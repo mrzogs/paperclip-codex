@@ -347,11 +347,16 @@ function replayAccountSortValue(accountId) {
   return match ? Number(match[1]) : Number.POSITIVE_INFINITY;
 }
 
+function isReplayAccountId(accountId) {
+  const text = String(accountId || "").trim();
+  return Boolean(text && text !== "None" && /^[A-Za-z0-9_-]+$/.test(text));
+}
+
 function replayAccounts(session) {
   const merged = new Map();
   const add = (account) => {
     const accountId = String(account?.accountId || account?.replayAccountId || "").trim();
-    if (!/^Sim\d+$/i.test(accountId)) return;
+    if (!isReplayAccountId(accountId)) return;
     const key = accountId.toLowerCase();
     const existing = merged.get(key) || {
       accountId,

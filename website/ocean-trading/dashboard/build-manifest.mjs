@@ -230,13 +230,18 @@ function replayAccountLabel(accountId) {
 }
 
 function parseReplayAccountFromTradeLog(filePath) {
-  const match = basename(filePath || "").match(/^TradeActivityLog_\d{4}-\d{2}-\d{2}_UTC\.(Sim\d+)\.simulated\.data$/i);
+  const match = basename(filePath || "").match(/^TradeActivityLog_\d{4}-\d{2}-\d{2}_UTC\.([^.]+)\.simulated\.data$/i);
   return match ? normalizeReplayAccountId(match[1]) : null;
 }
 
 function replayAccountSortValue(accountId) {
   const match = normalizeReplayAccountId(accountId).match(/^Sim(\d+)$/i);
   return match ? Number(match[1]) : Number.POSITIVE_INFINITY;
+}
+
+function isReplayAccountId(value) {
+  const accountId = normalizeReplayAccountId(value);
+  return Boolean(accountId && accountId !== "None" && /^[A-Za-z0-9_-]+$/.test(accountId));
 }
 
 function discoverReplayAccountIds({
@@ -250,7 +255,7 @@ function discoverReplayAccountIds({
   const ids = new Set();
   const add = (value) => {
     const accountId = normalizeReplayAccountId(value);
-    if (/^Sim\d+$/i.test(accountId)) ids.add(accountId);
+    if (isReplayAccountId(accountId)) ids.add(accountId);
   };
 
   for (const account of sourceAccounts || []) add(account?.accountId);
@@ -261,7 +266,7 @@ function discoverReplayAccountIds({
 
   const discovered = [...ids].sort((a, b) => replayAccountSortValue(a) - replayAccountSortValue(b) || a.localeCompare(b));
   if (discovered.length) return discovered;
-  return fallbackAccountIds.map((accountId) => normalizeReplayAccountId(accountId)).filter((accountId) => /^Sim\d+$/i.test(accountId));
+  return fallbackAccountIds.map((accountId) => normalizeReplayAccountId(accountId)).filter(isReplayAccountId);
 }
 
 function replayAccountState(accountId, existing = {}) {
@@ -360,7 +365,7 @@ function replayTradeActivityLogDir() {
 }
 
 function isReplayTradeActivityFile(entry) {
-  return /^TradeActivityLog_\d{4}-\d{2}-\d{2}_UTC\.Sim\d+\.simulated\.data$/i.test(entry.name);
+  return /^TradeActivityLog_\d{4}-\d{2}-\d{2}_UTC\.(?!None\.)([^.]+)\.simulated\.data$/i.test(entry.name);
 }
 
 function parseReplayTradeActivityFile(file) {
