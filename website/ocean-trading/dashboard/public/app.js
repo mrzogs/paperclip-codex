@@ -331,6 +331,7 @@ function replayArtifactScope(artifact) {
 }
 
 const REPLAY_ACCOUNT_STORAGE_KEY = "oceanTradingReplayAccountId";
+const REPLAY_ACCOUNT_MANUAL_SESSION_KEY = `${REPLAY_ACCOUNT_STORAGE_KEY}:manual`;
 const REPLAY_DEFAULT_ACCOUNTS = ["Sim1", "Sim2", "Sim3", "Sim4", "Sim5"].map((accountId) => ({
   accountId,
   label: accountId.replace(/^Sim(\d+)$/i, "SIM $1"),
@@ -399,18 +400,23 @@ function selectedReplayAccountId(session) {
   const accounts = replayAccounts(session);
   const allowed = new Set(accounts.map((account) => account.accountId));
   let stored = "";
+  let manualSelection = false;
   try {
     stored = window.localStorage.getItem(REPLAY_ACCOUNT_STORAGE_KEY) || "";
+    manualSelection = window.sessionStorage.getItem(REPLAY_ACCOUNT_MANUAL_SESSION_KEY) === "true";
   } catch {
     stored = "";
+    manualSelection = false;
   }
-  if (allowed.has(stored)) return stored;
+  if (manualSelection && allowed.has(stored)) return stored;
+  if (allowed.has(session?.activeReplayAccountId)) return session.activeReplayAccountId;
   return allowed.has(session?.defaultReplayAccountId) ? session.defaultReplayAccountId : accounts[0]?.accountId || "Sim1";
 }
 
 function setSelectedReplayAccountId(accountId) {
   try {
     window.localStorage.setItem(REPLAY_ACCOUNT_STORAGE_KEY, accountId);
+    window.sessionStorage.setItem(REPLAY_ACCOUNT_MANUAL_SESSION_KEY, "true");
   } catch {
     // The selector still works for the current render even if persistence is blocked.
   }
@@ -2119,6 +2125,7 @@ function renderReplayPerformanceCalendar(session) {
         ${renderReplayMetricCard("Win Rate", formatPercent(stats.winRate), "neutral", renderReplaySparkline(winTrend, "line"))}
         ${renderReplayMetricCard("Profit Factor", stats.profitFactor === Infinity ? "Inf" : stats.profitFactor === null ? "n/a" : stats.profitFactor.toFixed(2), "neutral", renderReplaySparkline(profitFactorTrend, "line"))}
       </div>
+      ${renderReplayAccountPanel(session)}
       ${renderReplayAccountClearToolbar(session, stats)}
       <div class="replay-dashboard-main">
         <article class="replay-dashboard-card replay-calendar-card">
@@ -2170,6 +2177,7 @@ function renderReplayMonitorDashboard(session) {
         ${renderReplayMetricCard("Win Rate", formatPercent(stats.winRate), "neutral", renderReplaySparkline(winTrend, "line"))}
         ${renderReplayMetricCard("Profit Factor", stats.profitFactor === Infinity ? "Inf" : stats.profitFactor === null ? "n/a" : stats.profitFactor.toFixed(2), "neutral", renderReplaySparkline(profitFactorTrend, "line"))}
       </div>
+      ${renderReplayAccountPanel(session)}
       ${renderReplayAccountClearToolbar(session, stats)}
       <div class="replay-dashboard-main">
         <article class="replay-dashboard-card replay-calendar-card">
