@@ -579,7 +579,7 @@ function renderReplayAccountDropdown(session) {
   const selectedAccountId = session?.selectedReplayAccountId || selectedReplayAccountId(session);
   const options = replayAccounts(session).map((account) => {
     const selected = account.accountId === selectedAccountId ? " selected" : "";
-    return `<option value="${escapeHtml(account.accountId)}"${selected}>${escapeHtml(account.label)}</option>`;
+    return `<option value="${escapeHtml(account.accountId)}"${selected}>${escapeHtml(replayAccountChoiceLabel(session, account))}</option>`;
   }).join("");
   return `
     <label class="replay-dashboard-account-select">
@@ -587,6 +587,21 @@ function renderReplayAccountDropdown(session) {
       <select data-replay-account-select aria-label="Replay account">${options}</select>
     </label>
   `;
+}
+
+function replayAccountTradeCount(account) {
+  return Number(account?.realizedTrades ?? account?.groupedTradesVisibleCount ?? account?.tradeCount) || 0;
+}
+
+function replayAccountTradeSummary(account, emptyText = "no data yet") {
+  const trades = replayAccountTradeCount(account);
+  return trades > 0 ? `${formatCount(trades)} trades` : emptyText;
+}
+
+function replayAccountChoiceLabel(session, account) {
+  const isActive = String(session?.activeReplayAccountId || "").toLowerCase() === String(account.accountId || "").toLowerCase();
+  const summary = replayAccountTradeSummary(account);
+  return isActive ? `${account.label} - active replay (${summary})` : `${account.label} - ${summary}`;
 }
 
 function renderReplaySparkline(values, type = "line") {
@@ -616,12 +631,30 @@ function renderReplayAccountClearToolbar(session, stats) {
   const days = Array.isArray(stats?.dailyRows) ? stats.dailyRows.length : 0;
   const sourceRows = Number(session?.audit?.selectedAccountTradeLogCount) || 0;
   const confirmPhrase = `CLEAR ${accountLabel}`;
+  const activeAccountId = String(session?.activeReplayAccountId || "").toLowerCase();
+  const accountChips = replayAccounts(session).map((account) => {
+    const selected = account.accountId === accountId;
+    const active = String(account.accountId || "").toLowerCase() === activeAccountId;
+    const classes = ["replay-account-chip"];
+    if (selected) classes.push("selected");
+    if (active) classes.push("active-source");
+    const label = selected
+      ? `Selected: ${account.label}`
+      : `${account.label}: ${replayAccountTradeSummary(account, "no data")}`;
+    return `
+      <button
+        class="${classes.join(" ")}"
+        type="button"
+        data-replay-account-option="${escapeHtml(account.accountId)}"
+        aria-pressed="${selected ? "true" : "false"}"
+      >${escapeHtml(label)}</button>
+    `;
+  }).join("");
   return `
     <div class="replay-account-clear-toolbar">
       <div class="replay-account-clear-chips">
-        <span>Selected account: ${escapeHtml(accountLabel)}</span>
-        <span>This account only: ${escapeHtml(formatCount(trades))} trades, ${escapeHtml(formatCount(sourceRows))} source rows, ${escapeHtml(formatCount(days))} daily totals</span>
-        <span>Other SIM accounts remain untouched</span>
+        ${accountChips}
+        <span class="replay-account-chip replay-account-note">Active replay account is selected automatically unless changed here</span>
       </div>
       <button
         class="dashboard-button danger replay-account-clear-button"
@@ -2125,7 +2158,6 @@ function renderReplayPerformanceCalendar(session) {
         ${renderReplayMetricCard("Win Rate", formatPercent(stats.winRate), "neutral", renderReplaySparkline(winTrend, "line"))}
         ${renderReplayMetricCard("Profit Factor", stats.profitFactor === Infinity ? "Inf" : stats.profitFactor === null ? "n/a" : stats.profitFactor.toFixed(2), "neutral", renderReplaySparkline(profitFactorTrend, "line"))}
       </div>
-      ${renderReplayAccountPanel(session)}
       ${renderReplayAccountClearToolbar(session, stats)}
       <div class="replay-dashboard-main">
         <article class="replay-dashboard-card replay-calendar-card">
@@ -2177,7 +2209,6 @@ function renderReplayMonitorDashboard(session) {
         ${renderReplayMetricCard("Win Rate", formatPercent(stats.winRate), "neutral", renderReplaySparkline(winTrend, "line"))}
         ${renderReplayMetricCard("Profit Factor", stats.profitFactor === Infinity ? "Inf" : stats.profitFactor === null ? "n/a" : stats.profitFactor.toFixed(2), "neutral", renderReplaySparkline(profitFactorTrend, "line"))}
       </div>
-      ${renderReplayAccountPanel(session)}
       ${renderReplayAccountClearToolbar(session, stats)}
       <div class="replay-dashboard-main">
         <article class="replay-dashboard-card replay-calendar-card">
