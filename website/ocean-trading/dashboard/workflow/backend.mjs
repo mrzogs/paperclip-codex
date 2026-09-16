@@ -9,7 +9,8 @@ import { WorkflowStore } from "./store.mjs";
 import { readWorkflowView, recordManualAcknowledgement } from "./ui-api.mjs";
 import { RunManager } from "./run-manager.mjs";
 import { attachMaintenance } from './maintenance.mjs';
-import { orderedSetup } from './setup-operator.mjs';
+import { orderedSetup, knownSetupTask } from './setup-operator.mjs';
+import { TestCommunication, TEST_PREFIX } from './test-communication.mjs';
 
 export const TABLE = JSON.parse(fs.readFileSync(new URL("./workflow-transition-table.json", import.meta.url), "utf8"));
 const GATES = { ONBOARDING: "DISCOVERY", DEVELOPMENT: "DEVELOPMENT_REVIEW", SHADOW: "SHADOW_REVIEW", PRODUCTION: "DEPLOYMENT_REVIEW", ROLLBACK: "ROLLBACK_REVIEW" };
@@ -44,6 +45,7 @@ export class WorkflowBackend {
     this.store = new WorkflowStore(config.db_file);
     this.db = this.store.db;
     this.runs = new RunManager(this);
+    this.testCommunication = new TestCommunication(this);
     try { this.auth = new OceanAuth(config, this.store, environment); }
     catch (error) { this.store.close(); throw error; }
   }
@@ -338,7 +340,7 @@ export class WorkflowBackend {
       case "setup.register": {
         exactKeys(data, ["receipt_id", "receipt", "content_hash"]);
         id(data.receipt_id);
-        requireThat(objectHash(data.receipt) === data.content_hash && /^(?:S23\.[12]|S\d+(?:-R\d+)?)$/.test(data.receipt.task_id) && data.receipt.task_id !== "S20", 422, "SETUP_RECEIPT_REJECTED");
+        requireThat(objectHash(data.receipt) === data.content_hash && knownSetupTask(data.receipt.task_id) && data.receipt.task_id !== "S20", 422, "SETUP_RECEIPT_REJECTED");
         const existing = this.db.prepare("SELECT content_hash FROM ow_setup_receipts WHERE id=?").get(data.receipt_id);
         if (existing) requireThat(existing.content_hash === data.content_hash, 409, "SETUP_RECEIPT_CONFLICT");
         else this.db.prepare("INSERT INTO ow_setup_receipts VALUES(?,?,?,'HISTORICAL_SETUP_NOT_APPROVAL')").run(data.receipt_id, data.content_hash, JSON.stringify(data.receipt));
@@ -656,6 +658,25 @@ export class WorkflowBackend {
       }
       const mutation = request.method !== "GET";
       const actor = this.auth.authenticate(request, mutation);
+      if (route.startsWith(`${TEST_PREFIX}/`)) {
+        const local=route.slice(TEST_PREFIX.length+1);
+        let result;
+        if(request.method==='GET' && local==='capabilities')result=this.testCommunication.readiness(actor);
+        else if(request.method==='POST' && local==='receipts')result=this.testCommunication.write(actor,await jsonBody(request));
+        else if(request.method==='GET' && /^(?:receipts|fixtures)\/[A-Za-z0-9_.:-]+(?:\/download)?$/.test(local)) {
+          const [kind,key,download]=local.split('/');
+          result=kind==='receipts'?this.testCommunication.receipt(actor,key):this.testCommunication.readFixture(actor,key);
+          if(download) {
+            const content=kind==='receipts'?result.data.content:result.handoff?.instruction_md;
+            requireThat(typeof content==='string',404,'TEST_DOWNLOAD_NOT_AVAILABLE');
+            response.setHeader('Content-Type','application/octet-stream');
+            response.setHeader('Content-Security-Policy',"sandbox; default-src 'none'");
+            response.setHeader('Content-Disposition',`attachment; filename="${key}.txt"`);
+            response.end(content);return true;
+          }
+        } else throw new WorkflowError(404,'UNKNOWN_TEST_ROUTE');
+        response.end(JSON.stringify(result));return true;
+      }
       if (route === 'auth/probe' && request.method === 'POST') {
         requireThat(actor.role !== 'HUMAN',403,'SERVICE_ONLY');
         const input=await jsonBody(request);exactKeys(input,['strategy_id','instance_id','action']);
@@ -670,10 +691,10 @@ export class WorkflowBackend {
         if (route === "run-manager/options") response.end(JSON.stringify(this.runs.options(actor)));
         else if (/^run-manager\/context\/[A-Za-z0-9_.:-]+$/.test(route)) response.end(JSON.stringify(this.runs.read(actor,route.split('/')[2])));
         else if (route.startsWith("view/")) response.end(JSON.stringify(readWorkflowView(this, actor, route)));
-        else if (route === "status") response.end(JSON.stringify({ api_version: API_VERSION, contract_release: RELEASE, namespace: "TEST", brain_submission: "OFF", live_real: "DISABLED", dispatch_worker: "OFF", auth: "REQUIRED", schema_version: 3, identity: { id: actor.id, role: actor.role, scopes: actor.scopes, strategy_ids: actor.strategyIds, instance_ids: actor.instanceIds }, ...this.auth.readiness(), maintenance:this.maintenanceHealth || {state:'NOT_INSTALLED_ISOLATED'} }));
+        else if (route === "status") response.end(JSON.stringify({ api_version: API_VERSION, contract_release: RELEASE, namespace: "TEST", brain_submission: "OFF", live_real: "DISABLED", dispatch_worker: "OFF", auth: "REQUIRED", schema_version: 4, identity: { id: actor.id, role: actor.role, scopes: actor.scopes, strategy_ids: actor.strategyIds, instance_ids: actor.instanceIds }, ...this.auth.readiness(), test_communication:this.testCommunication.readiness(actor), maintenance:this.maintenanceHealth || {state:'NOT_INSTALLED_ISOLATED'} }));
         else if (route === 'setup-receipts') {
           requireThat(actor.role === 'HUMAN',403,'WAYNE_BROWSER_ONLY');
-          response.end(JSON.stringify({ items: orderedSetup(this.db.prepare('SELECT * FROM ow_setup_receipts').all()), order: 'declared setup-task-map sequence; S23, S23.1, S23.2, S24' }));
+          response.end(JSON.stringify({ items: orderedSetup(this.db.prepare('SELECT * FROM ow_setup_receipts').all()), order: 'declared setup-task-map sequence; literal amendment IDs; historical statuses preserved' }));
         }
         else if (/^cases\/[A-Za-z0-9_.:-]+$/.test(route)) response.end(JSON.stringify(this.readCase(actor, route.slice(6))));
         else if (route === "cases") {

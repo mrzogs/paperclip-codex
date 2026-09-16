@@ -28,8 +28,13 @@ def main():
             sums[name]=digest
         assert set(sums)=={n for n in names if not n.endswith('/') and n!='checksums.sha256'}
         receipt=json.loads(z.read('receipt.json'))
-        assert receipt['task_id']==binding['task_id'] and receipt['project']==binding['owner']
-        assert receipt['status'] in ['PASS','VERIFIED_REUSE','BLOCKED','FAILED','NOT_RUN']
+        assert receipt['task_id']==binding['task_id']
+        # Sealed Brain/Ocean receipts use project; sealed Telemetry receipts use owner.
+        owners=[receipt[key] for key in ['project','owner'] if key in receipt]
+        assert owners and all(owner==binding['owner'] for owner in owners)
+        statuses=['PASS','VERIFIED_REUSE','BLOCKED','FAILED','NOT_RUN','WAITING_FOR_EVENT']
+        if binding['task_id'] in ['S46.2','S47.2']:statuses.append('NO_NEW_COVERAGE')
+        assert receipt['status'] in statuses
         filemap=json.loads(z.read('file-map.json'))
         for row in filemap['files']:
             if row.get('bundle_path'):assert sha(z.read(row['bundle_path']))==row['sha256'].removeprefix('sha256:')

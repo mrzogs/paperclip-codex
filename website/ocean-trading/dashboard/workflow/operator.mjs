@@ -7,6 +7,7 @@ import { WorkflowStore } from './store.mjs';
 import { issueOceanIdentity, passwordVerifier, humanBinding } from './auth.mjs';
 import { exactKeys, objectHash, digest, requireThat, ROLES } from './common.mjs';
 import { setupOperation } from './setup-operator.mjs';
+import { testFixtureOperation } from './test-communication.mjs';
 
 export const PENDING = [
   { role: 'BRAIN', direction: 'Brain-to-Ocean', owner: 'Brain', due_step: 'S24' },
@@ -152,8 +153,12 @@ export function cancelPendingRenewal({state,pending,request,operator_id,root}) {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const input = JSON.parse(fs.readFileSync(0, 'utf8').replace(/^\uFEFF/, ''));
-    if(input.mode==='setup')verifyState(input.state);
-    const result = input.mode === 'setup' ? setupOperation(input) : input.mode === 'cancel-renewal' ? cancelPendingRenewal(input) : input.mode === 'prepare' ? prepareOperation(input) : input.mode === 'maintenance' ? prepareMaintenance(input) : input.mode === 'commit' ? commitOperation(input.plan) : verifyState(input.state);
+    if(['setup','test-fixture'].includes(input.mode))verifyState(input.state);
+    let result;
+    if(input.mode==='test-fixture') {
+      const store=new WorkflowStore(input.state.config.db_file);
+      try {result=testFixtureOperation(input,store);} finally {store.close();}
+    } else result = input.mode === 'setup' ? setupOperation(input) : input.mode === 'cancel-renewal' ? cancelPendingRenewal(input) : input.mode === 'prepare' ? prepareOperation(input) : input.mode === 'maintenance' ? prepareMaintenance(input) : input.mode === 'commit' ? commitOperation(input.plan) : verifyState(input.state);
     process.stdout.write(JSON.stringify(result));
   } catch (error) { process.stderr.write(JSON.stringify({ error: error.code || 'OPERATOR_FAILED' })); process.exitCode = 1; }
 }

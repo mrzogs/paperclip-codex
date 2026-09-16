@@ -5,6 +5,7 @@ import { WorkflowStore } from './store.mjs';
 import { requireThat, objectHash, noSecrets } from './common.mjs';
 
 const bindings=JSON.parse(fs.readFileSync(new URL('./setup-task-map.json',import.meta.url))).tasks;
+export const knownSetupTask = taskId => bindings.some(row=>row.task_id===taskId);
 export function orderedSetup(rows) {
   const order=new Map(bindings.map((row,index)=>[row.task_id,index]));
   return rows.toSorted((a,b)=>(order.get(JSON.parse(a.payload_json).task_id) ?? Infinity)-(order.get(JSON.parse(b.payload_json).task_id) ?? Infinity));
