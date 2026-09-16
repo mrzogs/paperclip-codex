@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('Bootstrap','Maintenance','Initialize','Reset-Password','Enroll','Rotate','Revoke','Verify','Resume','Status','Runtime','Transfer','Probe','Setup-Import','Setup-Read','Setup-Export','Test-Prepare','Test-Export','Test-Cleanup')][string]$Action = 'Status',
+  [ValidateSet('Bootstrap','Maintenance','Initialize','Reset-Password','Enroll','Rotate','Revoke','Verify','Resume','Status','Runtime','Transfer','Probe','Setup-Import','Setup-Read','Setup-Export','Test-Prepare','Test-Export','Test-Cleanup','Integration-Import','Integration-Export','Register-Facts')][string]$Action = 'Status',
   [string]$RequestFile,
   [string]$IdentityId,
   [string]$Root = 'D:\OceanTradingData\website\workflow'
@@ -91,11 +91,11 @@ while (-not $lock) {
   }
 }
 try {
-  if ($Action -like 'Setup-*' -or $Action -like 'Test-*') {
+  if ($Action -like 'Setup-*' -or $Action -like 'Test-*' -or $Action -like 'Integration-*') {
     if (Test-Path -LiteralPath $PendingPath) { throw 'Resume the pending credential publication before setup operations.' }
     $state=Decode-State $StatePath
     $request=if($RequestFile){Get-Content -LiteralPath $RequestFile -Raw | ConvertFrom-Json}else{$null}
-    $mode=if($Action -like 'Test-*'){'test-fixture'}else{'setup'}
+    $mode=if($Action -like 'Test-*'){'test-fixture'}elseif($Action -like 'Integration-*'){'integration'}else{'setup'}
     Invoke-Core @{mode=$mode;state=$state;operator_id=$Sid;action=$Action.ToLowerInvariant();request=$request} | ConvertTo-Json -Depth 50
     return
   }

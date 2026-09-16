@@ -3,11 +3,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import { spawnSync } from 'node:child_process';
 import { WorkflowStore } from './store.mjs';
 import { issueOceanIdentity, passwordVerifier, humanBinding } from './auth.mjs';
 import { exactKeys, objectHash, digest, requireThat, ROLES } from './common.mjs';
 import { setupOperation } from './setup-operator.mjs';
 import { testFixtureOperation } from './test-communication.mjs';
+import { integrationOperation } from './integration.mjs';
 
 export const PENDING = [
   { role: 'BRAIN', direction: 'Brain-to-Ocean', owner: 'Brain', due_step: 'S24' },
@@ -33,8 +35,19 @@ export function prepareOperation({ action, state, password, request, operator_id
     next.config.browser = { state:'CONFIGURED', subject_id:'wayne-ocean-ui', credential_ref:'OCEAN_WAYNE_PASSWORD_SECRET' };
     next.environment[next.config.browser.credential_ref] = passwordVerifier(password);
   }
+  else if(action==='register-facts') {
+    const checked=spawnSync(next.config.python_executable,[fileURLToPath(new URL('./verify-factual-binding.py',import.meta.url))],{input:JSON.stringify(request),encoding:'utf8',windowsHide:true,timeout:120000,maxBuffer:2*1024*1024});
+    requireThat(checked.status===0,422,'FACTUAL_BINDING_PROVENANCE_REJECTED');
+    const binding=JSON.parse(checked.stdout);binding.binding_hash=objectHash(binding);
+    identityId=binding.instance.execution_instance_id;
+    const bindings=next.config.operational_factual_bindings ||= [];
+    const old=bindings.find(b=>b.instance.execution_instance_id===identityId);
+    requireThat(!old || old.binding_hash===binding.binding_hash,409,'FACTUAL_INSTANCE_CONFLICT');
+    if(!old){requireThat(bindings.length<32,429,'FACTUAL_BINDING_CAPACITY');bindings.push(binding);}
+  }
   else {
-    exactKeys(request, ['identity_id','role','namespace','credential_ref','strategy_ids','instance_ids','scopes','expires_at_utc','owner','evidence_path','evidence_sha256','verification_only','renewal_policy']);
+    exactKeys(request, ['identity_id','role','namespace','credential_ref','strategy_ids','instance_ids','scopes','expires_at_utc','owner','evidence_path','evidence_sha256','verification_only','renewal_policy','factual_binding_hash']);
+    if(request.namespace==='OPERATIONAL')requireThat(next.config.operational_factual_bindings?.some(b=>b.binding_hash===request.factual_binding_hash && b.strategy_id===request.strategy_ids?.[0] && request.strategy_ids.length===1 && request.instance_ids?.length===1 && b.instance.execution_instance_id===request.instance_ids[0]),409,'VERIFIED_FACTUAL_BINDING_REQUIRED');
     requireThat(request && typeof request.owner === 'string' && request.owner.length && path.isAbsolute(request.evidence_path || ''), 422, 'VERIFIED_OWNER_EVIDENCE_REQUIRED');
     requireThat(/^[a-f0-9]{64}$/.test(request.evidence_sha256) && digest(fs.readFileSync(request.evidence_path)) === `sha256:${request.evidence_sha256}`, 409, 'OWNER_EVIDENCE_HASH_CONFLICT');
     identityId = request.identity_id;
@@ -50,7 +63,7 @@ export function prepareOperation({ action, state, password, request, operator_id
         Number.isInteger(policy.renew_before_seconds) && policy.renew_before_seconds >= 30 && policy.renew_before_seconds < policy.lifetime_seconds &&
         policy.runner === 'ocean-website-maintenance' && policy.destination === 'dpapi-current-operator',422,'INVALID_RENEWAL_POLICY');
     }
-    const immutable = ['identity_id','role','namespace','credential_ref','strategy_ids','instance_ids','scopes','owner','verification_only','renewal_policy'];
+    const immutable = ['identity_id','role','namespace','credential_ref','strategy_ids','instance_ids','scopes','owner','verification_only','renewal_policy','factual_binding_hash'];
     if (old) for (const key of immutable) requireThat(objectHash(old[key] ?? null) === objectHash(request[key] ?? null), 409, 'IDENTITY_OR_SCOPE_CHANGE_REJECTED');
     if (action === 'enroll' && old) {
       requireThat(!old.revoked && Date.parse(old.expires_at_utc)>Date.now(),409,'IDENTITY_LIFECYCLE_CONFLICT');
@@ -70,7 +83,7 @@ export function prepareOperation({ action, state, password, request, operator_id
     else {
       requireThat(['enroll','rotate'].includes(action), 422, 'UNKNOWN_OPERATOR_ACTION');
       const { expires_at_utc, evidence_path, evidence_sha256, ...identity } = request;
-      const issued = issueOceanIdentity({ ...identity, credential_version:(old?.credential_version || 0)+1, owner_evidence_sha256: evidence_sha256, audience: 'Ocean workflow TEST', verification_state: 'CONFIGURED_NOT_VERIFIED' }, next.environment, expires_at_utc);
+      const issued = issueOceanIdentity({ ...identity, credential_version:(old?.credential_version || 0)+1, owner_evidence_sha256: evidence_sha256, audience: identity.namespace==='OPERATIONAL'?'Ocean workflow operational v1':'Ocean workflow TEST', verification_state: 'CONFIGURED_NOT_VERIFIED' }, next.environment, expires_at_utc);
       requireThat(!next.config.identities.some(item => item.identity_id !== identityId && item.credential_ref === issued.credential_ref), 409, 'CREDENTIAL_REFERENCE_IN_USE');
       if (old) next.config.identities[next.config.identities.indexOf(old)] = issued;
       else next.config.identities.push(issued);
@@ -153,9 +166,10 @@ export function cancelPendingRenewal({state,pending,request,operator_id,root}) {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const input = JSON.parse(fs.readFileSync(0, 'utf8').replace(/^\uFEFF/, ''));
-    if(['setup','test-fixture'].includes(input.mode))verifyState(input.state);
+    if(['setup','test-fixture','integration'].includes(input.mode))verifyState(input.state);
     let result;
-    if(input.mode==='test-fixture') {
+    if(input.mode==='integration')result=integrationOperation(input);
+    else if(input.mode==='test-fixture') {
       const store=new WorkflowStore(input.state.config.db_file);
       try {result=testFixtureOperation(input,store);} finally {store.close();}
     } else result = input.mode === 'setup' ? setupOperation(input) : input.mode === 'cancel-renewal' ? cancelPendingRenewal(input) : input.mode === 'prepare' ? prepareOperation(input) : input.mode === 'maintenance' ? prepareMaintenance(input) : input.mode === 'commit' ? commitOperation(input.plan) : verifyState(input.state);

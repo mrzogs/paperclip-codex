@@ -1,8 +1,19 @@
 {
-  "schema_version": "ocean-setup-task-map/v2",
+  "schema_version": "ocean-setup-task-map/v3",
+  "owner_aliases": {
+    "Ocean Trading Website": ["Ocean Trading Website", "OCEAN_TRADING"],
+    "Obsidian Brain": ["Obsidian Brain", "Obsidian/Hermes Brain"],
+    "Obsidian/Hermes Brain": ["Obsidian/Hermes Brain", "Obsidian Brain"],
+    "Telemetry Logger": ["Telemetry Logger", "Telemetry Data Logger"],
+    "Telemetry Data Logger": ["Telemetry Data Logger", "Telemetry Logger"],
+    "VWAP Strategy": ["VWAP Strategy"]
+  },
+  "historical_status_fields": {"S24": "final_status", "S19": "final_status"},
+  "diagnostic_only": ["S23", "S23.1", "S24", "S26.1"],
+  "scoped_foundations": {"S23.2": "MACHINE_FOUNDATION"},
   "source_sha256": "5c4ffd852d8d94b75b5746ee023cc495bcae8e348dd1f775f884a440544442dd",
   "pack_version": "13.1-S23.3-forward",
-  "order": "historical IDs retained; S24.1/S25.1/S26.1 diagnostic, then explicit sequence.json order",
+  "order": "historical IDs retained; S24.1 and S25.1 passing inputs, S26.1 diagnostic, then explicit sequence.json order",
   "tasks": [
     {
       "task_id": "S01",

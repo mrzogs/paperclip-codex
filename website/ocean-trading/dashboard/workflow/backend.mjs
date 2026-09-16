@@ -11,6 +11,9 @@ import { RunManager } from "./run-manager.mjs";
 import { attachMaintenance } from './maintenance.mjs';
 import { orderedSetup, knownSetupTask } from './setup-operator.mjs';
 import { TestCommunication, TEST_PREFIX } from './test-communication.mjs';
+import { integrationStatus } from './integration.mjs';
+import { OperationalTransition, OPERATIONAL_PREFIX, operationalPolicy } from './operational-transition.mjs';
+import { OperationalPreparation } from './operational-preparation.mjs';
 
 export const TABLE = JSON.parse(fs.readFileSync(new URL("./workflow-transition-table.json", import.meta.url), "utf8"));
 const GATES = { ONBOARDING: "DISCOVERY", DEVELOPMENT: "DEVELOPMENT_REVIEW", SHADOW: "SHADOW_REVIEW", PRODUCTION: "DEPLOYMENT_REVIEW", ROLLBACK: "ROLLBACK_REVIEW" };
@@ -46,6 +49,7 @@ export class WorkflowBackend {
     this.db = this.store.db;
     this.runs = new RunManager(this);
     this.testCommunication = new TestCommunication(this);
+    this.operational = new OperationalTransition(this);
     try { this.auth = new OceanAuth(config, this.store, environment); }
     catch (error) { this.store.close(); throw error; }
   }
@@ -658,6 +662,22 @@ export class WorkflowBackend {
       }
       const mutation = request.method !== "GET";
       const actor = this.auth.authenticate(request, mutation);
+      requireThat(actor.namespace!=='OPERATIONAL' || route.startsWith(`${OPERATIONAL_PREFIX}/`),403,'OPERATIONAL_IDENTITY_ON_TEST_ROUTE');
+      if(route==='integrations/v1/status' && request.method==='GET') {
+        response.end(JSON.stringify(integrationStatus(this,actor)));return true;
+      }
+      if(route.startsWith(`${OPERATIONAL_PREFIX}/`)) {
+        const local=route.slice(OPERATIONAL_PREFIX.length+1);let result;
+        requireThat(actor.role==='HUMAN' || actor.scopes.includes('read'),403,'WRONG_ACTION_SCOPE');
+        if(local==='policy' && request.method==='GET')result=operationalPolicy(this.config);
+        else if(local==='pending' && request.method==='GET')result=this.operational.pending(actor);
+        else if((local==='runs' || local.startsWith('receipts/')) && request.method==='GET')result=this.operational.read(actor,local.startsWith('receipts/')?local.slice(9):null);
+        else if(local==='dataset-manifests' && request.method==='POST')result=this.operational.manifest(actor,await jsonBody(request));
+        else if(['reviews','decisions','decisions/revoke','runs/prepare'].includes(local) && request.method==='POST')result=new OperationalPreparation(this).perform(local,actor,await jsonBody(request));
+        else if(['activate','context/resolve','events'].includes(local) && request.method==='POST')result=this.operational.perform(local,actor,await jsonBody(request));
+        else throw new WorkflowError(404,'UNKNOWN_OPERATIONAL_ROUTE');
+        response.end(JSON.stringify(result));return true;
+      }
       if (route.startsWith(`${TEST_PREFIX}/`)) {
         const local=route.slice(TEST_PREFIX.length+1);
         let result;
@@ -691,7 +711,7 @@ export class WorkflowBackend {
         if (route === "run-manager/options") response.end(JSON.stringify(this.runs.options(actor)));
         else if (/^run-manager\/context\/[A-Za-z0-9_.:-]+$/.test(route)) response.end(JSON.stringify(this.runs.read(actor,route.split('/')[2])));
         else if (route.startsWith("view/")) response.end(JSON.stringify(readWorkflowView(this, actor, route)));
-        else if (route === "status") response.end(JSON.stringify({ api_version: API_VERSION, contract_release: RELEASE, namespace: "TEST", brain_submission: "OFF", live_real: "DISABLED", dispatch_worker: "OFF", auth: "REQUIRED", schema_version: 4, identity: { id: actor.id, role: actor.role, scopes: actor.scopes, strategy_ids: actor.strategyIds, instance_ids: actor.instanceIds }, ...this.auth.readiness(), test_communication:this.testCommunication.readiness(actor), maintenance:this.maintenanceHealth || {state:'NOT_INSTALLED_ISOLATED'} }));
+        else if (route === "status") response.end(JSON.stringify({ api_version: API_VERSION, contract_release: RELEASE, namespace: "TEST", brain_submission: "OFF", live_real: "DISABLED", dispatch_worker: "OFF", auth: "REQUIRED", schema_version: 6, identity: { id: actor.id, role: actor.role, scopes: actor.scopes, strategy_ids: actor.strategyIds, instance_ids: actor.instanceIds }, ...this.auth.readiness(), test_communication:this.testCommunication.readiness(actor), maintenance:this.maintenanceHealth || {state:'NOT_INSTALLED_ISOLATED'} }));
         else if (route === 'setup-receipts') {
           requireThat(actor.role === 'HUMAN',403,'WAYNE_BROWSER_ONLY');
           response.end(JSON.stringify({ items: orderedSetup(this.db.prepare('SELECT * FROM ow_setup_receipts').all()), order: 'declared setup-task-map sequence; literal amendment IDs; historical statuses preserved' }));
