@@ -1,0 +1,11 @@
+{
+  "name": "ocean-trading-local-dashboard",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "generate": "node build-manifest.mjs",
+    "symbol:paper": "node update-sierra-symbol.mjs",
+    "start": "node server.mjs"
+  }
+}

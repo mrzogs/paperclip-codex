@@ -1,0 +1,13 @@
+CREATE TABLE ow_run_versions(id TEXT PRIMARY KEY,strategy_id TEXT NOT NULL REFERENCES ow_strategies(id),payload_json TEXT NOT NULL);
+CREATE TABLE ow_run_settings(id TEXT PRIMARY KEY REFERENCES ow_instances(id),payload_json TEXT NOT NULL);
+CREATE TABLE ow_dataset_permissions(id TEXT PRIMARY KEY,strategy_id TEXT NOT NULL REFERENCES ow_strategies(id),payload_json TEXT NOT NULL);
+CREATE TABLE ow_run_plans(id TEXT PRIMARY KEY REFERENCES ow_runs(id),coverage_key TEXT NOT NULL,payload_json TEXT NOT NULL);
+CREATE TABLE ow_run_leases(id TEXT PRIMARY KEY REFERENCES ow_runs(id),lease_id TEXT NOT NULL,owner_id TEXT NOT NULL REFERENCES ow_identities(id),expires_ms INTEGER NOT NULL,heartbeat_utc TEXT NOT NULL);
+CREATE TABLE ow_trade_pins(id TEXT NOT NULL,run_id TEXT NOT NULL REFERENCES ow_runs(id),context_hash TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('OPEN','CLOSED')),PRIMARY KEY(run_id,id));
+CREATE TABLE ow_run_progress(id INTEGER PRIMARY KEY,run_id TEXT NOT NULL REFERENCES ow_runs(id),payload_json TEXT NOT NULL);
+CREATE TABLE ow_coverage_receipts(id INTEGER PRIMARY KEY,run_id TEXT NOT NULL REFERENCES ow_runs(id),coverage_key TEXT NOT NULL,status TEXT NOT NULL,payload_json TEXT NOT NULL);
+CREATE TABLE ow_evidence_revisions(id INTEGER PRIMARY KEY,run_id TEXT NOT NULL REFERENCES ow_runs(id),event_id TEXT NOT NULL,canonical_id TEXT,market_id TEXT,payload_json TEXT NOT NULL,UNIQUE(run_id,event_id));
+CREATE TABLE ow_run_presets(id TEXT PRIMARY KEY,payload_json TEXT NOT NULL);
+CREATE INDEX ow_coverage_key_lookup ON ow_coverage_receipts(coverage_key,status);
+CREATE INDEX ow_evidence_canonical_lookup ON ow_evidence_revisions(canonical_id);
+INSERT INTO ow_schema_migrations VALUES(2,strftime('%Y-%m-%dT%H:%M:%fZ','now'));

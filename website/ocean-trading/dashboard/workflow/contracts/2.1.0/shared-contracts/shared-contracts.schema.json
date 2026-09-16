@@ -1,0 +1,3243 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hermes-brain:shared-contracts:2.1.0",
+  "title": "Hermes Brain Shared Trading Contracts",
+  "description": "Portable S09 contract release. Authority and permission fields are server-derived; the schema alone grants no runtime permission.",
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/_-]*$"
+    },
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+    },
+    "strategyId": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "nullableId": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "nullableNumber": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "nullableTimestamp": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/timestamp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "eventEnvelope": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "event_id",
+        "event_type",
+        "source_sequence",
+        "occurred_at_utc",
+        "recorded_at_utc",
+        "producer_id",
+        "payload_hash",
+        "strategy_id",
+        "strategy_name",
+        "strategy_version",
+        "strategy_code_hash",
+        "strategy_config_hash",
+        "strategy_profile_id",
+        "strategy_profile_version",
+        "execution_instance_id",
+        "source_installation_id",
+        "source_session_id",
+        "run_id",
+        "run_context_revision",
+        "run_context_hash"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "2.1.0"
+        },
+        "event_id": {
+          "$ref": "#/$defs/id"
+        },
+        "event_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "occurred_at_utc": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "recorded_at_utc": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "producer_id": {
+          "$ref": "#/$defs/id"
+        },
+        "payload_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "strategy_id": {
+          "$ref": "#/$defs/strategyId"
+        },
+        "strategy_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "strategy_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "strategy_code_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "strategy_config_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "strategy_profile_id": {
+          "$ref": "#/$defs/id"
+        },
+        "strategy_profile_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "execution_instance_id": {
+          "$ref": "#/$defs/id"
+        },
+        "source_installation_id": {
+          "$ref": "#/$defs/id"
+        },
+        "source_session_id": {
+          "$ref": "#/$defs/id"
+        },
+        "run_id": {
+          "$ref": "#/$defs/id"
+        },
+        "run_context_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "run_context_hash": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "sourceState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observed_at_utc",
+        "environment",
+        "simulation",
+        "replay",
+        "account_alias",
+        "source_schema_version",
+        "quality"
+      ],
+      "properties": {
+        "observed_at_utc": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "environment": {
+          "enum": [
+            "PAPER_FORWARD",
+            "REPLAY",
+            "BACKTEST",
+            "IMPORT",
+            "LIVE_REAL",
+            "UNKNOWN"
+          ]
+        },
+        "simulation": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "replay": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "account_alias": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_schema_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "quality": {
+          "enum": [
+            "VERIFIED",
+            "PARTIAL",
+            "UNKNOWN"
+          ]
+        }
+      }
+    },
+    "runContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "run_id",
+        "revision",
+        "context_hash",
+        "strategy_id",
+        "strategy_version",
+        "strategy_code_hash",
+        "strategy_config_hash",
+        "strategy_profile_id",
+        "strategy_profile_version",
+        "execution_instance_id",
+        "source_installation_id",
+        "expected_environment",
+        "observed_source_state",
+        "evidence_purpose",
+        "dataset_manifest_id",
+        "dataset_manifest_revision",
+        "dataset_manifest_hash",
+        "dataset_partition",
+        "experiment_id",
+        "candidate_id",
+        "case_id",
+        "historical_build_mode",
+        "learner_permission",
+        "permission_reason"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "2.1.0"
+        },
+        "run_id": {
+          "$ref": "#/$defs/id"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "context_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "strategy_id": {
+          "$ref": "#/$defs/strategyId"
+        },
+        "strategy_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "strategy_code_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "strategy_config_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "strategy_profile_id": {
+          "$ref": "#/$defs/id"
+        },
+        "strategy_profile_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "execution_instance_id": {
+          "$ref": "#/$defs/id"
+        },
+        "source_installation_id": {
+          "$ref": "#/$defs/id"
+        },
+        "expected_environment": {
+          "enum": [
+            "PAPER_FORWARD",
+            "REPLAY",
+            "BACKTEST",
+            "IMPORT",
+            "LIVE_REAL"
+          ]
+        },
+        "observed_source_state": {
+          "$ref": "#/$defs/sourceState"
+        },
+        "evidence_purpose": {
+          "enum": [
+            "LEARNING",
+            "HISTORICAL_BUILD",
+            "DEVELOPMENT_BACKTEST",
+            "VALIDATION",
+            "PROTECTED_HOLDOUT",
+            "RESEARCH_EXPERIMENT",
+            "SHADOW_FORWARD",
+            "NOT_ELIGIBLE"
+          ]
+        },
+        "dataset_manifest_id": {
+          "$ref": "#/$defs/id"
+        },
+        "dataset_manifest_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "dataset_manifest_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "dataset_partition": {
+          "enum": [
+            "DISCOVERY",
+            "DEVELOPMENT",
+            "VALIDATION",
+            "HOLDOUT",
+            "FORWARD"
+          ]
+        },
+        "experiment_id": {
+          "$ref": "#/$defs/nullableId"
+        },
+        "candidate_id": {
+          "$ref": "#/$defs/nullableId"
+        },
+        "case_id": {
+          "$ref": "#/$defs/nullableId"
+        },
+        "historical_build_mode": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "ADD_MISSING_HISTORY",
+            "REPROCESS_EXISTING_HISTORY",
+            "FILL_DATA_GAPS",
+            null
+          ]
+        },
+        "learner_permission": {
+          "enum": [
+            "SCOPED_LEARNING",
+            "HISTORICAL_DISCOVERY",
+            "EVALUATE_ONLY",
+            "FROZEN_EVALUATION",
+            "RESTRICTED_EVALUATOR",
+            "NONE"
+          ],
+          "readOnly": true,
+          "x-authority": "server"
+        },
+        "permission_reason": {
+          "type": "string",
+          "minLength": 1,
+          "readOnly": true,
+          "x-authority": "server"
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "expected_environment": {
+              "const": "PAPER_FORWARD"
+            },
+            "evidence_purpose": {
+              "const": "LEARNING"
+            },
+            "dataset_partition": {
+              "const": "FORWARD"
+            },
+            "historical_build_mode": {
+              "type": "null"
+            },
+            "learner_permission": {
+              "const": "SCOPED_LEARNING"
+            }
+          }
+        },
+        {
+          "properties": {
+            "expected_environment": {
+              "const": "REPLAY"
+            },
+            "evidence_purpose": {
+              "const": "HISTORICAL_BUILD"
+            },
+            "dataset_partition": {
+              "const": "DISCOVERY"
+            },
+            "historical_build_mode": {
+              "enum": [
+                "ADD_MISSING_HISTORY",
+                "REPROCESS_EXISTING_HISTORY",
+                "FILL_DATA_GAPS"
+              ]
+            },
+            "learner_permission": {
+              "const": "HISTORICAL_DISCOVERY"
+            }
+          }
+        },
+        {
+          "properties": {
+            "expected_environment": {
+              "enum": [
+                "REPLAY",
+                "BACKTEST"
+              ]
+            },
+            "evidence_purpose": {
+              "const": "DEVELOPMENT_BACKTEST"
+            },
+            "dataset_partition": {
+              "const": "DEVELOPMENT"
+            },
+            "experiment_id": {
+              "$ref": "#/$defs/id"
+            },
+            "candidate_id": {
+              "$ref": "#/$defs/id"
+            },
+            "historical_build_mode": {
+              "type": "null"
+            },
+            "learner_permission": {
+              "const": "EVALUATE_ONLY"
+            }
+          }
+        },
+        {
+          "properties": {
+            "expected_environment": {
+              "enum": [
+                "REPLAY",
+                "BACKTEST"
+              ]
+            },
+            "evidence_purpose": {
+              "const": "RESEARCH_EXPERIMENT"
+            },
+            "dataset_partition": {
+              "const": "DEVELOPMENT"
+            },
+            "experiment_id": {
+              "$ref": "#/$defs/id"
+            },
+            "candidate_id": {
+              "$ref": "#/$defs/id"
+            },
+            "historical_build_mode": {
+              "type": "null"
+            },
+            "learner_permission": {
+              "const": "EVALUATE_ONLY"
+            }
+          }
+        },
+        {
+          "properties": {
+            "expected_environment": {
+              "enum": [
+                "REPLAY",
+                "BACKTEST"
+              ]
+            },
+            "evidence_purpose": {
+              "const": "VALIDATION"
+            },
+            "dataset_partition": {
+              "const": "VALIDATION"
+            },
+            "experiment_id": {
+              "$ref": "#/$defs/id"
+            },
+            "candidate_id": {
+              "$ref": "#/$defs/id"
+            },
+            "historical_build_mode": {
+              "type": "null"
+            },
+            "learner_permission": {
+              "const": "FROZEN_EVALUATION"
+            }
+          }
+        },
+        {
+          "properties": {
+            "expected_environment": {
+              "enum": [
+                "REPLAY",
+                "BACKTEST"
+              ]
+            },
+            "evidence_purpose": {
+              "const": "PROTECTED_HOLDOUT"
+            },
+            "dataset_partition": {
+              "const": "HOLDOUT"
+            },
+            "experiment_id": {
+              "$ref": "#/$defs/id"
+            },
+            "candidate_id": {
+              "$ref": "#/$defs/id"
+            },
+            "historical_build_mode": {
+              "type": "null"
+            },
+            "learner_permission": {
+              "const": "RESTRICTED_EVALUATOR"
+            }
+          }
+        },
+        {
+          "properties": {
+            "expected_environment": {
+              "const": "PAPER_FORWARD"
+            },
+            "evidence_purpose": {
+              "const": "SHADOW_FORWARD"
+            },
+            "dataset_partition": {
+              "const": "FORWARD"
+            },
+            "experiment_id": {
+              "$ref": "#/$defs/id"
+            },
+            "candidate_id": {
+              "$ref": "#/$defs/id"
+            },
+            "historical_build_mode": {
+              "type": "null"
+            },
+            "learner_permission": {
+              "const": "FROZEN_EVALUATION"
+            }
+          }
+        },
+        {
+          "properties": {
+            "evidence_purpose": {
+              "const": "NOT_ELIGIBLE"
+            },
+            "historical_build_mode": {
+              "type": "null"
+            },
+            "learner_permission": {
+              "const": "NONE"
+            }
+          }
+        }
+      ]
+    },
+    "fill": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fill_id",
+        "order_id",
+        "role",
+        "occurred_at_utc",
+        "quantity",
+        "price",
+        "position_after",
+        "fees_currency"
+      ],
+      "properties": {
+        "fill_id": {
+          "$ref": "#/$defs/id"
+        },
+        "order_id": {
+          "$ref": "#/$defs/id"
+        },
+        "role": {
+          "enum": [
+            "ENTRY",
+            "SCALE_IN",
+            "PARTIAL_EXIT",
+            "FINAL_EXIT",
+            "REVERSAL_EXIT",
+            "REVERSAL_ENTRY"
+          ]
+        },
+        "occurred_at_utc": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "quantity": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "price": {
+          "type": "number"
+        },
+        "position_after": {
+          "type": "number"
+        },
+        "fees_currency": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      }
+    },
+    "tradeEvent": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/eventEnvelope"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "event_id",
+            "event_type",
+            "source_sequence",
+            "occurred_at_utc",
+            "recorded_at_utc",
+            "producer_id",
+            "payload_hash",
+            "strategy_id",
+            "strategy_name",
+            "strategy_version",
+            "strategy_code_hash",
+            "strategy_config_hash",
+            "strategy_profile_id",
+            "strategy_profile_version",
+            "execution_instance_id",
+            "source_installation_id",
+            "source_session_id",
+            "run_id",
+            "run_context_revision",
+            "run_context_hash",
+            "legacy_trade_id",
+            "strategy_attempt_id",
+            "strategy_trade_id",
+            "canonical_trade_id",
+            "processing_run_id",
+            "experiment_id",
+            "candidate_id",
+            "case_id",
+            "actual_contract_symbol",
+            "direction",
+            "execution_status",
+            "financial_outcome",
+            "fills",
+            "attached_order_ids",
+            "entry_price_points_per_contract",
+            "exit_price_points_per_contract",
+            "gross_points_per_contract",
+            "gross_currency_total",
+            "net_currency_total",
+            "fees_currency_total",
+            "currency",
+            "contract_multiplier",
+            "tick_size_points",
+            "risk_r",
+            "risk_r_unavailable_reason",
+            "mfe",
+            "mae",
+            "measurement_quality",
+            "decision_evidence",
+            "late_evidence_ids",
+            "correction_of_event_id",
+            "extensions"
+          ],
+          "properties": {
+            "schema_version": true,
+            "event_id": true,
+            "source_sequence": true,
+            "occurred_at_utc": true,
+            "recorded_at_utc": true,
+            "producer_id": true,
+            "payload_hash": true,
+            "strategy_id": true,
+            "strategy_name": true,
+            "strategy_version": true,
+            "strategy_code_hash": true,
+            "strategy_config_hash": true,
+            "strategy_profile_id": true,
+            "strategy_profile_version": true,
+            "execution_instance_id": true,
+            "source_installation_id": true,
+            "source_session_id": true,
+            "run_id": true,
+            "run_context_revision": true,
+            "run_context_hash": true,
+            "event_type": {
+              "enum": [
+                "TRADE_SIGNALLED",
+                "ORDER_SUBMITTED",
+                "FILL_RECORDED",
+                "TRADE_CLOSED",
+                "ATTEMPT_TERMINATED",
+                "EVIDENCE_ATTACHED",
+                "EVIDENCE_CORRECTED"
+              ]
+            },
+            "legacy_trade_id": {
+              "type": [
+                "string",
+                "integer",
+                "null"
+              ]
+            },
+            "strategy_attempt_id": {
+              "$ref": "#/$defs/id"
+            },
+            "strategy_trade_id": {
+              "$ref": "#/$defs/nullableId"
+            },
+            "canonical_trade_id": {
+              "$ref": "#/$defs/nullableId"
+            },
+            "processing_run_id": {
+              "$ref": "#/$defs/nullableId"
+            },
+            "experiment_id": {
+              "$ref": "#/$defs/nullableId"
+            },
+            "candidate_id": {
+              "$ref": "#/$defs/nullableId"
+            },
+            "case_id": {
+              "$ref": "#/$defs/nullableId"
+            },
+            "actual_contract_symbol": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "direction": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "LONG",
+                "SHORT",
+                null
+              ]
+            },
+            "execution_status": {
+              "enum": [
+                "SIGNALLED",
+                "SUBMITTED",
+                "PARTIALLY_FILLED",
+                "OPEN",
+                "PARTIALLY_EXITED",
+                "CLOSED",
+                "REJECTED",
+                "FAILED",
+                "CANCELLED"
+              ]
+            },
+            "financial_outcome": {
+              "enum": [
+                "WIN",
+                "LOSS",
+                "BREAK_EVEN",
+                "UNKNOWN"
+              ]
+            },
+            "fills": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/fill"
+              }
+            },
+            "attached_order_ids": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/id"
+              }
+            },
+            "entry_price_points_per_contract": {
+              "$ref": "#/$defs/nullableNumber"
+            },
+            "exit_price_points_per_contract": {
+              "$ref": "#/$defs/nullableNumber"
+            },
+            "gross_points_per_contract": {
+              "$ref": "#/$defs/nullableNumber"
+            },
+            "gross_currency_total": {
+              "$ref": "#/$defs/nullableNumber"
+            },
+            "net_currency_total": {
+              "$ref": "#/$defs/nullableNumber"
+            },
+            "fees_currency_total": {
+              "$ref": "#/$defs/nullableNumber"
+            },
+            "currency": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^[A-Z]{3}$"
+            },
+            "contract_multiplier": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "exclusiveMinimum": 0
+            },
+            "tick_size_points": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "exclusiveMinimum": 0
+            },
+            "risk_r": {
+              "$ref": "#/$defs/nullableNumber"
+            },
+            "risk_r_unavailable_reason": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "ZERO_INITIAL_RISK",
+                "MISSING_INITIAL_RISK",
+                "UNFILLED_ATTEMPT",
+                "INSUFFICIENT_DATA",
+                null
+              ]
+            },
+            "mfe": {
+              "$ref": "#/$defs/excursion"
+            },
+            "mae": {
+              "$ref": "#/$defs/excursion"
+            },
+            "measurement_quality": {
+              "enum": [
+                "VERIFIED_TICK",
+                "BAR_APPROXIMATION",
+                "PARTIAL",
+                "UNKNOWN"
+              ]
+            },
+            "decision_evidence": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/evidenceSnapshot"
+              }
+            },
+            "late_evidence_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/id"
+              }
+            },
+            "correction_of_event_id": {
+              "$ref": "#/$defs/nullableId"
+            },
+            "extensions": {
+              "type": "object",
+              "propertyNames": {
+                "pattern": "^[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)+$"
+              },
+              "additionalProperties": true
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "execution_status": {
+                    "enum": [
+                      "REJECTED",
+                      "FAILED",
+                      "CANCELLED"
+                    ]
+                  }
+                },
+                "required": [
+                  "execution_status"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "financial_outcome": {
+                    "const": "UNKNOWN"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "TRADE_CLOSED"
+                  }
+                },
+                "required": [
+                  "event_type"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "execution_status": {
+                    "const": "CLOSED"
+                  },
+                  "strategy_trade_id": {
+                    "$ref": "#/$defs/id"
+                  },
+                  "canonical_trade_id": {
+                    "$ref": "#/$defs/id"
+                  },
+                  "financial_outcome": {
+                    "enum": [
+                      "WIN",
+                      "LOSS",
+                      "BREAK_EVEN"
+                    ]
+                  },
+                  "fills": {
+                    "minItems": 2
+                  },
+                  "entry_price_points_per_contract": {
+                    "type": "number"
+                  },
+                  "exit_price_points_per_contract": {
+                    "type": "number"
+                  },
+                  "net_currency_total": {
+                    "type": "number"
+                  },
+                  "currency": {
+                    "type": "string",
+                    "pattern": "^[A-Z]{3}$"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "financial_outcome": {
+                    "const": "WIN"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "net_currency_total": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "financial_outcome": {
+                    "const": "LOSS"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "net_currency_total": {
+                    "type": "number",
+                    "exclusiveMaximum": 0
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "financial_outcome": {
+                    "const": "BREAK_EVEN"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "net_currency_total": {
+                    "const": 0
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "ATTEMPT_TERMINATED"
+                  },
+                  "fills": {
+                    "maxItems": 0
+                  }
+                },
+                "required": [
+                  "event_type",
+                  "fills"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "strategy_trade_id": {
+                    "type": "null"
+                  },
+                  "canonical_trade_id": {
+                    "type": "null"
+                  },
+                  "financial_outcome": {
+                    "const": "UNKNOWN"
+                  },
+                  "entry_price_points_per_contract": {
+                    "type": "null"
+                  },
+                  "exit_price_points_per_contract": {
+                    "type": "null"
+                  },
+                  "gross_points_per_contract": {
+                    "type": "null"
+                  },
+                  "gross_currency_total": {
+                    "type": "null"
+                  },
+                  "net_currency_total": {
+                    "type": "null"
+                  },
+                  "risk_r": {
+                    "type": "null"
+                  },
+                  "risk_r_unavailable_reason": {
+                    "const": "UNFILLED_ATTEMPT"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "EVIDENCE_CORRECTED"
+                  }
+                },
+                "required": [
+                  "event_type"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "correction_of_event_id": {
+                    "$ref": "#/$defs/id"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "risk_r": {
+                    "type": "null"
+                  }
+                },
+                "required": [
+                  "risk_r"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "risk_r_unavailable_reason": {
+                    "type": "string"
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "risk_r_unavailable_reason": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "excursion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value_points_per_contract",
+        "sign_convention",
+        "sampling_fidelity",
+        "position_method",
+        "window_start_utc",
+        "window_end_utc",
+        "unavailable_reason"
+      ],
+      "properties": {
+        "value_points_per_contract": {
+          "$ref": "#/$defs/nullableNumber"
+        },
+        "sign_convention": {
+          "enum": [
+            "FAVOURABLE_POSITIVE",
+            "ADVERSE_NEGATIVE"
+          ]
+        },
+        "sampling_fidelity": {
+          "enum": [
+            "TICK",
+            "TRADE_UPDATE",
+            "BAR_HIGH_LOW",
+            "UNKNOWN"
+          ]
+        },
+        "position_method": {
+          "enum": [
+            "WEIGHTED_OPEN_POSITION",
+            "PER_LOT",
+            "CAMPAIGN",
+            "UNKNOWN"
+          ]
+        },
+        "window_start_utc": {
+          "$ref": "#/$defs/nullableTimestamp"
+        },
+        "window_end_utc": {
+          "$ref": "#/$defs/nullableTimestamp"
+        },
+        "unavailable_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "evidenceSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_id",
+        "stage",
+        "known_at_utc",
+        "observed_at_utc",
+        "source_hash",
+        "method_version",
+        "chart_settings_hash",
+        "bar_completion",
+        "data_gaps",
+        "values"
+      ],
+      "properties": {
+        "evidence_id": {
+          "$ref": "#/$defs/id"
+        },
+        "stage": {
+          "enum": [
+            "SIGNAL",
+            "ENTRY",
+            "MANAGEMENT"
+          ]
+        },
+        "known_at_utc": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "observed_at_utc": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "source_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "method_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "chart_settings_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "bar_completion": {
+          "enum": [
+            "CLOSED",
+            "IN_PROGRESS",
+            "UNKNOWN"
+          ]
+        },
+        "data_gaps": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "values": {
+          "type": "object"
+        }
+      }
+    },
+    "strategyRelease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "strategy_id",
+        "identity_status",
+        "release_id",
+        "strategy_version",
+        "strategy_code_hash",
+        "strategy_config_hash",
+        "strategy_dll_hash",
+        "hmm_version",
+        "hmm_source_hash",
+        "hmm_dll_hash",
+        "source_location",
+        "release_role",
+        "lifecycle_status",
+        "baseline_reference",
+        "predecessor_release_id",
+        "attested_at_utc"
+      ],
+      "properties": {
+        "strategy_id": {"$ref": "#/$defs/strategyId"},
+        "identity_status": {"enum": ["FULL_ATTESTATION", "PARTIAL_HISTORICAL", "PAPER_BINDING_PENDING"]},
+        "release_id": {"$ref": "#/$defs/id"},
+        "strategy_version": {"type": "string", "minLength": 1},
+        "strategy_code_hash": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "strategy_config_hash": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "strategy_dll_hash": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "hmm_version": {"type": "string", "minLength": 1},
+        "hmm_source_hash": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "hmm_dll_hash": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "source_location": {"type": "string", "minLength": 1},
+        "release_role": {"enum": ["ACTIVE_PAPER", "HISTORICAL_BASELINE", "HISTORICAL_EVALUATION"]},
+        "lifecycle_status": {"enum": ["PAPER_ACTIVE_PENDING_INSTANCE_BINDING", "PAPER_OBSERVING", "HISTORICAL"]},
+        "baseline_reference": {"type": "boolean"},
+        "predecessor_release_id": {"$ref": "#/$defs/nullableId"},
+        "attested_at_utc": {"$ref": "#/$defs/timestamp"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"identity_status": {"const": "FULL_ATTESTATION"}}},
+          "then": {
+            "properties": {
+              "strategy_code_hash": {"$ref": "#/$defs/sha256"},
+              "strategy_config_hash": {"$ref": "#/$defs/sha256"},
+              "strategy_dll_hash": {"$ref": "#/$defs/sha256"},
+              "hmm_source_hash": {"$ref": "#/$defs/sha256"},
+              "hmm_dll_hash": {"$ref": "#/$defs/sha256"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"identity_status": {"const": "PAPER_BINDING_PENDING"}}},
+          "then": {
+            "properties": {
+              "strategy_code_hash": {"$ref": "#/$defs/sha256"},
+              "strategy_config_hash": {"$ref": "#/$defs/sha256"},
+              "hmm_source_hash": {"$ref": "#/$defs/sha256"}
+            }
+          }
+        }
+      ]
+    },
+    "activePaperRelease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["release_id", "effective_at_utc", "approval_id"],
+      "properties": {
+        "release_id": {"$ref": "#/$defs/id"},
+        "effective_at_utc": {"$ref": "#/$defs/timestamp"},
+        "approval_id": {"$ref": "#/$defs/id"}
+      }
+    },
+    "strategyProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "strategy_id",
+        "strategy_name",
+        "strategy_family",
+        "profile_id",
+        "profile_version",
+        "profile_hash",
+        "baseline_version",
+        "production_version",
+        "strategy_code_hash",
+        "strategy_config_hash",
+        "owner_project",
+        "owner_chat_label",
+        "source_location",
+        "instrument_scope",
+        "execution_timeframes",
+        "context_timeframes",
+        "rules",
+        "required_inputs",
+        "known_constraints",
+        "evaluation_objectives",
+        "evidence_policy",
+        "validation_plan",
+        "analytical_owner",
+        "operational_authority",
+        "onboarding_status",
+        "recommendations_enabled"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "2.1.0"
+        },
+        "strategy_id": {
+          "$ref": "#/$defs/strategyId"
+        },
+        "strategy_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "strategy_family": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/slug"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "profile_id": {
+          "$ref": "#/$defs/id"
+        },
+        "profile_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "profile_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "baseline_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "production_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "strategy_code_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "strategy_config_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "release_history": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/strategyRelease"}
+        },
+        "active_paper_release": {
+          "oneOf": [
+            {"$ref": "#/$defs/activePaperRelease"},
+            {"type": "null"}
+          ]
+        },
+        "owner_project": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner_chat_label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_location": {
+          "type": "string",
+          "minLength": 1
+        },
+        "instrument_scope": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "execution_timeframes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "context_timeframes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "rules": {
+          "type": "object",
+          "required": [
+            "entries",
+            "exits",
+            "stops",
+            "targets",
+            "filters",
+            "sizing",
+            "sessions"
+          ],
+          "properties": {
+            "entries": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "exits": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "stops": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "targets": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "filters": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "sizing": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "sessions": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "required_inputs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "known_constraints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evaluation_objectives": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidence_policy": {
+          "$ref": "#/$defs/evidencePolicy"
+        },
+        "validation_plan": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "analytical_owner": {
+          "const": "HERMES_BRAIN"
+        },
+        "operational_authority": {
+          "const": "OCEAN_TRADING"
+        },
+        "onboarding_status": {
+          "enum": [
+            "PENDING_ONBOARDING",
+            "PAPER_ACTIVE_PENDING_INSTANCE_BINDING",
+            "PAPER_OBSERVING",
+            "ACTIVE",
+            "SUSPENDED",
+            "RETIRED"
+          ]
+        },
+        "recommendations_enabled": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "onboarding_status": {
+                "enum": ["PAPER_ACTIVE_PENDING_INSTANCE_BINDING", "PAPER_OBSERVING"]
+              }
+            },
+            "required": ["onboarding_status"]
+          },
+          "then": {
+            "required": ["release_history", "active_paper_release"],
+            "properties": {
+              "active_paper_release": {"$ref": "#/$defs/activePaperRelease"}
+            }
+          }
+        }
+      ]
+    },
+    "evidencePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy_version",
+        "status",
+        "minimum_comparable_trades",
+        "minimum_independent_sessions",
+        "required_regime_coverage",
+        "maximum_data_quality_issues",
+        "contradictory_evidence_tolerance",
+        "winner_preservation_requirement",
+        "approval_decision_id"
+      ],
+      "properties": {
+        "policy_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "DRAFT",
+            "PENDING_WAYNE_APPROVAL",
+            "APPROVED",
+            "RETIRED"
+          ]
+        },
+        "minimum_comparable_trades": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "minimum_independent_sessions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "required_regime_coverage": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "maximum_data_quality_issues": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "contradictory_evidence_tolerance": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "winner_preservation_requirement": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "approval_decision_id": {
+          "$ref": "#/$defs/nullableId"
+        }
+      }
+    },
+    "executionInstance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "execution_instance_id",
+        "strategy_id",
+        "source_installation_id",
+        "chartbook_id",
+        "chart_id",
+        "source_study_instance_id",
+        "telemetry_producer_id",
+        "version_binding",
+        "config_hash",
+        "account_alias",
+        "capabilities",
+        "status",
+        "lease_run_id"
+      ],
+      "properties": {
+        "execution_instance_id": {
+          "$ref": "#/$defs/id"
+        },
+        "strategy_id": {
+          "$ref": "#/$defs/strategyId"
+        },
+        "source_installation_id": {
+          "$ref": "#/$defs/id"
+        },
+        "chartbook_id": {
+          "$ref": "#/$defs/id"
+        },
+        "chart_id": {
+          "$ref": "#/$defs/id"
+        },
+        "source_study_instance_id": {
+          "$ref": "#/$defs/id"
+        },
+        "telemetry_producer_id": {
+          "$ref": "#/$defs/id"
+        },
+        "version_binding": {
+          "type": "string",
+          "minLength": 1
+        },
+        "config_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "account_alias": {
+          "type": "string",
+          "minLength": 1
+        },
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "REPLAY",
+              "PAPER_FORWARD",
+              "BACKTEST",
+              "IMPORT",
+              "LIVE_REAL"
+            ]
+          }
+        },
+        "status": {
+          "enum": [
+            "DRAFT",
+            "READY",
+            "ACTIVE",
+            "COMPLETING",
+            "SUSPENDED",
+            "RETIRED"
+          ]
+        },
+        "lease_run_id": {
+          "$ref": "#/$defs/nullableId"
+        }
+      }
+    },
+    "strategyRegistry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "registry_revision",
+        "operational_authority",
+        "strategy_id",
+        "strategy_name",
+        "profile_id",
+        "profile_version",
+        "profile_hash",
+        "baseline_version",
+        "production_version",
+        "activation_status",
+        "activation_decision_id",
+        "execution_instances"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "2.1.0"
+        },
+        "registry_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "operational_authority": {
+          "const": "OCEAN_TRADING"
+        },
+        "strategy_id": {
+          "$ref": "#/$defs/strategyId"
+        },
+        "strategy_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "profile_id": {
+          "$ref": "#/$defs/id"
+        },
+        "profile_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "profile_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "baseline_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "production_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "release_history": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/strategyRelease"}
+        },
+        "active_paper_release": {
+          "oneOf": [
+            {"$ref": "#/$defs/activePaperRelease"},
+            {"type": "null"}
+          ]
+        },
+        "activation_status": {
+          "enum": [
+            "PENDING_ONBOARDING",
+            "PAPER_ACTIVE_PENDING_INSTANCE_BINDING",
+            "PAPER_OBSERVING",
+            "ACTIVE",
+            "SUSPENDED",
+            "RETIRED"
+          ]
+        },
+        "activation_decision_id": {
+          "$ref": "#/$defs/nullableId"
+        },
+        "execution_instances": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/executionInstance"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "activation_status": {
+                "enum": ["PAPER_ACTIVE_PENDING_INSTANCE_BINDING", "PAPER_OBSERVING"]
+              }
+            },
+            "required": ["activation_status"]
+          },
+          "then": {
+            "required": ["release_history", "active_paper_release"],
+            "properties": {
+              "active_paper_release": {"$ref": "#/$defs/activePaperRelease"}
+            }
+          }
+        }
+      ]
+    },
+    "tradeAssessmentProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "assessment_id",
+        "revision",
+        "status",
+        "trade_event_id",
+        "canonical_trade_id",
+        "strategy_id",
+        "strategy_profile_id",
+        "strategy_profile_version",
+        "run_id",
+        "run_context_revision",
+        "run_context_hash",
+        "technical_review",
+        "visual_review",
+        "synthesis_review",
+        "market_context",
+        "research",
+        "governance",
+        "created_at_utc",
+        "completed_at_utc"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "2.1.0"
+        },
+        "assessment_id": {
+          "$ref": "#/$defs/id"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "status": {
+          "enum": [
+            "DRAFT",
+            "COMPLETE",
+            "INVALID"
+          ]
+        },
+        "trade_event_id": {
+          "$ref": "#/$defs/id"
+        },
+        "canonical_trade_id": {
+          "$ref": "#/$defs/nullableId"
+        },
+        "strategy_id": {
+          "$ref": "#/$defs/strategyId"
+        },
+        "strategy_profile_id": {
+          "$ref": "#/$defs/id"
+        },
+        "strategy_profile_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "run_id": {
+          "$ref": "#/$defs/id"
+        },
+        "run_context_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "run_context_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "technical_review": {
+          "$ref": "#/$defs/review"
+        },
+        "visual_review": {
+          "$ref": "#/$defs/review"
+        },
+        "synthesis_review": {
+          "$ref": "#/$defs/review"
+        },
+        "market_context": {
+          "$ref": "#/$defs/marketContext"
+        },
+        "research": {
+          "type": "object",
+          "required": [
+            "evidence_ids",
+            "source_claims",
+            "inferences",
+            "counter_evidence"
+          ],
+          "properties": {
+            "evidence_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/id"
+              }
+            },
+            "source_claims": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "inferences": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "counter_evidence": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "governance": {
+          "type": "object",
+          "required": [
+            "case_id",
+            "recommendation_id",
+            "approval_decision_id",
+            "production_change_authorized"
+          ],
+          "properties": {
+            "case_id": {
+              "$ref": "#/$defs/nullableId"
+            },
+            "recommendation_id": {
+              "$ref": "#/$defs/nullableId"
+            },
+            "approval_decision_id": {
+              "$ref": "#/$defs/nullableId"
+            },
+            "production_change_authorized": {
+              "const": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "created_at_utc": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "completed_at_utc": {
+          "$ref": "#/$defs/nullableTimestamp"
+        }
+      }
+    },
+    "marketContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "as_of_utc",
+        "timezone",
+        "actual_contract_symbol",
+        "method_bundle_version",
+        "timeframes",
+        "data_revision_hash",
+        "gaps"
+      ],
+      "properties": {
+        "as_of_utc": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "timezone": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actual_contract_symbol": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "method_bundle_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "timeframes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "timeframe",
+              "source_bar_closed_at_utc",
+              "known_at_utc",
+              "bar_completion",
+              "trend_state",
+              "trend_strength",
+              "structure_state",
+              "volatility_state",
+              "volume_state",
+              "reference_distances",
+              "method_version"
+            ],
+            "properties": {
+              "timeframe": {
+                "type": "string",
+                "minLength": 1
+              },
+              "source_bar_closed_at_utc": {
+                "$ref": "#/$defs/timestamp"
+              },
+              "known_at_utc": {
+                "$ref": "#/$defs/timestamp"
+              },
+              "bar_completion": {
+                "const": "CLOSED"
+              },
+              "trend_state": {
+                "enum": [
+                  "STRONG_UP",
+                  "UP",
+                  "NEUTRAL",
+                  "DOWN",
+                  "STRONG_DOWN",
+                  "TRANSITION",
+                  "UNKNOWN"
+                ]
+              },
+              "trend_strength": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 100
+              },
+              "structure_state": {
+                "enum": [
+                  "HH_HL",
+                  "LH_LL",
+                  "MIXED",
+                  "RANGE",
+                  "INSUFFICIENT"
+                ]
+              },
+              "volatility_state": {
+                "enum": [
+                  "LOW",
+                  "NORMAL",
+                  "HIGH",
+                  "EXTREME",
+                  "UNKNOWN"
+                ]
+              },
+              "volume_state": {
+                "enum": [
+                  "LOW",
+                  "NORMAL",
+                  "HIGH",
+                  "UNKNOWN",
+                  "UNAVAILABLE"
+                ]
+              },
+              "reference_distances": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "reference_type",
+                    "signed_points",
+                    "signed_atr",
+                    "unavailable_reason"
+                  ],
+                  "properties": {
+                    "reference_type": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "signed_points": {
+                      "$ref": "#/$defs/nullableNumber"
+                    },
+                    "signed_atr": {
+                      "$ref": "#/$defs/nullableNumber"
+                    },
+                    "unavailable_reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              },
+              "method_version": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "data_revision_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "gaps": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "reviewer_id",
+        "method_version",
+        "completed_at_utc",
+        "evidence_ids",
+        "findings",
+        "conclusion",
+        "confidence",
+        "unavailable_reason"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "COMPLETE",
+            "UNAVAILABLE",
+            "NOT_REQUIRED"
+          ]
+        },
+        "reviewer_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "method_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "completed_at_utc": {
+          "$ref": "#/$defs/nullableTimestamp"
+        },
+        "evidence_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "conclusion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "confidence": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "LOW",
+            "MEDIUM",
+            "HIGH",
+            null
+          ]
+        },
+        "unavailable_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "COMPLETE"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reviewer_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "method_version": {
+                "type": "string",
+                "minLength": 1
+              },
+              "completed_at_utc": {
+                "$ref": "#/$defs/timestamp"
+              },
+              "conclusion": {
+                "type": "string",
+                "minLength": 1
+              },
+              "confidence": {
+                "enum": [
+                  "LOW",
+                  "MEDIUM",
+                  "HIGH"
+                ]
+              },
+              "unavailable_reason": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "UNAVAILABLE"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "unavailable_reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "datasetManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "dataset_manifest_id",
+        "revision",
+        "manifest_hash",
+        "source_id",
+        "source_revision",
+        "created_at_utc",
+        "timezone",
+        "contract_rollover_policy",
+        "adjustment_policy",
+        "partitions",
+        "protected_intervals",
+        "content_hashes",
+        "quality_status",
+        "gaps"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "2.1.0"
+        },
+        "dataset_manifest_id": {
+          "$ref": "#/$defs/id"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "manifest_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_id": {
+          "$ref": "#/$defs/id"
+        },
+        "source_revision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "created_at_utc": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "timezone": {
+          "type": "string",
+          "minLength": 1
+        },
+        "contract_rollover_policy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "adjustment_policy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "partitions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/datasetPartition"
+          }
+        },
+        "protected_intervals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/interval"
+          }
+        },
+        "content_hashes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/sha256"
+          }
+        },
+        "quality_status": {
+          "enum": [
+            "VERIFIED",
+            "PARTIAL",
+            "QUARANTINED"
+          ]
+        },
+        "gaps": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "interval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start_utc",
+        "end_utc"
+      ],
+      "properties": {
+        "start_utc": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "end_utc": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    },
+    "datasetPartition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start_utc",
+        "end_utc",
+        "partition",
+        "symbol",
+        "coverage_status"
+      ],
+      "properties": {
+        "start_utc": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "end_utc": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "partition": {
+          "enum": [
+            "DISCOVERY",
+            "DEVELOPMENT",
+            "VALIDATION",
+            "HOLDOUT",
+            "FORWARD"
+          ]
+        },
+        "symbol": {
+          "type": "string",
+          "minLength": 1
+        },
+        "coverage_status": {
+          "enum": [
+            "COMPLETE",
+            "PARTIAL",
+            "UNKNOWN"
+          ]
+        }
+      }
+    },
+    "workflowEvent": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/eventEnvelope"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "event_id",
+            "event_type",
+            "source_sequence",
+            "occurred_at_utc",
+            "recorded_at_utc",
+            "producer_id",
+            "payload_hash",
+            "strategy_id",
+            "strategy_name",
+            "strategy_version",
+            "strategy_code_hash",
+            "strategy_config_hash",
+            "strategy_profile_id",
+            "strategy_profile_version",
+            "execution_instance_id",
+            "source_installation_id",
+            "source_session_id",
+            "run_id",
+            "run_context_revision",
+            "run_context_hash",
+            "workflow_id",
+            "correlation_id",
+            "expected_state",
+            "expected_revision",
+            "proposed_state",
+            "actor_role",
+            "status",
+            "error"
+          ],
+          "properties": {
+            "schema_version": true,
+            "event_id": true,
+            "source_sequence": true,
+            "occurred_at_utc": true,
+            "recorded_at_utc": true,
+            "producer_id": true,
+            "payload_hash": true,
+            "strategy_id": true,
+            "strategy_name": true,
+            "strategy_version": true,
+            "strategy_code_hash": true,
+            "strategy_config_hash": true,
+            "strategy_profile_id": true,
+            "strategy_profile_version": true,
+            "execution_instance_id": true,
+            "source_installation_id": true,
+            "source_session_id": true,
+            "run_id": true,
+            "run_context_revision": true,
+            "run_context_hash": true,
+            "event_type": {
+              "enum": [
+                "RUN_RESERVED",
+                "RUN_STARTED",
+                "RUN_PROGRESS",
+                "RUN_COMPLETED",
+                "RUN_FAILED",
+                "RUN_CANCELLED",
+                "CASE_TRANSITION_PROPOSED"
+              ]
+            },
+            "workflow_id": {
+              "$ref": "#/$defs/id"
+            },
+            "correlation_id": {
+              "$ref": "#/$defs/id"
+            },
+            "expected_state": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "expected_revision": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "proposed_state": {
+              "type": "string",
+              "minLength": 1
+            },
+            "actor_role": {
+              "type": "string",
+              "minLength": 1
+            },
+            "status": {
+              "enum": [
+                "ACCEPTED",
+                "REJECTED",
+                "QUARANTINED"
+              ]
+            },
+            "error": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/error"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "artifactManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "artifact_id",
+        "artifact_version",
+        "content_hash",
+        "media_type",
+        "bytes",
+        "created_at_utc",
+        "producer_id",
+        "strategy_id",
+        "run_id",
+        "role",
+        "source_reference",
+        "known_at_utc",
+        "captured_at_utc",
+        "visible_market_cutoff_utc",
+        "chart_settings_hash",
+        "availability",
+        "immutable",
+        "supersedes_artifact_id"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "2.1.0"
+        },
+        "artifact_id": {
+          "$ref": "#/$defs/id"
+        },
+        "artifact_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "content_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "media_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "created_at_utc": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "producer_id": {
+          "$ref": "#/$defs/id"
+        },
+        "strategy_id": {
+          "$ref": "#/$defs/strategyId"
+        },
+        "run_id": {
+          "$ref": "#/$defs/id"
+        },
+        "role": {
+          "enum": [
+            "SIGNAL",
+            "ENTRY",
+            "EXIT",
+            "CONTEXT",
+            "POST_OUTCOME",
+            "RAW_TELEMETRY",
+            "REPORT"
+          ]
+        },
+        "source_reference": {
+          "type": "string",
+          "minLength": 1
+        },
+        "known_at_utc": {
+          "$ref": "#/$defs/nullableTimestamp"
+        },
+        "captured_at_utc": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "visible_market_cutoff_utc": {
+          "$ref": "#/$defs/nullableTimestamp"
+        },
+        "chart_settings_hash": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "availability": {
+          "enum": [
+            "AVAILABLE",
+            "MISSING",
+            "LATE",
+            "UNAVAILABLE"
+          ]
+        },
+        "immutable": {
+          "const": true
+        },
+        "supersedes_artifact_id": {
+          "$ref": "#/$defs/nullableId"
+        }
+      }
+    },
+    "approvalDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "decision_id",
+        "request_id",
+        "decision",
+        "scope",
+        "snapshot_hash",
+        "decided_by",
+        "decided_via",
+        "decided_at_utc",
+        "reason",
+        "expires_at_utc"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "2.1.0"
+        },
+        "decision_id": {
+          "$ref": "#/$defs/id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/id"
+        },
+        "decision": {
+          "enum": [
+            "APPROVED",
+            "REJECTED",
+            "REVOKED"
+          ]
+        },
+        "scope": {
+          "enum": [
+            "STRATEGY_ONBOARDING",
+            "PROFILE_ACTIVATION",
+            "RUN_RELEASE",
+            "RESULT_RELEASE",
+            "PRODUCTION_CHANGE"
+          ]
+        },
+        "snapshot_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "decided_by": {
+          "const": "Wayne"
+        },
+        "decided_via": {
+          "const": "AUTHORISED_OCEAN_UI"
+        },
+        "decided_at_utc": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expires_at_utc": {
+          "$ref": "#/$defs/nullableTimestamp"
+        }
+      }
+    },
+    "handoff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "handoff_id",
+        "correlation_id",
+        "strategy_id",
+        "run_id",
+        "sender_id",
+        "recipient_id",
+        "status",
+        "dispatched_at_utc",
+        "acknowledged_at_utc",
+        "completed_at_utc",
+        "artifact_ids",
+        "result_id",
+        "error"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "2.1.0"
+        },
+        "handoff_id": {
+          "$ref": "#/$defs/id"
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/id"
+        },
+        "strategy_id": {
+          "$ref": "#/$defs/strategyId"
+        },
+        "run_id": {
+          "$ref": "#/$defs/id"
+        },
+        "sender_id": {
+          "$ref": "#/$defs/id"
+        },
+        "recipient_id": {
+          "$ref": "#/$defs/id"
+        },
+        "status": {
+          "enum": [
+            "DISPATCHED",
+            "ACKNOWLEDGED",
+            "IN_PROGRESS",
+            "COMPLETED",
+            "FAILED",
+            "CANCELLED"
+          ]
+        },
+        "dispatched_at_utc": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "acknowledged_at_utc": {
+          "$ref": "#/$defs/nullableTimestamp"
+        },
+        "completed_at_utc": {
+          "$ref": "#/$defs/nullableTimestamp"
+        },
+        "artifact_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        },
+        "result_id": {
+          "$ref": "#/$defs/nullableId"
+        },
+        "error": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/error"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "FAILED"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "error": {
+                "$ref": "#/$defs/error"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "COMPLETED"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "completed_at_utc": {
+                "$ref": "#/$defs/timestamp"
+              },
+              "result_id": {
+                "$ref": "#/$defs/id"
+              },
+              "error": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "value",
+        "unit",
+        "quality",
+        "unavailable_reason"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "value": {
+          "$ref": "#/$defs/nullableNumber"
+        },
+        "unit": {
+          "enum": [
+            "COUNT",
+            "RATIO",
+            "PERCENT",
+            "POINTS_PER_CONTRACT",
+            "TICKS_TOTAL",
+            "CURRENCY_TOTAL",
+            "SECONDS"
+          ]
+        },
+        "quality": {
+          "enum": [
+            "VERIFIED",
+            "ESTIMATED",
+            "UNKNOWN"
+          ]
+        },
+        "unavailable_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "value": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "unavailable_reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "value": {
+                "type": "number"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "unavailable_reason": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "candidateResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "result_id",
+        "run_id",
+        "run_context_revision",
+        "run_context_hash",
+        "strategy_id",
+        "experiment_id",
+        "candidate_id",
+        "dataset_manifest_id",
+        "dataset_manifest_revision",
+        "dataset_partition",
+        "learner_permission",
+        "status",
+        "metrics",
+        "baseline_result_id",
+        "artifact_ids",
+        "created_at_utc",
+        "released_by_decision_id",
+        "failure"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "2.1.0"
+        },
+        "result_id": {
+          "$ref": "#/$defs/id"
+        },
+        "run_id": {
+          "$ref": "#/$defs/id"
+        },
+        "run_context_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "run_context_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "strategy_id": {
+          "$ref": "#/$defs/strategyId"
+        },
+        "experiment_id": {
+          "$ref": "#/$defs/id"
+        },
+        "candidate_id": {
+          "$ref": "#/$defs/id"
+        },
+        "dataset_manifest_id": {
+          "$ref": "#/$defs/id"
+        },
+        "dataset_manifest_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "dataset_partition": {
+          "enum": [
+            "DEVELOPMENT",
+            "VALIDATION",
+            "HOLDOUT",
+            "FORWARD"
+          ]
+        },
+        "learner_permission": {
+          "enum": [
+            "EVALUATE_ONLY",
+            "FROZEN_EVALUATION",
+            "RESTRICTED_EVALUATOR",
+            "NONE"
+          ],
+          "readOnly": true
+        },
+        "status": {
+          "enum": [
+            "COMPLETE",
+            "PARTIAL",
+            "FAILED",
+            "CANCELLED"
+          ]
+        },
+        "metrics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/metric"
+          }
+        },
+        "baseline_result_id": {
+          "$ref": "#/$defs/nullableId"
+        },
+        "artifact_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        },
+        "created_at_utc": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "released_by_decision_id": {
+          "$ref": "#/$defs/nullableId"
+        },
+        "failure": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/error"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "runCompletion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "run_id",
+        "run_context_revision",
+        "run_context_hash",
+        "status",
+        "requested_coverage",
+        "observed_coverage",
+        "watermark",
+        "unique_canonical_trade_count",
+        "processing_event_count",
+        "no_trade_interval_count",
+        "gaps",
+        "failures",
+        "dataset_manifest_hash",
+        "started_at_utc",
+        "completed_at_utc"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "2.1.0"
+        },
+        "run_id": {
+          "$ref": "#/$defs/id"
+        },
+        "run_context_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "run_context_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "status": {
+          "enum": [
+            "COMPLETED",
+            "PARTIAL",
+            "FAILED",
+            "CANCELLED"
+          ]
+        },
+        "requested_coverage": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/interval"
+          }
+        },
+        "observed_coverage": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/interval"
+          }
+        },
+        "watermark": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unique_canonical_trade_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "processing_event_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "no_trade_interval_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "gaps": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "failures": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/error"
+          }
+        },
+        "dataset_manifest_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "started_at_utc": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "completed_at_utc": {
+          "$ref": "#/$defs/nullableTimestamp"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "COMPLETED"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "completed_at_utc": {
+                "$ref": "#/$defs/timestamp"
+              },
+              "failures": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      ]
+    },
+    "sourceAdapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "adapter_id",
+        "adapter_version",
+        "source_system",
+        "source_schema",
+        "target_release",
+        "field_mappings",
+        "identity_policy",
+        "environment_policy",
+        "unknown_policy",
+        "idempotency_policy",
+        "permission_scope",
+        "compatibility_evidence"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "2.1.0"
+        },
+        "adapter_id": {
+          "$ref": "#/$defs/id"
+        },
+        "adapter_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_system": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target_release": {
+          "const": "2.1.0"
+        },
+        "field_mappings": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source",
+              "target",
+              "conversion",
+              "nullable"
+            ],
+            "properties": {
+              "source": {
+                "type": "string",
+                "minLength": 1
+              },
+              "target": {
+                "type": "string",
+                "minLength": 1
+              },
+              "conversion": {
+                "type": "string",
+                "minLength": 1
+              },
+              "nullable": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "identity_policy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "environment_policy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "unknown_policy": {
+          "const": "QUARANTINE_DO_NOT_GUESS"
+        },
+        "idempotency_policy": {
+          "const": "IDENTICAL_RETRY_RETURNS_PRIOR_RECEIPT_CONFLICTING_ID_QUARANTINED"
+        },
+        "permission_scope": {
+          "enum": [
+            "GENERAL_READ_ONLY",
+            "TRADING_STRATEGY_SCOPED",
+            "PROVIDER_INTERNAL"
+          ]
+        },
+        "compatibility_evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "quarantine_id"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "SCHEMA_INVALID",
+            "AUTHENTICATION_REQUIRED",
+            "SCOPE_DENIED",
+            "UNKNOWN_STRATEGY",
+            "AMBIGUOUS_INSTANCE",
+            "INVALID_RUN_COMBINATION",
+            "HASH_MISMATCH",
+            "DUPLICATE_CONFLICT",
+            "PROTECTED_DATASET",
+            "STALE_REVISION",
+            "MISSING_PREREQUISITE",
+            "PROVIDER_UNAVAILABLE",
+            "UNKNOWN"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "quarantine_id": {
+          "$ref": "#/$defs/nullableId"
+        }
+      }
+    }
+  }
+}

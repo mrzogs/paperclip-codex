@@ -1,0 +1,286 @@
+{
+  "schema_version": "ocean-setup-task-map/v1",
+  "source_sha256": "9e02010bcb545894d9d006687ce21ece85080c83ca3167fa6d4b7ac7d060e474",
+  "tasks": [
+    {
+      "task_id": "S01",
+      "owner": "Obsidian Brain",
+      "bundle": "S01-BRAIN-CHECKPOINT-RESULT.zip"
+    },
+    {
+      "task_id": "S02",
+      "owner": "Telemetry Logger",
+      "bundle": "S02-TELEMETRY-AUDIT-RESULT.zip"
+    },
+    {
+      "task_id": "S03",
+      "owner": "Ocean Trading Website",
+      "bundle": "S03-OCEAN-AUDIT-RESULT.zip"
+    },
+    {
+      "task_id": "S04",
+      "owner": "VWAP Strategy",
+      "bundle": "S04-VWAP-DRAFT-RESULT.zip"
+    },
+    {
+      "task_id": "S05",
+      "owner": "Obsidian Brain",
+      "bundle": "S05-BRAIN-RECOVERY-MAP-RESULT.zip"
+    },
+    {
+      "task_id": "S06",
+      "owner": "Telemetry Logger",
+      "bundle": "S06-TELEMETRY-BASELINE-RESULT.zip"
+    },
+    {
+      "task_id": "S07",
+      "owner": "Ocean Trading Website",
+      "bundle": "S07-OCEAN-LEDGER-BASELINE-RESULT.zip"
+    },
+    {
+      "task_id": "S08",
+      "owner": "Obsidian Brain",
+      "bundle": "S08-BRAIN-SAFE-RECONCILIATION-RESULT.zip"
+    },
+    {
+      "task_id": "S09",
+      "owner": "Obsidian Brain",
+      "bundle": "S09-BRAIN-SHARED-CONTRACTS-RESULT.zip"
+    },
+    {
+      "task_id": "S09-R1",
+      "owner": "Obsidian Brain",
+      "bundle": "S09-R1-BRAIN-SHARED-CONTRACTS-RESULT.zip"
+    },
+    {
+      "task_id": "S10",
+      "owner": "VWAP Strategy",
+      "bundle": "S10-VWAP-ONBOARDING-PROFILE-RESULT.zip"
+    },
+    {
+      "task_id": "S11",
+      "owner": "Obsidian Brain",
+      "bundle": "S11-BRAIN-REGISTRY-RECONCILE-RESULT.zip"
+    },
+    {
+      "task_id": "S12",
+      "owner": "Obsidian Brain",
+      "bundle": "S12-BRAIN-LIBRARY-RECOVERY-RESULT.zip"
+    },
+    {
+      "task_id": "S13",
+      "owner": "Ocean Trading Website",
+      "bundle": "S13-OCEAN-CONTRACT-INTAKE-RESULT.zip"
+    },
+    {
+      "task_id": "S14",
+      "owner": "Telemetry Logger",
+      "bundle": "S14-TELEMETRY-CONTRACT-INTAKE-RESULT.zip"
+    },
+    {
+      "task_id": "S15",
+      "owner": "Obsidian Brain",
+      "bundle": "S15-BRAIN-SKILL-REVIEW-RESULT.zip"
+    },
+    {
+      "task_id": "S16",
+      "owner": "Obsidian Brain",
+      "bundle": "S16-BRAIN-SKILLS-INSTALL-RESULT.zip"
+    },
+    {
+      "task_id": "S17",
+      "owner": "Obsidian Brain",
+      "bundle": "S17-BRAIN-REVIEWER-TESTS-RESULT.zip"
+    },
+    {
+      "task_id": "S18",
+      "owner": "Telemetry Logger",
+      "bundle": "S18-TELEMETRY-DATA-INVENTORY-RESULT.zip"
+    },
+    {
+      "task_id": "S19",
+      "owner": "Obsidian Brain",
+      "bundle": "S19-BRAIN-DATASET-PLAN-RESULT.zip"
+    },
+    {
+      "task_id": "S20",
+      "owner": "Ocean Trading Website",
+      "bundle": "S20-OCEAN-WORKFLOW-BACKEND-RESULT.zip"
+    },
+    {
+      "task_id": "S21",
+      "owner": "Ocean Trading Website",
+      "bundle": "S21-OCEAN-WORKFLOW-UI-RESULT.zip"
+    },
+    {
+      "task_id": "S22",
+      "owner": "Ocean Trading Website",
+      "bundle": "S22-OCEAN-RUN-WIZARD-RESULT.zip"
+    },
+    {
+      "task_id": "S23",
+      "owner": "Ocean Trading Website",
+      "bundle": "S23-OCEAN-PROVIDER-BINDINGS-RESULT.zip"
+    },
+    {
+      "task_id": "S23.1",
+      "owner": "Ocean Trading Website",
+      "bundle": "S23.1-OCEAN-PROVIDER-BINDINGS-RESULT.zip"
+    },
+    {
+      "task_id": "S23.2",
+      "owner": "Ocean Trading Website",
+      "bundle": "S23.2-OCEAN-PROVIDER-BINDINGS-RESULT.zip"
+    },
+    {
+      "task_id": "S24",
+      "owner": "Obsidian Brain",
+      "bundle": "S24-BRAIN-OCEAN-CONSUMER-RESULT.zip"
+    },
+    {
+      "task_id": "S25",
+      "owner": "Telemetry Logger",
+      "bundle": "S25-TELEMETRY-LOGGER-UPGRADE-RESULT.zip"
+    },
+    {
+      "task_id": "S26",
+      "owner": "Telemetry Logger",
+      "bundle": "S26-TELEMETRY-GATEWAY-RESULT.zip"
+    },
+    {
+      "task_id": "S27",
+      "owner": "VWAP Strategy",
+      "bundle": "S27-VWAP-CANDIDATE-TOOLING-RESULT.zip"
+    },
+    {
+      "task_id": "S28",
+      "owner": "Obsidian Brain",
+      "bundle": "S28-BRAIN-RECEIVER-RESULT.zip"
+    },
+    {
+      "task_id": "S29",
+      "owner": "Ocean Trading Website",
+      "bundle": "S29-OCEAN-ADAPTER-COMPLETION-RESULT.zip"
+    },
+    {
+      "task_id": "S30",
+      "owner": "Telemetry Logger",
+      "bundle": "S30-TELEMETRY-LIVE-ADAPTER-RESULT.zip"
+    },
+    {
+      "task_id": "S31",
+      "owner": "Obsidian Brain",
+      "bundle": "S31-BRAIN-SESSIONS-RESULT.zip"
+    },
+    {
+      "task_id": "S32",
+      "owner": "Obsidian Brain",
+      "bundle": "S32-BRAIN-LIFECYCLE-REVIEW-RESULT.zip"
+    },
+    {
+      "task_id": "S33",
+      "owner": "Ocean Trading Website",
+      "bundle": "S33-OCEAN-LIFECYCLE-UI-RESULT.zip"
+    },
+    {
+      "task_id": "S34",
+      "owner": "VWAP Strategy",
+      "bundle": "S34-VWAP-DEPLOYMENT-PROCEDURE-RESULT.zip"
+    },
+    {
+      "task_id": "S35",
+      "owner": "Telemetry Logger",
+      "bundle": "S35-TELEMETRY-E2E-TEST-RESULT.zip"
+    },
+    {
+      "task_id": "S36",
+      "owner": "Obsidian Brain",
+      "bundle": "S36-BRAIN-E2E-TEST-RESULT.zip"
+    },
+    {
+      "task_id": "S37",
+      "owner": "VWAP Strategy",
+      "bundle": "S37-VWAP-E2E-TEST-RESULT.zip"
+    },
+    {
+      "task_id": "S38",
+      "owner": "Ocean Trading Website",
+      "bundle": "S38-OCEAN-E2E-TEST-RESULT.zip"
+    },
+    {
+      "task_id": "S39",
+      "owner": "Obsidian Brain",
+      "bundle": "S39-BRAIN-READINESS-GATE-RESULT.zip"
+    },
+    {
+      "task_id": "S40",
+      "owner": "Ocean Trading Website",
+      "bundle": "S40-OCEAN-HUMAN-ONBOARDING-RESULT.zip"
+    },
+    {
+      "task_id": "S41",
+      "owner": "Ocean Trading Website",
+      "bundle": "S41-OCEAN-SMOKE-RUN-RESULT.zip"
+    },
+    {
+      "task_id": "S42",
+      "owner": "Telemetry Logger",
+      "bundle": "S42-TELEMETRY-SMOKE-REPLAY-RESULT.zip"
+    },
+    {
+      "task_id": "S43",
+      "owner": "Ocean Trading Website",
+      "bundle": "S43-OCEAN-REPROCESS-RUN-RESULT.zip"
+    },
+    {
+      "task_id": "S44",
+      "owner": "Telemetry Logger",
+      "bundle": "S44-TELEMETRY-REPROCESS-SMOKE-RESULT.zip"
+    },
+    {
+      "task_id": "S45",
+      "owner": "Obsidian Brain",
+      "bundle": "S45-BRAIN-SMOKE-RECONCILIATION-RESULT.zip"
+    },
+    {
+      "task_id": "S46",
+      "owner": "Ocean Trading Website",
+      "bundle": "S46-OCEAN-BULK-RUN-RESULT.zip"
+    },
+    {
+      "task_id": "S47",
+      "owner": "Telemetry Logger",
+      "bundle": "S47-TELEMETRY-HISTORICAL-BUILD-RESULT.zip"
+    },
+    {
+      "task_id": "S48",
+      "owner": "Obsidian Brain",
+      "bundle": "S48-BRAIN-BOOTSTRAP-REPORT-RESULT.zip"
+    },
+    {
+      "task_id": "S49",
+      "owner": "Ocean Trading Website",
+      "bundle": "S49-OCEAN-PAPER-RUN-RESULT.zip"
+    },
+    {
+      "task_id": "S50",
+      "owner": "Telemetry Logger",
+      "bundle": "S50-TELEMETRY-PAPER-FORWARD-RESULT.zip"
+    },
+    {
+      "task_id": "S51",
+      "owner": "Obsidian Brain",
+      "bundle": "S51-BRAIN-PAPER-LEARNING-CHECK-RESULT.zip"
+    },
+    {
+      "task_id": "S52",
+      "owner": "Ocean Trading Website",
+      "bundle": "S52-OCEAN-OPERATIONS-RESULT.zip"
+    },
+    {
+      "task_id": "S53",
+      "owner": "Obsidian Brain",
+      "bundle": "S53-BRAIN-FINAL-AUDIT-RESULT.zip"
+    }
+  ]
+}

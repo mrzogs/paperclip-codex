@@ -1,0 +1,29 @@
+{
+  "schema_version": "2.1.0",
+  "adapter_id": "telemetry-sqlite-v7-to-shared-v2",
+  "adapter_version": "1.0.0",
+  "source_system": "Sierra Trade Telemetry Logger",
+  "source_schema": "Replay=7; Paper=3; Live=5",
+  "target_release": "2.1.0",
+  "field_mappings": [
+    {"source": "trades.trade_id", "target": "legacy_trade_id", "conversion": "preserve unchanged; never use alone as canonical identity", "nullable": false},
+    {"source": "trades.strategy_id", "target": "strategy_id", "conversion": "use only when verified against the strategy registry", "nullable": true},
+    {"source": "trades.strategy_name", "target": "strategy_name", "conversion": "display label only; never a routing key", "nullable": true},
+    {"source": "trades.run_id", "target": "run_id", "conversion": "available in Replay schema 7; otherwise resolve through authenticated instance binding", "nullable": true},
+    {"source": "trades.status", "target": "execution_status", "conversion": "normalise lifecycle status; do not map failure/rejection to financial outcome", "nullable": false},
+    {"source": "trades.net_profit_loss", "target": "net_currency_total", "conversion": "preserve Ocean precedence and currency-total meaning", "nullable": true},
+    {"source": "trades.gross_points", "target": "gross_points_per_contract", "conversion": "preserve producer average realised points per exited unit", "nullable": true},
+    {"source": "fills + trade_legs", "target": "fills", "conversion": "preserve entry/scale/partial/final/reversal roles and source fill identity", "nullable": true},
+    {"source": "source path + environment/is_simulated", "target": "observed_source_state", "conversion": "Paper path is a mode boundary; Live excludes simulation; Replay requires environment=replay", "nullable": false}
+  ],
+  "identity_policy": "Legacy ID, event ID, processing run ID, strategy attempt ID, strategy trade ID and canonical trade ID remain distinct. Ambiguous attribution is unresolved.",
+  "environment_policy": "Import transport never proves original environment. Replay 7, Paper 3 and Live 5 use their S06/S07 observed mode-specific bindings.",
+  "unknown_policy": "QUARANTINE_DO_NOT_GUESS",
+  "idempotency_policy": "IDENTICAL_RETRY_RETURNS_PRIOR_RECEIPT_CONFLICTING_ID_QUARANTINED",
+  "permission_scope": "PROVIDER_INTERNAL",
+  "compatibility_evidence": [
+    "S06-TELEMETRY-BASELINE-RESULT.zip#artifacts/reference/telemetry/current-telemetry-sqlite-contract.md",
+    "S06-TELEMETRY-BASELINE-RESULT.zip#artifacts/reference/telemetry/telemetry-schema-v7.sql",
+    "S07-OCEAN-LEDGER-BASELINE-RESULT.zip#artifacts/bindings/current-ocean-telemetry-query-contract.json"
+  ]
+}

@@ -1,0 +1,11 @@
+DROP TABLE ow_run_presets;
+DROP TABLE ow_evidence_revisions;
+DROP TABLE ow_coverage_receipts;
+DROP TABLE ow_run_progress;
+DROP TABLE ow_trade_pins;
+DROP TABLE ow_run_leases;
+DROP TABLE ow_run_plans;
+DROP TABLE ow_dataset_permissions;
+DROP TABLE ow_run_settings;
+DROP TABLE ow_run_versions;
+DELETE FROM ow_schema_migrations WHERE version=2;

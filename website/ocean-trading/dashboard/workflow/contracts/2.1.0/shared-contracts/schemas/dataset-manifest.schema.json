@@ -1,0 +1,6 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hermes-brain:shared-contracts:dataset-manifest:2.1.0",
+  "title": "Hermes Brain dataset-manifest contract 2.1.0",
+  "$ref": "urn:hermes-brain:shared-contracts:2.1.0#/$defs/datasetManifest"
+}

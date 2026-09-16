@@ -1,0 +1,64 @@
+[
+  {
+    "name": "invalid-run-combination",
+    "schema": "run-context",
+    "mutate_positive": {"expected_environment": "REPLAY", "evidence_purpose": "LEARNING", "dataset_partition": "FORWARD", "learner_permission": "SCOPED_LEARNING"},
+    "expected_error": "is not valid under any of the given schemas"
+  },
+  {
+    "name": "holdout-cannot-learn",
+    "schema": "run-context",
+    "mutate_positive": {"expected_environment": "REPLAY", "evidence_purpose": "PROTECTED_HOLDOUT", "dataset_partition": "HOLDOUT", "experiment_id": "experiment-1", "candidate_id": "candidate-1", "learner_permission": "SCOPED_LEARNING"},
+    "expected_error": "is not valid under any of the given schemas"
+  },
+  {
+    "name": "live-learning-disabled",
+    "schema": "run-context",
+    "mutate_positive": {"expected_environment": "LIVE_REAL", "evidence_purpose": "LEARNING", "dataset_partition": "FORWARD", "learner_permission": "SCOPED_LEARNING"},
+    "expected_error": "is not valid under any of the given schemas"
+  },
+  {
+    "name": "wrong-strategy-shape",
+    "schema": "strategy-profile",
+    "mutate_positive": {"strategy_id": "Example VWAP"},
+    "expected_error": "does not match"
+  },
+  {
+    "name": "unfilled-rejection-cannot-be-win",
+    "schema": "trade-event",
+    "mutate_positive": {"event_type": "ATTEMPT_TERMINATED", "execution_status": "REJECTED", "financial_outcome": "WIN", "fills": [], "strategy_trade_id": null, "canonical_trade_id": null, "entry_price_points_per_contract": null, "exit_price_points_per_contract": null, "net_currency_total": null, "currency": null, "risk_r_unavailable_reason": "UNFILLED_ATTEMPT"},
+    "expected_error": "UNKNOWN was expected"
+  },
+  {
+    "name": "undefined-r-needs-reason",
+    "schema": "trade-event",
+    "mutate_positive": {"risk_r": null, "risk_r_unavailable_reason": null},
+    "expected_error": "is not of type"
+  },
+  {
+    "name": "caller-cannot-author-approval",
+    "schema": "approval-decision",
+    "mutate_positive": {"decided_by": "strategy-agent"},
+    "expected_error": "Wayne was expected"
+  },
+  {
+    "name": "artifact-must-be-immutable",
+    "schema": "artifact-manifest",
+    "mutate_positive": {"immutable": false},
+    "expected_error": "True was expected"
+  },
+  {
+    "name": "completed-run-cannot-carry-failure",
+    "schema": "run-completion",
+    "mutate_positive": {"status": "COMPLETED"},
+    "expected_error": "is expected to be empty"
+  },
+  {
+    "name": "duplicate-conflict-error-is-quarantined",
+    "schema": "workflow-event",
+    "mutate_positive": {"status": "QUARANTINED", "error": {"code": "DUPLICATE_CONFLICT", "message": "Event ID reused with a different payload hash.", "retryable": false, "quarantine_id": null}},
+    "expected_error": null,
+    "expected_valid": true,
+    "semantic_assertion": "A conflicting event ID is accepted only as an explicit quarantined workflow outcome, never as a second effect."
+  }
+]

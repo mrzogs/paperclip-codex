@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Continuous Improvement | Ocean Trading</title>
+  <link rel="stylesheet" href="/workflow/ui.css?v=s21-1">
+  <script type="module" src="/workflow/ui.js?v=s21-1"></script>
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <header class="site-header">
+    <a href="/" class="brand"><img src="/assets/ocean-trading-icon.png" alt="Ocean Trading"></a>
+    <nav aria-label="Ocean Trading"><a href="/">Dashboard</a><a href="/paper-dashboard.html">Paper</a><a href="/live-dashboard.html">Live</a><a href="/open-trades.html">Open Trades</a><a href="/replay-monitor.html">Replay</a><a href="/ledger.html">Ledgers</a><a href="/daily-report.html">Daily Report</a><a href="/research.html">Research</a><a href="/strategies.html">Strategies</a><a href="/improvement/dashboard" aria-current="page">Continuous Improvement</a><a href="/confluence.html">Confluence</a><a href="/hmm-strategy.html">HMM Strategy</a><a href="/rules.html">Rules</a><a href="http://127.0.0.1:3100/OCE/dashboard" target="_blank" rel="noopener">Paperclip</a><a href="/sources.html">Sources</a></nav>
+  </header>
+  <div class="workspace-bar"><strong>Continuous Improvement</strong><span class="badge test">TEST</span><span class="spacer"></span><span id="freshness" role="status">Connecting</span><button id="refresh" class="icon" title="Refresh data" aria-label="Refresh data"><i data-lucide="refresh-cw"></i></button><button id="logout" class="icon" title="Sign out" aria-label="Sign out" hidden><i data-lucide="log-out"></i></button></div>
+  <nav class="workspace-nav" aria-label="Continuous Improvement"><a href="/improvement/dashboard" data-view="dashboard">Overview</a><a href="/improvement/strategies" data-view="strategies">Strategies</a><a href="/improvement/runs" data-view="runs">Runs</a><a href="/improvement/cases" data-view="cases">Cases</a><a href="/improvement/approvals" data-view="approvals">Approvals <span id="approval-badge" class="count" hidden></span></a><a href="/improvement/history" data-view="history">History</a></nav>
+  <div id="notice" role="alert" hidden></div>
+  <main id="content" tabindex="-1" aria-busy="true"><p class="empty">Loading workflow data...</p></main>
+  <dialog id="modal" aria-labelledby="modal-title"><div id="modal-body"></div></dialog>
+</body>
+</html>

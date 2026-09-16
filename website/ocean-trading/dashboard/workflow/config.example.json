@@ -1,0 +1,18 @@
+{
+  "schema_version": "ocean-workflow-config/v1",
+  "contract_release": "2.1.0",
+  "test_only": true,
+  "binding_status": "PENDING_S23_PROVIDER_BINDINGS",
+  "db_file": null,
+  "allowed_origins": [],
+  "browser": {"subject_id":"wayne-ocean-ui","credential_ref":"OCEAN_WAYNE_BROWSER_SECRET"},
+  "identities": [
+    {"identity_id":"ocean-test-brain-callback","provider":"OCEAN_TRADING","namespace":"TEST","role":"BRAIN","credential_ref":"OCEAN_BRAIN_CALLBACK_TOKEN","credential_hash":null,"strategy_ids":[],"instance_ids":[],"expires_at_utc":null,"revoked":false},
+    {"identity_id":"ocean-test-telemetry-gateway","provider":"OCEAN_TRADING","namespace":"TEST","role":"TELEMETRY","credential_ref":"OCEAN_TELEMETRY_GATEWAY_TOKEN","credential_hash":null,"strategy_ids":[],"instance_ids":[],"expires_at_utc":null,"revoked":false},
+    {"identity_id":"ocean-test-strategy-tooling","provider":"OCEAN_TRADING","namespace":"TEST","role":"STRATEGY","credential_ref":"OCEAN_STRATEGY_TOOLING_TOKEN","credential_hash":null,"strategy_ids":[],"instance_ids":[],"expires_at_utc":null,"revoked":false}
+  ],
+  "brain_submission":"OFF",
+  "live_real":"DISABLED",
+  "dispatch_worker":"OFF",
+  "lease_ms":30000
+}

@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Research | Ocean Trading</title>
+    <link rel="stylesheet" href="/styles.css?v=20260519-grouped-trades-2" />
+  </head>
+  <body data-page="research">
+    <header class="topbar">
+      <div class="topbar-main">
+        <a class="brand brand-logo" href="/" aria-label="Ocean Trading dashboard"><img src="/assets/ocean-trading-icon.png" alt="Ocean Trading" /></a>
+        <nav class="main-nav" aria-label="Primary navigation">
+          <a href="/" data-nav-page="dashboard">Dashboard</a>
+          <a href="/paper-dashboard.html" data-nav-page="paper">Paper</a>
+          <a href="/live-dashboard.html" data-nav-page="live">Live</a>
+          <a href="/open-trades.html" data-nav-page="open">Open Trades</a>
+          <a href="/ledger.html" data-nav-page="ledger">Ledgers</a>
+          <a href="/daily-report.html" data-nav-page="daily">Daily Report</a>
+          <a href="/research.html" data-nav-page="research">Research</a>
+          <a href="/strategies.html" data-nav-page="strategies">Strategies</a>
+          <a href="/rules.html" data-nav-page="rules">Rules</a>
+          <a href="#" data-nav-page="paperclip" target="_blank" rel="noopener">Paperclip</a>
+          <a href="/sources.html" data-nav-page="sources">Sources</a>
+        </nav>
+      </div>
+      <div class="breadcrumb-bar">
+        <button class="back-button" type="button" data-nav-back>Back</button>
+        <nav class="breadcrumbs" aria-label="Breadcrumb">
+          <a href="/">Dashboard</a>
+          <span aria-hidden="true">/</span>
+          <span id="breadcrumb-current">Loading</span>
+        </nav>
+        <button class="dashboard-button" type="button" data-monitor-toggle>Monitor</button>
+      </div>
+    </header>
+    <main class="page">
+      <section class="hero compact">
+        <p class="eyebrow">Research and backtest runs</p>
+        <h1>Research</h1>
+        <p id="generated">Loading...</p>
+      </section>
+      <section class="panel">
+        <div class="tabbar" role="tablist" aria-label="Research views">
+          <button class="tab-button active" type="button" data-research-tab="finds">Research Finds</button>
+          <button class="tab-button" type="button" data-research-tab="manual">Manual Requests</button>
+          <button class="tab-button" type="button" data-research-tab="coded">Coded Strategies</button>
+          <button class="tab-button" type="button" data-research-tab="history">Accepted History</button>
+          <button class="tab-button" type="button" data-research-tab="artifacts">Raw Artifacts</button>
+        </div>
+        <div id="research">Loading...</div>
+      </section>
+      <dialog id="backtest-modal" class="modal">
+        <form id="backtest-form" method="dialog">
+          <div class="modal-head">
+            <div>
+              <p class="eyebrow">Backtest request</p>
+              <h2 id="backtest-strategy-title">Strategy</h2>
+            </div>
+            <button class="icon-button" type="button" data-close-modal aria-label="Close">x</button>
+          </div>
+          <input type="hidden" name="strategyName" id="backtest-strategy-name" />
+          <section class="request-history" id="backtest-request-history" aria-live="polite"></section>
+          <label>
+            Backtest duration
+            <select name="duration" id="backtest-duration">
+              <option value="1 month">1 month</option>
+              <option value="3 months">3 months</option>
+              <option value="6 months">6 months</option>
+              <option value="12 months">12 months</option>
+              <option value="18 months">18 months</option>
+              <option value="24 months">24 months</option>
+            </select>
+          </label>
+          <label>
+            Time frame
+            <select name="timeframe" id="backtest-timeframe">
+              <option value="1 minute">1 minute</option>
+              <option value="2 minutes">2 minutes</option>
+              <option value="5 minutes">5 minutes</option>
+              <option value="15 minutes">15 minutes</option>
+            </select>
+          </label>
+          <label>
+            Indicators / parameter instructions
+            <textarea name="indicatorInstructions" id="backtest-indicator-instructions" rows="4" placeholder="Review the expected indicators and add/remove anything before creating the request."></textarea>
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" name="optimization" id="backtest-optimization" />
+            Allow optimization through Strategy Builder if the first result is poor
+          </label>
+          <label>
+            Notes
+            <textarea name="notes" id="backtest-notes" rows="4" placeholder="Optional instructions for Backtester"></textarea>
+          </label>
+          <div id="backtest-request-status" class="form-status"></div>
+          <div class="modal-actions">
+            <button class="button-link" type="submit">Create backtest request</button>
+            <button class="secondary-button" type="button" data-close-modal>Cancel</button>
+          </div>
+        </form>
+      </dialog>
+      <dialog id="manual-strategy-modal" class="modal">
+        <form id="manual-strategy-form" method="dialog">
+          <div class="modal-head">
+            <div>
+              <p class="eyebrow">Manual strategy request</p>
+              <h2>Research and backtest a new strategy</h2>
+            </div>
+            <button class="icon-button" type="button" data-close-manual-modal aria-label="Close">x</button>
+          </div>
+          <label>
+            Strategy name
+            <input type="text" name="strategyName" id="manual-strategy-name" placeholder="e.g. MNQ VWAP reclaim with London filter" required />
+          </label>
+          <label>
+            Backtest duration
+            <select name="duration" id="manual-backtest-duration">
+              <option value="1 month">1 month</option>
+              <option value="3 months">3 months</option>
+              <option value="6 months">6 months</option>
+              <option value="12 months">12 months</option>
+              <option value="18 months">18 months</option>
+              <option value="24 months">24 months</option>
+            </select>
+          </label>
+          <label>
+            Time frame
+            <select name="timeframe" id="manual-backtest-timeframe">
+              <option value="1 minute">1 minute</option>
+              <option value="2 minutes">2 minutes</option>
+              <option value="5 minutes">5 minutes</option>
+              <option value="15 minutes">15 minutes</option>
+            </select>
+          </label>
+          <div class="form-grid two-col">
+            <label>
+              Instrument / contract
+              <select name="instrument" id="manual-strategy-instrument">
+                <option value="MNQ">MNQ - Micro Nasdaq</option>
+                <option value="NQ">NQ - Mini Nasdaq</option>
+                <option value="MES">MES - Micro S&amp;P 500</option>
+                <option value="ES">ES - Mini S&amp;P 500</option>
+                <option value="MCL">MCL - Micro Crude Oil</option>
+                <option value="CL">CL - Crude Oil</option>
+                <option value="MGC">MGC - Micro Gold</option>
+                <option value="GC">GC - Gold</option>
+              </select>
+            </label>
+            <label>
+              Number of contracts
+              <input type="number" name="contractQuantity" id="manual-contract-quantity" min="1" max="100" step="1" value="1" />
+            </label>
+          </div>
+          <label>
+            Trade direction
+            <select name="tradeDirection" id="manual-trade-direction">
+              <option value="Long and short">Long and short</option>
+              <option value="Long only">Long only</option>
+              <option value="Short only">Short only</option>
+            </select>
+          </label>
+          <label>
+            Session / time window
+            <input type="text" name="sessionWindows" id="manual-session-windows" placeholder="e.g. New York open, shown as UK/London chart time" />
+          </label>
+          <label>
+            What time zone are you living in?
+            <input type="text" name="userTimezone" id="manual-user-timezone" value="Europe/London" placeholder="e.g. Europe/London" />
+          </label>
+          <label>
+            Strategy timezone
+            <select name="strategyTimezone" id="manual-strategy-timezone">
+              <option value="Europe/London chart time">Europe/London chart time</option>
+              <option value="US Eastern market time converted to Europe/London">US Eastern market time converted to Europe/London</option>
+              <option value="US Central market time converted to Europe/London">US Central market time converted to Europe/London</option>
+            </select>
+          </label>
+          <label>
+            Maximum dollars you are willing to risk
+            <input type="number" name="maximumRiskDollars" id="manual-maximum-risk-dollars" min="1" step="1" value="2000" />
+          </label>
+          <label>
+            Strategy details or variation
+            <textarea name="suggestedStrategy" id="manual-suggested-strategy" rows="4" placeholder="Describe the rules, market, indicators, entries, exits, risk, and anything the researcher should clarify."></textarea>
+          </label>
+          <label>
+            Entry / exit / stop / target rules
+            <textarea name="rulesSummary" id="manual-rules-summary" rows="4" placeholder="Entry trigger, exit trigger, stop location, targets or R multiple. Leave blank if the researcher should ask follow-up questions."></textarea>
+          </label>
+          <label>
+            Upload strategy script or notes
+            <input type="file" name="strategyFile" id="manual-strategy-file" accept=".txt,.md,.pine,.cpp,.h,.hpp,.cs,.json,.csv" />
+          </label>
+          <p class="form-help">Use this for Pine Script, Sierra Chart ACSIL/C++, or written rules that should be researched and backtested.</p>
+          <label class="checkbox-row">
+            <input type="checkbox" name="optimization" id="manual-backtest-optimization" />
+            Allow optimization through Strategy Builder if the first result is poor
+          </label>
+          <label>
+            Notes
+            <textarea name="notes" id="manual-backtest-notes" rows="3" placeholder="Optional instructions for Researcher or Backtester"></textarea>
+          </label>
+          <div id="manual-strategy-request-status" class="form-status"></div>
+          <div class="modal-actions">
+            <button class="button-link" type="submit">Create manual strategy request</button>
+            <button class="secondary-button" type="button" data-close-manual-modal>Cancel</button>
+          </div>
+        </form>
+      </dialog>
+    </main>
+    <script src="/app.js?v=20260612-live-calendar-refresh" defer></script>
+  </body>
+</html>
+
+

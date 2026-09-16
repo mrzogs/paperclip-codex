@@ -1,0 +1,6 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hermes-brain:shared-contracts:approval-decision:2.1.0",
+  "title": "Hermes Brain approval-decision contract 2.1.0",
+  "$ref": "urn:hermes-brain:shared-contracts:2.1.0#/$defs/approvalDecision"
+}
