@@ -31,7 +31,7 @@ export class WorkflowStore {
         });
       }
       const version = this.db.prepare("SELECT MAX(version) AS version FROM ow_schema_migrations").get().version;
-      requireThat([1,2,3].includes(version), 503, "WORKFLOW_MIGRATION_VERSION_CONFLICT");
+      requireThat([1,2,3,4,5,6].includes(version), 503, "WORKFLOW_MIGRATION_VERSION_CONFLICT");
       if (version === 1) this.transaction(() => {
         this.db.exec(fs.readFileSync(new URL("./migrations/002-up.sql", import.meta.url), "utf8"));
         for (const table of RUN_IMMUTABLE) for (const action of ["UPDATE","DELETE"]) this.db.exec(`CREATE TRIGGER ${table}_no_${action.toLowerCase()} BEFORE ${action} ON ${table} BEGIN SELECT RAISE(ABORT,'immutable run record'); END;`);
@@ -41,6 +41,9 @@ export class WorkflowStore {
         this.db.exec("DELETE FROM ow_sessions");
         for (const action of ["UPDATE", "DELETE"]) this.db.exec(`CREATE TRIGGER ow_auth_audit_no_${action.toLowerCase()} BEFORE ${action} ON ow_auth_audit BEGIN SELECT RAISE(ABORT,'immutable auth audit'); END;`);
       });
+      if (version < 4) this.transaction(() => this.db.exec(fs.readFileSync(new URL("./migrations/004-up.sql", import.meta.url), "utf8")));
+      if (version < 5) this.transaction(() => this.db.exec(fs.readFileSync(new URL("./migrations/005-up.sql", import.meta.url), "utf8")));
+      if (version < 6) this.transaction(() => this.db.exec(fs.readFileSync(new URL("./migrations/006-up.sql", import.meta.url), "utf8")));
     } catch (error) { this.db.close(); throw error; }
   }
   transaction(work) {
@@ -79,6 +82,12 @@ export class WorkflowStore {
     const count = this.db.prepare("SELECT (SELECT COUNT(*) FROM ow_cases)+(SELECT COUNT(*) FROM ow_runs)+(SELECT COUNT(*) FROM ow_setup_receipts) AS n").get().n;
     requireThat(count === 0, 409, "POPULATED_WORKFLOW_REQUIRES_BACKUP_AND_OPERATOR_ROLLBACK");
     this.transaction(() => {
+      requireThat(this.db.prepare('SELECT (SELECT COUNT(*) FROM ow_operational_decisions)+(SELECT COUNT(*) FROM ow_operational_releases) AS n').get().n===0,409,'OPERATIONAL_HISTORY_REQUIRES_BACKUP_ROLLBACK');
+      this.db.exec('DROP TABLE ow_operational_releases; DROP TABLE ow_operational_revocations; DROP TABLE ow_operational_decisions; DELETE FROM ow_schema_migrations WHERE version=6;');
+      requireThat(this.db.prepare('SELECT (SELECT COUNT(*) FROM ow_integration_bindings)+(SELECT COUNT(*) FROM ow_operational_pending)+(SELECT COUNT(*) FROM ow_operational_receipts) AS n').get().n===0,409,'INTEGRATION_HISTORY_REQUIRES_BACKUP_ROLLBACK');
+      this.db.exec('DROP TABLE ow_operational_receipts; DROP TABLE ow_operational_pending; DROP TABLE ow_integration_bindings; DELETE FROM ow_schema_migrations WHERE version=5;');
+      requireThat(this.db.prepare('SELECT COUNT(*) AS n FROM ow_test_fixtures').get().n === 0,409,'TEST_FIXTURES_REQUIRE_BACKUP_ROLLBACK');
+      this.db.exec('DROP TABLE ow_test_conflicts; DROP TABLE ow_test_receipts; DROP TABLE ow_test_fixtures; DROP TABLE ow_test_declarations; DELETE FROM ow_schema_migrations WHERE version=4;');
       this.db.exec("DROP TABLE ow_auth_audit; DROP TABLE ow_auth_state; DELETE FROM ow_schema_migrations WHERE version=3;");
       this.db.exec(fs.readFileSync(new URL("./migrations/002-down.sql", import.meta.url), "utf8"));
       this.db.exec(fs.readFileSync(new URL("./migrations/001-down.sql", import.meta.url), "utf8"));

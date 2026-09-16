@@ -4,13 +4,13 @@ import { ROLES, digest, equalSecret, future, id, requireThat, strategyId } from 
 // Issuance is a local operator API, never an HTTP/browser response. Values go to injected environment only.
 export function issueOceanIdentity(identity, environment, expiresAtUtc) {
   requireThat(ROLES[identity.role], 422, "UNKNOWN_SERVICE_ROLE");
-  requireThat(identity.namespace === "TEST", 403, "TEST_NAMESPACE_REQUIRED");
+  requireThat(identity.namespace === "TEST" || (identity.namespace === 'OPERATIONAL' && identity.audience === 'Ocean workflow operational v1' && /^sha256:[a-f0-9]{64}$/.test(identity.factual_binding_hash || '')), 403, "VERIFIED_NAMESPACE_REQUIRED");
   id(identity.identity_id);
   requireThat(/^OCEAN_[A-Z0-9_]+_TOKEN$/.test(identity.credential_ref), 422, "OCEAN_SECRET_REFERENCE_REQUIRED");
   requireThat(Array.isArray(identity.strategy_ids) && identity.strategy_ids.length > 0, 422, "EXACT_SCOPE_REQUIRED");
   requireThat(Array.isArray(identity.instance_ids) && identity.instance_ids.length > 0, 422, "EXACT_SCOPE_REQUIRED");
   identity.strategy_ids.forEach(strategyId);
-  identity.instance_ids.forEach((value) => id(value, true));
+  identity.instance_ids.forEach((value) => {id(value, identity.namespace==='TEST');requireThat(identity.namespace==='TEST' || !value.startsWith('test-'),403,'TEST_IDENTITY_PROMOTION_REJECTED');});
   if (identity.scopes) requireThat(Array.isArray(identity.scopes) && identity.scopes.length && identity.scopes.every(scope => ROLES[identity.role].includes(scope)), 422, "WRONG_ACTION_SCOPE");
   requireThat(future(expiresAtUtc), 422, "CREDENTIAL_EXPIRY_REQUIRED");
   requireThat(Date.parse(expiresAtUtc) <= Date.now() + 90 * 86400000, 422, 'CREDENTIAL_LIFETIME_EXCEEDS_90_DAYS');
@@ -66,11 +66,12 @@ export class OceanAuth {
     this.bindingErrors = new Map();
     for (const identity of config.identities) {
       try {
-      requireThat(identity.provider === "OCEAN_TRADING" && identity.namespace === "TEST" && ROLES[identity.role], 503, "INVALID_PROVIDER_IDENTITY");
-      if (config.operator_managed) requireThat(identity.audience === 'Ocean workflow TEST' && identity.identity_id !== 'wayne-ocean-ui',503,'INVALID_OCEAN_AUDIENCE');
+      requireThat(identity.provider === "OCEAN_TRADING" && ['TEST','OPERATIONAL'].includes(identity.namespace) && ROLES[identity.role], 503, "INVALID_PROVIDER_IDENTITY");
+      if (config.operator_managed) requireThat(identity.audience === (identity.namespace==='TEST'?'Ocean workflow TEST':'Ocean workflow operational v1') && identity.identity_id !== 'wayne-ocean-ui',503,'INVALID_OCEAN_AUDIENCE');
+      if(identity.namespace==='OPERATIONAL')requireThat(config.operational_factual_bindings?.some(b=>b.binding_hash===identity.factual_binding_hash && b.strategy_id===identity.strategy_ids[0] && identity.strategy_ids.length===1 && identity.instance_ids.length===1 && b.instance.execution_instance_id===identity.instance_ids[0]),503,'FACTUAL_BINDING_REQUIRED');
       requireThat(/^OCEAN_[A-Z0-9_]+_TOKEN$/.test(identity.credential_ref) && identity.strategy_ids?.length && identity.instance_ids?.length, 503, "EXACT_SCOPE_REQUIRED");
       identity.strategy_ids.forEach(strategyId);
-      identity.instance_ids.forEach((value) => id(value, true));
+      identity.instance_ids.forEach((value) => {id(value,identity.namespace==='TEST');requireThat(identity.namespace==='TEST' || !value.startsWith('test-'),503,'TEST_IDENTITY_PROMOTION_REJECTED');});
       if (identity.scopes) requireThat(Array.isArray(identity.scopes) && identity.scopes.length && identity.scopes.every(scope => ROLES[identity.role].includes(scope)), 503, "WRONG_ACTION_SCOPE");
       const value = environment[identity.credential_ref];
       requireThat(typeof value === "string" && value.startsWith(`ocean_service_v1.${identity.identity_id}.`) && digest(value) === identity.credential_hash, 503, "PROVIDER_CREDENTIAL_UNRESOLVED");
@@ -149,7 +150,7 @@ export class OceanAuth {
       const identity = this.config.identities.find((item) => !this.bindingErrors.has(item.identity_id) && equalSecret(match[1], this.environment[item.credential_ref]));
       requireThat(identity && this.store.identityCurrent(identity), 401, "INVALID_OCEAN_CREDENTIAL");
       requireThat(!identity.revoked && future(identity.expires_at_utc), 401, "EXPIRED_OR_REVOKED_CREDENTIAL");
-      return { id: identity.identity_id, role: identity.role, scopes: identity.scopes || ROLES[identity.role], strategyIds: identity.strategy_ids, instanceIds: identity.instance_ids };
+      return { id: identity.identity_id, role: identity.role, scopes: identity.scopes || ROLES[identity.role], strategyIds: identity.strategy_ids, instanceIds: identity.instance_ids, namespace:identity.namespace, audience:identity.audience, factualBindingHash:identity.factual_binding_hash };
     }
     this.browserOrigin(request, mutation);
     requireThat(this.human.state === 'CONFIGURED' && this.browserHash, 401, this.human.state === 'UNENROLLED' ? 'HUMAN_UNENROLLED' : 'HUMAN_ACCESS_UNAVAILABLE');
