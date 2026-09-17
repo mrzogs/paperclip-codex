@@ -1,8 +1,11 @@
 import { randomBytes, scryptSync } from "node:crypto";
 import { ROLES, digest, equalSecret, future, id, requireThat, strategyId } from "./common.mjs";
+import { validateIdentityCapacity } from './provider-lifecycle.mjs';
 
 // Issuance is a local operator API, never an HTTP/browser response. Values go to injected environment only.
 export function issueOceanIdentity(identity, environment, expiresAtUtc) {
+  identity = { ...identity, audience: identity.audience ?? (identity.namespace === 'TEST' ? 'Ocean workflow TEST' : null) };
+  requireThat(identity.audience === (identity.namespace === 'TEST' ? 'Ocean workflow TEST' : 'Ocean workflow operational v1'), 403, 'INVALID_OCEAN_AUDIENCE');
   requireThat(ROLES[identity.role], 422, "UNKNOWN_SERVICE_ROLE");
   requireThat(identity.namespace === "TEST" || (identity.namespace === 'OPERATIONAL' && identity.audience === 'Ocean workflow operational v1' && /^sha256:[a-f0-9]{64}$/.test(identity.factual_binding_hash || '')), 403, "VERIFIED_NAMESPACE_REQUIRED");
   id(identity.identity_id);
@@ -57,7 +60,7 @@ export class OceanAuth {
       requireThat(url.origin === origin && (url.protocol === "https:" || ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)), 503, "UNSAFE_BROWSER_ORIGIN");
     }
     this.human = humanBinding(config, environment);
-    requireThat(Array.isArray(config.identities) && config.identities.length <= 32, 503, "INVALID_SERVICE_IDENTITIES");
+    validateIdentityCapacity(config.identities);
     if (!config.pending_services) requireThat(config.identities.length === 3 && new Set(config.identities.map((entry) => entry.role)).size === 3, 503, "THREE_SEPARATE_SERVICE_IDENTITIES_REQUIRED");
     else requireThat(Array.isArray(config.pending_services) && config.pending_services.every(entry => ROLES[entry.role] && typeof entry.due_step === "string"), 503, "INVALID_PENDING_SERVICES");
     requireThat(new Set(config.identities.map((entry) => entry.identity_id)).size === config.identities.length, 503, "DUPLICATE_IDENTITY");

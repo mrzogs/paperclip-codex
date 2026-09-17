@@ -1,0 +1,10 @@
+{
+  "schema_version":"ocean-provider-schema-resolver/v1",
+  "network_resolution":"DENIED",
+  "resources":[
+    {"uri":"https://ocean.local/contracts/factual-qualification/v1","path":"factual-qualification-v1.schema.json","sha256":"5ff23d69c88ac1e464a26c1d91df3a3ab92d1f70ddd972395b8d1698ebc899c4"},
+    {"uri":"https://ocean.local/contracts/service-identity/v1","path":"service-identity-v1.schema.json","sha256":"59d15240fdabd06e4cba3fdd7913f01d3cf180b592ed304f3ba345b03782edbf"},
+    {"uri":"https://ocean.local/contracts/factual-registration-readback/v1","path":"factual-registration-readback-v1.schema.json","sha256":"abb6f81d02189619298f78d79038dae37620c45db6114c3acb1e8c5102bb4042"},
+    {"uri":"https://ocean.local/contracts/shared/2.1.0","path":"2.1.0/shared-contracts/shared-contracts.schema.json","sha256":"cbe51e301abfbfb23973d04fe90aeb0b9be776a67da0ac4da0c03bd8e29e4b62"}
+  ]
+}
