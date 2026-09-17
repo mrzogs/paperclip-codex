@@ -1,0 +1,31 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://ocean.local/contracts/factual-registration-readback/v1",
+  "type":"object","additionalProperties":false,
+  "required":["schema_version","registry_revision","binding"],
+  "properties":{
+    "schema_version":{"const":"ocean-factual-registration-readback/v1"},
+    "registry_revision":{"type":"integer","minimum":0},
+    "binding":{
+      "type":"object","additionalProperties":false,
+      "required":["instance","strategy_code_hash","profile_hash","source_observed_at_utc","bundles","proofs","schema_version","strategy_id","state","operational_enabled","binding_hash"],
+      "properties":{
+        "schema_version":{"const":"ocean-operational-factual-binding/v1"},
+        "state":{"const":"VERIFIED_FACTS_ONLY"},"operational_enabled":{"const":false},
+        "instance":{"$ref":"https://ocean.local/contracts/shared/2.1.0#/$defs/executionInstance"},
+        "strategy_id":{"$ref":"https://ocean.local/contracts/shared/2.1.0#/$defs/strategyId"},
+        "strategy_code_hash":{"$ref":"#/$defs/hash"},"profile_hash":{"$ref":"#/$defs/hash"},"binding_hash":{"$ref":"#/$defs/hash"},
+        "source_observed_at_utc":{"type":"string","format":"date-time"},
+        "bundles":{"type":"object","additionalProperties":false,"required":["source","strategy"],
+          "properties":{"source":{"$ref":"https://ocean.local/contracts/factual-qualification/v1#/$defs/reference"},"strategy":{"$ref":"https://ocean.local/contracts/factual-qualification/v1#/$defs/reference"}}},
+        "proofs":{"type":"object","minProperties":14,"maxProperties":14,
+          "propertyNames":{"enum":["instance.execution_instance_id","instance.source_installation_id","instance.chartbook_id","instance.chart_id","instance.source_study_instance_id","instance.telemetry_producer_id","instance.account_alias","instance.capabilities","source_observed_at_utc","instance.strategy_id","instance.version_binding","instance.config_hash","strategy_code_hash","profile_hash"]},
+          "additionalProperties":{"$ref":"#/$defs/proof"}}
+      }
+    }
+  },
+  "$defs":{
+    "hash":{"type":"string","pattern":"^sha256:[a-f0-9]{64}$"},
+    "proof":{"type":"object","additionalProperties":false,"required":["member","pointer"],"properties":{"member":{"type":"string","pattern":"^artifacts/"},"pointer":{"type":"string","pattern":"^/","maxLength":999}}}
+  }
+}

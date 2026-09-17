@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('Bootstrap','Maintenance','Initialize','Reset-Password','Enroll','Rotate','Revoke','Verify','Resume','Status','Runtime','Transfer','Probe','Setup-Import','Setup-Read','Setup-Export','Test-Prepare','Test-Export','Test-Cleanup','Integration-Import','Integration-Export','Register-Facts')][string]$Action = 'Status',
+  [ValidateSet('Bootstrap','Maintenance','Initialize','Reset-Password','Enroll','Rotate','Revoke','Verify','Resume','Status','Runtime','Transfer','Probe','Setup-Import','Setup-Read','Setup-Export','Test-Prepare','Test-Export','Test-Cleanup','Integration-Import','Integration-Export','Register-Facts','Read-Facts')][string]$Action = 'Status',
   [string]$RequestFile,
   [string]$IdentityId,
   [string]$Root = 'D:\OceanTradingData\website\workflow'
@@ -14,7 +14,7 @@ if ($PSVersionTable.PSEdition -eq 'Core') {
 $ErrorActionPreference = 'Stop'
 $env:PSModulePath = "$PSHOME\Modules;${env:ProgramFiles}\WindowsPowerShell\Modules"
 $Node = 'C:\Program Files\nodejs\node.exe'
-$Module = 'D:\Paperclip-codex\website\ocean-trading\dashboard\workflow\operator.mjs'
+$Module = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\website\ocean-trading\dashboard\workflow\operator.mjs'))
 $Sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $Root = [IO.Path]::GetFullPath($Root)
 $StatePath = Join-Path $Root 'operator-state.dpapi'
@@ -77,7 +77,7 @@ function Publish-Handoffs($State) {
     $target = Join-Path $directory "$($identity.identity_id).dpapi"
     $candidate = "$target.next"
     $token = if ($identity.revoked) { $null } else { $State.environment.($identity.credential_ref) }
-    Encode-State @{identity_id=$identity.identity_id;credential_ref=$identity.credential_ref;token=$token;expires_at_utc=$identity.expires_at_utc;credential_version=$identity.credential_version;revoked=[bool]$identity.revoked;audience='Ocean workflow TEST';owner=$identity.owner} $candidate
+    Encode-State @{identity_id=$identity.identity_id;credential_ref=$identity.credential_ref;token=$token;expires_at_utc=$identity.expires_at_utc;credential_version=$identity.credential_version;revoked=[bool]$identity.revoked;audience=$identity.audience;owner=$identity.owner} $candidate
     if (Test-Path -LiteralPath $target) { [IO.File]::Replace($candidate,$target,"$target.previous") } else { [IO.File]::Move($candidate,$target) }
   }
 }
@@ -113,11 +113,13 @@ try {
   } elseif ($Action -eq 'Resume' -or ($Action -in @('Maintenance','Bootstrap') -and (Test-Path -LiteralPath $PendingPath))) {
     if (-not (Test-Path -LiteralPath $PendingPath)) { throw 'No interrupted operator update exists.' }
     $plan = Decode-State $PendingPath
-  } elseif ($Action -in @('Status','Runtime','Transfer','Probe')) {
+  } elseif ($Action -in @('Status','Runtime','Transfer','Probe','Read-Facts')) {
     if (Test-Path -LiteralPath $PendingPath) { throw 'Interrupted credential update. Run -Action Resume first.' }
     $state = Decode-State $StatePath
     $status = Invoke-Core @{mode='verify';state=$state}
-    if ($Action -eq 'Runtime') {
+    if ($Action -eq 'Read-Facts') {
+      Invoke-Core @{mode='facts-read';state=$state;identity_id=$IdentityId} | ConvertTo-Json -Depth 50
+    } elseif ($Action -eq 'Runtime') {
       if (-not [Console]::IsOutputRedirected) { throw 'Runtime is an internal captured-output reader. Use Status in an operator console.' }
       ConvertTo-Json -InputObject $state -Depth 50 -Compress
     } elseif ($Action -eq 'Status') { ConvertTo-Json -InputObject $status -Depth 50 }
@@ -127,8 +129,9 @@ try {
       $identity = $identity[0]
       $token = $state.environment.($identity.credential_ref)
       if ($Action -eq 'Probe') {
-        $response = Invoke-RestMethod -Uri 'http://localhost:3102/api/workflow/status' -Headers @{Authorization="Bearer $token"} -TimeoutSec 8
-        if ($response.identity.id -cne $IdentityId) { throw 'Observed identity mismatch.' }
+        $probe = Invoke-Core @{mode='probe-plan';state=$state;identity_id=$IdentityId}
+        $response = Invoke-RestMethod -Uri $probe.url -Headers @{Authorization="Bearer $token"} -TimeoutSec 8 -MaximumRedirection 0
+        $null = Invoke-Core @{mode='probe-verify';state=$state;identity_id=$IdentityId;response=$response}
         @{ status='PASS'; test_type='ACTUAL_DEPLOYED_OCEAN_LOCAL_OPERATOR_PROBE'; observed_at_utc=[DateTimeOffset]::UtcNow.ToString('o'); identity=$response.identity; integration_readiness=$response.integration_readiness; consumer_acceptance='NOT_VERIFIED_BY_THIS_LOCAL_PROBE' } | ConvertTo-Json -Depth 12
       } else {
         if ($IdentityId -notmatch '^[A-Za-z0-9_.:-]+$' -or $IdentityId.Contains(':')) { throw 'Identity is unsuitable for a protected handoff filename.' }
