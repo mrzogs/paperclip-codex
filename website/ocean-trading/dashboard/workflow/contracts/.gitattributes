@@ -1,3 +1,10 @@
 # Signed release members must retain exact producer bytes on every platform.
 2.1.0/shared-contracts-manifest.json -text
 2.1.0/shared-contracts/** -text
+# Bounded provider contracts are pinned by consumers and the offline resolver.
+factual-qualification-v1.md -text
+factual-qualification-v1.schema.json -text
+factual-registration-readback-v1.schema.json -text
+provider-lifecycle-v1.json -text
+schema-resolver-v1.json -text
+service-identity-v1.schema.json -text
