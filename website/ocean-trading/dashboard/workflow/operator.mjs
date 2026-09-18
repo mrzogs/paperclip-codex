@@ -10,6 +10,7 @@ import { exactKeys, objectHash, digest, requireThat, ROLES } from './common.mjs'
 import { setupOperation } from './setup-operator.mjs';
 import { testFixtureOperation } from './test-communication.mjs';
 import { integrationOperation } from './integration.mjs';
+import { MAX_SERVICE_IDENTITIES, validateIdentityCapacity, identityProbePath, validateIdentityProbe, factualReadback } from './provider-lifecycle.mjs';
 
 export const PENDING = [
   { role: 'BRAIN', direction: 'Brain-to-Ocean', owner: 'Brain', due_step: 'S24' },
@@ -29,6 +30,7 @@ export function prepareOperation({ action, state, password, request, operator_id
       identities: [], pending_services: PENDING, brain_submission: 'OFF', dispatch_worker: 'OFF', live_real: 'DISABLED' }, environment: {},
   };
   requireThat(next.config.db_file === path.join(root, 'workflow.sqlite'), 403, 'WORKFLOW_ROOT_CONFLICT');
+  validateIdentityCapacity(next.config.identities);
   let identityId = action === 'bootstrap' ? 'ocean-machine-foundation' : 'wayne-ocean-ui';
   if (action === 'bootstrap') requireThat(!password && !request,422,'BOOTSTRAP_CANNOT_ENROLL_IDENTITIES');
   else if (action === 'initialize' || action === 'reset-password') {
@@ -53,7 +55,7 @@ export function prepareOperation({ action, state, password, request, operator_id
     identityId = request.identity_id;
     requireThat(/^[A-Za-z0-9_.-]+$/.test(identityId || ''),422,'SAFE_HANDOFF_ID_REQUIRED');
     const old = next.config.identities.find(item => item.identity_id === identityId);
-    if(action==='enroll' && !old)requireThat(next.config.identities.length<32,409,'IDENTITY_REGISTRY_CAPACITY_REACHED');
+    if(action==='enroll' && !old)requireThat(next.config.identities.length<MAX_SERVICE_IDENTITIES,409,'IDENTITY_REGISTRY_CAPACITY_REACHED');
     requireThat(Array.isArray(request.scopes) && request.scopes.length && request.scopes.every(value => ROLES[request.role]?.includes(value)), 422, 'EXACT_ACTION_SCOPE_REQUIRED');
     if (request.verification_only) requireThat(/^test-s23[12]-/.test(identityId) && request.scopes.every(value => value === 'read') && request.strategy_ids.every(value => /^test_s23[12]_/.test(value)) && request.instance_ids.every(value => /^test-s23[12]-/.test(value)), 403, 'SEGREGATED_VERIFICATION_SCOPE_REQUIRED');
     if (request.renewal_policy) {
@@ -97,6 +99,7 @@ export function prepareOperation({ action, state, password, request, operator_id
 // The encrypted pending transaction is persisted by the OS wrapper before this commit.
 // A stale active file cannot revive old credentials; resume publishes the committed candidate.
 export function commitOperation(plan) {
+  validateIdentityCapacity(plan.next.config.identities);
   requireThat(plan.next_hash === objectHash(plan.next), 409, 'OPERATOR_PLAN_HASH_CONFLICT');
   const store = new WorkflowStore(plan.next.config.db_file);
   try {
@@ -125,8 +128,9 @@ export function commitOperation(plan) {
   } finally { store.close(); }
 }
 
-export function verifyState(state) {
-  const store = new WorkflowStore(state.config.db_file);
+export function verifyState(state, { readOnly = false } = {}) {
+  validateIdentityCapacity(state.config.identities);
+  const store = new WorkflowStore(state.config.db_file, { readOnly });
   try {
     requireThat(store.db.prepare("SELECT credential_hash FROM ow_auth_state WHERE id='bundle'").get()?.credential_hash === objectHash(state), 503, 'OPERATOR_RESUME_REQUIRED');
     return { revision: state.revision, test_only: state.config.test_only, brain_submission: state.config.brain_submission,
@@ -166,9 +170,26 @@ export function cancelPendingRenewal({state,pending,request,operator_id,root}) {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const input = JSON.parse(fs.readFileSync(0, 'utf8').replace(/^\uFEFF/, ''));
-    if(['setup','test-fixture','integration'].includes(input.mode))verifyState(input.state);
+    if (['verify-readonly','facts-readonly'].includes(input.mode)) {
+      const status = verifyState(input.state, { readOnly: true });
+      const result = input.mode === 'facts-readonly' ? factualReadback(input.state,input.identity_id) : status;
+      process.stdout.write(JSON.stringify(result));
+      process.exit(0);
+    }
+    if(['setup','test-fixture','integration','facts-read','probe-plan','probe-verify'].includes(input.mode))verifyState(input.state);
     let result;
-    if(input.mode==='integration')result=integrationOperation(input);
+    if(input.mode==='facts-read')result=factualReadback(input.state,input.identity_id);
+    else if(['probe-plan','probe-verify'].includes(input.mode)) {
+      const identity=input.state.config.identities.find(row=>row.identity_id===input.identity_id);
+      requireThat(identity && !identity.revoked && Date.parse(identity.expires_at_utc)>Date.now(),401,'EXPIRED_OR_REVOKED_CREDENTIAL');
+      if(input.mode==='probe-verify')result=validateIdentityProbe(input.response,identity);
+      else {
+        const origin=new URL(input.state.config.allowed_origins[0]);
+        requireThat(origin.protocol==='http:' && ['localhost','127.0.0.1','[::1]'].includes(origin.hostname),403,'LOCAL_PROBE_ORIGIN_REQUIRED');
+        result={url:origin.origin+identityProbePath(identity.namespace)};
+      }
+    }
+    else if(input.mode==='integration')result=integrationOperation(input);
     else if(input.mode==='test-fixture') {
       const store=new WorkflowStore(input.state.config.db_file);
       try {result=testFixtureOperation(input,store);} finally {store.close();}

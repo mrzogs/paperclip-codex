@@ -1,10 +1,12 @@
 param(
-  [ValidateSet('Bootstrap','Maintenance','Initialize','Reset-Password','Enroll','Rotate','Revoke','Verify','Resume','Status','Runtime','Transfer','Probe','Setup-Import','Setup-Read','Setup-Export','Test-Prepare','Test-Export','Test-Cleanup','Integration-Import','Integration-Export','Register-Facts')][string]$Action = 'Status',
+  [ValidateSet('Bootstrap','Maintenance','Initialize','Reset-Password','Enroll','Rotate','Revoke','Verify','Resume','Status','Runtime','Transfer','Probe','Setup-Import','Setup-Read','Setup-Export','Test-Prepare','Test-Export','Test-Cleanup','Integration-Import','Integration-Export','Register-Facts','Read-Facts')][string]$Action = 'Status',
   [string]$RequestFile,
   [string]$IdentityId,
   [string]$Root = 'D:\OceanTradingData\website\workflow'
 )
-if ($PSVersionTable.PSEdition -eq 'Core') {
+$ReadOnlyAction = $PSVersionTable.PSEdition -eq 'Core' -and $Action -in @('Status','Runtime','Read-Facts')
+if ($ReadOnlyAction -and $PSVersionTable.PSVersion -lt [Version]'7.5') { throw 'Read-only protected operator requires PowerShell 7.5 or newer for exact JSON date strings.' }
+if ($PSVersionTable.PSEdition -eq 'Core' -and -not $ReadOnlyAction) {
   $forward = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath)
   foreach ($key in $PSBoundParameters.Keys) { $forward += "-$key"; $forward += [string]$PSBoundParameters[$key] }
   & 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' @forward
@@ -14,7 +16,7 @@ if ($PSVersionTable.PSEdition -eq 'Core') {
 $ErrorActionPreference = 'Stop'
 $env:PSModulePath = "$PSHOME\Modules;${env:ProgramFiles}\WindowsPowerShell\Modules"
 $Node = 'C:\Program Files\nodejs\node.exe'
-$Module = 'D:\Paperclip-codex\website\ocean-trading\dashboard\workflow\operator.mjs'
+$Module = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\website\ocean-trading\dashboard\workflow\operator.mjs'))
 $Sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $Root = [IO.Path]::GetFullPath($Root)
 $StatePath = Join-Path $Root 'operator-state.dpapi'
@@ -41,7 +43,11 @@ foreach ($rule in $acl.Access) {
 function Decode-State([string]$File) {
   $secure = Get-Content -LiteralPath $File -Raw | ConvertTo-SecureString
   $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-  try { [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) | ConvertFrom-Json } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
+  try {
+    if ($ReadOnlyAction -and $PSVersionTable.PSEdition -eq 'Core') {
+      [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) | ConvertFrom-Json -DateKind String
+    } else { [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) | ConvertFrom-Json }
+  } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
 }
 function Encode-State($Value,[string]$File) {
   $json = ConvertTo-Json -InputObject $Value -Depth 50 -Compress
@@ -67,7 +73,16 @@ function Invoke-Core($Value) {
   $err = $p.StandardError.ReadToEnd()
   $p.WaitForExit()
   if ($p.ExitCode -ne 0) { throw "Protected workflow operation failed: $err" }
-  $output | ConvertFrom-Json
+  if ($ReadOnlyAction -and $PSVersionTable.PSEdition -eq 'Core') { $output | ConvertFrom-Json -DateKind String }
+  else { $output | ConvertFrom-Json }
+}
+function Assert-ReadOnlyFile([string]$File) {
+  $item = Get-Item -LiteralPath $File -Force
+  if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Existing regular protected operator file required.' }
+  foreach ($rule in (Get-Acl -LiteralPath $File).Access) {
+    $ruleSid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+    if ($rule.AccessControlType -eq 'Allow' -and $ruleSid -notin @($Sid,'S-1-5-18')) { throw 'Unexpected principal in protected operator file ACL.' }
+  }
 }
 function Publish-Handoffs($State) {
   $directory = Join-Path $Root 'handoffs'
@@ -77,14 +92,21 @@ function Publish-Handoffs($State) {
     $target = Join-Path $directory "$($identity.identity_id).dpapi"
     $candidate = "$target.next"
     $token = if ($identity.revoked) { $null } else { $State.environment.($identity.credential_ref) }
-    Encode-State @{identity_id=$identity.identity_id;credential_ref=$identity.credential_ref;token=$token;expires_at_utc=$identity.expires_at_utc;credential_version=$identity.credential_version;revoked=[bool]$identity.revoked;audience='Ocean workflow TEST';owner=$identity.owner} $candidate
+    Encode-State @{identity_id=$identity.identity_id;credential_ref=$identity.credential_ref;token=$token;expires_at_utc=$identity.expires_at_utc;credential_version=$identity.credential_version;revoked=[bool]$identity.revoked;audience=$identity.audience;owner=$identity.owner} $candidate
     if (Test-Path -LiteralPath $target) { [IO.File]::Replace($candidate,$target,"$target.previous") } else { [IO.File]::Move($candidate,$target) }
   }
 }
 $lock = $null
+if ($ReadOnlyAction) {
+  Assert-ReadOnlyFile $StatePath
+  Assert-ReadOnlyFile (Join-Path $Root 'operator.lock')
+}
 $lockDeadline = [DateTimeOffset]::UtcNow.AddSeconds(8)
 while (-not $lock) {
-  try { $lock = [IO.File]::Open((Join-Path $Root 'operator.lock'),'OpenOrCreate','ReadWrite','None') }
+  try {
+    if ($ReadOnlyAction) { $lock = [IO.File]::Open((Join-Path $Root 'operator.lock'),'Open','Read','None') }
+    else { $lock = [IO.File]::Open((Join-Path $Root 'operator.lock'),'OpenOrCreate','ReadWrite','None') }
+  }
   catch [IO.IOException] {
     if ([DateTimeOffset]::UtcNow -ge $lockDeadline) { throw 'Protected operator busy; bounded lock wait exceeded. Retry the same operation.' }
     Start-Sleep -Milliseconds 100
@@ -113,11 +135,22 @@ try {
   } elseif ($Action -eq 'Resume' -or ($Action -in @('Maintenance','Bootstrap') -and (Test-Path -LiteralPath $PendingPath))) {
     if (-not (Test-Path -LiteralPath $PendingPath)) { throw 'No interrupted operator update exists.' }
     $plan = Decode-State $PendingPath
-  } elseif ($Action -in @('Status','Runtime','Transfer','Probe')) {
+  } elseif ($Action -in @('Status','Runtime','Transfer','Probe','Read-Facts')) {
     if (Test-Path -LiteralPath $PendingPath) { throw 'Interrupted credential update. Run -Action Resume first.' }
     $state = Decode-State $StatePath
-    $status = Invoke-Core @{mode='verify';state=$state}
-    if ($Action -eq 'Runtime') {
+    if ($ReadOnlyAction) {
+      $expectedDb = Join-Path $Root 'workflow.sqlite'
+      if ($state.config.db_file -cne $expectedDb) { throw 'Protected workflow database root conflict.' }
+      Assert-ReadOnlyFile $expectedDb
+      foreach ($suffix in @('-wal','-shm')) {
+        if (Test-Path -LiteralPath "$expectedDb$suffix") { Assert-ReadOnlyFile "$expectedDb$suffix" }
+      }
+      $status = Invoke-Core @{mode='verify-readonly';state=$state}
+    } else { $status = Invoke-Core @{mode='verify';state=$state} }
+    if ($Action -eq 'Read-Facts') {
+      $factsMode = if ($ReadOnlyAction) { 'facts-readonly' } else { 'facts-read' }
+      Invoke-Core @{mode=$factsMode;state=$state;identity_id=$IdentityId} | ConvertTo-Json -Depth 50
+    } elseif ($Action -eq 'Runtime') {
       if (-not [Console]::IsOutputRedirected) { throw 'Runtime is an internal captured-output reader. Use Status in an operator console.' }
       ConvertTo-Json -InputObject $state -Depth 50 -Compress
     } elseif ($Action -eq 'Status') { ConvertTo-Json -InputObject $status -Depth 50 }
@@ -127,8 +160,9 @@ try {
       $identity = $identity[0]
       $token = $state.environment.($identity.credential_ref)
       if ($Action -eq 'Probe') {
-        $response = Invoke-RestMethod -Uri 'http://localhost:3102/api/workflow/status' -Headers @{Authorization="Bearer $token"} -TimeoutSec 8
-        if ($response.identity.id -cne $IdentityId) { throw 'Observed identity mismatch.' }
+        $probe = Invoke-Core @{mode='probe-plan';state=$state;identity_id=$IdentityId}
+        $response = Invoke-RestMethod -Uri $probe.url -Headers @{Authorization="Bearer $token"} -TimeoutSec 8 -MaximumRedirection 0
+        $null = Invoke-Core @{mode='probe-verify';state=$state;identity_id=$IdentityId;response=$response}
         @{ status='PASS'; test_type='ACTUAL_DEPLOYED_OCEAN_LOCAL_OPERATOR_PROBE'; observed_at_utc=[DateTimeOffset]::UtcNow.ToString('o'); identity=$response.identity; integration_readiness=$response.integration_readiness; consumer_acceptance='NOT_VERIFIED_BY_THIS_LOCAL_PROBE' } | ConvertTo-Json -Depth 12
       } else {
         if ($IdentityId -notmatch '^[A-Za-z0-9_.:-]+$' -or $IdentityId.Contains(':')) { throw 'Identity is unsuitable for a protected handoff filename.' }

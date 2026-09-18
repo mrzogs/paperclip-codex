@@ -1,0 +1,13 @@
+# Provider repair runtime bytes are externally pinned; preserve them on checkout.
+auth.mjs -text
+backend.mjs -text
+maintenance.mjs -text
+operator.mjs -text
+store.mjs -text
+readonly-fixture.ps1 -text
+readonly-operator.test.mjs -text
+provider-lifecycle.mjs -text
+provider_schema_formats.py -text
+validate-provider-schema.py -text
+verify-factual-binding.py -text
+verify-factual-qualification.py -text
