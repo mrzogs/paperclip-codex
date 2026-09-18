@@ -4,7 +4,9 @@ param(
   [string]$IdentityId,
   [string]$Root = 'D:\OceanTradingData\website\workflow'
 )
-if ($PSVersionTable.PSEdition -eq 'Core') {
+$ReadOnlyAction = $PSVersionTable.PSEdition -eq 'Core' -and $Action -in @('Status','Runtime','Read-Facts')
+if ($ReadOnlyAction -and $PSVersionTable.PSVersion -lt [Version]'7.5') { throw 'Read-only protected operator requires PowerShell 7.5 or newer for exact JSON date strings.' }
+if ($PSVersionTable.PSEdition -eq 'Core' -and -not $ReadOnlyAction) {
   $forward = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath)
   foreach ($key in $PSBoundParameters.Keys) { $forward += "-$key"; $forward += [string]$PSBoundParameters[$key] }
   & 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' @forward
@@ -41,7 +43,11 @@ foreach ($rule in $acl.Access) {
 function Decode-State([string]$File) {
   $secure = Get-Content -LiteralPath $File -Raw | ConvertTo-SecureString
   $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-  try { [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) | ConvertFrom-Json } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
+  try {
+    if ($ReadOnlyAction -and $PSVersionTable.PSEdition -eq 'Core') {
+      [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) | ConvertFrom-Json -DateKind String
+    } else { [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) | ConvertFrom-Json }
+  } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
 }
 function Encode-State($Value,[string]$File) {
   $json = ConvertTo-Json -InputObject $Value -Depth 50 -Compress
@@ -67,7 +73,16 @@ function Invoke-Core($Value) {
   $err = $p.StandardError.ReadToEnd()
   $p.WaitForExit()
   if ($p.ExitCode -ne 0) { throw "Protected workflow operation failed: $err" }
-  $output | ConvertFrom-Json
+  if ($ReadOnlyAction -and $PSVersionTable.PSEdition -eq 'Core') { $output | ConvertFrom-Json -DateKind String }
+  else { $output | ConvertFrom-Json }
+}
+function Assert-ReadOnlyFile([string]$File) {
+  $item = Get-Item -LiteralPath $File -Force
+  if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Existing regular protected operator file required.' }
+  foreach ($rule in (Get-Acl -LiteralPath $File).Access) {
+    $ruleSid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+    if ($rule.AccessControlType -eq 'Allow' -and $ruleSid -notin @($Sid,'S-1-5-18')) { throw 'Unexpected principal in protected operator file ACL.' }
+  }
 }
 function Publish-Handoffs($State) {
   $directory = Join-Path $Root 'handoffs'
@@ -82,9 +97,16 @@ function Publish-Handoffs($State) {
   }
 }
 $lock = $null
+if ($ReadOnlyAction) {
+  Assert-ReadOnlyFile $StatePath
+  Assert-ReadOnlyFile (Join-Path $Root 'operator.lock')
+}
 $lockDeadline = [DateTimeOffset]::UtcNow.AddSeconds(8)
 while (-not $lock) {
-  try { $lock = [IO.File]::Open((Join-Path $Root 'operator.lock'),'OpenOrCreate','ReadWrite','None') }
+  try {
+    if ($ReadOnlyAction) { $lock = [IO.File]::Open((Join-Path $Root 'operator.lock'),'Open','Read','None') }
+    else { $lock = [IO.File]::Open((Join-Path $Root 'operator.lock'),'OpenOrCreate','ReadWrite','None') }
+  }
   catch [IO.IOException] {
     if ([DateTimeOffset]::UtcNow -ge $lockDeadline) { throw 'Protected operator busy; bounded lock wait exceeded. Retry the same operation.' }
     Start-Sleep -Milliseconds 100
@@ -116,9 +138,18 @@ try {
   } elseif ($Action -in @('Status','Runtime','Transfer','Probe','Read-Facts')) {
     if (Test-Path -LiteralPath $PendingPath) { throw 'Interrupted credential update. Run -Action Resume first.' }
     $state = Decode-State $StatePath
-    $status = Invoke-Core @{mode='verify';state=$state}
+    if ($ReadOnlyAction) {
+      $expectedDb = Join-Path $Root 'workflow.sqlite'
+      if ($state.config.db_file -cne $expectedDb) { throw 'Protected workflow database root conflict.' }
+      Assert-ReadOnlyFile $expectedDb
+      foreach ($suffix in @('-wal','-shm')) {
+        if (Test-Path -LiteralPath "$expectedDb$suffix") { Assert-ReadOnlyFile "$expectedDb$suffix" }
+      }
+      $status = Invoke-Core @{mode='verify-readonly';state=$state}
+    } else { $status = Invoke-Core @{mode='verify';state=$state} }
     if ($Action -eq 'Read-Facts') {
-      Invoke-Core @{mode='facts-read';state=$state;identity_id=$IdentityId} | ConvertTo-Json -Depth 50
+      $factsMode = if ($ReadOnlyAction) { 'facts-readonly' } else { 'facts-read' }
+      Invoke-Core @{mode=$factsMode;state=$state;identity_id=$IdentityId} | ConvertTo-Json -Depth 50
     } elseif ($Action -eq 'Runtime') {
       if (-not [Console]::IsOutputRedirected) { throw 'Runtime is an internal captured-output reader. Use Status in an operator console.' }
       ConvertTo-Json -InputObject $state -Depth 50 -Compress

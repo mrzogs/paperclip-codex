@@ -7,8 +7,30 @@ const IMMUTABLE = ["ow_profiles", "ow_artifacts", "ow_decisions", "ow_events", "
 const RUN_IMMUTABLE = ["ow_run_versions", "ow_run_settings", "ow_dataset_permissions", "ow_run_plans", "ow_run_progress", "ow_coverage_receipts", "ow_evidence_revisions", "ow_run_presets"];
 
 export class WorkflowStore {
-  constructor(filename) {
+  constructor(filename, { readOnly = false } = {}) {
     requireThat(typeof filename === "string" && path.isAbsolute(filename), 503, "ABSOLUTE_WORKFLOW_DB_REQUIRED");
+    requireThat(typeof readOnly === "boolean", 503, "BOOLEAN_READONLY_MODE_REQUIRED");
+    if (readOnly) {
+      const regular = (file) => fs.existsSync(file) && fs.lstatSync(file).isFile() && !fs.lstatSync(file).isSymbolicLink();
+      requireThat(regular(filename), 503, "EXISTING_WORKFLOW_DB_REQUIRED");
+      const header = Buffer.alloc(100);
+      const descriptor = fs.openSync(filename, "r");
+      try { requireThat(fs.readSync(descriptor, header, 0, 100, 0) === 100 && header.subarray(0, 16).toString() === "SQLite format 3\0", 503, "EXISTING_WORKFLOW_DB_REQUIRED"); }
+      finally { fs.closeSync(descriptor); }
+      // A read-only WAL connection can otherwise create sidecars. Never initialize them here.
+      if (header[18] === 2 || header[19] === 2) {
+        requireThat(regular(`${filename}-wal`) && regular(`${filename}-shm`), 503, "EXISTING_WORKFLOW_WAL_REQUIRED");
+      }
+      this.db = new DatabaseSync(filename, { readOnly: true, timeout: 250 });
+      try {
+        this.db.exec("PRAGMA query_only=ON");
+        const tables = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all().map(row => row.name);
+        requireThat(tables.length > 0 && tables.every(name => name.startsWith("ow_")), 503, "EXISTING_NON_WORKFLOW_DATABASE_REJECTED");
+        requireThat(["ow_schema_migrations", "ow_auth_state", "ow_auth_audit", "ow_identities"].every(name => tables.includes(name)), 503, "EXISTING_WORKFLOW_SCHEMA_REQUIRED");
+        requireThat(this.db.prepare("SELECT MAX(version) AS version FROM ow_schema_migrations").get().version === 6, 503, "READONLY_WORKFLOW_MIGRATION_REQUIRED");
+      } catch (error) { this.db.close(); throw error; }
+      return;
+    }
     fs.mkdirSync(path.dirname(filename), { recursive: true });
     if (fs.existsSync(filename)) {
       const probe = new DatabaseSync(filename, { readOnly: true, timeout: 250 });
