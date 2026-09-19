@@ -786,7 +786,7 @@ export function workflowFromEnvironment(environment, python) {
   let resolvedEnvironment = environment;
   if (environment.OCEAN_WORKFLOW_CONFIG.endsWith('.dpapi')) {
     requireThat(fs.existsSync(environment.OCEAN_WORKFLOW_CONFIG), 503, 'MACHINE_BOOTSTRAP_REQUIRED');
-    const result = spawnSync(protectedOperatorHost, ['-NoProfile','-NonInteractive','-File',fileURLToPath(new URL('../../../../scripts/ocean-workflow-operator.ps1', import.meta.url)),'-Action','Runtime','-Root',path.dirname(environment.OCEAN_WORKFLOW_CONFIG)], { encoding: 'utf8', windowsHide: true, timeout: 15_000, maxBuffer: 256*1024 });
+    const result = spawnSync(protectedOperatorHost, ['-NoProfile','-NonInteractive','-File',fileURLToPath(new URL('../../../../scripts/ocean-workflow-operator.ps1', import.meta.url)),'-Action','Bootstrap-Runtime','-Root',path.dirname(environment.OCEAN_WORKFLOW_CONFIG)], { encoding: 'utf8', windowsHide: true, timeout: 15_000, maxBuffer: 256*1024 });
     requireThat(result.status === 0, 503, 'PROTECTED_OPERATOR_STATE_UNAVAILABLE');
     const state = JSON.parse(result.stdout.replace(/^\uFEFF/,''));
     config = state.config;

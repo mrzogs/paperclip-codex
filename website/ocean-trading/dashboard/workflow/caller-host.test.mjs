@@ -81,3 +81,42 @@ test('actual Core launcher module path resolves Windows network and process comm
   assert.equal(result.status,0,result.stderr);
   assert.ok(result.stdout.includes('Get-NetTCPConnection')&&result.stdout.includes('Get-CimInstance'));
 });
+
+test('actual protected loader starts after a clean last-writer shutdown without precreated WAL sidecars',async()=>{
+  const root=path.join(os.tmpdir(),`ocean-s302-loader-${randomUUID()}`);let backend;
+  try{
+    await protectedOperation('Bootstrap',root);
+    assert.equal(fs.existsSync(path.join(root,'workflow.sqlite-wal')),false);
+    assert.equal(fs.existsSync(path.join(root,'workflow.sqlite-shm')),false);
+    const cipher=digest(fs.readFileSync(path.join(root,'operator-state.dpapi')));
+    for(let pass=0;pass<2;pass++){
+      backend=workflowFromEnvironment({OCEAN_WORKFLOW_ENABLED:'1',OCEAN_WORKFLOW_CONFIG:path.join(root,'operator-state.dpapi')},'C:\\Users\\wayne\\AppData\\Local\\Programs\\Python\\Python312\\python.exe');
+      await until(()=>backend.maintenanceHealth.state==='READY');
+      assert.equal(backend.config.identities.length,0);assert.equal(backend.config.browser.state,'UNENROLLED');
+      assert.equal(backend.config.brain_submission,'OFF');assert.equal(backend.config.live_real,'DISABLED');
+      assert.equal(backend.store.db.prepare('SELECT COUNT(*) n FROM ow_auth_audit').get().n,1);
+      assert.equal(digest(fs.readFileSync(path.join(root,'operator-state.dpapi'))),cipher);
+      backend.close();backend=null;
+      assert.equal(fs.existsSync(path.join(root,'workflow.sqlite-wal')),false);
+      assert.equal(fs.existsSync(path.join(root,'workflow.sqlite-shm')),false);
+    }
+  }finally{
+    backend?.close();
+    assert.ok(path.resolve(root).startsWith(path.resolve(os.tmpdir())+path.sep)&&path.basename(root).startsWith('ocean-s302-loader-'));
+    fs.rmSync(root,{recursive:true,force:true});
+  }
+});
+
+test('startup runtime rejects missing protected database without creating a substitute',async()=>{
+  const root=path.join(os.tmpdir(),`ocean-s302-loader-${randomUUID()}`);
+  try{
+    await protectedOperation('Bootstrap',root);
+    const db=path.join(root,'workflow.sqlite');fs.renameSync(db,db+'.fixture-backup');
+    const before=fs.readdirSync(root).sort();
+    const rejected=call(root,'Bootstrap-Runtime');assert.notEqual(rejected.status,0);
+    assert.deepEqual(fs.readdirSync(root).sort(),before);assert.equal(fs.existsSync(db),false);
+  }finally{
+    assert.ok(path.resolve(root).startsWith(path.resolve(os.tmpdir())+path.sep)&&path.basename(root).startsWith('ocean-s302-loader-'));
+    fs.rmSync(root,{recursive:true,force:true});
+  }
+});
