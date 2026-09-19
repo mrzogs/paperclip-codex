@@ -1,2 +1,3 @@
 # Protected native operator is published by exact source hash.
 ocean-workflow-operator.ps1 -text
+start-ocean-website.ps1 -text

@@ -1,11 +1,6 @@
 param([switch]$Restart,[switch]$DisableWorkflow,[switch]$EnableWorkflow,[switch]$PreserveMonitorState)
-if ($PSVersionTable.PSEdition -eq 'Core') {
-  $forward = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath)
-  foreach ($key in $PSBoundParameters.Keys) { if ($PSBoundParameters[$key]) { $forward += "-$key" } }
-  & 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' @forward
-  if ($LASTEXITCODE -ne 0) { throw 'Native Windows Ocean launcher failed.' }
-  return
-}
+$CoreHost = $PSVersionTable.PSEdition -eq 'Core'
+if ($CoreHost -and $PSVersionTable.PSVersion -lt [Version]'7.5') { throw 'Ocean website Core launcher requires PowerShell 7.5 or newer.' }
 $ErrorActionPreference = 'Stop'
 $env:PSModulePath = "$PSHOME\Modules;${env:ProgramFiles}\WindowsPowerShell\Modules"
 $Dashboard = 'D:\Paperclip-codex\website\ocean-trading\dashboard'
@@ -20,7 +15,8 @@ foreach ($principal in @($sid,'S-1-5-18')) {
   $identity = New-Object Security.Principal.SecurityIdentifier($principal)
   $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($identity,'FullControl','ContainerInherit,ObjectInherit','None','Allow')))
 }
-[IO.Directory]::SetAccessControl($Runtime,$acl)
+if ($CoreHost) { [IO.FileSystemAclExtensions]::SetAccessControl([IO.DirectoryInfo]::new($Runtime),$acl) }
+else { [IO.Directory]::SetAccessControl($Runtime,$acl) }
 $flag = Join-Path $Runtime 'workflow-disabled.json'
 if ($DisableWorkflow -and $EnableWorkflow) { throw 'Choose only one workflow flag.' }
 if ($DisableWorkflow -or $EnableWorkflow) { [IO.File]::WriteAllText($flag,(@{disabled=[bool]$DisableWorkflow} | ConvertTo-Json -Compress)) }
