@@ -7,6 +7,9 @@ factual-qualification-v1.schema.json -text
 factual-registration-readback-v1.schema.json -text
 provider-lifecycle-v1.json -text
 readonly-operator-v1.json -text
+mutation-operator-host-v1.json -text
+mutation-operator-host-v1.md -text
+.gitattributes -text
 readonly-operator-v1.md -text
 schema-resolver-v1.json -text
 service-identity-v1.schema.json -text

@@ -1,4 +1,5 @@
 # Provider repair runtime bytes are externally pinned; preserve them on checkout.
+.gitattributes -text
 auth.mjs -text
 backend.mjs -text
 maintenance.mjs -text
@@ -6,6 +7,8 @@ operator.mjs -text
 store.mjs -text
 readonly-fixture.ps1 -text
 readonly-operator.test.mjs -text
+mutation-host.test.mjs -text
+mutation-lock-fixture.ps1 -text
 provider-lifecycle.mjs -text
 provider_schema_formats.py -text
 validate-provider-schema.py -text
