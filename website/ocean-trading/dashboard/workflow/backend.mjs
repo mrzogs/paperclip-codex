@@ -14,6 +14,7 @@ import { TestCommunication, TEST_PREFIX } from './test-communication.mjs';
 import { integrationStatus } from './integration.mjs';
 import { OperationalTransition, OPERATIONAL_PREFIX, operationalPolicy } from './operational-transition.mjs';
 import { OperationalPreparation } from './operational-preparation.mjs';
+import { identityReadback } from './provider-lifecycle.mjs';
 
 export const TABLE = JSON.parse(fs.readFileSync(new URL("./workflow-transition-table.json", import.meta.url), "utf8"));
 const GATES = { ONBOARDING: "DISCOVERY", DEVELOPMENT: "DEVELOPMENT_REVIEW", SHADOW: "SHADOW_REVIEW", PRODUCTION: "DEPLOYMENT_REVIEW", ROLLBACK: "ROLLBACK_REVIEW" };
@@ -663,13 +664,17 @@ export class WorkflowBackend {
       const mutation = request.method !== "GET";
       const actor = this.auth.authenticate(request, mutation);
       requireThat(actor.namespace!=='OPERATIONAL' || route.startsWith(`${OPERATIONAL_PREFIX}/`),403,'OPERATIONAL_IDENTITY_ON_TEST_ROUTE');
+      if(route==='identity/v1' && request.method==='GET') {
+        response.end(JSON.stringify(identityReadback(this.config,actor,'TEST')));return true;
+      }
       if(route==='integrations/v1/status' && request.method==='GET') {
         response.end(JSON.stringify(integrationStatus(this,actor)));return true;
       }
       if(route.startsWith(`${OPERATIONAL_PREFIX}/`)) {
         const local=route.slice(OPERATIONAL_PREFIX.length+1);let result;
         requireThat(actor.role==='HUMAN' || actor.scopes.includes('read'),403,'WRONG_ACTION_SCOPE');
-        if(local==='policy' && request.method==='GET')result=operationalPolicy(this.config);
+        if(local==='identity' && request.method==='GET')result=identityReadback(this.config,actor,'OPERATIONAL');
+        else if(local==='policy' && request.method==='GET')result=operationalPolicy(this.config);
         else if(local==='pending' && request.method==='GET')result=this.operational.pending(actor);
         else if((local==='runs' || local.startsWith('receipts/')) && request.method==='GET')result=this.operational.read(actor,local.startsWith('receipts/')?local.slice(9):null);
         else if(local==='dataset-manifests' && request.method==='POST')result=this.operational.manifest(actor,await jsonBody(request));
