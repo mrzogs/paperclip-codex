@@ -72,3 +72,12 @@ test('caller host paths and website-only launcher contain no policy overrides or
   assert.ok(!launcher.includes('ExecutionPolicy')&&!launcher.includes('$forward'));
   assert.ok(launcher.includes('FileSystemAclExtensions')&&launcher.includes('-WindowStyle Hidden'));
 });
+
+test('actual Core launcher module path resolves Windows network and process commands',()=>{
+  const launcher=fs.readFileSync(path.resolve(here,'../../../../scripts/start-ocean-website.ps1'),'utf8');
+  const line=launcher.split(/\r?\n/).find(value=>value.startsWith('$env:PSModulePath = '));
+  assert.ok(line?.includes('$env:WINDIR\\System32\\WindowsPowerShell\\v1.0\\Modules'));
+  const result=spawnSync(protectedOperatorHost,['-NoProfile','-NonInteractive','-Command',line+'; Get-Command Get-NetTCPConnection,Get-CimInstance | Select-Object -ExpandProperty Name'],{encoding:'utf8',windowsHide:true,timeout:30000});
+  assert.equal(result.status,0,result.stderr);
+  assert.ok(result.stdout.includes('Get-NetTCPConnection')&&result.stdout.includes('Get-CimInstance'));
+});

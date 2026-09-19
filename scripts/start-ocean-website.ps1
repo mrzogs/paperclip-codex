@@ -2,7 +2,7 @@ param([switch]$Restart,[switch]$DisableWorkflow,[switch]$EnableWorkflow,[switch]
 $CoreHost = $PSVersionTable.PSEdition -eq 'Core'
 if ($CoreHost -and $PSVersionTable.PSVersion -lt [Version]'7.5') { throw 'Ocean website Core launcher requires PowerShell 7.5 or newer.' }
 $ErrorActionPreference = 'Stop'
-$env:PSModulePath = "$PSHOME\Modules;${env:ProgramFiles}\WindowsPowerShell\Modules"
+$env:PSModulePath = "$PSHOME\Modules;${env:ProgramFiles}\WindowsPowerShell\Modules;$env:WINDIR\System32\WindowsPowerShell\v1.0\Modules"
 $Dashboard = 'D:\Paperclip-codex\website\ocean-trading\dashboard'
 $Runtime = 'D:\OceanTradingData\website\ocean-runtime'
 $StateFile = Join-Path $Runtime 'website-process.json'
