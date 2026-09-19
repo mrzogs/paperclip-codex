@@ -65,7 +65,7 @@ test('S23.2 isolated real HTTP/SQLite: independent human/machine lifecycle, scop
     const identity=state.config.identities[0];
     fs.writeFileSync(proofFile,JSON.stringify({schema_version:'ocean-consumer-verification/v1',identity_id:identity.identity_id,audience:identity.audience,credential_hash:identity.credential_hash,strategy_ids:identity.strategy_ids,instance_ids:identity.instance_ids,scopes:identity.scopes,tests:['allowed','missing','invalid','wrong_strategy','wrong_instance','wrong_action','forged_human','expired_or_revoked'].map(name=>({name,status:'PASS',test_type:'ACTUAL_CONSUMER_TO_OCEAN'}))}));
     op('verify',{request:{...request,evidence_path:proofFile,evidence_sha256:digest(fs.readFileSync(proofFile)).slice(7)}});load();assert.equal(state.config.identities[0].verification_state,'VERIFIED');
-    const capacity=structuredClone(state);capacity.config.identities=Array(32).fill(identity);
+    const capacity=structuredClone(state);capacity.config.identities=Array(64).fill(identity);
     assert.throws(()=>prepareOperation({action:'enroll',state:capacity,root,operator_id,request:{...request,identity_id:'test-s232-capacity'}}),/IDENTITY_REGISTRY_CAPACITY_REACHED/);
     op('revoke',{request});assert.equal((await call('status',auth())).status,401);load();
     assert.ok(prepareMaintenance({state,root,operator_id}).no_change);

@@ -1,5 +1,6 @@
 """Resolve exact observed fields from independently sealed owner exports."""
 import importlib.util
+import hashlib
 import json
 import re
 from datetime import datetime, timezone
@@ -12,6 +13,9 @@ ROOT = Path(__file__).parent
 spec = importlib.util.spec_from_file_location('setup_verifier', ROOT / 'verify-setup-bundle.py')
 verifier = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(verifier)
+qualification_spec = importlib.util.spec_from_file_location('qualification_verifier', ROOT / 'verify-factual-qualification.py')
+qualification = importlib.util.module_from_spec(qualification_spec)
+qualification_spec.loader.exec_module(qualification)
 
 
 def pointer(document, value):
@@ -38,11 +42,15 @@ def verify(request):
     checked = {}
     for role in ['source', 'strategy']:
         item = request['bundles'][role]
-        result = verifier.verify(item)
+        qualification.validate(item, 'reference')
+        is_qualification = item.get('schema_version') == 'ocean-factual-qualification-reference/v1'
+        result = qualification.verify(item, role) if is_qualification else verifier.verify(item)
         receipt = result['receipt']
         assert receipt.get('status') in ('PASS', 'VERIFIED_REUSE')
         allowed = ['Telemetry Data Logger', 'Telemetry Logger'] if role == 'source' else ['VWAP Strategy']
         assert receipt.get('project', receipt.get('owner')) in allowed
+        if is_qualification:
+            assert receipt['target_execution_instance_id'] == instance['execution_instance_id']
         checked[role] = result
     fields = {f'instance.{k}': 'source' for k in instance if k not in ['status', 'lease_run_id', 'strategy_id', 'version_binding', 'config_hash']}
     fields.update({'instance.strategy_id': 'strategy', 'instance.version_binding': 'strategy', 'instance.config_hash': 'strategy', 'strategy_code_hash': 'strategy', 'profile_hash': 'strategy', 'source_observed_at_utc': 'source'})
@@ -54,9 +62,13 @@ def verify(request):
         with zipfile.ZipFile(request['bundles'][role]['bundle_path']) as archive:
             raw = archive.read(proof['member'])
         assert len(raw) <= 2 * 1024 * 1024
+        assert hashlib.sha256(raw).hexdigest() == checked[role]['verified_members'][proof['member']]
         actual = pointer(json.loads(raw), proof['pointer'])
         expected = instance[field.split('.')[1]] if field.startswith('instance.') else request[field]
         assert expected is not None and expected != '' and actual == expected
+        if 'facts' in checked[role]:
+            assert proof == {'member': 'artifacts/facts.json', 'pointer': '/' + field}
+            assert checked[role]['facts'][field] == expected
     return {**request, 'schema_version': 'ocean-operational-factual-binding/v1', 'strategy_id': instance['strategy_id'], 'state': 'VERIFIED_FACTS_ONLY', 'operational_enabled': False}
 
 

@@ -8,12 +8,13 @@ import { OceanAuth } from "./auth.mjs";
 import { WorkflowStore } from "./store.mjs";
 import { readWorkflowView, recordManualAcknowledgement } from "./ui-api.mjs";
 import { RunManager } from "./run-manager.mjs";
-import { attachMaintenance } from './maintenance.mjs';
+import { attachMaintenance, protectedOperatorHost } from './maintenance.mjs';
 import { orderedSetup, knownSetupTask } from './setup-operator.mjs';
 import { TestCommunication, TEST_PREFIX } from './test-communication.mjs';
 import { integrationStatus } from './integration.mjs';
 import { OperationalTransition, OPERATIONAL_PREFIX, operationalPolicy } from './operational-transition.mjs';
 import { OperationalPreparation } from './operational-preparation.mjs';
+import { identityReadback } from './provider-lifecycle.mjs';
 
 export const TABLE = JSON.parse(fs.readFileSync(new URL("./workflow-transition-table.json", import.meta.url), "utf8"));
 const GATES = { ONBOARDING: "DISCOVERY", DEVELOPMENT: "DEVELOPMENT_REVIEW", SHADOW: "SHADOW_REVIEW", PRODUCTION: "DEPLOYMENT_REVIEW", ROLLBACK: "ROLLBACK_REVIEW" };
@@ -663,13 +664,17 @@ export class WorkflowBackend {
       const mutation = request.method !== "GET";
       const actor = this.auth.authenticate(request, mutation);
       requireThat(actor.namespace!=='OPERATIONAL' || route.startsWith(`${OPERATIONAL_PREFIX}/`),403,'OPERATIONAL_IDENTITY_ON_TEST_ROUTE');
+      if(route==='identity/v1' && request.method==='GET') {
+        response.end(JSON.stringify(identityReadback(this.config,actor,'TEST')));return true;
+      }
       if(route==='integrations/v1/status' && request.method==='GET') {
         response.end(JSON.stringify(integrationStatus(this,actor)));return true;
       }
       if(route.startsWith(`${OPERATIONAL_PREFIX}/`)) {
         const local=route.slice(OPERATIONAL_PREFIX.length+1);let result;
         requireThat(actor.role==='HUMAN' || actor.scopes.includes('read'),403,'WRONG_ACTION_SCOPE');
-        if(local==='policy' && request.method==='GET')result=operationalPolicy(this.config);
+        if(local==='identity' && request.method==='GET')result=identityReadback(this.config,actor,'OPERATIONAL');
+        else if(local==='policy' && request.method==='GET')result=operationalPolicy(this.config);
         else if(local==='pending' && request.method==='GET')result=this.operational.pending(actor);
         else if((local==='runs' || local.startsWith('receipts/')) && request.method==='GET')result=this.operational.read(actor,local.startsWith('receipts/')?local.slice(9):null);
         else if(local==='dataset-manifests' && request.method==='POST')result=this.operational.manifest(actor,await jsonBody(request));
@@ -781,7 +786,7 @@ export function workflowFromEnvironment(environment, python) {
   let resolvedEnvironment = environment;
   if (environment.OCEAN_WORKFLOW_CONFIG.endsWith('.dpapi')) {
     requireThat(fs.existsSync(environment.OCEAN_WORKFLOW_CONFIG), 503, 'MACHINE_BOOTSTRAP_REQUIRED');
-    const result = spawnSync('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', ['-NoProfile','-ExecutionPolicy','Bypass','-File',fileURLToPath(new URL('../../../../scripts/ocean-workflow-operator.ps1', import.meta.url)),'-Action','Runtime','-Root',path.dirname(environment.OCEAN_WORKFLOW_CONFIG)], { encoding: 'utf8', windowsHide: true, timeout: 15_000, maxBuffer: 256*1024 });
+    const result = spawnSync(protectedOperatorHost, ['-NoProfile','-NonInteractive','-File',fileURLToPath(new URL('../../../../scripts/ocean-workflow-operator.ps1', import.meta.url)),'-Action','Bootstrap-Runtime','-Root',path.dirname(environment.OCEAN_WORKFLOW_CONFIG)], { encoding: 'utf8', windowsHide: true, timeout: 15_000, maxBuffer: 256*1024 });
     requireThat(result.status === 0, 503, 'PROTECTED_OPERATOR_STATE_UNAVAILABLE');
     const state = JSON.parse(result.stdout.replace(/^\uFEFF/,''));
     config = state.config;

@@ -4,12 +4,14 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { OceanAuth } from './auth.mjs';
 import { requireThat } from './common.mjs';
+import { identityProbePath, validateIdentityProbe } from './provider-lifecycle.mjs';
 
 const command=fileURLToPath(new URL('../../../../scripts/ocean-workflow-operator.ps1',import.meta.url));
+export const protectedOperatorHost='C:\\Users\\wayne\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\powershell\\pwsh.exe';
 export function protectedOperation(action,root) {
   return new Promise((resolve,reject)=>{
-    const child=spawn('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
-      ['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',command,'-Action',action,'-Root',root],
+    const child=spawn(protectedOperatorHost,
+      ['-NoProfile','-NonInteractive','-File',command,'-Action',action,'-Root',root],
       {windowsHide:true,stdio:['ignore','pipe','pipe']});
     let output=''; let bytes=0;
     const timer=setTimeout(()=>{child.kill();reject(new Error('PROTECTED_OPERATION_TIMEOUT'));},15000);
@@ -53,8 +55,9 @@ export function attachMaintenance(backend,filename) {
           // Confirm the provider accepts each maintained credential before reporting success.
           for(const identity of state.config.identities.filter(item=>item.renewal_policy && !item.revoked && Date.parse(item.expires_at_utc)>Date.now())){
             const origin=state.config.allowed_origins[0];
-            const response=await fetch(`${origin}/api/workflow/status`,{headers:{Authorization:`Bearer ${environment[identity.credential_ref]}`},signal:AbortSignal.timeout(5000)});
-            requireThat(response.ok && (await response.json()).identity.id===identity.identity_id,503,'MAINTENANCE_AUTH_PROBE_FAILED');
+            const response=await fetch(`${origin}${identityProbePath(identity.namespace)}`,{headers:{Authorization:`Bearer ${environment[identity.credential_ref]}`},signal:AbortSignal.timeout(5000),redirect:'error'});
+            requireThat(response.ok,503,'MAINTENANCE_AUTH_PROBE_FAILED');
+            validateIdentityProbe(await response.json(),identity);
           }
         }
       }
