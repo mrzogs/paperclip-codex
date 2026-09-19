@@ -150,14 +150,15 @@ test('Core mutation lock contention fails bounded without publication and retrie
   const f=await fixture();let child,exited;
   try{
     const before=objectHash(await f.state());
-    child=spawn(core,['-NoProfile','-NonInteractive','-File',path.join(here,'mutation-lock-fixture.ps1'),'-Root',f.root],{windowsHide:true,stdio:['ignore','pipe','pipe']});
+    child=spawn(core,['-NoProfile','-NonInteractive','-File',path.join(here,'mutation-lock-fixture.ps1'),'-Root',f.root],{windowsHide:true,stdio:['pipe','pipe','pipe']});
     exited=new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',resolve);});
     await new Promise((resolve,reject)=>{child.stdout.once('data',resolve);child.once('error',reject);});
     const result=await f.requestCall('Enroll');assert.notEqual(result.code,0);assert.match(result.stderr,/bounded lock wait exceeded/);
+    child.stdin.end('RELEASE\n');
     assert.equal(await exited,0);assert.equal(objectHash(await f.state()),before);
     assert.equal(fs.existsSync(path.join(f.root,'operator-pending.dpapi')),false);
     safe(await f.requestCall('Enroll'));assert.equal((await f.state()).config.identities.length,1);
-  }finally{if(exited)await exited;f.close();}
+  }finally{if(child?.stdin&&!child.stdin.writableEnded)child.stdin.end('RELEASE\n');if(exited)await exited;f.close();}
 });
 
 test('Core-issued expired credential is denied by actual private HTTP and protected transfer',async()=>{
