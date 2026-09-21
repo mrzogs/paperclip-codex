@@ -1,0 +1,36 @@
+{
+  "schema_version": "ocean-readonly-operator/v1",
+  "owner": "Ocean Trading Website",
+  "parent_task_id": "S30.2",
+  "repair_id": "S30.2-OCEAN-READONLY-OPERATOR-REPAIR",
+  "operator_path": "D:\\Paperclip-codex\\scripts\\ocean-workflow-operator.ps1",
+  "protected_root": "D:\\OceanTradingData\\website\\workflow",
+  "supported_host": {
+    "edition": "Core",
+    "minimum_version": "7.5",
+    "verified_executable": "C:\\Users\\wayne\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\powershell\\pwsh.exe",
+    "execution_policy_override": false,
+    "windows_powershell_forwarding": false
+  },
+  "actions": {
+    "Status": {"internal_mode": "verify-readonly", "output": "Existing sanitized status shape"},
+    "Runtime": {"internal_mode": "verify-readonly", "output": "Existing internal captured-output runtime state; never print, persist or export credentials"},
+    "Read-Facts": {"internal_mode": "facts-readonly", "selector": "IdentityId is exact execution_instance_id", "output_schema": "ocean-factual-registration-readback/v1"}
+  },
+  "prerequisites": [
+    "Current-user DPAPI state and protected current-user/SYSTEM root/file ACLs",
+    "Existing regular files only, no reparse roots or protected files",
+    "Existing operator.lock opened read-only with exclusive sharing and bounded wait",
+    "No pending credential publication",
+    "Configured DB equals protected root/workflow.sqlite",
+    "Existing workflow schema version 6 and readback tables",
+    "For WAL databases, existing regular WAL and SHM sidecars; no initialization",
+    "Registry bundle hash agrees with the unchanged DPAPI state"
+  ],
+  "store_mode": {"readOnly": true, "query_only": true, "schema_migrations": false, "mkdir": false, "write_transactions": false},
+  "wal_semantics": "Normal SQLite transient SHM read marks may change. Report their hashes separately. DB/WAL/DPAPI/lock and logical records must not be written by this reader. Never use immutable mode on active WAL or copy protected databases as a workaround.",
+  "json_dates": "ConvertFrom-Json -DateKind String preserves exact ISO strings and registry hashes",
+  "compatibility": "Default WorkflowStore and legacy Windows PowerShell paths are unchanged. Non-read Core actions retain existing forwarding; they are not certified under a no-Bypass constraint by this repair.",
+  "activation": "No service restart required for the operator child. No enrollment, registration, token export, trading or workflow activation is authorized.",
+  "consumer_acknowledgement": "Telemetry must pin the amended source and contract hashes and invoke the named trusted Core host explicitly; this is not a full S30.2 task PASS."
+}
