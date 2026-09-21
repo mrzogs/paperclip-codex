@@ -133,12 +133,13 @@ test('Core read-only rejects unsafe root and file ACLs and reparse roots',()=>{
 
 test('Core read-only respects the existing exclusive operator lock with bounded wait',async()=>{
   const f=fixture();
-  const child=spawn(pwsh,['-NoProfile','-NonInteractive','-File',helper,'-Root',f.dir,'-Action','Lock'],{windowsHide:true,stdio:['ignore','pipe','pipe']});
+  const child=spawn(pwsh,['-NoProfile','-NonInteractive','-File',helper,'-Root',f.dir,'-Action','Lock'],{windowsHide:true,stdio:['pipe','pipe','pipe']});
   const exited=new Promise((resolve,reject)=>{child.on('error',reject);child.on('exit',resolve);});
   try {
     await new Promise((resolve,reject)=>{child.stdout.once('data',resolve);child.once('error',reject);});
     const result=read(f.dir);assert.notEqual(result.status,0);assert.match(result.stderr,/bounded lock wait exceeded/);
+    child.stdin.end('RELEASE\n');
     assert.equal(await exited,0);
     assert.equal(successful(read(f.dir)).revision,f.state.revision);
-  } finally {await exited;f.close();}
+  } finally {if(!child.stdin.writableEnded)child.stdin.end('RELEASE\n');await exited;f.close();}
 });

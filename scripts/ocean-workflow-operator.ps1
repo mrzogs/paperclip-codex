@@ -1,11 +1,13 @@
 param(
-  [ValidateSet('Bootstrap','Maintenance','Initialize','Reset-Password','Enroll','Rotate','Revoke','Verify','Resume','Status','Runtime','Transfer','Probe','Setup-Import','Setup-Read','Setup-Export','Test-Prepare','Test-Export','Test-Cleanup','Integration-Import','Integration-Export','Register-Facts','Read-Facts')][string]$Action = 'Status',
+  [ValidateSet('Bootstrap','Bootstrap-Runtime','Maintenance','Initialize','Reset-Password','Enroll','Rotate','Revoke','Verify','Resume','Status','Runtime','Transfer','Probe','Setup-Import','Setup-Read','Setup-Export','Test-Prepare','Test-Export','Test-Cleanup','Integration-Import','Integration-Export','Register-Facts','Read-Facts')][string]$Action = 'Status',
   [string]$RequestFile,
   [string]$IdentityId,
   [string]$Root = 'D:\OceanTradingData\website\workflow'
 )
 $CoreHost = $PSVersionTable.PSEdition -eq 'Core'
 $ReadOnlyAction = $CoreHost -and $Action -in @('Status','Runtime','Read-Facts')
+$StartupRuntimeAction = $Action -eq 'Bootstrap-Runtime'
+if ($StartupRuntimeAction -and -not [Console]::IsOutputRedirected) { throw 'Bootstrap-Runtime is an internal captured-output startup operation.' }
 if ($CoreHost -and $PSVersionTable.PSVersion -lt [Version]'7.5') { throw 'Protected Core operator requires PowerShell 7.5 or newer for exact JSON date strings.' }
 $ErrorActionPreference = 'Stop'
 $env:PSModulePath = "$PSHOME\Modules;${env:ProgramFiles}\WindowsPowerShell\Modules"
@@ -96,7 +98,7 @@ function Publish-Handoffs($State) {
   }
 }
 $lock = $null
-if ($ReadOnlyAction) {
+if ($ReadOnlyAction -or $StartupRuntimeAction) {
   Assert-ReadOnlyFile $StatePath
   Assert-ReadOnlyFile (Join-Path $Root 'operator.lock')
 }
@@ -134,22 +136,23 @@ try {
   } elseif ($Action -eq 'Resume' -or ($Action -in @('Maintenance','Bootstrap') -and (Test-Path -LiteralPath $PendingPath))) {
     if (-not (Test-Path -LiteralPath $PendingPath)) { throw 'No interrupted operator update exists.' }
     $plan = Decode-State $PendingPath
-  } elseif ($Action -in @('Status','Runtime','Transfer','Probe','Read-Facts')) {
+  } elseif ($Action -in @('Status','Runtime','Bootstrap-Runtime','Transfer','Probe','Read-Facts')) {
     if (Test-Path -LiteralPath $PendingPath) { throw 'Interrupted credential update. Run -Action Resume first.' }
     $state = Decode-State $StatePath
-    if ($ReadOnlyAction) {
+    if ($ReadOnlyAction -or $StartupRuntimeAction) {
       $expectedDb = Join-Path $Root 'workflow.sqlite'
       if ($state.config.db_file -cne $expectedDb) { throw 'Protected workflow database root conflict.' }
       Assert-ReadOnlyFile $expectedDb
       foreach ($suffix in @('-wal','-shm')) {
         if (Test-Path -LiteralPath "$expectedDb$suffix") { Assert-ReadOnlyFile "$expectedDb$suffix" }
       }
-      $status = Invoke-Core @{mode='verify-readonly';state=$state}
+      $mode = if ($ReadOnlyAction) { 'verify-readonly' } else { 'verify' }
+      $status = Invoke-Core @{mode=$mode;state=$state}
     } else { $status = Invoke-Core @{mode='verify';state=$state} }
     if ($Action -eq 'Read-Facts') {
       $factsMode = if ($ReadOnlyAction) { 'facts-readonly' } else { 'facts-read' }
       Invoke-Core @{mode=$factsMode;state=$state;identity_id=$IdentityId} | ConvertTo-Json -Depth 50
-    } elseif ($Action -eq 'Runtime') {
+    } elseif ($Action -in @('Runtime','Bootstrap-Runtime')) {
       if (-not [Console]::IsOutputRedirected) { throw 'Runtime is an internal captured-output reader. Use Status in an operator console.' }
       ConvertTo-Json -InputObject $state -Depth 50 -Compress
     } elseif ($Action -eq 'Status') { ConvertTo-Json -InputObject $status -Depth 50 }

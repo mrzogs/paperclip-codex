@@ -9,6 +9,7 @@ provider-lifecycle-v1.json -text
 readonly-operator-v1.json -text
 mutation-operator-host-v1.json -text
 mutation-operator-host-v1.md -text
+website-operator-host-v1.json -text
 .gitattributes -text
 readonly-operator-v1.md -text
 schema-resolver-v1.json -text

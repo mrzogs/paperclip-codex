@@ -9,6 +9,7 @@ readonly-fixture.ps1 -text
 readonly-operator.test.mjs -text
 mutation-host.test.mjs -text
 mutation-lock-fixture.ps1 -text
+caller-host.test.mjs -text
 provider-lifecycle.mjs -text
 provider_schema_formats.py -text
 validate-provider-schema.py -text
