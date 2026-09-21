@@ -1,16 +1,14 @@
 param(
-  [ValidateSet('Bootstrap','Maintenance','Initialize','Reset-Password','Enroll','Rotate','Revoke','Verify','Resume','Status','Runtime','Transfer','Probe','Setup-Import','Setup-Read','Setup-Export','Test-Prepare','Test-Export','Test-Cleanup','Integration-Import','Integration-Export','Register-Facts','Read-Facts')][string]$Action = 'Status',
+  [ValidateSet('Bootstrap','Bootstrap-Runtime','Maintenance','Initialize','Reset-Password','Enroll','Rotate','Revoke','Verify','Resume','Status','Runtime','Transfer','Probe','Setup-Import','Setup-Read','Setup-Export','Test-Prepare','Test-Export','Test-Cleanup','Integration-Import','Integration-Export','Register-Facts','Read-Facts')][string]$Action = 'Status',
   [string]$RequestFile,
   [string]$IdentityId,
   [string]$Root = 'D:\OceanTradingData\website\workflow'
 )
-if ($PSVersionTable.PSEdition -eq 'Core') {
-  $forward = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath)
-  foreach ($key in $PSBoundParameters.Keys) { $forward += "-$key"; $forward += [string]$PSBoundParameters[$key] }
-  & 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' @forward
-  if ($LASTEXITCODE -ne 0) { throw 'Native Windows protected operator command failed.' }
-  return
-}
+$CoreHost = $PSVersionTable.PSEdition -eq 'Core'
+$ReadOnlyAction = $CoreHost -and $Action -in @('Status','Runtime','Read-Facts')
+$StartupRuntimeAction = $Action -eq 'Bootstrap-Runtime'
+if ($StartupRuntimeAction -and -not [Console]::IsOutputRedirected) { throw 'Bootstrap-Runtime is an internal captured-output startup operation.' }
+if ($CoreHost -and $PSVersionTable.PSVersion -lt [Version]'7.5') { throw 'Protected Core operator requires PowerShell 7.5 or newer for exact JSON date strings.' }
 $ErrorActionPreference = 'Stop'
 $env:PSModulePath = "$PSHOME\Modules;${env:ProgramFiles}\WindowsPowerShell\Modules"
 $Node = 'C:\Program Files\nodejs\node.exe'
@@ -29,7 +27,8 @@ if (-not (Test-Path -LiteralPath $Root)) {
     $rule = New-Object Security.AccessControl.FileSystemAccessRule($identity,'FullControl','ContainerInherit,ObjectInherit','None','Allow')
     $acl.AddAccessRule($rule)
   }
-  [IO.Directory]::SetAccessControl($Root,$acl)
+  if ($CoreHost) { [IO.FileSystemAclExtensions]::SetAccessControl([IO.DirectoryInfo]::new($Root),$acl) }
+  else { [IO.Directory]::SetAccessControl($Root,$acl) }
 }
 $acl = Get-Acl -LiteralPath $Root
 if ((Get-Item -LiteralPath $Root).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Reparse-point operator root rejected.' }
@@ -38,10 +37,19 @@ foreach ($rule in $acl.Access) {
   $ruleSid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
   if ($rule.AccessControlType -eq 'Allow' -and $ruleSid -notin @($Sid,'S-1-5-18')) { throw 'Unexpected principal in operator directory ACL.' }
 }
+function Convert-OperatorJson {
+  param([Parameter(ValueFromPipeline=$true)][string]$Json)
+  process {
+    if ($CoreHost) { $Json | ConvertFrom-Json -DateKind String }
+    else { $Json | ConvertFrom-Json }
+  }
+}
 function Decode-State([string]$File) {
   $secure = Get-Content -LiteralPath $File -Raw | ConvertTo-SecureString
   $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-  try { [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) | ConvertFrom-Json } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
+  try {
+    [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) | Convert-OperatorJson
+  } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
 }
 function Encode-State($Value,[string]$File) {
   $json = ConvertTo-Json -InputObject $Value -Depth 50 -Compress
@@ -67,7 +75,15 @@ function Invoke-Core($Value) {
   $err = $p.StandardError.ReadToEnd()
   $p.WaitForExit()
   if ($p.ExitCode -ne 0) { throw "Protected workflow operation failed: $err" }
-  $output | ConvertFrom-Json
+  $output | Convert-OperatorJson
+}
+function Assert-ReadOnlyFile([string]$File) {
+  $item = Get-Item -LiteralPath $File -Force
+  if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Existing regular protected operator file required.' }
+  foreach ($rule in (Get-Acl -LiteralPath $File).Access) {
+    $ruleSid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+    if ($rule.AccessControlType -eq 'Allow' -and $ruleSid -notin @($Sid,'S-1-5-18')) { throw 'Unexpected principal in protected operator file ACL.' }
+  }
 }
 function Publish-Handoffs($State) {
   $directory = Join-Path $Root 'handoffs'
@@ -82,9 +98,16 @@ function Publish-Handoffs($State) {
   }
 }
 $lock = $null
+if ($ReadOnlyAction -or $StartupRuntimeAction) {
+  Assert-ReadOnlyFile $StatePath
+  Assert-ReadOnlyFile (Join-Path $Root 'operator.lock')
+}
 $lockDeadline = [DateTimeOffset]::UtcNow.AddSeconds(8)
 while (-not $lock) {
-  try { $lock = [IO.File]::Open((Join-Path $Root 'operator.lock'),'OpenOrCreate','ReadWrite','None') }
+  try {
+    if ($ReadOnlyAction) { $lock = [IO.File]::Open((Join-Path $Root 'operator.lock'),'Open','Read','None') }
+    else { $lock = [IO.File]::Open((Join-Path $Root 'operator.lock'),'OpenOrCreate','ReadWrite','None') }
+  }
   catch [IO.IOException] {
     if ([DateTimeOffset]::UtcNow -ge $lockDeadline) { throw 'Protected operator busy; bounded lock wait exceeded. Retry the same operation.' }
     Start-Sleep -Milliseconds 100
@@ -94,7 +117,7 @@ try {
   if ($Action -like 'Setup-*' -or $Action -like 'Test-*' -or $Action -like 'Integration-*') {
     if (Test-Path -LiteralPath $PendingPath) { throw 'Resume the pending credential publication before setup operations.' }
     $state=Decode-State $StatePath
-    $request=if($RequestFile){Get-Content -LiteralPath $RequestFile -Raw | ConvertFrom-Json}else{$null}
+    $request=if($RequestFile){Get-Content -LiteralPath $RequestFile -Raw | Convert-OperatorJson}else{$null}
     $mode=if($Action -like 'Test-*'){'test-fixture'}elseif($Action -like 'Integration-*'){'integration'}else{'setup'}
     Invoke-Core @{mode=$mode;state=$state;operator_id=$Sid;action=$Action.ToLowerInvariant();request=$request} | ConvertTo-Json -Depth 50
     return
@@ -105,7 +128,7 @@ try {
     return
   }
   if ($Action -eq 'Revoke' -and (Test-Path -LiteralPath $PendingPath)) {
-    $request = Get-Content -LiteralPath $RequestFile -Raw | ConvertFrom-Json
+    $request = Get-Content -LiteralPath $RequestFile -Raw | Convert-OperatorJson
     $plan = Invoke-Core @{mode='cancel-renewal';state=(Decode-State $StatePath);pending=(Decode-State $PendingPath);request=$request;operator_id=$Sid;root=$Root}
     $candidate = Join-Path $Root 'operator-pending.next.dpapi'
     Encode-State $plan $candidate
@@ -113,13 +136,23 @@ try {
   } elseif ($Action -eq 'Resume' -or ($Action -in @('Maintenance','Bootstrap') -and (Test-Path -LiteralPath $PendingPath))) {
     if (-not (Test-Path -LiteralPath $PendingPath)) { throw 'No interrupted operator update exists.' }
     $plan = Decode-State $PendingPath
-  } elseif ($Action -in @('Status','Runtime','Transfer','Probe','Read-Facts')) {
+  } elseif ($Action -in @('Status','Runtime','Bootstrap-Runtime','Transfer','Probe','Read-Facts')) {
     if (Test-Path -LiteralPath $PendingPath) { throw 'Interrupted credential update. Run -Action Resume first.' }
     $state = Decode-State $StatePath
-    $status = Invoke-Core @{mode='verify';state=$state}
+    if ($ReadOnlyAction -or $StartupRuntimeAction) {
+      $expectedDb = Join-Path $Root 'workflow.sqlite'
+      if ($state.config.db_file -cne $expectedDb) { throw 'Protected workflow database root conflict.' }
+      Assert-ReadOnlyFile $expectedDb
+      foreach ($suffix in @('-wal','-shm')) {
+        if (Test-Path -LiteralPath "$expectedDb$suffix") { Assert-ReadOnlyFile "$expectedDb$suffix" }
+      }
+      $mode = if ($ReadOnlyAction) { 'verify-readonly' } else { 'verify' }
+      $status = Invoke-Core @{mode=$mode;state=$state}
+    } else { $status = Invoke-Core @{mode='verify';state=$state} }
     if ($Action -eq 'Read-Facts') {
-      Invoke-Core @{mode='facts-read';state=$state;identity_id=$IdentityId} | ConvertTo-Json -Depth 50
-    } elseif ($Action -eq 'Runtime') {
+      $factsMode = if ($ReadOnlyAction) { 'facts-readonly' } else { 'facts-read' }
+      Invoke-Core @{mode=$factsMode;state=$state;identity_id=$IdentityId} | ConvertTo-Json -Depth 50
+    } elseif ($Action -in @('Runtime','Bootstrap-Runtime')) {
       if (-not [Console]::IsOutputRedirected) { throw 'Runtime is an internal captured-output reader. Use Status in an operator console.' }
       ConvertTo-Json -InputObject $state -Depth 50 -Compress
     } elseif ($Action -eq 'Status') { ConvertTo-Json -InputObject $status -Depth 50 }
@@ -158,7 +191,7 @@ try {
         if ($password -cne [Runtime.InteropServices.Marshal]::PtrToStringBSTR($p2)) { throw 'Passwords do not match.' }
       } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($p1); [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($p2) }
     }
-    $request = if ($RequestFile) { Get-Content -LiteralPath $RequestFile -Raw | ConvertFrom-Json } else { $null }
+    $request = if ($RequestFile) { Get-Content -LiteralPath $RequestFile -Raw | Convert-OperatorJson } else { $null }
     $mode = if ($Action -eq 'Maintenance') { 'maintenance' } else { 'prepare' }
     $plan = Invoke-Core @{mode=$mode;action=$Action.ToLowerInvariant();state=$state;password=$password;request=$request;operator_id=$Sid;root=$Root}
     $password = $null

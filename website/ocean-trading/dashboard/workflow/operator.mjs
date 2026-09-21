@@ -128,9 +128,9 @@ export function commitOperation(plan) {
   } finally { store.close(); }
 }
 
-export function verifyState(state) {
+export function verifyState(state, { readOnly = false } = {}) {
   validateIdentityCapacity(state.config.identities);
-  const store = new WorkflowStore(state.config.db_file);
+  const store = new WorkflowStore(state.config.db_file, { readOnly });
   try {
     requireThat(store.db.prepare("SELECT credential_hash FROM ow_auth_state WHERE id='bundle'").get()?.credential_hash === objectHash(state), 503, 'OPERATOR_RESUME_REQUIRED');
     return { revision: state.revision, test_only: state.config.test_only, brain_submission: state.config.brain_submission,
@@ -170,6 +170,12 @@ export function cancelPendingRenewal({state,pending,request,operator_id,root}) {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const input = JSON.parse(fs.readFileSync(0, 'utf8').replace(/^\uFEFF/, ''));
+    if (['verify-readonly','facts-readonly'].includes(input.mode)) {
+      const status = verifyState(input.state, { readOnly: true });
+      const result = input.mode === 'facts-readonly' ? factualReadback(input.state,input.identity_id) : status;
+      process.stdout.write(JSON.stringify(result));
+      process.exit(0);
+    }
     if(['setup','test-fixture','integration','facts-read','probe-plan','probe-verify'].includes(input.mode))verifyState(input.state);
     let result;
     if(input.mode==='facts-read')result=factualReadback(input.state,input.identity_id);
