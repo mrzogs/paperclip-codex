@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { OceanAuth } from './auth.mjs';
 import { requireThat } from './common.mjs';
+import { identityProbePath, validateIdentityProbe } from './provider-lifecycle.mjs';
 
 const command=fileURLToPath(new URL('../../../../scripts/ocean-workflow-operator.ps1',import.meta.url));
 export function protectedOperation(action,root) {
@@ -53,8 +54,9 @@ export function attachMaintenance(backend,filename) {
           // Confirm the provider accepts each maintained credential before reporting success.
           for(const identity of state.config.identities.filter(item=>item.renewal_policy && !item.revoked && Date.parse(item.expires_at_utc)>Date.now())){
             const origin=state.config.allowed_origins[0];
-            const response=await fetch(`${origin}/api/workflow/status`,{headers:{Authorization:`Bearer ${environment[identity.credential_ref]}`},signal:AbortSignal.timeout(5000)});
-            requireThat(response.ok && (await response.json()).identity.id===identity.identity_id,503,'MAINTENANCE_AUTH_PROBE_FAILED');
+            const response=await fetch(`${origin}${identityProbePath(identity.namespace)}`,{headers:{Authorization:`Bearer ${environment[identity.credential_ref]}`},signal:AbortSignal.timeout(5000),redirect:'error'});
+            requireThat(response.ok,503,'MAINTENANCE_AUTH_PROBE_FAILED');
+            validateIdentityProbe(await response.json(),identity);
           }
         }
       }
