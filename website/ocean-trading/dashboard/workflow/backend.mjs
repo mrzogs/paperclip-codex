@@ -10,7 +10,7 @@ import { readWorkflowView, recordManualAcknowledgement } from "./ui-api.mjs";
 import { RunManager } from "./run-manager.mjs";
 import { attachMaintenance } from './maintenance.mjs';
 import { orderedSetup, knownSetupTask } from './setup-operator.mjs';
-import { TestCommunication, TEST_PREFIX } from './test-communication.mjs';
+import { TestCommunication, TEST_PREFIX, TEST_PREFIX_V2, TEST_VERSION, TEST_VERSION_V2 } from './test-communication.mjs';
 import { integrationStatus } from './integration.mjs';
 import { OperationalTransition, OPERATIONAL_PREFIX, operationalPolicy } from './operational-transition.mjs';
 import { OperationalPreparation } from './operational-preparation.mjs';
@@ -683,14 +683,16 @@ export class WorkflowBackend {
         else throw new WorkflowError(404,'UNKNOWN_OPERATIONAL_ROUTE');
         response.end(JSON.stringify(result));return true;
       }
-      if (route.startsWith(`${TEST_PREFIX}/`)) {
-        const local=route.slice(TEST_PREFIX.length+1);
+      if (route.startsWith(`${TEST_PREFIX}/`) || route.startsWith(`${TEST_PREFIX_V2}/`)) {
+        const version=route.startsWith(`${TEST_PREFIX_V2}/`)?TEST_VERSION_V2:TEST_VERSION;
+        const local=route.slice((version===TEST_VERSION_V2?TEST_PREFIX_V2:TEST_PREFIX).length+1);
         let result;
-        if(request.method==='GET' && local==='capabilities')result=this.testCommunication.readiness(actor);
-        else if(request.method==='POST' && local==='receipts')result=this.testCommunication.write(actor,await jsonBody(request));
+        if(request.method==='GET' && local==='capabilities')result=this.testCommunication.readiness(actor,version);
+        else if(request.method==='POST' && local==='receipts')result=this.testCommunication.write(actor,await jsonBody(request),version);
         else if(request.method==='GET' && /^(?:receipts|fixtures)\/[A-Za-z0-9_.:-]+(?:\/download)?$/.test(local)) {
           const [kind,key,download]=local.split('/');
           result=kind==='receipts'?this.testCommunication.receipt(actor,key):this.testCommunication.readFixture(actor,key);
+          if(version===TEST_VERSION_V2)requireThat(kind==='receipts' && result.schema_version===TEST_VERSION_V2,404,'TEST_V2_RECEIPT_NOT_FOUND');
           if(download) {
             const content=kind==='receipts'?result.data.content:result.handoff?.instruction_md;
             requireThat(typeof content==='string',404,'TEST_DOWNLOAD_NOT_AVAILABLE');

@@ -4,6 +4,9 @@ import { digest, objectHash, exactKeys, id, requireThat, noSecrets, future } fro
 
 export const TEST_VERSION = 'ocean-test-communication/v1';
 export const TEST_PREFIX = 'test-communication/v1';
+export const TEST_VERSION_V2 = 'ocean-test-communication/v2';
+export const TEST_PREFIX_V2 = 'test-communication/v2';
+export const TERMINAL_CALLBACK_STATUSES = Object.freeze(['COMPLETED', 'ERROR', 'TIMEOUT', 'INCOMPLETE']);
 export const DECLARATION_SHA256 = 'sha256:37e87d8271b9e17b1a1efe50971ba757afa66abd252ce2a1141cfa2150cdd267';
 export const TEST_OPERATIONS = Object.freeze({
   'health.report': { roles: ['TELEMETRY'], scope: 'health.write' },
@@ -52,12 +55,13 @@ export class TestCommunication {
     const declared=JSON.parse(declaration.payload_json);
     requireThat(declared.strategy_id===fixture.payload.strategy_id && declared.instance_id===fixture.payload.instance_id,409,'TEST_DECLARATION_SCOPE_MISMATCH');
   }
-  readiness(actor) {
+  readiness(actor,version=TEST_VERSION) {
     const rows=this.db.prepare('SELECT * FROM ow_test_fixtures WHERE identity_id=? AND active=1').all(actor.id);
     const ready=rows.filter(row=>future(JSON.parse(row.payload_json).expires_at_utc));
-    return {version:TEST_VERSION,facility:'INSTALLED',scope_readiness:ready.length?'FIXTURE_PREPARED':'OPERATOR_FIXTURE_REQUIRED',
+    return {version,facility:'INSTALLED',scope_readiness:ready.length?'FIXTURE_PREPARED':'OPERATOR_FIXTURE_REQUIRED',
       active_fixtures:ready.map(row=>row.id),persisted_receipts:this.db.prepare('SELECT COUNT(*) AS n FROM ow_test_receipts WHERE identity_id=?').get(actor.id).n,
-      consumer_adoption:'NOT_ASSERTED',completed_analysis:'NOT_ASSERTED',...EXCLUSIONS};
+      consumer_adoption:'NOT_ASSERTED',completed_analysis:'NOT_ASSERTED',
+      terminal_callback_statuses:version===TEST_VERSION_V2?TERMINAL_CALLBACK_STATUSES:['COMPLETED'],...EXCLUSIONS};
   }
   readFixture(actor,key) {
     const fixture=this.fixture(key);this.authorize(actor,fixture,'read');
@@ -71,11 +75,12 @@ export class TestCommunication {
     requireThat(row.identity_id===actor.id,403,'TEST_WRONG_CALLER');
     return JSON.parse(row.receipt_json);
   }
-  write(actor,input) {
+  write(actor,input,version=TEST_VERSION) {
     exactKeys(input,['schema_version','message_id','declaration_sha256','strategy_id','instance_id','fixture_id','operation','data']);
-    requireThat(input.schema_version===TEST_VERSION,422,'TEST_SCHEMA_REQUIRED');
+    requireThat(input.schema_version===version && (version===TEST_VERSION || version===TEST_VERSION_V2),422,'TEST_SCHEMA_REQUIRED');
     id(input.message_id,true);
     requireThat(Object.hasOwn(TEST_OPERATIONS,input.operation),422,'TEST_OPERATION_UNKNOWN');
+    requireThat(version===TEST_VERSION || input.operation==='result.callback',422,'TEST_V2_CALLBACK_ONLY');
     const op=TEST_OPERATIONS[input.operation];
     const fixture=this.fixture(input.fixture_id);
     // Authorize before idempotency/conflict lookup: old receipts never bypass present trust.
@@ -98,6 +103,9 @@ export class TestCommunication {
         }
         return JSON.parse(previous.receipt_json);
       }
+      if(input.operation==='result.callback') {
+        requireThat(!this.db.prepare("SELECT id FROM ow_test_receipts WHERE fixture_id=? AND identity_id=? AND operation='result.callback' LIMIT 1").get(fixture.id,actor.id),409,'TEST_TERMINAL_CALLBACK_CONFLICT');
+      }
       const count=this.db.prepare('SELECT COUNT(*) AS n,COALESCE(SUM(byte_count),0) AS bytes FROM ow_test_receipts').get();
       requireThat(count.n<10000 && count.bytes+3*Buffer.byteLength(JSON.stringify(input))<64*1024*1024,429,'TEST_STORAGE_CAPACITY');
       requireThat(this.db.prepare('SELECT COUNT(*) AS n FROM ow_test_receipts WHERE fixture_id=?').get(fixture.id).n<1000,429,'TEST_FIXTURE_CAPACITY');
@@ -116,7 +124,8 @@ export class TestCommunication {
           requireThat(objectHash(data.correlation)===objectHash(fixture.payload.correlation),409,'TEST_CORRELATION_MISMATCH');break;
         case 'result.callback': {
           exactKeys(data,['correlation','result_receipt_id','result_sha256','status']);correlation(data.correlation);
-          requireThat(objectHash(data.correlation)===objectHash(fixture.payload.correlation) && data.status==='COMPLETED',409,'TEST_CORRELATION_MISMATCH');
+          requireThat(objectHash(data.correlation)===objectHash(fixture.payload.correlation),409,'TEST_CORRELATION_MISMATCH');
+          requireThat((version===TEST_VERSION_V2?TERMINAL_CALLBACK_STATUSES:['COMPLETED']).includes(data.status),422,'TEST_CALLBACK_STATUS_INVALID');
           this.resultReference(actor,fixture,data,'result.register');break;
         }
         default: {
@@ -130,7 +139,7 @@ export class TestCommunication {
           nextState=after;
         }
       }
-      const receipt={schema_version:TEST_VERSION,receipt_id:`test-receipt-${objectHash([actor.id,input.message_id]).slice(7)}`,
+      const receipt={schema_version:version,receipt_id:`test-receipt-${objectHash([actor.id,input.message_id]).slice(7)}`,
         caller_id:actor.id,audience:'Ocean workflow TEST',role:actor.role,scope:op.scope,fixture_id:fixture.id,message_id:input.message_id,
         declaration_sha256:DECLARATION_SHA256,strategy_id:input.strategy_id,instance_id:input.instance_id,operation:input.operation,
         payload_sha256:payloadHash,received_at_utc:new Date().toISOString(),persisted:true,state:nextState,data,...EXCLUSIONS};
