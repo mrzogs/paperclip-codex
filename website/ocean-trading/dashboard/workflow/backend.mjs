@@ -657,7 +657,7 @@ export class WorkflowBackend {
         this.auth.browserOrigin(request);
         requireThat(['127.0.0.1','::1','::ffff:127.0.0.1'].includes(request.socket.remoteAddress),403,'LOOPBACK_REQUIRED');
         const readiness=this.auth.readiness();
-        response.end(JSON.stringify({machine:this.maintenanceHealth?.state==='ERROR'?'DEGRADED':readiness.machine_readiness,human:this.auth.human.state,human_acceptance_due:readiness.human_acceptance_due,integrations:'PENDING',execution:'TEST_ONLY',ingestion:'OFF',maintenance:this.maintenanceHealth?.state || 'NOT_INSTALLED_ISOLATED'}));return true;
+        response.end(JSON.stringify({machine:this.maintenanceHealth?.state==='ERROR'?'DEGRADED':readiness.machine_readiness,human:this.auth.human.state,human_auth_method:readiness.human_auth_method,human_acceptance_due:readiness.human_acceptance_due,integrations:'PENDING',execution:'TEST_ONLY',ingestion:'OFF',maintenance:this.maintenanceHealth?.state || 'NOT_INSTALLED_ISOLATED'}));return true;
       }
       if (route === "session" && request.method === "POST") {
         const input = await jsonBody(request); response.end(JSON.stringify(this.auth.login(request, input, response))); return true;

@@ -26,7 +26,8 @@ if ($listeners.Count -and $Restart) {
   $state = Get-Content -LiteralPath $StateFile -Raw | ConvertFrom-Json
   if (@($listeners | Where-Object { $_.OwningProcess -ne $state.pid }).Count) { throw 'Port 3102 listener differs from protected website receipt.' }
   $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$($state.pid)"
-  if (-not $proc -or $proc.CommandLine -notmatch 'server\.mjs' -or $state.dashboard -ne $Dashboard) { throw 'Website process identity conflict.' }
+  $nodeNames = @('node.exe','node')
+  if (-not $proc -or $state.dashboard -ne $Dashboard -or $proc.Name -notin $nodeNames -or ($proc.CommandLine -and $proc.CommandLine -notmatch 'server\.mjs')) { throw 'Website process identity conflict.' }
   [IO.File]::WriteAllText($StopFile,($state | Select-Object pid,nonce | ConvertTo-Json -Compress))
   $deadline = (Get-Date).AddSeconds(35)
   while ((Get-Process -Id $state.pid -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }

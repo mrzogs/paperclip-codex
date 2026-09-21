@@ -180,9 +180,9 @@ try {
     if (Test-Path -LiteralPath $PendingPath) { throw 'Interrupted credential update. Run -Action Resume first.' }
     $state = if (Test-Path -LiteralPath $StatePath) { Decode-State $StatePath } else { $null }
     $password = $null
-    if ($Action -in @('Initialize','Reset-Password')) {
+    if ($Action -eq 'Reset-Password') {
       if ([Console]::IsInputRedirected) { throw 'Human secret entry requires the genuine protected interactive operator prompt.' }
-      $first = Read-Host 'New Ocean workflow password (14-256 characters)' -AsSecureString
+      $first = Read-Host 'New Ocean workflow password (6-256 characters)' -AsSecureString
       $second = Read-Host 'Confirm new password' -AsSecureString
       $p1 = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($first)
       $p2 = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($second)

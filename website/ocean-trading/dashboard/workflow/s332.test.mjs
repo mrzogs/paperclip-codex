@@ -4,7 +4,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { randomUUID } from 'node:crypto';
 import { prepareOperation, commitOperation } from './operator.mjs';
 import { setupOperation } from './setup-operator.mjs';
 import { WorkflowBackend } from './backend.mjs';
@@ -24,11 +23,10 @@ const request = task => ({ task_id: task, bundle_path: byTask.get(task).path, bu
 
 test('S33.2 isolated operator import and lifecycle dashboard projection', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ocean-s332-'));
-  const password = `isolated-${randomUUID()}`;
   let backend;
   const server = http.createServer((req, res) => backend.handle(req, res, new URL(req.url, `http://${req.headers.host}`)));
   try {
-    const plan = prepareOperation({ action: 'initialize', operator_id, root, password });
+    const plan = prepareOperation({ action: 'initialize', operator_id, root });
     commitOperation(plan);
     const state = plan.next;
     state.config.python_executable = process.env.OCEAN_TRADING_PYTHON || 'python';
@@ -67,10 +65,13 @@ test('S33.2 isolated operator import and lifecycle dashboard projection', async 
     const readiness = await call('readiness', { headers: { Origin: base } });
     assert.equal(readiness.status, 200);
     assert.equal(readiness.value.human_acceptance_due, 'S33.2');
+    assert.equal(readiness.value.human_auth_method, 'LOCAL_OPERATOR_ACCESS');
     assert.equal(readiness.value.execution, 'TEST_ONLY');
     assert.equal(readiness.value.ingestion, 'OFF');
 
-    const login = await call('session', { method: 'POST', headers: { Origin: base }, body: { credential: password } });
+    const wrong = await call('session', { method: 'POST', headers: { Origin: base }, body: { credential: 'not-local-access' } });
+    assert.equal(wrong.status, 401);
+    const login = await call('session', { method: 'POST', headers: { Origin: base }, body: { credential: '' } });
     assert.equal(login.status, 200);
     const cookie = login.headers.get('set-cookie').split(';')[0];
     const human = { Origin: base, Cookie: cookie, 'X-CSRF-Token': login.value.csrf_token };
