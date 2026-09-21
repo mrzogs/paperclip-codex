@@ -107,7 +107,7 @@ export class OceanAuth {
   readiness() {
     return { local_readiness: 'READY', integration_readiness: 'PENDING',
       machine_readiness: this.bindingErrors.size ? 'DEGRADED' : 'READY',
-      human_readiness: this.human.state, human_acceptance_due: 'S33',
+      human_readiness: this.human.state, human_acceptance_due: 'S33.2',
       pending_bindings: this.config.pending_services || [],
       bindings: this.config.identities.map(identity => ({ identity_id: identity.identity_id, role: identity.role,
         owner: identity.owner || identity.role, verification_only: identity.verification_only === true,

@@ -65,7 +65,7 @@ function signIn(message = '') {
   const status = document.createElement('p'); status.className='muted'; status.id='service-readiness';
   document.querySelector('#login h1').after(status);
   request('readiness').then(value => {
-    if(status.isConnected)status.textContent=`Services: ${human(value.machine)}. Human access: ${human(value.human)}. Ingestion: off.`;
+    if(status.isConnected)status.textContent=`Services: ${human(value.machine)}. Human access: ${human(value.human)}. Due: ${esc(value.human_acceptance_due || 'Not recorded')}. Ingestion: off.`;
   }).catch(()=>{if(status.isConnected)status.textContent='Service readiness unavailable.';});
 }
 function heading(title, subtitle = '', actions = '') {
@@ -87,12 +87,35 @@ function timeline(items) {
   if (!items.length) return empty('No history recorded.');
   return `<ol class='timeline'>${items.map(event => `<li><span class='timestamp'>${esc(date(event.created_at_utc))}</span><p><strong>${esc(human(event.action.replaceAll('.', ' ')))}</strong> <span class='muted'>${esc(event.entity_id)}</span></p><p>${esc(event.actor_id)} <span class='muted'>${esc(event.actor_role)}</span></p>${event.payload?.reason || event.payload?.note ? `<p>${esc(event.payload.reason || event.payload.note)}</p>` : ''}<details><summary>Recorded details</summary><pre>${esc(JSON.stringify(event.payload, null, 2))}</pre></details></li>`).join('')}</ol>`;
 }
+function providerPanel(data) {
+  const binding = data.provider_binding || {};
+  const operational = data.operational_readiness || {};
+  const current = binding.current_amended_provider || {};
+  const foundation = binding.immutable_machine_foundation || {};
+  const rows = (binding.historical_diagnostics || []).map(row => [
+    esc(row.task_id),
+    badge(row.status || 'NOT_IMPORTED'),
+    esc(row.diagnostic_preserved ? 'Preserved diagnostic' : row.task_id === 'S26.2' ? 'Replacement receipt' : 'Setup receipt'),
+    row.verified_bundle_sha256 ? hash(`sha256:${row.verified_bundle_sha256}`) : '<span class="muted">Not imported</span>',
+  ]);
+  const pending = (operational.pending_items || []).length ? table(['Pending item', 'Strategy', 'Kind', 'Created'], operational.pending_items.map(row => [esc(row.id), esc(row.strategy_id || 'Not recorded'), esc(row.kind), esc(date(row.created_at_utc))])) : empty('No pending operational dataset/profile records in this store.');
+  return section('Provider binding and setup receipts',
+    facts([
+      ['Current TEST provider', `${esc(current.task_id || 'S23.3')} ${badge(current.status || 'NOT_IMPORTED')}`],
+      ['Machine foundation', `${esc(foundation.task_id || 'S23.2')} ${badge(foundation.status || 'NOT_IMPORTED')}`],
+      ['Human access due', esc(data.human_acceptance_due || 'S33.2')],
+      ['Execution state', `TEST only; dispatch ${esc(data.dispatch_worker || 'OFF')}; ingestion ${esc(operational.normal_ingestion || 'OFF')}`],
+      ['Operational release', `Replay ${esc(operational.replay_enabled ? 'enabled' : 'disabled')}; Paper ${esc(operational.paper_forward_enabled ? 'enabled' : 'disabled')}; Live ${esc(operational.live_real || data.live_real || 'DISABLED')}`],
+      ['Persisted setup receipts', esc(binding.persisted_receipts_total ?? 0)],
+    ]) + table(['Task', 'Receipt state', 'Meaning', 'Bundle hash'], rows) + `<div class='section-heading'><h3>Pending operational records</h3><span class='muted'>S31.2 manifests remain proposed until later human release gates.</span></div>${pending}`,
+    `<span class='muted'>${esc(binding.receipt_order || 'Historical statuses preserved')}</span>`);
+}
 function pager(data) {
   return `<div class='pager'><span>${data.total ? data.offset + 1 : 0}-${Math.min(data.offset + data.page_size, data.total)} of ${data.total}</span><span class='spacer'></span><button class='icon' data-action='previous' title='Previous page' aria-label='Previous page' ${data.offset === 0 ? 'disabled' : ''}>${icon('chevron-left')}</button><button class='icon' data-action='next' title='Next page' aria-label='Next page' ${data.offset + data.page_size >= data.total ? 'disabled' : ''}>${icon('chevron-right')}</button></div>`;
 }
 function overview(data) {
   const count = data.counts;
-  return heading('Overview', 'Reviews, case progress and integration health') + `<div class='stats'>${[['Action required', count.action_required], ['Active cases', count.active_cases], ['Blocked / failed', count.blocked_cases], ['Active runs', count.active_runs], ['Pending sync', count.pending_sync]].map(([name, value], index) => `<div class='stat ${index === 0 || index === 2 ? 'attention' : ''}'><span>${esc(name)}</span><strong>${value}</strong></div>`).join('')}</div><div class='columns'><div>${section('Awaiting decisions', approvalTable(data.pending), `<span class='muted'>${count.pending_gates} pending gates / ${count.urgent_reviews} urgent reviews</span>`)}${section('Current cases', caseTable(data.cases), '<a data-route href="/improvement/cases">All cases</a>')}</div><div>${section('Integration health', data.health.length ? data.health.map(row => `<div class='list-row'><div class='row-head'><strong>${esc(row.provider_id)}</strong>${badge(row.stale ? 'STALE' : row.status)}</div><p>${esc(row.instance_id)}</p><p>${esc(row.next_action)}</p><p class='muted'>${esc(row.next_owner)} / ${esc(date(row.observed_at_utc))}</p></div>`).join('') : empty('No provider observations recorded.'))}<p class='muted'>Local access ready. Integrations pending S24 / S26 / S27 / S28. Dispatch off.</p>${section('Recent history', timeline(data.history), '<a data-route href="/improvement/history">All history</a>')}</div></div>`;
+  return heading('Overview', 'Reviews, case progress and integration health') + `<div class='stats'>${[['Action required', count.action_required], ['Active cases', count.active_cases], ['Blocked / failed', count.blocked_cases], ['Active runs', count.active_runs], ['Pending sync', count.pending_sync]].map(([name, value], index) => `<div class='stat ${index === 0 || index === 2 ? 'attention' : ''}'><span>${esc(name)}</span><strong>${value}</strong></div>`).join('')}</div>${providerPanel(data)}<div class='columns'><div>${section('Awaiting decisions', approvalTable(data.pending), `<span class='muted'>${count.pending_gates} pending gates / ${count.urgent_reviews} urgent reviews</span>`)}${section('Current cases', caseTable(data.cases), '<a data-route href="/improvement/cases">All cases</a>')}</div><div>${section('Integration health', data.health.length ? data.health.map(row => `<div class='list-row'><div class='row-head'><strong>${esc(row.provider_id)}</strong>${badge(row.stale ? 'STALE' : row.status)}</div><p>${esc(row.instance_id)}</p><p>${esc(row.next_action)}</p><p class='muted'>${esc(row.next_owner)} / ${esc(date(row.observed_at_utc))}</p></div>`).join('') : empty('No provider observations recorded.'))}<p class='muted'>Local access ready. Integrations pending S24.1 / S26.2 / S27.2 / S28.2. Dispatch off.</p>${section('Recent history', timeline(data.history), '<a data-route href="/improvement/history">All history</a>')}</div></div>`;
 }
 function strategyPage(data) {
   return heading(data.strategy_name, data.strategy_id, badge(data.activation_status) + button('prepare-run','Prepare run','', 'plus')) + facts([
