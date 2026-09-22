@@ -58,10 +58,11 @@ export class TestCommunication {
   readiness(actor,version=TEST_VERSION) {
     const rows=this.db.prepare('SELECT * FROM ow_test_fixtures WHERE identity_id=? AND active=1').all(actor.id);
     const ready=rows.filter(row=>future(JSON.parse(row.payload_json).expires_at_utc));
-    return {version,facility:'INSTALLED',scope_readiness:ready.length?'FIXTURE_PREPARED':'OPERATOR_FIXTURE_REQUIRED',
+    const response={version,facility:'INSTALLED',scope_readiness:ready.length?'FIXTURE_PREPARED':'OPERATOR_FIXTURE_REQUIRED',
       active_fixtures:ready.map(row=>row.id),persisted_receipts:this.db.prepare('SELECT COUNT(*) AS n FROM ow_test_receipts WHERE identity_id=?').get(actor.id).n,
-      consumer_adoption:'NOT_ASSERTED',completed_analysis:'NOT_ASSERTED',
-      terminal_callback_statuses:version===TEST_VERSION_V2?TERMINAL_CALLBACK_STATUSES:['COMPLETED'],...EXCLUSIONS};
+      consumer_adoption:'NOT_ASSERTED',completed_analysis:'NOT_ASSERTED',...EXCLUSIONS};
+    if(version===TEST_VERSION_V2)response.terminal_callback_statuses=TERMINAL_CALLBACK_STATUSES;
+    return response;
   }
   readFixture(actor,key) {
     const fixture=this.fixture(key);this.authorize(actor,fixture,'read');
