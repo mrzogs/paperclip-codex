@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { spawnSync } from 'node:child_process';
 import { WorkflowStore } from './store.mjs';
-import { issueOceanIdentity, passwordVerifier, humanBinding } from './auth.mjs';
+import { issueOceanIdentity, issueLocalBrowserSecret, passwordVerifier, humanBinding } from './auth.mjs';
 import { exactKeys, objectHash, digest, requireThat, ROLES } from './common.mjs';
 import { setupOperation } from './setup-operator.mjs';
 import { testFixtureOperation } from './test-communication.mjs';
@@ -26,14 +26,20 @@ export function prepareOperation({ action, state, password, request, operator_id
     revision: 0, config: { operator_managed: true, contract_release: '2.1.0', test_only: true,
       db_file: path.join(root, 'workflow.sqlite'), allowed_origins: ['http://localhost:3102', 'http://127.0.0.1:3102'],
       python_executable: 'C:\\Users\\wayne\\AppData\\Local\\Programs\\Python\\Python312\\python.exe',
-      browser: { state: 'UNENROLLED', subject_id: 'wayne-ocean-ui', credential_ref: 'OCEAN_WAYNE_PASSWORD_SECRET' },
+      browser: { state: 'UNENROLLED', subject_id: 'wayne-ocean-ui', credential_ref: 'OCEAN_WAYNE_BROWSER_SECRET' },
       identities: [], pending_services: PENDING, brain_submission: 'OFF', dispatch_worker: 'OFF', live_real: 'DISABLED' }, environment: {},
   };
   requireThat(next.config.db_file === path.join(root, 'workflow.sqlite'), 403, 'WORKFLOW_ROOT_CONFLICT');
   validateIdentityCapacity(next.config.identities);
   let identityId = action === 'bootstrap' ? 'ocean-machine-foundation' : 'wayne-ocean-ui';
   if (action === 'bootstrap') requireThat(!password && !request,422,'BOOTSTRAP_CANNOT_ENROLL_IDENTITIES');
-  else if (action === 'initialize' || action === 'reset-password') {
+  else if (action === 'initialize') {
+    const passwordMode = typeof password === 'string' && password.length > 0;
+    next.config.browser = { state:'CONFIGURED', subject_id:'wayne-ocean-ui', credential_ref:passwordMode ? 'OCEAN_WAYNE_PASSWORD_SECRET' : 'OCEAN_WAYNE_BROWSER_SECRET' };
+    if (passwordMode) next.environment[next.config.browser.credential_ref] = passwordVerifier(password);
+    else issueLocalBrowserSecret(next.environment, next.config.browser.credential_ref);
+  }
+  else if (action === 'reset-password') {
     next.config.browser = { state:'CONFIGURED', subject_id:'wayne-ocean-ui', credential_ref:'OCEAN_WAYNE_PASSWORD_SECRET' };
     next.environment[next.config.browser.credential_ref] = passwordVerifier(password);
   }

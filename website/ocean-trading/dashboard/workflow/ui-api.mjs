@@ -1,5 +1,6 @@
 import { requireThat, id } from './common.mjs';
 import { orderedSetup } from './setup-operator.mjs';
+import { operationalPolicy } from './operational-transition.mjs';
 
 export const UI_API_VERSION = 'ocean-workflow-ui/v1';
 const PAGE_SIZE = 50;
@@ -24,6 +25,20 @@ export function readWorkflowView(backend, actor, route) {
   const caseRow = (value) => ({ ...backend.readCase(actor, value.id), strategy_name: strategyName(value.strategy_id), priority: value.stage === 'ROLLBACK_REVIEW' ? 'URGENT_REVIEW' : null });
   const runRow = (value) => ({ ...backend.readRun(actor, value.id), strategy_name: strategyName(value.strategy_id) });
   const artifactRow = (value) => ({ artifact_id: value.id, case_id: value.case_id, kind: value.kind, producer_id: value.producer_id, recipient_id: value.recipient_id, candidate_hash: value.candidate_hash, dependency_ids: JSON.parse(value.dependencies_json), manifest: JSON.parse(value.manifest_json) });
+  const setupRows = () => orderedSetup(db.prepare('SELECT payload_json FROM ow_setup_receipts').all()).map(row => {
+    const receipt = parse(row);
+    const status = receipt.status || receipt.final_status || 'UNKNOWN';
+    const members = receipt.verified_members ? Object.keys(receipt.verified_members) : [];
+    return {
+      task_id: receipt.task_id,
+      status,
+      owner: receipt.owner || receipt.project || 'Not recorded',
+      classification: 'HISTORICAL_SETUP_NOT_APPROVAL',
+      verified_bundle_sha256: receipt.verified_bundle_sha256 || null,
+      verified_member_count: members.length,
+      diagnostic_preserved: ['S23', 'S23.1', 'S24', 'S26.1'].includes(receipt.task_id),
+    };
+  });
   const approvalRow = (value) => {
     backend.verifySnapshot(value);
     const row = backend.one('ow_cases', value.case_id);
@@ -54,7 +69,36 @@ export function readWorkflowView(backend, actor, route) {
       pending_sync: db.prepare("SELECT COUNT(*) AS n FROM ow_outbox WHERE state<>'ACKNOWLEDGED'").get().n,
     };
     const health = db.prepare('SELECT payload_json FROM ow_health ORDER BY rowid DESC LIMIT 50').all().map(row => { const data = parse(row); return { ...data, stale: Date.now() - Date.parse(data.observed_at_utc) > 120000 }; });
-    return { ...stamp, counts, pending: pending.slice(0, 10), cases: db.prepare("SELECT * FROM ow_cases WHERE stage<>'CLOSED' ORDER BY CASE WHEN work_status IN ('BLOCKED','FAILED') THEN 0 ELSE 1 END, rowid DESC LIMIT 10").all().map(caseRow), health, history: db.prepare('SELECT payload_json FROM ow_events ORDER BY id DESC LIMIT 12').all().map(row => parse(row)), ...backend.auth.readiness(), provider_binding: 'PENDING_FUTURE_CONSUMERS', dispatch_worker: 'OFF', brain_submission: 'OFF', live_real: 'DISABLED' };
+    const setup = setupRows();
+    const receipt = taskId => setup.find(row => row.task_id === taskId) || { task_id: taskId, status: 'NOT_IMPORTED', owner: 'Not recorded', classification: 'HISTORICAL_SETUP_NOT_APPROVAL', verified_bundle_sha256: null, verified_member_count: 0, diagnostic_preserved: ['S23', 'S23.1', 'S24', 'S26.1'].includes(taskId) };
+    const policy = operationalPolicy(backend.config);
+    const pendingOperational = backend.operational.pending(actor);
+    return {
+      ...stamp, counts, pending: pending.slice(0, 10),
+      cases: db.prepare("SELECT * FROM ow_cases WHERE stage<>'CLOSED' ORDER BY CASE WHEN work_status IN ('BLOCKED','FAILED') THEN 0 ELSE 1 END, rowid DESC LIMIT 10").all().map(caseRow),
+      health,
+      history: db.prepare('SELECT payload_json FROM ow_events ORDER BY id DESC LIMIT 12').all().map(row => parse(row)),
+      ...backend.auth.readiness(),
+      provider_binding: {
+        current_amended_provider: receipt('S23.3'),
+        immutable_machine_foundation: receipt('S23.2'),
+        persisted_receipts_total: setup.length,
+        historical_diagnostics: ['S23', 'S23.1', 'S24', 'S26.1', 'S26.2', 'S31.2', 'S32.2'].map(receipt),
+        receipt_order: 'setup-task-map sequence with literal amended IDs; diagnostics remain separate',
+      },
+      operational_readiness: {
+        schema_version: policy.schema_version,
+        replay_enabled: policy.modes.REPLAY.enabled,
+        paper_forward_enabled: policy.modes.PAPER_FORWARD.enabled,
+        live_real: policy.live_real,
+        normal_ingestion: policy.normal_ingestion,
+        future_owners: policy.future_owners,
+        pending_items: pendingOperational.items.slice(0, 10),
+        pending_total: pendingOperational.items.length,
+      },
+      setup_receipts: setup.slice(0, 12),
+      dispatch_worker: 'OFF', brain_submission: 'OFF', live_real: 'DISABLED',
+    };
   }
   const tables = { strategies: 'ow_strategies', cases: 'ow_cases', runs: 'ow_runs', approvals: 'ow_approval_requests', history: 'ow_events' };
   if (tables[collection] && (!key || key === 'page')) {

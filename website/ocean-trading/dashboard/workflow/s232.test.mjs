@@ -12,7 +12,7 @@ import {WorkflowBackend} from './backend.mjs';
 import {objectHash,digest} from './common.mjs';
 import {orderedSetup,setupOperation} from './setup-operator.mjs';
 
-const wrapper='D:\\Paperclip-codex\\scripts\\ocean-workflow-operator.ps1';
+const wrapper=path.resolve('scripts/ocean-workflow-operator.ps1');
 test('S23.2 isolated real HTTP/SQLite: independent human/machine lifecycle, scopes, faults and recovery',async()=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'ocean-s232-'));
   const operator_id='S-1-5-21-1000';let state;let backend;
@@ -131,14 +131,15 @@ test('S23.2 isolated protected receipt import and actual browser history project
   }finally{await browser?.close();await new Promise(resolve=>server.close(resolve));backend.close();assert.ok(root.startsWith(os.tmpdir()));fs.rmSync(root,{recursive:true,force:true});}
 });
 
-test('S23.2 Windows non-interactive DPAPI bootstrap is idempotent and human setup cannot consume redirected stdin',()=>{
+test('S23.2 Windows non-interactive DPAPI bootstrap is idempotent and local human setup needs no redirected stdin',()=>{
   const root=path.join(os.tmpdir(),`ocean-s232-${randomUUID()}`);
   const call=(action,args=[])=>spawnSync('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',wrapper,'-Root',root,'-Action',action,...args],{input:'',encoding:'utf8',windowsHide:true,timeout:30000});
   try{
     assert.equal(call('Bootstrap').status,0);
     const first=fs.readFileSync(path.join(root,'operator-state.dpapi'));assert.equal(call('Bootstrap').status,0);assert.deepEqual(fs.readFileSync(path.join(root,'operator-state.dpapi')),first);
     const status=call('Status');assert.equal(status.status,0);assert.equal(JSON.parse(status.stdout).browser.state,'UNENROLLED');
-    assert.equal(call('Maintenance').status,0);assert.notEqual(call('Initialize').status,0);
+    assert.equal(call('Maintenance').status,0);assert.equal(call('Initialize').status,0);
+    assert.equal(JSON.parse(call('Status').stdout).browser.state,'CONFIGURED');
     assert.ok(!status.stdout.includes('ocean_password_v1.'));
     const proof=path.join(root,'isolated-owner.md');fs.writeFileSync(proof,'S23.2 isolated owner fixture');
     const requestFile=path.join(root,'request.json');fs.writeFileSync(requestFile,JSON.stringify({identity_id:'test-s232-native',role:'TELEMETRY',namespace:'TEST',credential_ref:'OCEAN_S232_NATIVE_TOKEN',strategy_ids:['test_s232_native'],instance_ids:['test-s232-native'],scopes:['read'],expires_at_utc:new Date(Date.now()+300000).toISOString(),owner:'S23.2 isolated native test',evidence_path:proof,evidence_sha256:digest(fs.readFileSync(proof)).slice(7),verification_only:true}));

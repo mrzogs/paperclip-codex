@@ -23,7 +23,7 @@ export function issueOceanIdentity(identity, environment, expiresAtUtc) {
 }
 
 export function passwordVerifier(password) {
-  requireThat(typeof password === "string" && password.length >= 14 && password.length <= 256, 422, "PASSWORD_LENGTH_14_TO_256_REQUIRED");
+  requireThat(typeof password === "string" && password.length >= 6 && password.length <= 256, 422, "PASSWORD_LENGTH_6_TO_256_REQUIRED");
   const salt = randomBytes(16).toString("hex");
   return `ocean_password_v1.${salt}.${scryptSync(password, salt, 32).toString("hex")}`;
 }
@@ -32,20 +32,28 @@ export function humanBinding(config, environment) {
   if (config.browser?.state === 'UNENROLLED') return { state: 'UNENROLLED', hash: null };
   const ref = config.browser?.credential_ref;
   const secret = environment[ref];
+  const passwordSecret = /^ocean_password_v1\.[a-f0-9]{32}\.[a-f0-9]{64}$/.test(secret || '');
+  const localBrowserSecret = typeof secret === 'string' && secret.startsWith('ocean_browser_v1.');
   const valid = config.browser?.subject_id === 'wayne-ocean-ui' && /^OCEAN_[A-Z0-9_]+_SECRET$/.test(ref || '') &&
-    typeof secret === 'string' && (/^ocean_password_v1\.[a-f0-9]{32}\.[a-f0-9]{64}$/.test(secret) || (!config.operator_managed && secret.startsWith('ocean_browser_v1.')));
-  return valid ? { state: 'CONFIGURED', hash: digest(secret) } : { state: 'ERROR', hash: null };
+    typeof secret === 'string' && (passwordSecret || localBrowserSecret);
+  return valid ? { state: 'CONFIGURED', hash: digest(secret), method: passwordSecret ? 'PASSWORD' : 'LOCAL_OPERATOR_ACCESS' } : { state: 'ERROR', hash: null, method: null };
 }
 
 function matchesBrowserCredential(input, stored) {
+  if (stored?.startsWith("ocean_browser_v1.")) return input === "" || equalSecret(input, stored);
   if (!stored?.startsWith("ocean_password_v1.")) return equalSecret(input, stored);
   const [, salt, hash] = stored.split(".");
   return equalSecret(scryptSync(input, salt, 32).toString("hex"), hash);
 }
 
-export function issueTestBrowserSecret(environment, reference) {
+export function issueLocalBrowserSecret(environment, reference) {
   requireThat(/^OCEAN_[A-Z0-9_]+_SECRET$/.test(reference), 422, "OCEAN_SECRET_REFERENCE_REQUIRED");
   environment[reference] = `ocean_browser_v1.${randomBytes(32).toString("base64url")}`;
+  return environment[reference];
+}
+
+export function issueTestBrowserSecret(environment, reference) {
+  return issueLocalBrowserSecret(environment, reference);
 }
 
 export class OceanAuth {
@@ -107,7 +115,7 @@ export class OceanAuth {
   readiness() {
     return { local_readiness: 'READY', integration_readiness: 'PENDING',
       machine_readiness: this.bindingErrors.size ? 'DEGRADED' : 'READY',
-      human_readiness: this.human.state, human_acceptance_due: 'S33',
+      human_readiness: this.human.state, human_auth_method: this.human.method || null, human_acceptance_due: 'S33.2',
       pending_bindings: this.config.pending_services || [],
       bindings: this.config.identities.map(identity => ({ identity_id: identity.identity_id, role: identity.role,
         owner: identity.owner || identity.role, verification_only: identity.verification_only === true,
