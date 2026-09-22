@@ -45,6 +45,9 @@ function setup() {
 test('Nonphysical durable receipts, duplicates/conflicts, strict scopes, restart and no factual registration',()=>{
   const a=setup();try{
     const t=a.backend.testCommunication,actor=a.actors.TELEMETRY.actor;
+    const capabilities=t.readiness(actor,TEST_VERSION);
+    assert.equal(capabilities.version,TEST_VERSION);
+    assert.equal(Object.hasOwn(capabilities,'terminal_callback_statuses'),false);
     const body=a.input('TELEMETRY','health.report',{status:'READY',next_owner:'Ocean',next_action:'Synthetic only'});
     const first=t.write(actor,body);assert.equal(first.payload_sha256,objectHash(body));assert.deepEqual(t.write(actor,body),first);
     assert.deepEqual(t.receipt(actor,first.receipt_id),first);
