@@ -143,11 +143,12 @@ git push <fork-remote> "${UPSTREAM_REMOTE}/master:master"
 
 ### Step 1 — Read the canonical files
 
-You MUST read all three of these files before creating a PR:
+You MUST read both of these files before creating a PR:
 
 1. **`.github/PULL_REQUEST_TEMPLATE.md`** — the required PR body structure
 2. **`CONTRIBUTING.md`** — contribution conventions, PR requirements, and thinking-path examples
-3. **`.github/workflows/pr.yml`** — CI checks that gate merge
+
+Validation is local-only. Run the checks required by `AGENTS.md` and record the commands and results in the PR body.
 
 ### Step 2 — Validate your PR body against this checklist
 

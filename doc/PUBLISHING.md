@@ -164,36 +164,29 @@ Stable publishes do not create a release commit. Instead:
 - packages are published from the chosen source commit
 - git tag `vYYYY.MDD.P` points at that original commit
 
-## Trusted publishing
+## Publishing authentication
 
-The intended CI model is npm trusted publishing through GitHub OIDC.
+Publishing is a local maintainer operation. Authenticate immediately before a release with `npm login` or a short-lived credential supplied through the maintainer's local environment. Never commit or store an npm credential in this repository.
 
-That means:
-
-- no long-lived `NPM_TOKEN` in repository secrets
-- GitHub Actions obtains short-lived publish credentials
-- trusted publisher rules are configured per workflow file
-
-See [doc/RELEASE-AUTOMATION-SETUP.md](RELEASE-AUTOMATION-SETUP.md) for the GitHub/npm setup steps.
+See [doc/LOCAL-RELEASE-SETUP.md](LOCAL-RELEASE-SETUP.md) for the local release setup.
 
 ## Release enrollment for new public packages
 
-Paperclip does not auto-publish every non-private workspace package anymore.
-CI publishing is controlled by [`scripts/release-package-manifest.json`](../scripts/release-package-manifest.json).
+Paperclip does not publish every non-private workspace package.
+Release publishing is controlled by [`scripts/release-package-manifest.json`](../scripts/release-package-manifest.json).
 
 When you add a new public package:
 
-1. add it to the manifest and decide whether CI should publish it immediately
-2. if CI should publish it, bootstrap the package on npm before merge
-3. if CI should not publish it yet, keep `"publishFromCi": false`
-4. only enable `"publishFromCi": true` after npm trusted publishing is configured for that package
+1. add it to the manifest and decide whether the release script should publish it immediately
+2. if it should publish, bootstrap the package on npm before merge
+3. if it should not publish yet, keep `"publishFromCi": false`
+4. only enable `"publishFromCi": true` after the package has been bootstrapped and local publish access has been verified
 
-PR CI now checks changed release-enabled package manifests against npm. That catches a missing first-publish bootstrap before the change reaches `master`.
+Run `pnpm test:release-registry` locally after changing release-enabled package manifests. That catches a missing first-publish bootstrap before the change reaches `master`.
 
 ### One-time bootstrap sequence for a new package
 
-The first publish of a brand-new package still needs one human maintainer with npm write access.
-After that, trusted publishing can take over.
+The first publish of a brand-new package needs one human maintainer with npm write access. Later canary and stable publishes use the same local maintainer process.
 
 Example for `@paperclipai/adapter-acpx-local` from the repo root:
 
@@ -214,19 +207,16 @@ The helper script:
 
 For the real `--publish` step, the maintainer machine must already be authenticated to npm.
 If `npm whoami` returns `401`, first run `npm logout --registry=https://registry.npmjs.org/` to clear any stale local auth, then run `npm login` or `npm adduser` locally as an npm org member, and finally rerun the helper.
-That local human auth is fine for the one-time bootstrap publish; we just do not want the same auth model inside CI.
+Use local human authentication for the bootstrap and later releases, and never store that credential in the repository.
 The helper now requires `--otp <code>` up front for `--publish`, so it fails before the real publish attempt if the one-time password is missing.
 
 After that first publish succeeds:
 
-1. open `https://www.npmjs.com/package/@paperclipai/adapter-acpx-local`
-2. go to `Settings` → `Trusted publishing`
-3. add repository `paperclipai/paperclip`
-4. set workflow filename to `release.yml`
-5. optionally go to `Settings` → `Publishing access` and enable `Require two-factor authentication and disallow tokens`
-6. keep `publishFromCi: true` in [`scripts/release-package-manifest.json`](../scripts/release-package-manifest.json)
+1. verify the package with `npm view @paperclipai/adapter-acpx-local version`
+2. optionally enable `Require two-factor authentication and disallow tokens` in the package's npm publishing settings
+3. keep `publishFromCi: true` in [`scripts/release-package-manifest.json`](../scripts/release-package-manifest.json); the field name is retained for manifest compatibility and is honored by the local release scripts
 
-Once those steps are done, future canary and stable publishes for that package are automated through GitHub OIDC. The manual step is only the first package creation on npm.
+Future canary and stable publishes for that package remain explicit local maintainer operations.
 
 ## Rollback model
 

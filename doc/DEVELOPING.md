@@ -17,11 +17,11 @@ Current implementation status:
 
 ## Dependency Lockfile Policy
 
-GitHub Actions owns `pnpm-lock.yaml`.
+The developer changing dependency manifests owns `pnpm-lock.yaml`.
 
-- Do not commit `pnpm-lock.yaml` in pull requests.
-- Pull request CI validates dependency resolution when manifests change.
-- Pushes to `master` regenerate `pnpm-lock.yaml` with `pnpm install --lockfile-only --no-frozen-lockfile`, commit it back if needed, and then run verification with `--frozen-lockfile`.
+- Regenerate it locally with `pnpm install --lockfile-only --no-frozen-lockfile` whenever dependency manifests change.
+- Commit the resulting lockfile with the manifest change.
+- Verify the committed result locally with `pnpm install --frozen-lockfile` before hand-off.
 
 ## Start Dev
 
@@ -120,7 +120,7 @@ pnpm test:e2e
 pnpm test:release-smoke
 ```
 
-These browser suites are intended for targeted local verification and CI, not the default agent/human test command.
+These browser suites are intended for targeted local verification, not the default agent/human test command.
 
 For normal issue work, start with the smallest targeted check that proves the change. Reserve repo-wide typecheck/build/test runs for PR-ready handoff or changes broad enough that narrow checks do not cover the risk.
 
@@ -498,13 +498,13 @@ only), `assets` (other non-script files), or `scripts_executables` (any
 executable script). The build contract is documented in
 `doc/plans/2026-05-26-skills-cli-catalog-contract.md`.
 
-CI runs `pnpm --filter @paperclipai/skills-catalog validate` and the package's
-vitest suite, so always regenerate the manifest in the same commit as the
-catalog change.
+Run `pnpm --filter @paperclipai/skills-catalog validate` and the package's
+vitest suite locally, and always regenerate the manifest in the same commit as
+the catalog change.
 
 ## App-Shipped Teams Catalog
 
-The team catalog package mirrors the skills catalog workflow for
+The team catalog package mirrors the skills catalog process for
 agentcompanies/v1 team packages:
 
 ```text
