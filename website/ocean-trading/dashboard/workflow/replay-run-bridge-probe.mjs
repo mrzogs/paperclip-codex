@@ -56,7 +56,7 @@ function discoverRun(config) {
   }
 }
 
-function telemetry(config) {
+function telemetry(config, expectedRunId) {
   if (!fs.existsSync(config.telemetry_db)) return { verified: false, reason: 'TELEMETRY_DB_MISSING' };
   const db = new DatabaseSync(config.telemetry_db, { readOnly: true, timeout: 2000 });
   try {
@@ -75,6 +75,7 @@ function telemetry(config) {
       && account?.trade_account === config.account_alias
       && Number(account?.is_simulated) === 1
       && replay?.strategy_id === config.strategy_id
+      && replay?.run_id === expectedRunId
       && replay?.strategy_version === config.expected_strategy_version
       && replay?.instance_role === 'replay'
       && instance?.instance_role === 'replay'
@@ -105,11 +106,12 @@ function telemetry(config) {
 
 try {
   const config = readConfig(process.argv[2]);
+  const run = discoverRun(config);
   console.log(JSON.stringify({
     schema_version: CONFIG_SCHEMA,
     observed_at_utc: new Date().toISOString(),
-    run: discoverRun(config),
-    telemetry: telemetry(config),
+    run,
+    telemetry: telemetry(config, run?.id || null),
   }));
 } catch (error) {
   console.error(JSON.stringify({ status: 'BLOCKED', error: /^[A-Z0-9_]+$/.test(error.message) ? error.message : 'PROBE_FAILED' }));

@@ -31,7 +31,7 @@ function createFixture() {
       CREATE TABLE instrument_snapshot (instrument_snapshot_id INTEGER PRIMARY KEY, symbol TEXT);
       INSERT INTO instrument_snapshot VALUES (1, 'MNQM25_FUT_CME');
       CREATE TABLE replay_runs (run_id TEXT, created_utc TEXT, strategy_id TEXT, instance_role TEXT, strategy_version TEXT);
-      INSERT INTO replay_runs VALUES ('replay-1', '2026-10-01T09:22:26Z', 'cicd-vwap-pull-back-strategy', 'replay', 'v0.6.228');
+      INSERT INTO replay_runs VALUES ('test-run-1', '2026-10-01T09:22:26Z', 'cicd-vwap-pull-back-strategy', 'replay', 'v0.6.228');
       CREATE TABLE sierra_instance (instance_id TEXT, last_seen_utc TEXT, instance_role TEXT, sierra_exe_path TEXT);
       CREATE TABLE fills (id INTEGER, run_id TEXT);
       CREATE TABLE orders (id INTEGER, run_id TEXT);
@@ -107,6 +107,24 @@ test('probe rejects telemetry from a different MNQ contract', t => {
 
   const output = execFileSync(process.execPath, [probe, fixture.configFile], { encoding: 'utf8' });
   const result = JSON.parse(output);
+  assert.equal(result.telemetry.verified, false);
+  assert.equal(result.telemetry.reason, 'TELEMETRY_BINDING_NOT_VERIFIED');
+});
+
+test('probe rejects a stale logger context from a different Ocean run', t => {
+  const fixture = createFixture();
+  t.after(() => {
+    assert.ok(path.resolve(fixture.directory).startsWith(path.resolve(os.tmpdir())));
+    fs.rmSync(fixture.directory, { recursive: true, force: true });
+  });
+  const telemetry = new DatabaseSync(fixture.telemetryDb);
+  telemetry.exec("UPDATE replay_runs SET run_id='test-run-stale'");
+  telemetry.close();
+
+  const output = execFileSync(process.execPath, [probe, fixture.configFile], { encoding: 'utf8' });
+  const result = JSON.parse(output);
+  assert.equal(result.run.id, 'test-run-1');
+  assert.equal(result.telemetry.replay_run_id, 'test-run-stale');
   assert.equal(result.telemetry.verified, false);
   assert.equal(result.telemetry.reason, 'TELEMETRY_BINDING_NOT_VERIFIED');
 });
