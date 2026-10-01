@@ -48,7 +48,7 @@ Wayne approved the separate predecessor baseline rooted at published commit
 `69a7243e62e2af3633c0a4fc981402ab0c54d644`. This feature targets `develop`, not
 local main's unpublished unrelated Brain history. The existing operational
 checkout is not switched or deployed from this temporary delivery worktree.
-GitHub Actions are suppressed during publication. This PR must not be merged
+Hosted automation is disabled during publication. This PR must not be merged
 as part of S23.3.
 
 Patch exports must use explicit newline handling and be application-tested

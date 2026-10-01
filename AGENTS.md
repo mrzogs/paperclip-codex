@@ -124,7 +124,9 @@ pnpm test:e2e
 pnpm test:release-smoke
 ```
 
-Run the browser suites only when your change touches them or when you are explicitly verifying CI/release flows.
+Run the browser suites only when your change touches them or when you are explicitly verifying release flows.
+
+This repository uses local-only validation. Do not add remote workflow definitions or dispatch hosted automation. Record the exact local commands and results in the pull request instead.
 
 For normal issue work, run the smallest relevant verification first. Do not default to repo-wide typecheck/build/test on every heartbeat when a narrower check is enough to prove the change.
 

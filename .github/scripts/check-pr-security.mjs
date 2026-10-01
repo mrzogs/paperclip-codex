@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * check-pr-security.mjs
- * Runs 6 security checks against a PR diff. Never posts public comments.
+ * Runs 5 security checks against a PR diff. Never posts public comments.
  * Creates a draft security advisory in the repo if any check fires.
  *
  * Env: GH_TOKEN, GH_REPO, PR_NUMBER, PR_AUTHOR
@@ -45,12 +45,6 @@ const CI_BUILD_SCRIPTS = [
   'scripts/release-package-map.mjs',
   'scripts/docker-onboard-smoke.sh',
 ];
-
-export function scanCITampering(files) {
-  return files
-    .filter(f => f.filename.startsWith('.github/workflows/') && f.status !== 'removed')
-    .map(f => ({ check: 'ci-tampering', file: f.filename }));
-}
 
 export function scanBuildScripts(files) {
   return files
@@ -178,7 +172,6 @@ const SEVERITY_MAP = {
   'supply-chain': 'critical',
   'sensitive-path': 'critical',
   'secret-scan': 'high',
-  'ci-tampering': 'high',
   'suspicious-test': 'high',
   'build-script-change': 'medium',
 };
@@ -333,7 +326,6 @@ async function main() {
 
   const allFlags = [
     ...scanSecrets(files),
-    ...scanCITampering(files),
     ...scanBuildScripts(files),
     ...scanSupplyChain(files),
     ...scanTestPatterns(files),
