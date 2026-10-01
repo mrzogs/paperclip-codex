@@ -769,7 +769,7 @@ const foldCurtainLongMarkdown = [
   "",
   "1. Land the runner with support for 3 task types.",
   "2. Backfill 50 tasks from open-source benchmarks.",
-  "3. Wire the scorer to GitHub Actions.",
+  "3. Add the scorer to the local validation suite.",
   "4. Publish baseline numbers on the main branch.",
   "",
   "All of this is described in more detail in the design doc linked from the home page.",

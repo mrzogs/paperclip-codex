@@ -5,7 +5,6 @@ import {
   findExistingDraftAdvisory,
   postSecurityCheckRun,
   scanSecrets,
-  scanCITampering,
   scanBuildScripts,
   scanSupplyChain,
   scanTestPatterns,
@@ -33,23 +32,6 @@ test('scanSecrets: ignores removed lines', () => {
 
 test('scanSecrets: ignores files without patch', () => {
   assert.equal(scanSecrets([{ filename: 'large-file.ts' }]).length, 0);
-});
-
-// ── scanCITampering ──────────────────────────────────────────────────────────
-
-test('scanCITampering: flags workflow file changes', () => {
-  const files = [{ filename: '.github/workflows/pr.yml', status: 'modified' }];
-  assert.ok(scanCITampering(files).length > 0);
-});
-
-test('scanCITampering: ignores non-workflow files', () => {
-  const files = [{ filename: 'src/foo.ts', status: 'modified' }];
-  assert.equal(scanCITampering(files).length, 0);
-});
-
-test('scanCITampering: ignores removed workflow files', () => {
-  const files = [{ filename: '.github/workflows/old.yml', status: 'removed' }];
-  assert.equal(scanCITampering(files).length, 0);
 });
 
 // ── scanBuildScripts ─────────────────────────────────────────────────────────
@@ -126,14 +108,14 @@ test('findExistingDraftAdvisory: returns matching draft advisory from paginated 
       return Array.from({ length: 100 }, (_, i) => ({ summary: `Unrelated advisory ${i}` }));
     }
     if (/[?&]page=2(?:&|$)/.test(path)) {
-      return [{ summary: '🚨 Security flag — PR #6469: ci-tampering' }];
+      return [{ summary: '🚨 Security flag — PR #6469: build-script-change' }];
     }
     return [];
   };
 
   const advisory = await findExistingDraftAdvisory(fakeFetch, 'token', 'paperclipai/paperclip', 6469);
 
-  assert.deepEqual(advisory, { summary: '🚨 Security flag — PR #6469: ci-tampering' });
+  assert.deepEqual(advisory, { summary: '🚨 Security flag — PR #6469: build-script-change' });
   assert.equal(calls.length, 2);
 });
 
@@ -146,14 +128,14 @@ test('findExistingDraftAdvisory: returns null when no matching draft advisory ex
 test('syncDraftAdvisory: patches an existing advisory with the latest flags', async () => {
   const calls = [];
   const flags = [
-    { check: 'ci-tampering', file: '.github/workflows/pr.yml' },
+    { check: 'build-script-change', file: 'scripts/release.sh' },
     { check: 'secret-scan', file: 'src/config.ts', pattern: 'OpenAI API key' },
   ];
 
   await syncDraftAdvisory(async (path, token, options) => {
     calls.push({ path, token, options });
     if (path.includes('/security-advisories?state=draft')) {
-      return [{ ghsa_id: 'GHSA-test-1234', summary: '🚨 Security flag — PR #6469: ci-tampering' }];
+      return [{ ghsa_id: 'GHSA-test-1234', summary: '🚨 Security flag — PR #6469: build-script-change' }];
     }
     return { ok: true };
   }, 'token', 'paperclipai/paperclip', 6469, 'My PR', flags);

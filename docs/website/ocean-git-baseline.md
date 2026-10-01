@@ -22,6 +22,6 @@ their established locations. They must never be committed as source.
 
 S23.3 is a subsequent, separate feature commit and PR into this baseline's
 `develop`. Neither branch promotion nor merging is implied by that receipt.
-GitHub Actions must be suppressed for the approved delivery and its prior
+Hosted automation must remain disabled for the approved delivery and its prior
 setting recorded and restored after publication. Tests run locally against the
 exact selected code; no cloud CI pass may be fabricated.

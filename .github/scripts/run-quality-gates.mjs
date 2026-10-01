@@ -21,7 +21,7 @@ const COMMENT_SIGNATURE = '— commitperclip';
 
 function buildComment(author, failures, informational) {
   if (failures.length === 0 && informational.length === 0) {
-    return `✅ All checks passing — ready for Greptile review and maintainer approval.\n\n${COMMENT_SIGNATURE}`;
+    return `✅ All local checks passing — ready for maintainer review.\n\n${COMMENT_SIGNATURE}`;
   }
 
   const lines = [
@@ -40,7 +40,7 @@ function buildComment(author, failures, informational) {
   }
 
   lines.push(
-    '\nOnce updated, push a new commit and these checks will re-run automatically.\n',
+    '\nOnce updated, rerun the local quality-gate command and record the result.\n',
     COMMENT_SIGNATURE
   );
 
@@ -117,7 +117,7 @@ async function main() {
       Promise.resolve(checkLinkedIssue(prBody, prTitle)),
       Promise.resolve(checkDedupSearch(prBody, prTitle)),
       Promise.resolve(checkTestCoverage(files, prTitle)),
-      Promise.resolve(checkLockfile(files, author, branch)),
+      Promise.resolve(checkLockfile(files)),
       checkDependencies(files, GH_TOKEN, GH_REPO, prNumber, pr.base?.ref),
     ]);
 
