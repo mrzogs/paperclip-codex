@@ -4050,6 +4050,7 @@ function renderPaperDashboard(paper) {
   const separation = paper.separation || {};
   const otherPaper = separation.otherStrategies || {};
   const manualPaper = separation.manual || {};
+  const projectTelemetry = paper.projectTelemetry || {};
   return `
     <div class="journal-toolbar">
       <span>Account: ${escapeHtml(paper.account || "Sim1")}</span>
@@ -4071,6 +4072,24 @@ function renderPaperDashboard(paper) {
       ${summaryTile("Other paper strategy fills", otherPaper.trades?.length || 0, otherPaper.trades?.length ? "warn" : "good")}
       ${summaryTile("Manual paper fills", manualPaper.trades?.length || 0, manualPaper.trades?.length ? "warn" : "good")}
     </div>
+    <h2>Current Project Strategy Telemetry</h2>
+    <p class="section-note">This is the isolated VWAP Pullback Paper runtime status. It does not replace or add rows to the Paper calendar and ledger.</p>
+    <div class="tile-grid">
+      ${summaryTile("VWAP Paper status", humanizeStatus(projectTelemetry.status || "missing"), projectTelemetry.healthy ? "good" : "warn")}
+      ${summaryTile("Account", projectTelemetry.account || "n/a", projectTelemetry.account === "Sim1" ? "good" : "warn")}
+      ${summaryTile("Mode", projectTelemetry.isSimulated ? "Simulation" : "Unknown", projectTelemetry.isSimulated ? "good" : "warn")}
+      ${summaryTile("Symbol", projectTelemetry.symbol || "n/a")}
+      ${summaryTile("Logger", projectTelemetry.loggerVersion || "n/a", projectTelemetry.loggerVersion ? "good" : "warn")}
+      ${summaryTile("Orders / fills / trades", `${projectTelemetry.counts?.orders ?? 0} / ${projectTelemetry.counts?.fills ?? 0} / ${projectTelemetry.counts?.trades ?? 0}`)}
+    </div>
+    ${keyValueTable([
+      ["Dedicated instance", projectTelemetry.instanceName || "n/a"],
+      ["Latest telemetry UTC", projectTelemetry.latestSnapshotUtc || "n/a"],
+      ["Telemetry age", projectTelemetry.ageSeconds === null || projectTelemetry.ageSeconds === undefined ? "n/a" : `${projectTelemetry.ageSeconds} seconds`],
+      ["Status warning", projectTelemetry.warning || "none"],
+      ["Isolation", projectTelemetry.isolation || "Status only; the existing Paper ledger remains authoritative."],
+      ["Dedicated telemetry DB", projectTelemetry.sqliteFile || "n/a"],
+    ])}
     <h2>Paper Account Size Source</h2>
     ${keyValueTable([
       ["Account monitor account", accountSize.account],

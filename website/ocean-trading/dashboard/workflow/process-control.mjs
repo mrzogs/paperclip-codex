@@ -10,8 +10,10 @@ export function installWebsiteControl(server, dashboard, workflowReady) {
   const receipt = path.join(root, 'website-process.json');
   const stop = path.join(root, 'website-stop.json');
   const source = fs.readFileSync(path.join(dashboard, 'server.mjs'));
-  const state = { pid: process.pid, nonce, dashboard, started_at_utc: new Date().toISOString(), server_sha256: createHash('sha256').update(source).digest('hex'), workflow_ready: workflowReady };
-  server.once('listening', () => fs.writeFileSync(receipt, JSON.stringify(state)));
+  const readWorkflowReady = () => Boolean(typeof workflowReady === 'function' ? workflowReady() : workflowReady);
+  const state = { pid: process.pid, nonce, dashboard, started_at_utc: new Date().toISOString(), server_sha256: createHash('sha256').update(source).digest('hex'), workflow_ready: readWorkflowReady() };
+  const writeState = () => fs.writeFileSync(receipt, JSON.stringify(state));
+  server.once('listening', writeState);
   let stopping = false;
   function shutdown() {
     if (stopping) return;
@@ -26,6 +28,11 @@ export function installWebsiteControl(server, dashboard, workflowReady) {
       const request = JSON.parse(fs.readFileSync(stop, 'utf8'));
       if (request.pid === process.pid && request.nonce === nonce) { fs.unlinkSync(stop); shutdown(); }
     } catch { /* No matching protected stop request. */ }
+    const ready = readWorkflowReady();
+    if (state.workflow_ready !== ready) {
+      state.workflow_ready = ready;
+      writeState();
+    }
   }, 500);
   timer.unref();
   process.once('SIGINT', shutdown);
