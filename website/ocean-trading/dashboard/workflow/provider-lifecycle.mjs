@@ -13,7 +13,7 @@ export function identityProjection(identity) {
   return { id: identity.identity_id, role: identity.role, namespace: identity.namespace,
     audience: identity.audience, scopes: identity.scopes || ROLES[identity.role], strategy_ids: identity.strategy_ids,
     instance_ids: identity.instance_ids, factual_binding_hash: identity.factual_binding_hash ?? null,
-    credential_version: identity.credential_version || 1, expires_at_utc: identity.expires_at_utc };
+    credential_version: identity.credential_version || 1, expires_at_utc: new Date(identity.expires_at_utc).toISOString() };
 }
 export function identityReadback(config, actor, namespace) {
   requireThat(actor.role !== 'HUMAN' && actor.namespace === namespace, 403, 'IDENTITY_NAMESPACE_MISMATCH');
@@ -24,8 +24,9 @@ export function identityReadback(config, actor, namespace) {
     operational_ingestion: 'OFF', live_real: 'DISABLED', approval_authority: false };
 }
 export function validateIdentityProbe(result, identity) {
+  const observedIdentity = result?.identity ? { ...result.identity, expires_at_utc: new Date(result.identity.expires_at_utc).toISOString() } : null;
   requireThat(result?.schema_version === 'ocean-service-identity/v1' &&
-    objectHash(result.identity) === objectHash(identityProjection(identity)) &&
+    objectHash(observedIdentity) === objectHash(identityProjection(identity)) &&
     result.operational_ingestion === 'OFF' && result.live_real === 'DISABLED' && result.approval_authority === false,
   503, 'IDENTITY_PROBE_MISMATCH');
   return result;
