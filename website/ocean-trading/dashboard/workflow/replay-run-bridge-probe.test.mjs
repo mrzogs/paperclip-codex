@@ -62,7 +62,61 @@ function createFixture() {
   };
   const configFile = path.join(directory, 'config.json');
   fs.writeFileSync(configFile, JSON.stringify(config));
-  return { directory, configFile, telemetryDb };
+  return { directory, configFile, telemetryDb, workflowDb, config };
+}
+
+function createOperationalFixture() {
+  const fixture = createFixture();
+  const runId = 'cicd-vwap-operational-run-1';
+  const instanceId = 'cicd-vwap-pull-back-strategy:replay-two:chart1';
+  const identityId = `${instanceId}:telemetry-study2`;
+  const chartbook = path.join(fixture.directory, 'CICD - VWAP Pull Back Strategy.Cht');
+  const strategyModule = path.join(fixture.directory, 'CICD_VWAPPullback_v228_64.dll');
+  const telemetryModule = path.join(fixture.directory, 'CICD_VWAPPullback_Telemetry_v0526_64.dll');
+  fs.writeFileSync(chartbook, 'fixture');
+  fs.writeFileSync(strategyModule, 'fixture');
+  fs.writeFileSync(telemetryModule, 'fixture');
+
+  const workflow = new DatabaseSync(fixture.workflowDb);
+  workflow.exec('CREATE TABLE ow_operational_releases (run_id TEXT, context_hash TEXT, payload_json TEXT)');
+  workflow.prepare('UPDATE ow_runs SET id=?, instance_id=?, state=?, revision=?').run(runId, instanceId, 'READY', 1);
+  workflow.close();
+  const telemetry = new DatabaseSync(fixture.telemetryDb);
+  telemetry.exec(`
+    UPDATE schema_version SET version=9;
+    UPDATE logger_health SET message='logger_started version=v0.5.31';
+    UPDATE account_snapshot SET snapshot_utc=strftime('%Y-%m-%d %H:%M:%S','now');
+    UPDATE instrument_snapshot SET symbol='MNQH26_FUT_CME';
+    ALTER TABLE replay_runs ADD COLUMN chartbook TEXT;
+    ALTER TABLE replay_runs ADD COLUMN chart_number INTEGER;
+    ALTER TABLE replay_runs ADD COLUMN bar_period TEXT;
+  `);
+  telemetry.prepare('UPDATE replay_runs SET run_id=?, strategy_version=?, chartbook=?, chart_number=?, bar_period=?')
+    .run(runId, 'v0.6.234', chartbook, 1, 'intraday_type=0;p1=60;seconds=60');
+  telemetry.close();
+  const config = {
+    ...fixture.config,
+    schema_version: 'ocean-replay-run-bridge/v4',
+    namespace: 'OPERATIONAL',
+    factual_binding_hash: `sha256:${'6'.repeat(64)}`,
+    minimum_schema_version: 9,
+    freshness_seconds: 120,
+    instance_id: instanceId,
+    identity_id: identityId,
+    credential_ref: 'OCEAN_CICD_VWAP_REPLAY_TELEMETRY_V1_TOKEN',
+    expected_symbol: 'MNQH26_FUT_CME',
+    expected_strategy_version: 'v0.6.234',
+    expected_telemetry_version: 'v0.5.31',
+    expected_chartbook_path: chartbook,
+    expected_chart_number: 1,
+    expected_bar_period_seconds: 60,
+    expected_strategy_module_path: strategyModule,
+    expected_strategy_module_sha256: `sha256:${'7'.repeat(64)}`,
+    expected_telemetry_module_path: telemetryModule,
+    expected_telemetry_module_sha256: `sha256:${'8'.repeat(64)}`,
+  };
+  fs.writeFileSync(fixture.configFile, JSON.stringify(config));
+  return { ...fixture, runId, instanceId, config };
 }
 
 test('probe verifies the exact TEST Replay binding without claiming trade evidence', t => {
@@ -128,4 +182,49 @@ test('probe rejects a stale logger context from a different Ocean run', t => {
   assert.equal(result.telemetry.replay_run_id, 'test-run-stale');
   assert.equal(result.telemetry.verified, false);
   assert.equal(result.telemetry.reason, 'TELEMETRY_BINDING_NOT_VERIFIED');
+});
+
+test('v4 probe verifies the exact operational Replay preflight and run binding', t => {
+  const fixture = createOperationalFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  const result = JSON.parse(execFileSync(process.execPath, [probe, fixture.configFile], { encoding: 'utf8' }));
+  assert.deepEqual(result.run, { id: fixture.runId, state: 'READY', revision: 1, release_context_hash: null });
+  assert.equal(result.schema_version, 'ocean-replay-run-bridge/v4');
+  assert.equal(result.telemetry.preflight_verified, true);
+  assert.equal(result.telemetry.run_verified, true);
+  assert.equal(result.telemetry.verified, true);
+  assert.equal(result.telemetry.source_schema_version, 'sierra-telemetry-sqlite/9');
+});
+
+test('v4 probe keeps source preflight distinct from the not-yet-started Replay run', t => {
+  const fixture = createOperationalFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  const telemetry = new DatabaseSync(fixture.telemetryDb);
+  telemetry.exec('DELETE FROM replay_runs');
+  telemetry.close();
+  const result = JSON.parse(execFileSync(process.execPath, [probe, fixture.configFile], { encoding: 'utf8' }));
+  assert.equal(result.telemetry.preflight_verified, true);
+  assert.equal(result.telemetry.run_verified, false);
+  assert.equal(result.telemetry.reason, 'AWAITING_MATCHING_REPLAY_RUN');
+});
+
+test('v4 probe rejects stale source-account telemetry', t => {
+  const fixture = createOperationalFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  const telemetry = new DatabaseSync(fixture.telemetryDb);
+  telemetry.exec("UPDATE account_snapshot SET snapshot_utc='2026-01-01 00:00:00'");
+  telemetry.close();
+  const result = JSON.parse(execFileSync(process.execPath, [probe, fixture.configFile], { encoding: 'utf8' }));
+  assert.equal(result.telemetry.preflight_verified, false);
+  assert.equal(result.telemetry.reason, 'TELEMETRY_PREFLIGHT_NOT_VERIFIED');
+});
+
+test('v4 probe rejects a test namespace instance', t => {
+  const fixture = createOperationalFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  fs.writeFileSync(fixture.configFile, JSON.stringify({ ...fixture.config, instance_id: 'test-cicd-vwap-pull-back-replay-two-v014' }));
+  assert.throws(() => execFileSync(process.execPath, [probe, fixture.configFile], { encoding: 'utf8', stdio: 'pipe' }), error => {
+    assert.match(String(error.stderr), /IDENTITY_SCOPE_REJECTED/);
+    return true;
+  });
 });

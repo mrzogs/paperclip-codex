@@ -27,5 +27,25 @@ if (-not $source.Contains('$binding.expires_at_utc -is [DateTime]') -or
     -not $source.Contains('[Globalization.CultureInfo]::InvariantCulture')) {
   throw 'DPAPI_EXPIRY_PARSE_MUST_BE_CULTURE_SAFE'
 }
+if (-not $source.Contains("'ocean-replay-run-bridge/v4'") -or
+    -not $source.Contains("'Ocean workflow operational v1'") -or
+    -not $source.Contains("'/api/workflow/operational/v1/run/'") -or
+    -not $source.Contains("'/api/workflow/operational/v1/runs/'")) {
+  throw 'OPERATIONAL_BRIDGE_ROUTE_REQUIRED'
+}
+if (-not $source.Contains('$value.factual_binding_hash') -or
+    -not $source.Contains('OPERATIONAL_HASH_REJECTED')) {
+  throw 'OPERATIONAL_FACTUAL_BINDING_CONFIG_REQUIRED'
+}
+if (-not $source.Contains("status='AWAITING_HUMAN_RELEASE'") -or
+    -not $source.Contains("status='AWAITING_MATCHING_REPLAY_RUN'") -or
+    -not $source.Contains('OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED')) {
+  throw 'OPERATIONAL_FAIL_CLOSED_STATES_REQUIRED'
+}
+if (-not $source.Contains('Test-OperationalPhysicalBinding') -or
+    -not $source.Contains('EXPECTED_MODULE_NOT_LOADED') -or
+    -not $source.Contains('EXPECTED_CHARTBOOK_NOT_OPEN')) {
+  throw 'OPERATIONAL_PHYSICAL_BINDING_REQUIRED'
+}
 
-Write-Output 'PASS: Replay bridge finalizes drained COMPLETING runs and binds its versioned identity from validated configuration.'
+Write-Output 'PASS: Replay bridge preserves TEST behavior and adds a fail-closed, exact-binding OPERATIONAL route without LIVE_REAL authority.'

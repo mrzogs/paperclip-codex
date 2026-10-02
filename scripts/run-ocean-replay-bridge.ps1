@@ -6,23 +6,38 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Net.Http
 $Node = 'C:\Program Files\nodejs\node.exe'
-$Probe = 'D:\Paperclip-codex\website\ocean-trading\dashboard\workflow\replay-run-bridge-probe.mjs'
-$EvidenceBuilder = 'D:\Paperclip-codex\website\ocean-trading\dashboard\workflow\replay-run-evidence.mjs'
+$RepositoryRoot = Split-Path -Parent $PSScriptRoot
+$Probe = Join-Path $RepositoryRoot 'website\ocean-trading\dashboard\workflow\replay-run-bridge-probe.mjs'
+$EvidenceBuilder = Join-Path $RepositoryRoot 'website\ocean-trading\dashboard\workflow\replay-run-evidence.mjs'
 $script:Credential = $null
 $script:Client = $null
 $script:Sequence = 0
 $script:LeaseId = $null
 $script:LeaseRunId = $null
+$script:Namespace = $null
 
 function Read-BridgeConfig {
   $value = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
-  if ($value.schema_version -cne 'ocean-replay-run-bridge/v3' -or $value.base_url -cne 'http://127.0.0.1:3102') { throw 'BRIDGE_CONFIG_REJECTED' }
+  if ($value.schema_version -notin @('ocean-replay-run-bridge/v3','ocean-replay-run-bridge/v4') -or $value.base_url -cne 'http://127.0.0.1:3102') { throw 'BRIDGE_CONFIG_REJECTED' }
+  $operational = $value.schema_version -ceq 'ocean-replay-run-bridge/v4'
   foreach ($key in @('workflow_db','telemetry_db','handoff_path','expected_sierra_exe','state_file')) {
     if (-not [IO.Path]::IsPathRooted([string]$value.$key) -or ([string]$value.$key).StartsWith('\\')) { throw 'LOCAL_PATH_REQUIRED' }
   }
-  if ($value.instance_id -cnotmatch '^test-[A-Za-z0-9_.:-]+$' -or $value.strategy_id -cnotmatch '^[a-z0-9]+(?:[_-][a-z0-9]+)*$') { throw 'BRIDGE_SCOPE_REJECTED' }
+  if ($value.strategy_id -cnotmatch '^[a-z0-9]+(?:[_-][a-z0-9]+)*$') { throw 'BRIDGE_SCOPE_REJECTED' }
+  if ($operational) {
+    foreach ($key in @('expected_chartbook_path','expected_strategy_module_path','expected_telemetry_module_path')) {
+      if (-not [IO.Path]::IsPathRooted([string]$value.$key) -or ([string]$value.$key).StartsWith('\\')) { throw 'LOCAL_PATH_REQUIRED' }
+    }
+    if ($value.namespace -cne 'OPERATIONAL' -or $value.instance_id.StartsWith('test-') -or $value.instance_id -cnotmatch '^[A-Za-z0-9_.:-]+$') { throw 'BRIDGE_SCOPE_REJECTED' }
+    if ($value.factual_binding_hash -cnotmatch '^sha256:[a-f0-9]{64}$' -or
+        $value.expected_strategy_module_sha256 -cnotmatch '^sha256:[a-f0-9]{64}$' -or
+        $value.expected_telemetry_module_sha256 -cnotmatch '^sha256:[a-f0-9]{64}$') { throw 'OPERATIONAL_HASH_REJECTED' }
+    if ([int]$value.minimum_schema_version -lt 9 -or [int]$value.freshness_seconds -lt 30 -or [int]$value.freshness_seconds -gt 300 -or
+        [int]$value.expected_chart_number -lt 1 -or [int]$value.expected_bar_period_seconds -ne 60) { throw 'OPERATIONAL_SOURCE_POLICY_REJECTED' }
+  } elseif ($value.instance_id -cnotmatch '^test-[A-Za-z0-9_.:-]+$') { throw 'BRIDGE_SCOPE_REJECTED' }
   if ($value.expected_telemetry_version -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw 'TELEMETRY_VERSION_REJECTED' }
-  if ($value.identity_id -cne ($value.instance_id + '-telemetry') -or $value.credential_ref -cnotmatch '^OCEAN_[A-Z0-9_]+_TOKEN$') { throw 'BRIDGE_IDENTITY_REJECTED' }
+  if ((-not $operational -and $value.identity_id -cne ($value.instance_id + '-telemetry')) -or
+      $value.identity_id -cnotmatch '^[A-Za-z0-9_.:-]+$' -or $value.credential_ref -cnotmatch '^OCEAN_[A-Z0-9_]+_TOKEN$') { throw 'BRIDGE_IDENTITY_REJECTED' }
   return $value
 }
 
@@ -36,9 +51,10 @@ function Read-ProtectedCredential($Config) {
   } else {
     [DateTimeOffset]::Parse([string]$binding.expires_at_utc,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::AssumeUniversal)
   }
+  $expectedAudience = if ($Config.schema_version -ceq 'ocean-replay-run-bridge/v4') { 'Ocean workflow operational v1' } else { 'Ocean workflow TEST' }
   if ($binding.identity_id -cne $Config.identity_id -or
       $binding.credential_ref -cne $Config.credential_ref -or
-      $binding.audience -cne 'Ocean workflow TEST' -or $binding.revoked -or
+      $binding.audience -cne $expectedAudience -or $binding.revoked -or
       $expires -le [DateTimeOffset]::UtcNow) { throw 'CREDENTIAL_BINDING_REJECTED' }
   return $binding
 }
@@ -55,7 +71,7 @@ function New-BridgeClient($Binding) {
 }
 
 function Invoke-OceanRequest([string]$Method, [string]$Route, $Body = $null) {
-  if ($Route -cnotmatch '^/api/workflow/(status|health|run-manager/context/[A-Za-z0-9_.:-]+|run-manager/(claim|renew|activate|pin|evidence|progress|finish))$') { throw 'ROUTE_REJECTED' }
+  if ($Route -cnotmatch '^/api/workflow/(status|health|run-manager/context/[A-Za-z0-9_.:-]+|run-manager/(claim|renew|activate|pin|evidence|progress|finish)|operational/v1/runs/[A-Za-z0-9_.:-]+|operational/v1/run/(claim|renew|activate|pin|evidence|progress|finish))$') { throw 'ROUTE_REJECTED' }
   $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::new($Method), ($Config.base_url + $Route))
   try {
     if ($null -ne $Body) {
@@ -76,9 +92,56 @@ function Invoke-OceanRequest([string]$Method, [string]$Route, $Body = $null) {
 }
 
 function Invoke-Mutation([string]$Action, $Data) {
+  if ($script:Namespace -ceq 'OPERATIONAL') {
+    return Invoke-OceanRequest 'POST' ('/api/workflow/operational/v1/run/' + $Action) $Data
+  }
   $script:Sequence++
   $messageId = 'test-replay-bridge-' + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + '-' + $script:Sequence
   return Invoke-OceanRequest 'POST' ('/api/workflow/run-manager/' + $Action) @{ message_id=$messageId; data=$Data }
+}
+
+function Get-RunContext([string]$RunId) {
+  if ($script:Namespace -ceq 'OPERATIONAL') {
+    return Invoke-OceanRequest 'GET' ('/api/workflow/operational/v1/runs/' + $RunId)
+  }
+  return Invoke-OceanRequest 'GET' ('/api/workflow/run-manager/context/' + $RunId)
+}
+
+function New-ObservedSourceState($Probe) {
+  return @{
+    observed_at_utc=[DateTimeOffset]::UtcNow.ToString('o')
+    environment='REPLAY'
+    simulation=$true
+    replay=$true
+    account_alias=$Config.account_alias
+    source_schema_version=[string]$Probe.telemetry.source_schema_version
+    quality='VERIFIED'
+  }
+}
+
+function Test-OperationalPhysicalBinding($BridgeConfig) {
+  if ($BridgeConfig.schema_version -cne 'ocean-replay-run-bridge/v4') { return }
+  foreach ($pair in @(
+    @([string]$BridgeConfig.expected_strategy_module_path,[string]$BridgeConfig.expected_strategy_module_sha256),
+    @([string]$BridgeConfig.expected_telemetry_module_path,[string]$BridgeConfig.expected_telemetry_module_sha256)
+  )) {
+    if (-not [IO.File]::Exists($pair[0])) { throw 'EXPECTED_MODULE_MISSING' }
+    $observedHash = 'sha256:' + (Get-FileHash -LiteralPath $pair[0] -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($observedHash -cne $pair[1]) { throw 'EXPECTED_MODULE_HASH_MISMATCH' }
+  }
+  $expectedExe = [IO.Path]::GetFullPath([string]$BridgeConfig.expected_sierra_exe)
+  $matches = @(Get-Process -Name 'SierraChart_64' -ErrorAction SilentlyContinue | Where-Object {
+    try { [IO.Path]::GetFullPath([string]$_.Path) -ceq $expectedExe } catch { $false }
+  })
+  if ($matches.Count -ne 1) { throw 'EXACT_SIERRA_PROCESS_REQUIRED' }
+  $process = $matches[0]
+  $modulePaths = @($process.Modules | ForEach-Object { [IO.Path]::GetFullPath([string]$_.FileName) })
+  foreach ($modulePath in @([string]$BridgeConfig.expected_strategy_module_path,[string]$BridgeConfig.expected_telemetry_module_path)) {
+    $expectedPath = [IO.Path]::GetFullPath($modulePath)
+    if (-not ($modulePaths | Where-Object { $_ -ceq $expectedPath })) { throw 'EXPECTED_MODULE_NOT_LOADED' }
+  }
+  $chartbookName = [IO.Path]::GetFileNameWithoutExtension([string]$BridgeConfig.expected_chartbook_path)
+  if ([string]$process.MainWindowTitle -cnotlike ('*' + $chartbookName + '*')) { throw 'EXPECTED_CHARTBOOK_NOT_OPEN' }
 }
 
 function Invoke-BoundedNode([string]$Script, [string[]]$Arguments, [int]$TimeoutMilliseconds, [string]$FailureCode) {
@@ -138,9 +201,11 @@ function Write-State($State) {
 }
 
 function Invoke-BridgeCycle {
+  Test-OperationalPhysicalBinding $Config
   $probe = Get-Probe
   if (-not $probe.run) {
-    Write-State ([ordered]@{ status='IDLE'; run_id=$null; telemetry=$probe.telemetry; safety='TEST_ONLY_INGESTION_OFF' })
+    $safety = if ($script:Namespace -ceq 'OPERATIONAL') { 'OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED' } else { 'TEST_ONLY_INGESTION_OFF' }
+    Write-State ([ordered]@{ status='IDLE'; run_id=$null; telemetry=$probe.telemetry; safety=$safety })
     return
   }
   $runId = [string]$probe.run.id
@@ -148,7 +213,32 @@ function Invoke-BridgeCycle {
     $script:LeaseId = $null
     $script:LeaseRunId = $null
   }
-  $context = Invoke-OceanRequest 'GET' ('/api/workflow/run-manager/context/' + $runId)
+  $context = Get-RunContext $runId
+  if ($script:Namespace -ceq 'OPERATIONAL' -and $context.state -eq 'READY') {
+    if (-not $probe.telemetry.preflight_verified) {
+      Write-State ([ordered]@{status='AWAITING_SOURCE_PREFLIGHT';run_id=$runId;run_state=$context.state;telemetry=$probe.telemetry;safety='OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED'})
+      return
+    }
+    $source = New-ObservedSourceState $probe
+    $sourceHandshake = @{instance=$context.plan.instance;source_state=$source;context_hash=$context.context.context_hash}
+    $releaseRecorded = [string]$probe.run.release_context_hash -ceq [string]$context.context.context_hash
+    if (-not $releaseRecorded) {
+      $releaseRequest = @{
+        environment='REPLAY'
+        strategy_id=$Config.strategy_id
+        instance_id=$Config.instance_id
+        run_id=$runId
+        context_hash=$context.context.context_hash
+        source_handshake=$sourceHandshake
+      }
+      Write-State ([ordered]@{status='AWAITING_HUMAN_RELEASE';run_id=$runId;run_state=$context.state;telemetry=$probe.telemetry;release_recorded=$false;release_request=$releaseRequest;safety='OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED'})
+      return
+    }
+    if (-not $probe.telemetry.verified) {
+      Write-State ([ordered]@{status='AWAITING_MATCHING_REPLAY_RUN';run_id=$runId;run_state=$context.state;telemetry=$probe.telemetry;release_recorded=$true;safety='OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED'})
+      return
+    }
+  }
   $lease = $context.lease
   if (-not $lease -or $lease.expired) {
     $claimed = Invoke-Mutation 'claim' @{run_id=$runId;expected_revision=[int]$context.revision}
@@ -162,15 +252,7 @@ function Invoke-BridgeCycle {
 
   if ($context.state -eq 'READY') {
     if (-not $probe.telemetry.verified) { throw 'TELEMETRY_BINDING_NOT_VERIFIED' }
-    $source = @{
-      observed_at_utc=[DateTimeOffset]::UtcNow.ToString('o')
-      environment='REPLAY'
-      simulation=$true
-      replay=$true
-      account_alias=$Config.account_alias
-      source_schema_version=[string]$probe.telemetry.source_schema_version
-      quality='VERIFIED'
-    }
+    $source = New-ObservedSourceState $probe
     $context = Invoke-Mutation 'activate' @{
       run_id=$runId
       lease_id=$leaseId
@@ -213,22 +295,27 @@ function Invoke-BridgeCycle {
     $script:LeaseId = $null
     $script:LeaseRunId = $null
   }
-  $healthBody = @{
-    message_id=('test-replay-bridge-health-' + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
-    data=@{strategy_id=$Config.strategy_id;instance_id=$Config.instance_id;status='READY';next_owner=$script:Credential.identity_id;next_action='Continue scoped Replay telemetry observation'}
+  if ($script:Namespace -ceq 'TEST') {
+    $healthBody = @{
+      message_id=('test-replay-bridge-health-' + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
+      data=@{strategy_id=$Config.strategy_id;instance_id=$Config.instance_id;status='READY';next_owner=$script:Credential.identity_id;next_action='Continue scoped Replay telemetry observation'}
+    }
+    $null = Invoke-OceanRequest 'POST' '/api/workflow/health' $healthBody
   }
-  $null = Invoke-OceanRequest 'POST' '/api/workflow/health' $healthBody
-  Write-State ([ordered]@{status='ACTIVE';run_id=$runId;run_state=$context.state;lease_id=$leaseId;telemetry=$probe.telemetry;reconciliation=$reconciliation;safety='TEST_ONLY_SCOPED_REPLAY_EVIDENCE'})
+  $safety = if ($script:Namespace -ceq 'OPERATIONAL') { 'OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED' } else { 'TEST_ONLY_SCOPED_REPLAY_EVIDENCE' }
+  Write-State ([ordered]@{status='ACTIVE';run_id=$runId;run_state=$context.state;lease_id=$leaseId;telemetry=$probe.telemetry;reconciliation=$reconciliation;safety=$safety})
 }
 
 $Config = Read-BridgeConfig
+$script:Namespace = if ($Config.schema_version -ceq 'ocean-replay-run-bridge/v4') { 'OPERATIONAL' } else { 'TEST' }
 $script:Credential = Read-ProtectedCredential $Config
 try {
   $script:Client = New-BridgeClient $script:Credential
   do {
     try { Invoke-BridgeCycle }
     catch {
-      Write-State ([ordered]@{status='DEGRADED';error=$(if ($_.Exception.Message -cmatch '^[A-Z][A-Z0-9_]{1,100}$') {$_.Exception.Message} else {'BRIDGE_CYCLE_FAILED'});safety='TEST_ONLY_INGESTION_OFF'})
+      $safety = if ($script:Namespace -ceq 'OPERATIONAL') { 'OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED' } else { 'TEST_ONLY_INGESTION_OFF' }
+      Write-State ([ordered]@{status='DEGRADED';error=$(if ($_.Exception.Message -cmatch '^[A-Z][A-Z0-9_]{1,100}$') {$_.Exception.Message} else {'BRIDGE_CYCLE_FAILED'});safety=$safety})
     }
     if (-not $Once) { Start-Sleep -Seconds ([int]$Config.poll_seconds) }
   } while (-not $Once)
