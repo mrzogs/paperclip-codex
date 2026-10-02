@@ -20,6 +20,27 @@ function countRows(db, table) {
   return tableExists(db, table) ? Number(db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count) : null;
 }
 
+function tableColumns(db, table) {
+  if (!tableExists(db, table)) return new Set();
+  return new Set(db.prepare(`PRAGMA table_info(${table})`).all().map(column => String(column.name)));
+}
+
+function openTradeCounts(db, authoritativeAccount) {
+  const columns = tableColumns(db, "trades");
+  if (!columns.has("status")) return { openTrades: null, legacyOpenTrades: null };
+  const openTrades = Number(db.prepare("SELECT COUNT(*) AS count FROM trades WHERE lower(trim(status)) = 'open'").get().count);
+  if (!columns.has("trade_account") || !authoritativeAccount) {
+    return { openTrades, legacyOpenTrades: null };
+  }
+  const legacyOpenTrades = Number(db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM trades
+    WHERE lower(trim(status)) = 'open'
+      AND coalesce(trim(trade_account), '') <> trim(?)
+  `).get(authoritativeAccount).count);
+  return { openTrades, legacyOpenTrades };
+}
+
 export function readProjectPaperTelemetry(sqliteFile, options = {}) {
   const nowMs = Number(options.nowMs ?? Date.now());
   const staleAfterMs = Number(options.staleAfterMs ?? DEFAULT_STALE_AFTER_MS);
@@ -55,13 +76,15 @@ export function readProjectPaperTelemetry(sqliteFile, options = {}) {
     const expectedSimulationIdentity = Number(account?.is_simulated) === 1
       && String(account?.account_type_guess || "").toLowerCase() === "simulation";
     const fresh = ageMs !== null && ageMs <= staleAfterMs;
-    const healthy = Boolean(account && instrument && health && expectedPaperIdentity && expectedSimulationIdentity && fresh);
+    const tradeCounts = openTradeCounts(db, account?.trade_account || null);
+    const reconciliationRequired = Number(tradeCounts.legacyOpenTrades || 0) > 0;
+    const healthy = Boolean(account && instrument && health && expectedPaperIdentity && expectedSimulationIdentity && fresh && !reconciliationRequired);
     const loggerVersion = String(health?.message || "").match(/\bversion=([^\s]+)/i)?.[1] || null;
 
     return {
       available: true,
       healthy,
-      status: healthy ? "active" : fresh ? "identity_mismatch" : "stale",
+      status: healthy ? "active" : reconciliationRequired ? "reconciliation_required" : fresh ? "identity_mismatch" : "stale",
       sqliteFile,
       instanceName: instance?.instance_name || account?.instance_name || null,
       instanceRole: instance?.instance_role || account?.instance_role || null,
@@ -77,10 +100,14 @@ export function readProjectPaperTelemetry(sqliteFile, options = {}) {
         orders: countRows(db, "orders"),
         fills: countRows(db, "fills"),
         trades: countRows(db, "trades"),
+        openTrades: tradeCounts.openTrades,
+        legacyOpenTrades: tradeCounts.legacyOpenTrades,
       },
       warning: healthy
         ? null
-        : !fresh
+        : reconciliationRequired
+          ? `${tradeCounts.legacyOpenTrades} open trade record(s) belong to a non-authoritative Paper account and require audited reconciliation.`
+          : !fresh
           ? "The dedicated VWAP Paper telemetry heartbeat is stale."
           : "The dedicated telemetry database is not reporting the expected Paper simulation identity.",
       isolation: "Status only. This database is not merged into the existing Paper calendar or ledger.",
