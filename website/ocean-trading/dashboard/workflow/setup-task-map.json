@@ -467,6 +467,11 @@
       "bundle": "S31.3-BRAIN-RUNTIME-MANIFEST-COMPLETION-RESULT.zip"
     },
     {
+      "task_id": "S31.4",
+      "owner": "Obsidian Brain",
+      "bundle": "S31.4-BRAIN-STRATEGY-DATASET-MANIFEST-RESULT.zip"
+    },
+    {
       "task_id": "S40.3",
       "owner": "Ocean Trading Website",
       "bundle": "S40.3-OCEAN-HUMAN-ONBOARDING-REVIEW-PREP-RESULT.zip"

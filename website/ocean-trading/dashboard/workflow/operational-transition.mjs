@@ -3,6 +3,7 @@ import { PURPOSES, interval, intersect, subtract } from './run-manager.mjs';
 import { OperationalPreparation, RELEASE_SCOPES } from './operational-preparation.mjs';
 
 export const OPERATIONAL_PREFIX='operational/v1';
+export const DATASET_OWNER_TASKS=['S31.3','S31.4'];
 export const operationalPolicy=(config={})=>({
   schema_version:'ocean-operational-transition/v1',shared_contract_release:'2.1.0',
   modes:Object.fromEntries(['REPLAY','PAPER_FORWARD'].map(mode=>[mode,{enabled:config.operational?.modes?.[mode]?.enabled===true}])),live_real:'DISABLED',
@@ -93,7 +94,7 @@ export class OperationalTransition {
     requireThat(!input.instance_id.startsWith('test-'),403,'TEST_IDENTITY_PROMOTION_REJECTED');
     const binding=this.b.config.operational_factual_bindings?.find(value=>value.strategy_id===input.strategy_id && value.instance.execution_instance_id===input.instance_id);
     requireThat(actor.strategyIds.includes(input.strategy_id) && binding && binding.state==='VERIFIED_FACTS_ONLY' && sealedHash(binding,'binding_hash')===binding.binding_hash,403,'WRONG_PROPOSAL_SCOPE');
-    requireThat(input.source_task==='S31.3',422,'DATASET_OWNER_RECEIPT_REQUIRED');
+    requireThat(DATASET_OWNER_TASKS.includes(input.source_task),422,'DATASET_OWNER_RECEIPT_REQUIRED');
     const setup=this.db.prepare('SELECT payload_json FROM ow_setup_receipts WHERE id=?').get(input.source_task);
     requireThat(setup,409,'SEALED_DATASET_OWNER_RECEIPT_MISSING');
     const receipt=JSON.parse(setup.payload_json);

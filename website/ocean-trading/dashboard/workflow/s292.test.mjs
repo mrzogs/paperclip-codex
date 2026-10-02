@@ -133,10 +133,10 @@ test('S29.2 pending manifest validates exact source member bytes and remains ine
     const examples=JSON.parse(fs.readFileSync(new URL('./contracts/2.1.0/shared-contracts/examples/positive-examples.json',import.meta.url)));
     const manifest={...examples['dataset-manifest'],dataset_manifest_id:'isolated-proposed-dataset'};
     manifest.manifest_hash=sealedHash(manifest,'manifest_hash');const text=JSON.stringify(manifest);
-    // Synthetic future owner receipt in this private test DB only, not S31.2 execution.
+    // Synthetic strategy-scoped owner receipt in this private test DB only, not S31.4 execution.
     const source='artifacts/proposed-manifest.json',hash=digest('isolated owner fixture').slice(7);
-    b.db.prepare("INSERT INTO ow_setup_receipts VALUES(?,?,?,'HISTORICAL_SETUP_NOT_APPROVAL')").run('S31.2',digest('fixture'),JSON.stringify({task_id:'S31.2',status:'PASS',verified_bundle_sha256:hash,verified_members:{[source]:digest(text).slice(7)}}));
-    const input={strategy_id:actor.strategyIds[0],instance_id:actor.instanceIds[0],manifest_text:text,source_task:'S31.2',source_bundle_sha256:hash,source_member:source};
+    b.db.prepare("INSERT INTO ow_setup_receipts VALUES(?,?,?,'HISTORICAL_SETUP_NOT_APPROVAL')").run('S31.4',digest('fixture'),JSON.stringify({task_id:'S31.4',status:'PASS',verified_bundle_sha256:hash,verified_members:{[source]:digest(text).slice(7)}}));
+    const input={strategy_id:actor.strategyIds[0],instance_id:actor.instanceIds[0],manifest_text:text,source_task:'S31.4',source_bundle_sha256:hash,source_member:source};
     const first=b.operational.manifest(actor,input);assert.equal(first.runtime_eligible,false);assert.equal(first.learner_permission,'NONE');
     assert.equal(b.operational.manifest(actor,input).idempotent,true);
     assert.throws(()=>b.operational.manifest(actor,{...input,manifest_text:text+' '}),/MANIFEST_MEMBER_PROVENANCE_CONFLICT/);
