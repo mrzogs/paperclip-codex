@@ -98,6 +98,10 @@ await check("GOV-01 CFG-02: authentication failures, role separation, browser CS
   const a = await app();
   try {
     assert.equal((await a.fetchJson("status", { role: null, headers: { Host: new URL(a.base).host } })).status, 401);
+    const registryOnlyStrategy = await a.fetchJson(`view/strategies/${STRATEGY}`);
+    assert.equal(registryOnlyStrategy.status, 200);
+    assert.equal(registryOnlyStrategy.value.strategy_id, STRATEGY);
+    assert.equal(registryOnlyStrategy.value.onboarding, undefined, 'a registry-only strategy must remain readable without an onboarding projection');
     for (const token of ["invalid", "brain-general-credential", "ocean_service_v1.ocean-test-brain.forged", a.environment.OCEAN_WAYNE_BROWSER_SECRET]) {
       const response = await fetch(`${a.base}/api/workflow/status`, { headers: { Authorization: `Bearer ${token}` } }); assert.equal(response.status, 401);
     }
@@ -375,6 +379,31 @@ await check("GOV-01 GOV-03 CFG-02 CFG-04: unresolved/reference-forged credential
     const python=a.backend().config.python_executable; a.backend().config.python_executable=path.join(a.directory,"missing-validator.exe");
     assert.equal((await a.fetchJson("profiles",{data:{profile:a.profile,file_sha256:digest(JSON.stringify(a.profile))}})).status,503); a.backend().config.python_executable=python;
   } finally { await a.close(); }
+});
+
+await check("workflow SQLite contention is bounded, retryable and diagnosable", async () => {
+  const a = await app();
+  const originalOptions = a.backend().runs.options;
+  const originalConsoleError = console.error;
+  const diagnostics = [];
+  try {
+    assert.equal(a.backend().db.prepare("PRAGMA busy_timeout").get().timeout, 5000);
+    a.backend().runs.options = () => {
+      const error = new Error("database is locked");
+      error.code = "SQLITE_BUSY";
+      throw error;
+    };
+    console.error = (...values) => diagnostics.push(values.join(" "));
+    const response = await a.fetchJson("run-manager/options");
+    assert.equal(response.status, 503);
+    assert.equal(response.value.error.code, "WORKFLOW_DATABASE_BUSY");
+    assert.equal(response.value.error.retryable, true);
+    assert.match(diagnostics.join("\n"), /GET \/api\/workflow\/run-manager\/options WORKFLOW_DATABASE_BUSY/);
+  } finally {
+    console.error = originalConsoleError;
+    a.backend().runs.options = originalOptions;
+    await a.close();
+  }
 });
 
 if (process.env.OCEAN_S20_RESULT_FILE) fs.writeFileSync(process.env.OCEAN_S20_RESULT_FILE, JSON.stringify({ test_type: "ACTUAL_ISOLATED_NODE_HTTP_SQLITE_RUNTIME", data_type: "SYNTHETIC_TEST_FIXTURES_AND_VERIFIED_S19_PENDING_PLAN", mocks: "NONE", tests: results, status: results.every((entry) => entry.status === "PASS") ? "PASS" : "FAILED", table_transitions: TABLE.normal_transitions.length }, null, 2));

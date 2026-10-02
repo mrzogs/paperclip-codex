@@ -35,7 +35,8 @@ def verify(request):
             sums[name]=digest
         assert set(sums)=={n for n in names if not n.endswith('/') and n!='checksums.sha256'}
         receipt=json.loads(z.read('receipt.json'))
-        assert receipt['task_id']==binding['task_id']
+        accepted_task_ids=[binding['task_id'],*binding.get('receipt_task_ids',[])]
+        assert receipt['task_id'] in accepted_task_ids
         # Sealed Brain/Ocean receipts use project; sealed Telemetry receipts use owner.
         owners=[receipt[key] for key in ['project','owner'] if key in receipt]
         aliases=taskmap.get('owner_aliases',{}).get(binding['owner'],[binding['owner']])
@@ -48,15 +49,21 @@ def verify(request):
         if 'status' in receipt and status_field in receipt: assert receipt['status']==receipt[status_field]
         if binding['task_id'] in taskmap.get('diagnostic_only',[]): assert status=='BLOCKED'
         filemap=json.loads(z.read('file-map.json'))
-        assert filemap['task_id']==binding['task_id']
+        assert filemap['task_id']==receipt['task_id']
         mapped=set()
-        for row in filemap.get('files',filemap.get('outputs',[])):
-            name=row['bundle_path']
+        for row in filemap.get('files',filemap.get('outputs',filemap.get('entries',[]))):
+            name=row.get('bundle_path',row.get('archive_path',row.get('path')))
+            assert isinstance(name,str) and name
+            if row.get('export_disposition')=='PRIVATE_LOCAL_ONLY_NOT_IN_ZIP':
+                assert name not in names
+                continue
+            if name in {'checksums.sha256','file-map.json'}:
+                continue
             assert name in sums and name not in mapped
             assert sums[name]==row['sha256'].removeprefix('sha256:')
             mapped.add(name)
         assert {n for n in sums if n.startswith('artifacts/')}<=mapped
-    return {'receipt':receipt,'bundle_sha256':request['bundle_sha256'],'owner':binding['owner'],'verified_members':{name:sums[name] for name in sorted(mapped)}}
+    return {'receipt':receipt,'canonical_task_id':binding['task_id'],'bundle_sha256':request['bundle_sha256'],'owner':binding['owner'],'verified_members':{name:sums[name] for name in sorted(mapped)}}
 
 def main():
     print(json.dumps(verify(json.load(sys.stdin))))

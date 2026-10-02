@@ -7,7 +7,19 @@ import { requireThat } from './common.mjs';
 import { identityProbePath, validateIdentityProbe } from './provider-lifecycle.mjs';
 
 const command=fileURLToPath(new URL('../../../../scripts/ocean-workflow-operator.ps1',import.meta.url));
-export const protectedOperatorHost='C:\\Users\\wayne\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\powershell\\pwsh.exe';
+function resolveProtectedOperatorHost() {
+  const candidates = [
+    process.env.OCEAN_PROTECTED_OPERATOR_HOST,
+    'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
+    'C:\\Users\\wayne\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\powershell\\pwsh.exe',
+    'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return candidates[candidates.length - 1];
+}
+export const protectedOperatorHost=resolveProtectedOperatorHost();
 export function protectedOperation(action,root) {
   return new Promise((resolve,reject)=>{
     const child=spawn(protectedOperatorHost,

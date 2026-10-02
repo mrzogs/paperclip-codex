@@ -46,7 +46,10 @@ try {
       await call('datasets',{data:{strategy_id:f.registered[i].profile.strategy_id,manifest}});
       const permission={permission_id:`test-permission-${i}-${role}`,strategy_id:f.registered[i].profile.strategy_id,manifest_key:`${manifest.dataset_manifest_id}:${manifest.revision}`,manifest_hash:manifest.manifest_hash,purposes:[...PURPOSES.filter(p=>p[2]===role).map(p=>p[1]),'NOT_ELIGIBLE'],expires_at_utc:new Date(Date.now()+3600000).toISOString(),prior_exposure:role==='HOLDOUT'?'UNTOUCHED':'EXPOSED',test_only:true};permissions[`${i}-${role}`]={manifest,permission};await rm('permission',permission);
     }
+    const readinessDb=new DatabaseSync(app.config.db_file);const source=readinessDb.prepare('SELECT * FROM ow_strategies WHERE id=?').get(first.profile.strategy_id);const incomplete=JSON.parse(source.payload_json);incomplete.strategy_id='test-incomplete-strategy';incomplete.strategy_name='Incomplete strategy';readinessDb.prepare('INSERT INTO ow_strategies VALUES(?,?,?,?,?)').run(incomplete.strategy_id,source.profile_id,source.revision,source.baseline_hash,JSON.stringify(incomplete));readinessDb.close();
     const o=await call('run-manager/options');assert.equal(o.actual_ingestion,'OFF');assert.equal(o.pending_plans.length,1);assert.ok(o.disabled_environments.includes('LIVE_REAL'));
+    assert.equal(o.strategies.find(strategy=>strategy.strategy_id===first.profile.strategy_id).run_readiness.ready,true);
+    assert.deepEqual(o.strategies.find(strategy=>strategy.strategy_id==='test-incomplete-strategy').run_readiness,{ready:false,missing:['REGISTERED_VERSION_REQUIRED','REPLAY_INSTANCE_REQUIRED','EXECUTION_SETTINGS_REQUIRED','APPROVED_HISTORICAL_DATASET_REQUIRED']});
   });
   await check('DATA-04 purpose matrix, immutable roles, validation and shadow candidate approval',async()=>{
     for(const rule of PURPOSES.filter(p=>p[1]!=='SHADOW_FORWARD')){

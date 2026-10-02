@@ -13,8 +13,8 @@
   "gateway_receiver": "PENDING_S23",
   "brain_receiver": "PENDING_S28",
   "remote_adapter_acceptance": "NOT_DUE_S29",
-  "actual_isolated_acceptance_url": "http://127.0.0.1:58812",
-  "acceptance_url_state": "CLOSED_AFTER_TEST",
+  "actual_isolated_acceptance_url": null,
+  "acceptance_url_state": "NOT_EXECUTED",
   "implementation": {
     "entrypoint": "website/ocean-trading/dashboard/server.mjs",
     "module": "website/ocean-trading/dashboard/workflow/backend.mjs",
@@ -297,6 +297,13 @@
     },
     {
       "method": "POST",
+      "path": "/api/workflow/handoff-confirmations",
+      "operation": "handoff.manual-confirmation",
+      "scope": "HUMAN_ONLY",
+      "constraints": "Exact server-side role/state/version/recipient checks"
+    },
+    {
+      "method": "POST",
       "path": "/api/workflow/run-events",
       "operation": "run.event",
       "allowed_data_keys": [
@@ -392,6 +399,104 @@
       "allowed_data_keys": [
         "outbox_id"
       ],
+      "scope": "HUMAN_ONLY",
+      "constraints": "Exact server-side role/state/version/recipient checks"
+    },
+    {
+      "method": "POST",
+      "path": "/api/workflow/run-manager/version",
+      "operation": "run-manager.version",
+      "scope": "HUMAN_ONLY",
+      "constraints": "Exact server-side role/state/version/recipient checks"
+    },
+    {
+      "method": "POST",
+      "path": "/api/workflow/run-manager/settings",
+      "operation": "run-manager.settings",
+      "scope": "HUMAN_ONLY",
+      "constraints": "Exact server-side role/state/version/recipient checks"
+    },
+    {
+      "method": "POST",
+      "path": "/api/workflow/run-manager/permission",
+      "operation": "run-manager.permission",
+      "scope": "HUMAN_ONLY",
+      "constraints": "Exact server-side role/state/version/recipient checks"
+    },
+    {
+      "method": "POST",
+      "path": "/api/workflow/run-manager/preview",
+      "operation": "run-manager.preview",
+      "scope": "HUMAN_ONLY",
+      "constraints": "Exact server-side role/state/version/recipient checks"
+    },
+    {
+      "method": "POST",
+      "path": "/api/workflow/run-manager/prepare",
+      "operation": "run-manager.prepare",
+      "scope": "HUMAN_ONLY",
+      "constraints": "Exact server-side role/state/version/recipient checks"
+    },
+    {
+      "method": "POST",
+      "path": "/api/workflow/run-manager/preset",
+      "operation": "run-manager.preset",
+      "scope": "HUMAN_ONLY",
+      "constraints": "Exact server-side role/state/version/recipient checks"
+    },
+    {
+      "method": "POST",
+      "path": "/api/workflow/run-manager/end",
+      "operation": "run-manager.end",
+      "scope": "HUMAN_ONLY",
+      "constraints": "Exact server-side role/state/version/recipient checks"
+    },
+    {
+      "method": "POST",
+      "path": "/api/workflow/run-manager/claim",
+      "operation": "run-manager.claim",
+      "scope": "HUMAN_ONLY",
+      "constraints": "Exact server-side role/state/version/recipient checks"
+    },
+    {
+      "method": "POST",
+      "path": "/api/workflow/run-manager/renew",
+      "operation": "run-manager.renew",
+      "scope": "HUMAN_ONLY",
+      "constraints": "Exact server-side role/state/version/recipient checks"
+    },
+    {
+      "method": "POST",
+      "path": "/api/workflow/run-manager/activate",
+      "operation": "run-manager.activate",
+      "scope": "HUMAN_ONLY",
+      "constraints": "Exact server-side role/state/version/recipient checks"
+    },
+    {
+      "method": "POST",
+      "path": "/api/workflow/run-manager/pin",
+      "operation": "run-manager.pin",
+      "scope": "HUMAN_ONLY",
+      "constraints": "Exact server-side role/state/version/recipient checks"
+    },
+    {
+      "method": "POST",
+      "path": "/api/workflow/run-manager/progress",
+      "operation": "run-manager.progress",
+      "scope": "HUMAN_ONLY",
+      "constraints": "Exact server-side role/state/version/recipient checks"
+    },
+    {
+      "method": "POST",
+      "path": "/api/workflow/run-manager/evidence",
+      "operation": "run-manager.evidence",
+      "scope": "HUMAN_ONLY",
+      "constraints": "Exact server-side role/state/version/recipient checks"
+    },
+    {
+      "method": "POST",
+      "path": "/api/workflow/run-manager/finish",
+      "operation": "run-manager.finish",
       "scope": "HUMAN_ONLY",
       "constraints": "Exact server-side role/state/version/recipient checks"
     }
@@ -505,5 +610,418 @@
     "No running production provider URL or real external credential binding is claimed",
     "Wire workflow-event persistence is not automatic transition/dispatch/analysis",
     "S20 is synthetic TEST acceptance, not Wayne runtime approval"
-  ]
+  ],
+  "operational": {
+    "policy": {
+      "schema_version": "ocean-operational-transition/v1",
+      "shared_contract_release": "2.1.0",
+      "modes": {
+        "REPLAY": {
+          "enabled": false
+        },
+        "PAPER_FORWARD": {
+          "enabled": false
+        }
+      },
+      "live_real": "DISABLED",
+      "normal_ingestion": "OFF",
+      "test_identity_promotion": false,
+      "machine_activation": false,
+      "separate_operational_enrollment_required": true,
+      "classification": [
+        {
+          "environment": "PAPER_FORWARD",
+          "purpose": "LEARNING",
+          "partition": "FORWARD",
+          "permission": "SCOPED_LEARNING"
+        },
+        {
+          "environment": "PAPER_FORWARD",
+          "purpose": "SHADOW_FORWARD",
+          "partition": "FORWARD",
+          "permission": "FROZEN_EVALUATION"
+        },
+        {
+          "environment": "REPLAY",
+          "purpose": "HISTORICAL_BUILD",
+          "partition": "DISCOVERY",
+          "permission": "HISTORICAL_DISCOVERY"
+        },
+        {
+          "environment": "REPLAY",
+          "purpose": "DEVELOPMENT_BACKTEST",
+          "partition": "DEVELOPMENT",
+          "permission": "EVALUATE_ONLY"
+        },
+        {
+          "environment": "REPLAY",
+          "purpose": "RESEARCH_EXPERIMENT",
+          "partition": "DEVELOPMENT",
+          "permission": "EVALUATE_ONLY"
+        },
+        {
+          "environment": "REPLAY",
+          "purpose": "VALIDATION",
+          "partition": "VALIDATION",
+          "permission": "FROZEN_EVALUATION"
+        },
+        {
+          "environment": "REPLAY",
+          "purpose": "PROTECTED_HOLDOUT",
+          "partition": "HOLDOUT",
+          "permission": "RESTRICTED_EVALUATOR"
+        }
+      ],
+      "required_authorities": [
+        "verified factual instance",
+        "strategy/profile/code/config pins",
+        "dataset manifest revision/hash and permission",
+        "genuine onboarding and dataset release",
+        "genuine per-run confirmation",
+        "pinned Run Context",
+        "compatible observed source handshake"
+      ],
+      "future_owners": {
+        "dataset_manifest": "S31.3",
+        "human_access": "S33.2",
+        "human_release": "S40.4",
+        "per_run": "S41.3",
+        "first_replay_enablement": "S42.3",
+        "paper_reservation": "S49.3",
+        "paper_source_handshake": "S50.3"
+      }
+    },
+    "contract": {
+      "schema_version": "ocean-operational-runtime-contract/v1",
+      "base_path": "/api/workflow/operational/v1",
+      "namespace": "OPERATIONAL",
+      "normal_ingestion": "OFF",
+      "live_real": "DISABLED",
+      "source_activation": {
+        "human_release": {
+          "method": "POST",
+          "path": "/activate",
+          "role": "HUMAN",
+          "actual_source_start": false
+        },
+        "source_owned_run_activation": {
+          "method": "POST",
+          "path": "/run/activate",
+          "role": "TELEMETRY",
+          "scope": "event.write",
+          "fields": [
+            "run_id",
+            "lease_id",
+            "expected_revision",
+            "observed_handshake"
+          ],
+          "actual_source_start": false
+        },
+        "observed_context": {
+          "method": "POST",
+          "path": "/context/resolve",
+          "role": "TELEMETRY",
+          "scope": "read",
+          "requires_exact_factual_producer": true
+        }
+      },
+      "paper_forward_reservation": {
+        "options": {
+          "method": "GET",
+          "path": "/paper-forward/options",
+          "role": "HUMAN"
+        },
+        "preview": {
+          "method": "POST",
+          "path": "/paper-forward/preview",
+          "role": "HUMAN"
+        },
+        "prepare": {
+          "method": "POST",
+          "path": "/paper-forward/prepare",
+          "role": "HUMAN",
+          "result_state": "READY",
+          "actual_source_start": false
+        },
+        "prospective_manifest": {
+          "partition": "FORWARD",
+          "quality_status": "PARTIAL",
+          "coverage_status": "PARTIAL",
+          "gap": "future interval incomplete"
+        },
+        "source_handshake": "PENDING"
+      },
+      "telemetry_lifecycle": [
+        {
+          "method": "POST",
+          "path": "/run/claim",
+          "scope": "event.write",
+          "fields": [
+            "run_id",
+            "expected_revision"
+          ]
+        },
+        {
+          "method": "POST",
+          "path": "/run/renew",
+          "scope": "event.write",
+          "fields": [
+            "run_id",
+            "lease_id"
+          ]
+        },
+        {
+          "method": "POST",
+          "path": "/run/activate",
+          "scope": "event.write",
+          "fields": [
+            "run_id",
+            "lease_id",
+            "expected_revision",
+            "observed_handshake"
+          ]
+        },
+        {
+          "method": "POST",
+          "path": "/run/pin",
+          "scope": "event.write",
+          "fields": [
+            "run_id",
+            "lease_id",
+            "trade_id",
+            "state",
+            "context_hash"
+          ]
+        },
+        {
+          "method": "POST",
+          "path": "/run/progress",
+          "scope": "event.write",
+          "fields": [
+            "run_id",
+            "lease_id",
+            "axes",
+            "watermark",
+            "pending_events",
+            "gaps",
+            "failures"
+          ]
+        },
+        {
+          "method": "POST",
+          "path": "/run/evidence",
+          "scope": "event.write",
+          "fields": [
+            "run_id",
+            "lease_id",
+            "event_id",
+            "legacy_trade_id",
+            "trade_id",
+            "symbol",
+            "entry_time_utc",
+            "exit_time_utc",
+            "side",
+            "entry_order_key",
+            "exit_order_key",
+            "market_event_keys",
+            "facts"
+          ]
+        },
+        {
+          "method": "POST",
+          "path": "/run/finish",
+          "scope": "event.write",
+          "fields": [
+            "run_id",
+            "lease_id",
+            "expected_revision"
+          ]
+        }
+      ],
+      "human_drain": {
+        "method": "POST",
+        "path": "/run/end",
+        "role": "HUMAN",
+        "fields": [
+          "run_id",
+          "expected_revision",
+          "outcome"
+        ]
+      },
+      "run_readback": {
+        "method": "GET",
+        "path": "/runs/{run_id}",
+        "scope": "read",
+        "includes": [
+          "lease",
+          "progress",
+          "open_pins",
+          "evidence_counts",
+          "completion",
+          "completion_current"
+        ]
+      },
+      "historical_build_terminal_decision": {
+        "record": {
+          "method": "POST",
+          "path": "/runs/no-new-coverage",
+          "role": "HUMAN",
+          "subject": "wayne-ocean-ui",
+          "fields": [
+            "decision_id",
+            "reprocess_run_id",
+            "expected_revision",
+            "confirmed",
+            "reason"
+          ]
+        },
+        "readback": {
+          "method": "GET",
+          "path": "/no-new-coverage/{decision_id}",
+          "role": "HUMAN"
+        },
+        "requires": [
+          "completed ADD_MISSING_HISTORY source",
+          "completed REPROCESS_EXISTING_HISTORY pass",
+          "current immutable completion receipts",
+          "complete source_market coverage",
+          "complete strategy_execution coverage",
+          "complete processing_review coverage",
+          "no missing DISCOVERY interval",
+          "no protected overlap",
+          "no current lease or coverage reservation"
+        ],
+        "result": {
+          "outcome": "NO_NEW_COVERAGE",
+          "run_id": null,
+          "run_created": false,
+          "normal_ingestion": "OFF",
+          "live_real": "DISABLED"
+        }
+      },
+      "authority_readback": {
+        "method": "GET",
+        "path": "/authority/{run_id}",
+        "role": "BRAIN",
+        "scope": "read",
+        "includes": [
+          "review_hash",
+          "release_decisions",
+          "review_expiry",
+          "source_verified",
+          "ingestion_counts",
+          "revocations",
+          "authority_current"
+        ]
+      },
+      "event_exchange": {
+        "workflow_event_readback": {
+          "method": "GET",
+          "path": "/workflow-events/{receipt_id}",
+          "role": "BRAIN",
+          "scope": "read",
+          "schema": "2.1.0 workflow-event"
+        },
+        "trade_event_intake": {
+          "method": "POST",
+          "path": "/trade-events",
+          "role": "TELEMETRY",
+          "scope": "event.write",
+          "fields": [
+            "run_id",
+            "context_hash",
+            "event"
+          ],
+          "schema": "2.1.0 trade-event"
+        },
+        "trade_event_readback": {
+          "method": "GET",
+          "path": "/trade-events/{receipt_id}",
+          "role": "BRAIN",
+          "scope": "read",
+          "returns": [
+            "event",
+            "receipt",
+            "immutable"
+          ]
+        }
+      },
+      "timestamp_semantics": {
+        "workflow_event_occurred_at_utc": "wall-clock lifecycle time",
+        "historical_scored_interval_time": "derived only from the sealed run context and coverage evidence",
+        "prohibit_substitution": true
+      },
+      "zero_trade_smoke_sequence": [
+        "activate released run",
+        "resolve the exact factual source context",
+        "claim lease",
+        "record RUN_PROGRESS while the run is ACTIVE after the replay reaches its end",
+        "request human end and enter DRAINING",
+        "finish the lease with immutable run-completion and coverage evidence"
+      ],
+      "terminal_processing": {
+        "preferred_smoke_event": "RUN_PROGRESS",
+        "terminal_event_reactivation_required": false,
+        "event_type_alone_proves_completion": false,
+        "completion_authority_requires": [
+          "immutable run-completion receipt",
+          "coverage evidence",
+          "matching sealed context"
+        ],
+        "zero_trade_completion_allowed": true
+      },
+      "brain_results": {
+        "register": {
+          "method": "POST",
+          "path": "/brain-results/register",
+          "role": "BRAIN",
+          "scope": "artifact.write",
+          "fields": [
+            "run_id",
+            "context_hash",
+            "content",
+            "content_sha256",
+            "correlation"
+          ]
+        },
+        "callback": {
+          "method": "POST",
+          "path": "/brain-results/callback",
+          "role": "BRAIN",
+          "scope": "event.write",
+          "fields": [
+            "run_id",
+            "context_hash",
+            "result_id",
+            "result_sha256",
+            "status",
+            "correlation"
+          ]
+        },
+        "readback": {
+          "method": "GET",
+          "path": "/brain-results/{result_id}",
+          "scope": "read"
+        },
+        "correlation_fields": [
+          "event_id",
+          "input_sha256",
+          "job_id"
+        ]
+      },
+      "shared_schemas": {
+        "workflow_event": "2.1.0 workflow-event",
+        "run_completion": "2.1.0 run-completion",
+        "handoff": "2.1.0 handoff"
+      },
+      "safety": {
+        "separate_operational_credentials": true,
+        "exact_strategy_instance_allowlists": true,
+        "verified_factual_binding_required": true,
+        "test_identity_promotion": false,
+        "machine_activation": false,
+        "sierra_start_performed_by_routes": false
+      }
+    }
+  }
 }

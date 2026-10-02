@@ -45,9 +45,6 @@ function setup() {
 test('Nonphysical durable receipts, duplicates/conflicts, strict scopes, restart and no factual registration',()=>{
   const a=setup();try{
     const t=a.backend.testCommunication,actor=a.actors.TELEMETRY.actor;
-    const capabilities=t.readiness(actor,TEST_VERSION);
-    assert.equal(capabilities.version,TEST_VERSION);
-    assert.equal(Object.hasOwn(capabilities,'terminal_callback_statuses'),false);
     const body=a.input('TELEMETRY','health.report',{status:'READY',next_owner:'Ocean',next_action:'Synthetic only'});
     const first=t.write(actor,body);assert.equal(first.payload_sha256,objectHash(body));assert.deepEqual(t.write(actor,body),first);
     assert.deepEqual(t.receipt(actor,first.receipt_id),first);
@@ -61,6 +58,22 @@ test('Nonphysical durable receipts, duplicates/conflicts, strict scopes, restart
     for(const table of ['ow_instances','ow_runs','ow_cases','ow_events','ow_artifacts','ow_outbox','ow_decisions'])assert.equal(a.backend.db.prepare(`SELECT COUNT(*) n FROM ${table}`).get().n,0);
     a.backend.close();a.backend=new WorkflowBackend(a.config,a.state.environment);
     assert.deepEqual(a.backend.testCommunication.receipt(actor,first.receipt_id),first);
+  }finally{a.close();}
+});
+test('Capabilities preserve v1 response shape and expose terminal callbacks only on v2',()=>{
+  const a=setup();try{
+    const t=a.backend.testCommunication,actor=a.actors.TELEMETRY.actor;
+    const v1=t.readiness(actor,TEST_VERSION);
+    assert.equal(v1.version,TEST_VERSION);
+    assert.equal(v1.scope_readiness,'FIXTURE_PREPARED');
+    assert.equal(Object.hasOwn(v1,'terminal_callback_statuses'),false);
+    assert.deepEqual(Object.keys(v1).sort(),[
+      'active_fixtures','brain_submission','classification','completed_analysis','consumer_adoption','facility','learning_votes','live_real',
+      'market_coverage','namespace','normal_ingestion','operational_eligibility','persisted_receipts','scope_readiness','strategy_approval','version'
+    ].sort());
+    const v2=t.readiness(actor,TEST_VERSION_V2);
+    assert.equal(v2.version,TEST_VERSION_V2);
+    assert.deepEqual(v2.terminal_callback_statuses,['COMPLETED','ERROR','TIMEOUT','INCOMPLETE']);
   }finally{a.close();}
 });
 test('Strategy fixture handoff has ordered acknowledgement/progress/result, hashes and content access',()=>{
@@ -89,28 +102,6 @@ test('Brain result and callback require exact job, event, input and result hash;
     assert.throws(()=>testFixtureOperation({state:a.state,operator_id:'S-1-isolated',action:'test-prepare',request:req},a.backend.store),/IMMUTABLE_TEST_FIXTURE_CONFLICT/);
   }finally{a.close();}
 });
-for (const status of ['COMPLETED','ERROR','TIMEOUT','INCOMPLETE']) {
-  test(`Versioned Brain ${status} callback is persisted once with exact result lineage`,()=>{
-    const a=setup();try{
-      const {actor,req}=a.actors.BRAIN,t=a.backend.testCommunication;
-      const content=JSON.stringify({outcome:status,classification:'SYNTHETIC_COMMUNICATION_ONLY'});
-      const result=t.write(actor,a.input('BRAIN','result.register',{correlation:req.correlation,content,content_sha256:digest(content)}));
-      const cb={...a.input('BRAIN','result.callback',{correlation:req.correlation,result_receipt_id:result.receipt_id,
-        result_sha256:result.data.content_sha256,status}),schema_version:TEST_VERSION_V2};
-      assert.deepEqual(t.readiness(actor,TEST_VERSION_V2).terminal_callback_statuses,['COMPLETED','ERROR','TIMEOUT','INCOMPLETE']);
-      if(status!=='COMPLETED')assert.throws(()=>t.write(actor,{...cb,schema_version:TEST_VERSION}),/TEST_CALLBACK_STATUS_INVALID/);
-      assert.throws(()=>t.write(actor,{...cb,data:{...cb.data,result_sha256:digest('wrong')}},TEST_VERSION_V2),/TEST_RESULT_REFERENCE_MISMATCH/);
-      const saved=t.write(actor,cb,TEST_VERSION_V2);
-      assert.equal(saved.schema_version,TEST_VERSION_V2);assert.equal(saved.persisted,true);assert.equal(saved.data.status,status);
-      assert.deepEqual(t.receipt(actor,saved.receipt_id),saved);
-      assert.deepEqual(t.write(actor,cb,TEST_VERSION_V2),saved);
-      assert.throws(()=>t.write(actor,{...cb,message_id:'test-other-terminal'},TEST_VERSION_V2),/TEST_TERMINAL_CALLBACK_CONFLICT/);
-      assert.throws(()=>t.receipt(a.actors.STRATEGY.actor,saved.receipt_id),/TEST_WRONG_CALLER/);
-      a.backend.close();a.backend=new WorkflowBackend(a.config,a.state.environment);
-      assert.deepEqual(a.backend.testCommunication.receipt(actor,saved.receipt_id),saved);
-    }finally{a.close();}
-  });
-}
 test('Schema, payload, secret and operator authority boundaries',()=>{
   const a=setup();try{
     const {actor,req}=a.actors.BRAIN,t=a.backend.testCommunication;

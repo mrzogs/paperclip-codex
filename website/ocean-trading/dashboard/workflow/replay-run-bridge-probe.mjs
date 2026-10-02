@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-const CONFIG_SCHEMA = 'ocean-replay-run-bridge/v2';
+const CONFIG_SCHEMA = 'ocean-replay-run-bridge/v3';
 
 function fail(code) {
   throw new Error(code);
@@ -14,7 +14,7 @@ function readConfig(filename) {
   const required = [
     'schema_version', 'base_url', 'workflow_db', 'telemetry_db', 'handoff_path',
     'strategy_id', 'instance_id', 'identity_id', 'credential_ref', 'account_alias', 'expected_symbol',
-    'expected_strategy_version', 'expected_sierra_exe',
+    'expected_strategy_version', 'expected_telemetry_version', 'expected_sierra_exe',
     'poll_seconds', 'state_file',
   ];
   if (Object.keys(value).sort().join('\n') !== required.sort().join('\n')) fail('CONFIG_FIELDS_REJECTED');
@@ -25,6 +25,7 @@ function readConfig(filename) {
   if (!/^test-[A-Za-z0-9_.:-]+$/.test(value.instance_id) || !/^[a-z0-9]+(?:[_-][a-z0-9]+)*$/.test(value.strategy_id)) fail('IDENTITY_SCOPE_REJECTED');
   if (value.identity_id !== `${value.instance_id}-telemetry` || !/^OCEAN_[A-Z0-9_]+_TOKEN$/.test(value.credential_ref)) fail('TELEMETRY_IDENTITY_REJECTED');
   if (!/^MNQ[A-Z][0-9]{2}_FUT_CME$/.test(value.expected_symbol) || !/^v[0-9]+\.[0-9]+\.[0-9]+$/.test(value.expected_strategy_version)) fail('PHYSICAL_BINDING_REJECTED');
+  if (!/^v[0-9]+\.[0-9]+\.[0-9]+$/.test(value.expected_telemetry_version)) fail('TELEMETRY_VERSION_REJECTED');
   if (!Number.isInteger(value.poll_seconds) || value.poll_seconds < 5 || value.poll_seconds > 20) fail('POLL_INTERVAL_REJECTED');
   return value;
 }
@@ -71,7 +72,7 @@ function telemetry(config, expectedRunId) {
     const observedExe = path.normalize(instance?.sierra_exe_path || '').toLowerCase();
     const observedSymbol = String(instrument?.symbol || '').replace(/\[M\]$/, '');
     const verified = schemaVersion >= 7
-      && logger?.message?.startsWith('logger_started version=v0.5.26')
+      && logger?.message?.startsWith(`logger_started version=${config.expected_telemetry_version}`)
       && account?.trade_account === config.account_alias
       && Number(account?.is_simulated) === 1
       && replay?.strategy_id === config.strategy_id
@@ -86,6 +87,7 @@ function telemetry(config, expectedRunId) {
       reason: verified ? null : 'TELEMETRY_BINDING_NOT_VERIFIED',
       source_schema_version: `sierra-telemetry-sqlite/${schemaVersion}`,
       logger_started_utc: logger?.created_utc || null,
+      expected_telemetry_version: config.expected_telemetry_version,
       account_snapshot_utc: account?.snapshot_utc || null,
       replay_run_id: replay?.run_id || null,
       physical_strategy_version: replay?.strategy_version || null,

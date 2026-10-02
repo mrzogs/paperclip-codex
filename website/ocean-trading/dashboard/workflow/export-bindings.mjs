@@ -1,9 +1,11 @@
 import fs from "node:fs";
 import { ROUTES } from "./backend.mjs";
 import { API_VERSION, RELEASE, ROLES } from "./common.mjs";
+import { operationalPolicy } from './operational-transition.mjs';
 
 const reportFile = process.env.OCEAN_S20_FRONTEND_REPORT;
 const acceptance = reportFile ? JSON.parse(fs.readFileSync(reportFile, "utf8")) : null;
+const operationalContract=JSON.parse(fs.readFileSync(new URL('./contracts/operational-runtime-v1.json',import.meta.url),'utf8'));
 const dataKeys = {
   "profile.register": ["profile", "file_sha256"],
   "strategy.register": ["registry", "baseline_hash", "expected_revision"],
@@ -37,6 +39,7 @@ const bindings = {
   get_routes: ["status", "cases", "cases/{id}", "cases/{id}/history", "runs/{id}", "profiles/{id}", "strategies/{id}", "instances/{id}", "datasets/{id}", "approvals/{id}", "decisions/{id}", "artifacts/{id}", "artifacts/{id}/download", "handoffs/{id}", "handoffs/{id}/download", "health/{instance_id}"].map((route) => ({ method: "GET", path: `/api/workflow/${route}`, scope: "read; exact strategy/instance and artifact/handoff/decision recipient restrictions" })),
   errors: { shape: { error: { code: "stable uppercase code", message: "redacted code or non-secret explanation", retryable: "boolean" }, api_version: API_VERSION }, statuses: { 400: "malformed JSON/unsafe query", 401: "absent/invalid/expired/revoked credential", 403: "wrong actor/role/scope/origin/CSRF/TEST authority", 404: "unknown entity/route", 409: "revision/gate/hash/dedup/lease/reconciliation conflict", 413: "upload bound", 415: "JSON required", 422: "schema/payload rejected", 429: "queue/session/login capacity", 500: "redacted internal failure", 503: "new workflow disabled/unresolved validator or binding" } },
   limitations: ["No running production provider URL or real external credential binding is claimed", "Wire workflow-event persistence is not automatic transition/dispatch/analysis", "S20 is synthetic TEST acceptance, not Wayne runtime approval"],
+  operational: { policy:operationalPolicy(), contract:operationalContract },
 };
 const text = `${JSON.stringify(bindings, null, 2)}\n`;
 if (process.argv[2]) fs.writeFileSync(process.argv[2], text);

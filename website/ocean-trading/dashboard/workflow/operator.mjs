@@ -6,7 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { spawnSync } from 'node:child_process';
 import { WorkflowStore } from './store.mjs';
 import { issueOceanIdentity, issueLocalBrowserSecret, passwordVerifier, humanBinding } from './auth.mjs';
-import { exactKeys, objectHash, digest, requireThat, ROLES } from './common.mjs';
+import { exactKeys, id, objectHash, digest, requireThat, ROLES } from './common.mjs';
 import { setupOperation } from './setup-operator.mjs';
 import { testFixtureOperation } from './test-communication.mjs';
 import { integrationOperation } from './integration.mjs';
@@ -58,8 +58,7 @@ export function prepareOperation({ action, state, password, request, operator_id
     if(request.namespace==='OPERATIONAL')requireThat(next.config.operational_factual_bindings?.some(b=>b.binding_hash===request.factual_binding_hash && b.strategy_id===request.strategy_ids?.[0] && request.strategy_ids.length===1 && request.instance_ids?.length===1 && b.instance.execution_instance_id===request.instance_ids[0]),409,'VERIFIED_FACTUAL_BINDING_REQUIRED');
     requireThat(request && typeof request.owner === 'string' && request.owner.length && path.isAbsolute(request.evidence_path || ''), 422, 'VERIFIED_OWNER_EVIDENCE_REQUIRED');
     requireThat(/^[a-f0-9]{64}$/.test(request.evidence_sha256) && digest(fs.readFileSync(request.evidence_path)) === `sha256:${request.evidence_sha256}`, 409, 'OWNER_EVIDENCE_HASH_CONFLICT');
-    identityId = request.identity_id;
-    requireThat(/^[A-Za-z0-9_.-]+$/.test(identityId || ''),422,'SAFE_HANDOFF_ID_REQUIRED');
+    identityId = id(request.identity_id);
     const old = next.config.identities.find(item => item.identity_id === identityId);
     if(action==='enroll' && !old)requireThat(next.config.identities.length<MAX_SERVICE_IDENTITIES,409,'IDENTITY_REGISTRY_CAPACITY_REACHED');
     requireThat(Array.isArray(request.scopes) && request.scopes.length && request.scopes.every(value => ROLES[request.role]?.includes(value)), 422, 'EXACT_ACTION_SCOPE_REQUIRED');
