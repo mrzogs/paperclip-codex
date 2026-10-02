@@ -7,6 +7,7 @@ import {
   scopeReplayTelemetry,
   selectReplayTradeLogFallbackAccounts,
   clearReplayAccount,
+  applyReplayClearsToSession,
   visibleReplayTrades,
 } from "./replay-session-scope.mjs";
 import { withManifestBuildLock } from "./manifest-build-lock.mjs";
@@ -15,6 +16,29 @@ const row = (id, day, account = "Sim1", overrides = {}) => ({
   telemetryTradeId: id, account, instanceId: "replay", symbol: "MNQU26",
   entryAtUtc: `2026-${day}T12:00:00Z`, capturedAtUtc: new Date(Date.UTC(2026, 8, 4, 12, id)).toISOString(),
   ...overrides,
+});
+
+test("applies a persisted account clear to all replay totals without changing other accounts", () => {
+  const sim1 = { replayAccountId: "Sim1", sourceTradeId: "one", capturedAtUtc: "2026-09-30T08:00:00Z", realizedPnlDollars: 25 };
+  const sim2 = { replayAccountId: "Sim2", sourceTradeId: "two", capturedAtUtc: "2026-09-30T08:01:00Z", realizedPnlDollars: -10 };
+  const clears = clearReplayAccount({ accounts: {} }, "Sim1", [sim1, sim2], "2026-09-30T09:00:00Z");
+  const session = applyReplayClearsToSession({
+    activeReplayAccountId: "Sim1",
+    groupedTrades: [sim1, sim2],
+    groupedTradesVisible: [sim1, sim2],
+    replayAccounts: [{ accountId: "Sim1" }, { accountId: "Sim2" }],
+    replayAccountSummaries: [{ accountId: "Sim1" }, { accountId: "Sim2" }],
+    openPositions: [],
+    audit: {},
+  }, clears);
+
+  assert.equal(session.groupedTrades.length, 2);
+  assert.deepEqual(session.groupedTradesVisible.map((trade) => trade.replayAccountId), ["Sim2"]);
+  assert.equal(session.groupedTradesVisibleCount, 1);
+  assert.equal(session.groupedTradesNetPnlDollars, -10);
+  assert.equal(session.lastClearedAtUtc, "2026-09-30T09:00:00Z");
+  assert.equal(session.replayAccountSummaries.find((account) => account.accountId === "Sim1").realizedTrades, 0);
+  assert.equal(session.replayAccountSummaries.find((account) => account.accountId === "Sim2").realizedTrades, 1);
 });
 const stateFrom = (result) => Object.fromEntries(Object.entries(result.scopes).map(([key, value]) => [key, { telemetryScope: value }]));
 
