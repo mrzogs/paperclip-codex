@@ -33,7 +33,7 @@ function Read-BridgeConfig {
         $value.expected_strategy_module_sha256 -cnotmatch '^sha256:[a-f0-9]{64}$' -or
         $value.expected_telemetry_module_sha256 -cnotmatch '^sha256:[a-f0-9]{64}$') { throw 'OPERATIONAL_HASH_REJECTED' }
     if ([int]$value.minimum_schema_version -lt 9 -or [int]$value.freshness_seconds -lt 30 -or [int]$value.freshness_seconds -gt 300 -or
-        [int]$value.expected_chart_number -lt 1 -or [int]$value.expected_bar_period_seconds -ne 60) { throw 'OPERATIONAL_SOURCE_POLICY_REJECTED' }
+        [int]$value.expected_chart_number -lt 1 -or [int]$value.expected_bar_period_seconds -ne 300) { throw 'OPERATIONAL_SOURCE_POLICY_REJECTED' }
   } elseif ($value.instance_id -cnotmatch '^test-[A-Za-z0-9_.:-]+$') { throw 'BRIDGE_SCOPE_REJECTED' }
   if ($value.expected_telemetry_version -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw 'TELEMETRY_VERSION_REJECTED' }
   if ((-not $operational -and $value.identity_id -cne ($value.instance_id + '-telemetry')) -or
