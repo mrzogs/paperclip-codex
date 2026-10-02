@@ -57,6 +57,36 @@ function evidenceImage(workflowDb, runId) {
   return { ready: true, path: filename, hash: sha256(bytes), bytes: bytes.length };
 }
 
+function completionReceipt(config, runId, image, intervals) {
+  if (config.schema_version !== 'ocean-replay-run-bridge/v4') return { ready: true, receipt: null };
+  const filename = path.join(path.dirname(config.workflow_db), 'evidence', `${runId}-completion.json`);
+  if (!fs.existsSync(filename)) return { ready: false, path: filename };
+  const receipt = readJson(filename);
+  const required = [
+    'schema_version', 'run_id', 'status', 'replay_start_utc', 'scored_start_utc',
+    'end_exclusive_utc', 'completed_at_utc', 'evidence_image_sha256',
+    'lifecycle_sha256', 'candidate_sha256', 'simulation_account', 'live_real',
+  ];
+  if (Object.keys(receipt).sort().join('\n') !== required.sort().join('\n')) fail('REPLAY_COMPLETION_FIELDS_REJECTED');
+  const first = intervals[0];
+  const last = intervals.at(-1);
+  const completed = Date.parse(receipt.completed_at_utc);
+  if (receipt.schema_version !== 'ocean-replay-completion/v1'
+    || receipt.run_id !== runId
+    || receipt.status !== 'COMPLETED'
+    || receipt.scored_start_utc !== first.start_utc
+    || receipt.end_exclusive_utc !== last.end_utc
+    || Date.parse(receipt.replay_start_utc) > Date.parse(receipt.scored_start_utc)
+    || !Number.isFinite(completed)
+    || completed > Date.now() + 5000
+    || receipt.evidence_image_sha256 !== image.hash
+    || !/^sha256:[a-f0-9]{64}$/.test(receipt.lifecycle_sha256)
+    || !/^sha256:[a-f0-9]{64}$/.test(receipt.candidate_sha256)
+    || receipt.simulation_account !== config.account_alias
+    || receipt.live_real !== 'DISABLED') fail('REPLAY_COMPLETION_RECEIPT_REJECTED');
+  return { ready: true, path: filename, receipt };
+}
+
 function loadWorkflow(config, runId) {
   const db = new DatabaseSync(config.workflow_db, { readOnly: true, timeout: 2000 });
   try {
@@ -174,6 +204,11 @@ try {
   if (!image.ready) {
     console.log(JSON.stringify({ schema_version: 'ocean-replay-evidence-plan/v1', status: 'AWAITING_SIERRA_EVIDENCE_IMAGE', run_id: runId, evidence_image: image.path }));
   } else {
+    const completion = completionReceipt(config, runId, image, workflow.scoredIntervals);
+    if (!completion.ready) {
+      console.log(JSON.stringify({ schema_version: 'ocean-replay-evidence-plan/v1', status: 'AWAITING_REPLAY_COMPLETION', run_id: runId, evidence_image: image.path, completion_receipt: completion.path }));
+      process.exit(0);
+    }
     const telemetry = loadTelemetry(config, runId, workflow, image.hash);
     console.log(JSON.stringify({
       schema_version: 'ocean-replay-evidence-plan/v1',
@@ -183,6 +218,7 @@ try {
       evidence_image: { path: image.path, sha256: image.hash, bytes: image.bytes },
       scored_intervals: workflow.scoredIntervals,
       watermark: workflow.scoredIntervals.at(-1).end_utc,
+      completion_receipt: completion.receipt,
       ...telemetry,
     }));
   }
