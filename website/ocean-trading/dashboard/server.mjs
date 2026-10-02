@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
-import { clearReplayAccount } from "./replay-session-scope.mjs";
+import { applyReplayClearsToSession, clearReplayAccount } from "./replay-session-scope.mjs";
 import { workflowFromEnvironment } from "./workflow/backend.mjs";
 import { installWebsiteControl } from "./workflow/process-control.mjs";
 
@@ -265,6 +265,27 @@ function writeReplayMonitorClears(payload) {
   fs.renameSync(tempPath, REPLAY_MONITOR_CLEARS_FILE);
 }
 
+function readReplayMonitorClears() {
+  try {
+    return fs.existsSync(REPLAY_MONITOR_CLEARS_FILE)
+      ? JSON.parse(fs.readFileSync(REPLAY_MONITOR_CLEARS_FILE, "utf8"))
+      : { version: 1, accounts: {} };
+  } catch {
+    return { version: 1, accounts: {} };
+  }
+}
+
+function applyReplayMonitorClears(payload) {
+  const manifest = JSON.parse(payload);
+  if (manifest?.replayMonitor?.currentSession) {
+    manifest.replayMonitor.currentSession = applyReplayClearsToSession(
+      manifest.replayMonitor.currentSession,
+      readReplayMonitorClears(),
+    );
+  }
+  return JSON.stringify(manifest);
+}
+
 function normalizeReplayAccountId(value) {
   const text = String(value || "").trim();
   const match = text.match(/^sim\s*(\d+)$/i);
@@ -272,24 +293,22 @@ function normalizeReplayAccountId(value) {
 }
 
 async function clearReplayMonitorSession(accountId = null) {
-  await rebuildManifestAsync();
   const manifest = JSON.parse(buildManifest({ skipRebuildCheck: true, preferFile: true }));
   const requestedAccountId = normalizeReplayAccountId(accountId || manifest?.replayMonitor?.currentSession?.defaultReplayAccountId || "Sim1");
   if (!/^Sim\d+$/.test(requestedAccountId)) throw new Error("A simulation account is required.");
-  const existing = fs.existsSync(REPLAY_MONITOR_CLEARS_FILE)
-    ? JSON.parse(fs.readFileSync(REPLAY_MONITOR_CLEARS_FILE, "utf8")) : { accounts: {} };
+  const existing = readReplayMonitorClears();
   const currentSessionId = manifest?.replayMonitor?.currentSession?.sessionId || null;
   const clearedAtUtc = new Date().toISOString();
   const trades = manifest?.replayMonitor?.currentSession?.groupedTrades || [];
-  writeReplayMonitorClears(clearReplayAccount(existing, requestedAccountId, trades, clearedAtUtc));
-  await rebuildManifestAsync();
-  const refreshed = JSON.parse(buildManifest({ skipRebuildCheck: true, preferFile: true }));
+  const clears = clearReplayAccount(existing, requestedAccountId, trades, clearedAtUtc);
+  writeReplayMonitorClears(clears);
+  const replaySession = applyReplayClearsToSession(manifest?.replayMonitor?.currentSession || null, clears);
   return {
     ok: true,
     clearedReplayAccountId: requestedAccountId,
     clearedSessionId: currentSessionId,
     clearedAtUtc,
-    replaySession: refreshed?.replayMonitor?.currentSession || null,
+    replaySession,
   };
 }
 
@@ -345,15 +364,15 @@ function buildManifest(options = {}) {
   const manifestPath = path.join(ROOT_DIR, "dashboard", "dashboard-data.json");
   const needsRebuild = !options.skipRebuildCheck && (options.forceRebuild || shouldRebuildManifest(manifestPath));
   if (needsRebuild) {
-    // Keep dashboard reads available while telemetry is publishing. The monitor
-    // or this single-flight background job refreshes the snapshot; /api/rebuild
-    // remains the explicit route that waits for completion.
+    // Dashboard reads must remain available while telemetry is publishing. The
+    // monitor or this single-flight background job refreshes the snapshot;
+    // /api/rebuild remains the explicit route that waits for completion.
     void scheduleManifestRebuild();
   }
-  if (options.preferFile === true) return fs.readFileSync(manifestPath, "utf8");
+  if (options.preferFile === true) return applyReplayMonitorClears(fs.readFileSync(manifestPath, "utf8"));
   const snapshotPayload = readLatestManifestSnapshot();
-  if (snapshotPayload) return snapshotPayload;
-  return fs.readFileSync(manifestPath, "utf8");
+  if (snapshotPayload) return applyReplayMonitorClears(snapshotPayload);
+  return applyReplayMonitorClears(fs.readFileSync(manifestPath, "utf8"));
 }
 
 async function buildManifestWithPaperclipSync(options = {}) {
@@ -3862,7 +3881,7 @@ const server = http.createServer((req, res) => {
   }
 
   if (requestUrl.pathname === "/improvement" || requestUrl.pathname.startsWith("/improvement/")) {
-    if (!/^(?:GET|HEAD)$/.test(req.method || "GET") || !/^\/improvement(?:\/(?:dashboard|strategies|runs|cases|approvals|artifacts|history)(?:\/[A-Za-z0-9_.:-]+)?)?\/?$/.test(requestUrl.pathname)) {
+    if (!/^(?:GET|HEAD)$/.test(req.method || "GET") || !/^\/improvement(?:\/(?:dashboard|strategies|runs|cases|approvals|artifacts|history|onboarding-guide)(?:\/[A-Za-z0-9_.:-]+)?)?\/?$/.test(requestUrl.pathname)) {
       res.writeHead(404); res.end("Workflow page not found"); return;
     }
     res.setHeader("Cache-Control", "no-store");

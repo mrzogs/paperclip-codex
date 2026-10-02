@@ -16,11 +16,12 @@ $script:LeaseRunId = $null
 
 function Read-BridgeConfig {
   $value = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
-  if ($value.schema_version -cne 'ocean-replay-run-bridge/v2' -or $value.base_url -cne 'http://127.0.0.1:3102') { throw 'BRIDGE_CONFIG_REJECTED' }
+  if ($value.schema_version -cne 'ocean-replay-run-bridge/v3' -or $value.base_url -cne 'http://127.0.0.1:3102') { throw 'BRIDGE_CONFIG_REJECTED' }
   foreach ($key in @('workflow_db','telemetry_db','handoff_path','expected_sierra_exe','state_file')) {
     if (-not [IO.Path]::IsPathRooted([string]$value.$key) -or ([string]$value.$key).StartsWith('\\')) { throw 'LOCAL_PATH_REQUIRED' }
   }
   if ($value.instance_id -cnotmatch '^test-[A-Za-z0-9_.:-]+$' -or $value.strategy_id -cnotmatch '^[a-z0-9]+(?:[_-][a-z0-9]+)*$') { throw 'BRIDGE_SCOPE_REJECTED' }
+  if ($value.expected_telemetry_version -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw 'TELEMETRY_VERSION_REJECTED' }
   if ($value.identity_id -cne ($value.instance_id + '-telemetry') -or $value.credential_ref -cnotmatch '^OCEAN_[A-Z0-9_]+_TOKEN$') { throw 'BRIDGE_IDENTITY_REJECTED' }
   return $value
 }
@@ -80,15 +81,38 @@ function Invoke-Mutation([string]$Action, $Data) {
   return Invoke-OceanRequest 'POST' ('/api/workflow/run-manager/' + $Action) @{ message_id=$messageId; data=$Data }
 }
 
+function Invoke-BoundedNode([string]$Script, [string[]]$Arguments, [int]$TimeoutMilliseconds, [string]$FailureCode) {
+  $start = [Diagnostics.ProcessStartInfo]::new()
+  $start.FileName = $Node
+  $quoted = @($Script) + $Arguments | ForEach-Object { '"' + ([string]$_).Replace('"','\"') + '"' }
+  $start.Arguments = $quoted -join ' '
+  $start.UseShellExecute = $false
+  $start.CreateNoWindow = $true
+  $start.RedirectStandardOutput = $true
+  $start.RedirectStandardError = $true
+  $process = [Diagnostics.Process]::new()
+  $process.StartInfo = $start
+  try {
+    if (-not $process.Start()) { throw $FailureCode }
+    if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+      try { $process.Kill() } catch {}
+      $process.WaitForExit()
+      throw ($FailureCode + '_TIMEOUT')
+    }
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    if ($process.ExitCode -ne 0) { throw $FailureCode }
+    return $stdout
+  } finally { $process.Dispose() }
+}
+
 function Get-Probe {
-  $raw = & $Node $Probe $ConfigPath
-  if ($LASTEXITCODE -ne 0) { throw 'BRIDGE_PROBE_FAILED' }
+  $raw = Invoke-BoundedNode $Probe @($ConfigPath) 15000 'BRIDGE_PROBE_FAILED'
   return $raw | ConvertFrom-Json
 }
 
 function Get-EvidencePlan([string]$RunId) {
-  $raw = & $Node $EvidenceBuilder $ConfigPath $RunId
-  if ($LASTEXITCODE -ne 0) { throw 'REPLAY_EVIDENCE_PLAN_FAILED' }
+  $raw = Invoke-BoundedNode $EvidenceBuilder @($ConfigPath,$RunId) 30000 'REPLAY_EVIDENCE_PLAN_FAILED'
   return $raw | ConvertFrom-Json
 }
 

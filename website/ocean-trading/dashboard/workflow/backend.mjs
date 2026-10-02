@@ -15,16 +15,31 @@ import { integrationStatus } from './integration.mjs';
 import { OperationalTransition, OPERATIONAL_PREFIX, operationalPolicy } from './operational-transition.mjs';
 import { OperationalPreparation } from './operational-preparation.mjs';
 import { identityReadback } from './provider-lifecycle.mjs';
+import { OperationalResults } from './operational-results.mjs';
+import { PaperForwardPreparation } from './paper-forward-preparation.mjs';
+import {
+  activateStrategyOnboarding,
+  deactivateStrategyOnboarding,
+  emergencyStopStrategyOnboarding,
+  pauseStrategyOnboarding,
+  recordStrategyOnboarding,
+  registerStrategyOnboarding,
+} from './strategy-onboarding.mjs';
+import { OnboardingBrainSync, retryOnboardingBrain } from './onboarding-brain-sync.mjs';
 
 export const TABLE = JSON.parse(fs.readFileSync(new URL("./workflow-transition-table.json", import.meta.url), "utf8"));
 const GATES = { ONBOARDING: "DISCOVERY", DEVELOPMENT: "DEVELOPMENT_REVIEW", SHADOW: "SHADOW_REVIEW", PRODUCTION: "DEPLOYMENT_REVIEW", ROLLBACK: "ROLLBACK_REVIEW" };
 const ARTIFACT_KINDS = new Set(["EVIDENCE", "RECOMMENDATION", "CANDIDATE", "BACKTEST", "ROBUSTNESS", "WALK_FORWARD", "OOS_HOLDOUT", "EVALUATION", "FORWARD_RESULT", "FORWARD_EVALUATION", "DEPLOYMENT_PLAN", "ROLLBACK_PLAN", "VALIDATION_REPORT", "OUTCOME", "LESSON", "NO_BENEFIT"]);
-const HUMAN_OPERATIONS = new Set(["profile.register", "strategy.register", "instance.register", "dataset.register", "plan.register", "run.register", "case.register", "approval.decide", "approval.revoke", "setup.register", "outbox.retry", "handoff.create"]);
+const HUMAN_OPERATIONS = new Set(["profile.register", "strategy.register", "instance.register", "dataset.register", "plan.register", "run.register", "case.register", "approval.decide", "approval.revoke", "setup.register", "outbox.retry", "handoff.create", "onboarding.draft", "onboarding.submit", "onboarding.brain.retry", "onboarding.register", "onboarding.activate", "onboarding.pause", "onboarding.deactivate", "onboarding.emergency-stop"]);
 export const ROUTES = {
   profiles: "profile.register", strategies: "strategy.register", instances: "instance.register", datasets: "dataset.register", "dataset-plans": "plan.register",
   runs: "run.register", cases: "case.register", artifacts: "artifact.write", approvals: "approval.request", decisions: "approval.decide", revocations: "approval.revoke",
   transitions: "case.transition", tasks: "task.result", handoffs: "handoff.create", "handoff-events": "handoff.event", "handoff-confirmations": "handoff.manual-confirmation", "run-events": "run.event",
   events: "event.write", health: "health.write", "setup-receipts": "setup.register", "outbox/claim": "outbox.claim", "outbox/ack": "outbox.ack", "outbox/fail": "outbox.fail", "outbox/retry": "outbox.retry",
+  "onboarding/drafts": "onboarding.draft", "onboarding/submissions": "onboarding.submit",
+  "onboarding/brain/retry": "onboarding.brain.retry", "onboarding/register": "onboarding.register",
+  "onboarding/activate": "onboarding.activate", "onboarding/pause": "onboarding.pause",
+  "onboarding/deactivate": "onboarding.deactivate", "onboarding/emergency-stop": "onboarding.emergency-stop",
 };
 for (const action of ["version","settings","permission","preview","prepare","preset","end","claim","renew","activate","pin","progress","evidence","finish"]) {
   ROUTES[`run-manager/${action}`] = `run-manager.${action}`;
@@ -51,10 +66,31 @@ export class WorkflowBackend {
     this.runs = new RunManager(this);
     this.testCommunication = new TestCommunication(this);
     this.operational = new OperationalTransition(this);
+    this.operationalResults = new OperationalResults(this);
     try { this.auth = new OceanAuth(config, this.store, environment); }
     catch (error) { this.store.close(); throw error; }
+    this.onboardingBrain = new OnboardingBrainSync(this, config.onboarding_brain_sync || { enabled: false });
+    this.onboardingBrain.start();
+    this.authFailureWindowMs = 5 * 60 * 1000;
+    this.authFailureThreshold = 3;
+    this.authFailureTotals = { 401: 0, 403: 0 };
+    this.authFailureBuckets = new Map();
   }
-  close() { this.stopMaintenance?.(); this.store.close(); }
+  close() { this.stopMaintenance?.(); this.onboardingBrain?.stop(); this.store.close(); }
+  recordAuthFailure(status, code) {
+    if (![401,403].includes(status)) return;
+    const now=Date.now();const key=`${status}:${code}`;
+    const previous=this.authFailureBuckets.get(key);
+    const current=!previous || now-previous.first_ms>this.authFailureWindowMs ? {status,code,count:1,first_ms:now,last_ms:now} : {...previous,count:previous.count+1,last_ms:now};
+    this.authFailureBuckets.delete(key);this.authFailureBuckets.set(key,current);
+    while(this.authFailureBuckets.size>32)this.authFailureBuckets.delete(this.authFailureBuckets.keys().next().value);
+    this.authFailureTotals[status]+=1;
+  }
+  authFailureReadiness() {
+    const now=Date.now();
+    const repeated=[...this.authFailureBuckets.values()].filter(row=>now-row.first_ms<=this.authFailureWindowMs && row.count>=this.authFailureThreshold).map(row=>({status:row.status,code:row.code,count:row.count,first_at_utc:new Date(row.first_ms).toISOString(),last_at_utc:new Date(row.last_ms).toISOString()}));
+    return {window_seconds:this.authFailureWindowMs/1000,threshold:this.authFailureThreshold,total_401:this.authFailureTotals[401],total_403:this.authFailureTotals[403],repeated};
+  }
   validate(kind, payload) {
     const result = spawnSync(this.config.python_executable, [fileURLToPath(new URL("./validate-contract.py", import.meta.url))], {
       input: JSON.stringify({ kind, payload }), encoding: "utf8", windowsHide: true, timeout: 4000, maxBuffer: 64 * 1024,
@@ -88,7 +124,8 @@ export class WorkflowBackend {
   expect(row, revision) { requireThat(Number.isInteger(revision) && row.revision === revision, 409, "REVISION_CONFLICT"); }
   active(row) { requireThat(!["PAUSED", "CANCELLED", "BLOCKED", "FAILED"].includes(row.work_status) && row.stage !== "CLOSED", 409, "CASE_NOT_EXECUTABLE"); }
   event(entity, operation, actor, payload, recipient = null) {
-    const event = { schema_version: API_VERSION, namespace: "TEST", operational_action_allowed: false, entity_id: entity, action: operation, actor_id: actor.id, actor_role: actor.role, created_at_utc: new Date().toISOString(), payload };
+    const namespace=actor.namespace==='OPERATIONAL'?'OPERATIONAL':'TEST';
+    const event = { schema_version: API_VERSION, namespace, operational_action_allowed: namespace==='OPERATIONAL', entity_id: entity, action: operation, actor_id: actor.id, actor_role: actor.role, created_at_utc: new Date().toISOString(), payload };
     const record = this.db.prepare("INSERT INTO ow_events(entity_id,action,actor_id,actor_role,created_at_utc,payload_json) VALUES(?,?,?,?,?,?)").run(entity, operation, actor.id, actor.role, event.created_at_utc, JSON.stringify(event));
     if (recipient) {
       requireThat(this.db.prepare("SELECT COUNT(*) AS n FROM ow_outbox WHERE state NOT IN ('ACKNOWLEDGED','DEAD_LETTER')").get().n < 1000, 429, "OUTBOX_BACKPRESSURE");
@@ -319,6 +356,14 @@ export class WorkflowBackend {
       case "handoff.create": return this.createHandoff(actor, data);
       case "handoff.event": return this.handoffEvent(actor, data);
       case "handoff.manual-confirmation": return recordManualAcknowledgement(this, actor, data);
+      case "onboarding.draft": return recordStrategyOnboarding(this, actor, data, "DRAFT");
+      case "onboarding.submit": return recordStrategyOnboarding(this, actor, data, "SUBMITTED");
+      case "onboarding.brain.retry": return retryOnboardingBrain(this, actor, data);
+      case "onboarding.register": return registerStrategyOnboarding(this, actor, data);
+      case "onboarding.activate": return activateStrategyOnboarding(this, actor, data);
+      case "onboarding.pause": return pauseStrategyOnboarding(this, actor, data);
+      case "onboarding.deactivate": return deactivateStrategyOnboarding(this, actor, data);
+      case "onboarding.emergency-stop": return emergencyStopStrategyOnboarding(this, actor, data);
       case "event.write": {
         exactKeys(data, ["run_id", "event"]);
         const run = this.one("ow_runs", data.run_id);
@@ -619,7 +664,8 @@ export class WorkflowBackend {
   }
   readRun(actor, runId) {
     const run = this.one("ow_runs", runId); this.authorize(actor, "read", run.strategy_id, run.instance_id);
-    return { context: JSON.parse(run.context_json), state: run.state, revision: run.revision, namespace: "TEST", reservation_is_actual_sierra_start: false, manager: this.runs.managed(run.id) ? this.runs.read(actor,run.id) : null, events: this.db.prepare("SELECT payload_json FROM ow_events WHERE entity_id=? ORDER BY id DESC LIMIT 200").all(run.id).map((row) => JSON.parse(row.payload_json)) };
+    const manager=this.runs.managed(run.id) ? this.runs.read(actor,run.id) : null;
+    return { context: JSON.parse(run.context_json), state: run.state, revision: run.revision, namespace: manager?.namespace || "TEST", reservation_is_actual_sierra_start: false, manager, events: this.db.prepare("SELECT payload_json FROM ow_events WHERE entity_id=? ORDER BY id DESC LIMIT 200").all(run.id).map((row) => JSON.parse(row.payload_json)) };
   }
   readStrategyEntity(actor, table, entityId) {
     const row = this.one(table, entityId);
@@ -673,14 +719,30 @@ export class WorkflowBackend {
       }
       if(route.startsWith(`${OPERATIONAL_PREFIX}/`)) {
         const local=route.slice(OPERATIONAL_PREFIX.length+1);let result;
-        requireThat(actor.role==='HUMAN' || actor.scopes.includes('read'),403,'WRONG_ACTION_SCOPE');
+        if(request.method==='GET')requireThat(actor.role==='HUMAN' || actor.scopes.includes('read'),403,'WRONG_ACTION_SCOPE');
         if(local==='identity' && request.method==='GET')result=identityReadback(this.config,actor,'OPERATIONAL');
         else if(local==='policy' && request.method==='GET')result=operationalPolicy(this.config);
         else if(local==='pending' && request.method==='GET')result=this.operational.pending(actor);
+        else if(/^dataset-manifests\/[A-Za-z0-9_.:-]+$/.test(local) && request.method==='GET')result=this.operational.manifestRead(actor,local.slice('dataset-manifests/'.length));
         else if((local==='runs' || local.startsWith('receipts/')) && request.method==='GET')result=this.operational.read(actor,local.startsWith('receipts/')?local.slice(9):null);
+        else if(/^runs\/[A-Za-z0-9_.:-]+$/.test(local) && request.method==='GET')result=this.runs.read(actor,local.slice(5));
+        else if(/^no-new-coverage\/[A-Za-z0-9_.:-]+$/.test(local) && request.method==='GET')result=new OperationalPreparation(this).readNoNewCoverage(actor,local.slice('no-new-coverage/'.length));
+        else if(/^authority\/[A-Za-z0-9_.:-]+$/.test(local) && request.method==='GET')result=this.operational.authority(actor,local.slice(10));
+        else if(/^workflow-events\/[A-Za-z0-9_.:-]+$/.test(local) && request.method==='GET')result=this.operational.workflowEventRead(actor,local.slice(16));
+        else if(/^trade-events\/[A-Za-z0-9_.:-]+$/.test(local) && request.method==='GET')result=this.operational.tradeEventRead(actor,local.slice(13));
+        else if(/^brain-results\/[A-Za-z0-9_.:-]+$/.test(local) && request.method==='GET')result=this.operationalResults.read(actor,local.slice(14));
         else if(local==='dataset-manifests' && request.method==='POST')result=this.operational.manifest(actor,await jsonBody(request));
-        else if(['reviews','decisions','decisions/revoke','runs/prepare'].includes(local) && request.method==='POST')result=new OperationalPreparation(this).perform(local,actor,await jsonBody(request));
+        else if(local==='release-requests' && request.method==='GET')result=new OperationalPreparation(this).list(actor);
+        else if(local==='paper-forward/options' && request.method==='GET')result=new PaperForwardPreparation(this).options(actor);
+        else if(local==='paper-forward/preview' && request.method==='POST')result=new PaperForwardPreparation(this).preview(actor,await jsonBody(request));
+        else if(local==='paper-forward/prepare' && request.method==='POST')result=new PaperForwardPreparation(this).prepare(actor,await jsonBody(request));
+        else if(['reviews','release-requests','decisions','decisions/revoke','dataset-releases','runs/prepare','runs/reprocess','runs/reprocess/abandon','runs/no-new-coverage'].includes(local) && request.method==='POST')result=new OperationalPreparation(this).perform(local,actor,await jsonBody(request));
         else if(['activate','context/resolve','events'].includes(local) && request.method==='POST')result=this.operational.perform(local,actor,await jsonBody(request));
+        else if(local==='trade-events' && request.method==='POST')result=this.operational.tradeEvent(actor,await jsonBody(request));
+        else if(local==='brain-results/register' && request.method==='POST')result=this.operationalResults.register(actor,await jsonBody(request));
+        else if(local==='brain-results/callback' && request.method==='POST')result=this.operationalResults.callback(actor,await jsonBody(request));
+        else if(local==='run/end' && request.method==='POST')result=this.runs.perform('end',actor,await jsonBody(request));
+        else if(['run/claim','run/renew','run/activate','run/pin','run/progress','run/evidence','run/finish'].includes(local) && request.method==='POST')result=this.runs.perform(local.slice(4),actor,await jsonBody(request));
         else throw new WorkflowError(404,'UNKNOWN_OPERATIONAL_ROUTE');
         response.end(JSON.stringify(result));return true;
       }
@@ -719,7 +781,7 @@ export class WorkflowBackend {
         if (route === "run-manager/options") response.end(JSON.stringify(this.runs.options(actor)));
         else if (/^run-manager\/context\/[A-Za-z0-9_.:-]+$/.test(route)) response.end(JSON.stringify(this.runs.read(actor,route.split('/')[2])));
         else if (route.startsWith("view/")) response.end(JSON.stringify(readWorkflowView(this, actor, route)));
-        else if (route === "status") response.end(JSON.stringify({ api_version: API_VERSION, contract_release: RELEASE, namespace: "TEST", brain_submission: "OFF", live_real: "DISABLED", dispatch_worker: "OFF", auth: "REQUIRED", schema_version: 6, identity: { id: actor.id, role: actor.role, scopes: actor.scopes, strategy_ids: actor.strategyIds, instance_ids: actor.instanceIds }, ...this.auth.readiness(), test_communication:this.testCommunication.readiness(actor), maintenance:this.maintenanceHealth || {state:'NOT_INSTALLED_ISOLATED'} }));
+        else if (route === "status") response.end(JSON.stringify({ api_version: API_VERSION, contract_release: RELEASE, namespace: "TEST", brain_submission: "OFF", live_real: "DISABLED", dispatch_worker: "OFF", auth: "REQUIRED", schema_version: 10, identity: { id: actor.id, role: actor.role, scopes: actor.scopes, strategy_ids: actor.strategyIds, instance_ids: actor.instanceIds }, ...this.auth.readiness(), test_communication:this.testCommunication.readiness(actor), onboarding_brain_sync:this.onboardingBrain.status(), maintenance:this.maintenanceHealth || {state:'NOT_INSTALLED_ISOLATED'} }));
         else if (route === 'setup-receipts') {
           requireThat(actor.role === 'HUMAN',403,'WAYNE_BROWSER_ONLY');
           response.end(JSON.stringify({ items: orderedSetup(this.db.prepare('SELECT * FROM ow_setup_receipts').all()), order: 'declared setup-task-map sequence; literal amendment IDs; historical statuses preserved' }));
@@ -765,8 +827,12 @@ export class WorkflowBackend {
         response.end(JSON.stringify(result));
       }
     } catch (error) {
-      response.statusCode = error instanceof WorkflowError ? error.status : 500;
-      response.end(JSON.stringify({ error: { code: error instanceof WorkflowError ? error.code : "WORKFLOW_INTERNAL_ERROR", message: error instanceof WorkflowError ? error.message : "Workflow operation failed", retryable: response.statusCode === 503 }, api_version: API_VERSION }));
+      const sqliteBusy = !(error instanceof WorkflowError) && /SQLITE_BUSY|database is (?:locked|busy)/i.test(`${error?.code || ''} ${error?.message || ''}`);
+      const code = error instanceof WorkflowError ? error.code : sqliteBusy ? 'WORKFLOW_DATABASE_BUSY' : 'WORKFLOW_INTERNAL_ERROR';
+      response.statusCode = error instanceof WorkflowError ? error.status : sqliteBusy ? 503 : 500;
+      this.recordAuthFailure(response.statusCode,code);
+      if (!(error instanceof WorkflowError)) console.error(`[ocean-workflow] ${request.method || 'UNKNOWN'} ${requestUrl.pathname} ${code}: ${error?.stack || error}`);
+      response.end(JSON.stringify({ error: { code, message: error instanceof WorkflowError ? error.message : sqliteBusy ? "Workflow data is temporarily busy" : "Workflow operation failed", retryable: response.statusCode === 503 }, api_version: API_VERSION }));
     }
     return true;
   }
@@ -797,7 +863,15 @@ export function workflowFromEnvironment(environment, python) {
   } else config = JSON.parse(fs.readFileSync(environment.OCEAN_WORKFLOW_CONFIG, "utf8"));
   const forbidden = [environment.OCEAN_WEBSITE_DB || "D:\\OceanTradingData\\website\\ocean-trading-website.sqlite", environment.PATRADING_LIVE_SQLITE_FILE, environment.PATRADING_PAPER_SQLITE_FILE, environment.PATRADING_REPLAY_SQLITE_FILE].filter(Boolean);
   requireThat(typeof config.db_file === "string" && forbidden.every((file) => path.resolve(config.db_file).toLowerCase() !== path.resolve(file).toLowerCase()) && !/^TradeTelemetry.*\.sqlite$/i.test(path.basename(config.db_file)), 503, "LEGACY_DATABASE_REUSE_PROHIBITED");
-  const backend=new WorkflowBackend({ ...config, python_executable: python }, resolvedEnvironment);
+  // The protected workflow state owns its validator runtime. Do not replace it
+  // with an ambient website Python that may not have contract dependencies.
+  const onboardingBrainSync = {
+    enabled: environment.OCEAN_ONBOARDING_BRAIN_SYNC !== '0',
+    api: environment.OCEAN_ONBOARDING_BRAIN_API || 'http://127.0.0.1:4001',
+    token_file: environment.OCEAN_ONBOARDING_BRAIN_TOKEN_FILE || 'D:\\Paperclip-codex\\workspaces\\hermes-brain-console\\secrets\\clients\\ocean-website-development.token',
+    interval_ms: Number(environment.OCEAN_ONBOARDING_BRAIN_INTERVAL_MS || 5000),
+  };
+  const backend=new WorkflowBackend({ ...config, python_executable: config.python_executable || python, onboarding_brain_sync: onboardingBrainSync }, resolvedEnvironment);
   if(environment.OCEAN_WORKFLOW_CONFIG.endsWith('.dpapi'))attachMaintenance(backend,environment.OCEAN_WORKFLOW_CONFIG);
   return backend;
 }

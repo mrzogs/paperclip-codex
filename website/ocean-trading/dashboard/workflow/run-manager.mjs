@@ -18,7 +18,7 @@ const TERMINAL = ['COMPLETED','FAILED','CANCELLED'];
 const parse = row => JSON.parse(row.payload_json);
 const hash = value => requireThat(typeof value === 'string' && /^sha256:[a-f0-9]{64}$/.test(value),422,'HASH_REQUIRED');
 const bounded = value => requireThat(typeof value === 'string' && value.trim().length > 0 && value.length <= 200,422,'BOUNDED_VALUE_REQUIRED');
-const utc = value => requireThat(typeof value === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0,19)===value.slice(0,19),422,'UTC_TIMESTAMP_REQUIRED');
+const utc = value => requireThat(typeof value === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?Z$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0,19)===value.slice(0,19),422,'UTC_TIMESTAMP_REQUIRED');
 export function interval(value) {
   exactKeys(value,['start_utc','end_utc']); utc(value.start_utc); utc(value.end_utc);
   requireThat(Date.parse(value.start_utc)<Date.parse(value.end_utc),422,'INVALID_INTERVAL');
@@ -63,6 +63,9 @@ export class RunManager {
     if(strategy)this.db.prepare(`INSERT INTO ${table} VALUES(?,?,?)`).run(key,strategy,JSON.stringify(payload));
     else this.db.prepare(`INSERT INTO ${table} VALUES(?,?)`).run(key,JSON.stringify(payload));
     return {id:key,namespace:'TEST',operational_action_allowed:false};
+  }
+  namespace(actor,plan=null) {
+    return actor.namespace==='OPERATIONAL' || plan?.operational_review ? 'OPERATIONAL' : 'TEST';
   }
   uniqueInstance(instance) {
     for(const row of this.db.prepare('SELECT payload_json FROM ow_instances').all()) {
@@ -191,11 +194,39 @@ export class RunManager {
   }
   load(actor,runId,scope='read') {
     const run=this.b.one('ow_runs',runId);this.b.authorize(actor,scope,run.strategy_id,run.instance_id);
-    const record=this.managed(runId);requireThat(record,409,'MANAGED_RUN_REQUIRED');const plan=parse(record);
-    requireThat(sealedHash(plan,'plan_hash')===plan.plan_hash,409,'RUN_PLAN_HASH_MISMATCH');
+    const record=this.managed(runId);requireThat(record,409,'MANAGED_RUN_REQUIRED');const stored=parse(record);
+    requireThat(sealedHash(stored,'plan_hash')===stored.plan_hash,409,'RUN_PLAN_HASH_MISMATCH');
+    const plan=this.runtimePlan(stored,record.coverage_key);
     return {run,plan,context:JSON.parse(run.context_json)};
   }
+  runtimePlan(plan,coverageKey) {
+    if(!plan.operational_review)return plan;
+    const review=plan.operational_review;
+    const binding=this.b.config.operational_factual_bindings?.find(value=>value.binding_hash===review.factual_binding_hash);
+    requireThat(binding,409,'OPERATIONAL_FACTUAL_BINDING_CHANGED');
+    const manifest=parse(this.b.one('ow_datasets',review.manifest_key));
+    const partition=manifest.partitions[review.partition_index];
+    requireThat(partition,409,'OPERATIONAL_PARTITION_CHANGED');
+    const coverageIdentity={strategy_id:review.context.strategy_id,code_hash:review.context.strategy_code_hash,config_hash:review.context.strategy_config_hash,source_id:manifest.source_id,source_revision:manifest.source_revision,symbol:partition.symbol,timezone:manifest.timezone,rollover:manifest.contract_rollover_policy,adjustment:manifest.adjustment_policy,instance_id:binding.instance.execution_instance_id};
+    return {...plan,instance:binding.instance,manifest_hash:manifest.manifest_hash,symbol:partition.symbol,coverage_identity:coverageIdentity,coverage_key:coverageKey,scored_intervals:[review.interval],warmup_intervals:[],created_at_utc:review.context.observed_source_state.observed_at_utc};
+  }
   current(plan) {
+    if(plan.operational_review) {
+      const review=plan.operational_review,{review_hash:reviewHash,...reviewBody}=review,c=review.context,s=plan.selection;
+      requireThat(objectHash(reviewBody)===reviewHash && sealedHash(c,'context_hash')===c.context_hash && plan.context_hash===c.context_hash,409,'OPERATIONAL_RUN_CONTEXT_CHANGED');
+      requireThat(s.strategy_id===c.strategy_id && s.instance_id===c.execution_instance_id && s.purpose===c.evidence_purpose && s.permission_id===c.run_id && s.partition_index===review.partition_index && objectHash(s.interval)===objectHash(review.interval),409,'OPERATIONAL_RUN_SELECTION_CHANGED');
+      const binding=this.b.config.operational_factual_bindings?.find(value=>value.binding_hash===review.factual_binding_hash);
+      requireThat(binding && sealedHash(binding,'binding_hash')===binding.binding_hash && binding.state==='VERIFIED_FACTS_ONLY' && binding.strategy_id===c.strategy_id && binding.instance.execution_instance_id===c.execution_instance_id,409,'OPERATIONAL_FACTUAL_BINDING_CHANGED');
+      const instance=parse(this.b.one('ow_instances',c.execution_instance_id)),dataset=this.b.one('ow_datasets',review.manifest_key),manifest=parse(dataset);
+      requireThat(objectHash(instance)===objectHash(binding.instance) && dataset.content_hash===review.manifest_hash && manifest.manifest_hash===review.manifest_hash && sealedHash(manifest,'manifest_hash')===manifest.manifest_hash,409,'OPERATIONAL_RUN_INPUT_CHANGED');
+      for(const scope of ['STRATEGY_ONBOARDING','DATASET_RELEASE','RUN_RELEASE']) {
+        const decisions=this.db.prepare('SELECT id,payload_json FROM ow_operational_decisions WHERE strategy_id=? AND review_hash=? AND scope=?').all(c.strategy_id,reviewHash,scope).filter(row=>{
+          const decision=parse(row);return decision.decision==='APPROVED' && future(decision.expires_at_utc) && !this.db.prepare('SELECT id FROM ow_operational_revocations WHERE id=?').get(row.id);
+        });
+        requireThat(decisions.length===1,409,`${scope}_AUTHORITY_CHANGED`);
+      }
+      return;
+    }
     const fresh=this.preview(plan.selection);
     requireThat(fresh.approval_id===plan.approval_id && fresh.coverage_key===plan.coverage_key && fresh.manifest_hash===plan.manifest_hash,409,'RUN_AUTHORITY_CHANGED');
   }
@@ -242,7 +273,7 @@ export class RunManager {
     if(action==='progress') {
       exactKeys(data.axes,AXES);requireThat(AXES.every(k=>Array.isArray(data.axes[k])&&data.axes[k].length<=1000),422,'THREE_COVERAGE_AXES_REQUIRED');
       const axes=Object.fromEntries(AXES.map(k=>[k,merge(data.axes[k])]));
-      const activated=this.db.prepare("SELECT id FROM ow_events WHERE entity_id=? AND action='run-manager.activate' LIMIT 1").get(run.id);
+      const activated=this.db.prepare("SELECT id FROM ow_events WHERE entity_id=? AND action IN ('run-manager.activate','operational.source-observed') LIMIT 1").get(run.id);
       requireThat(activated || AXES.every(k=>axes[k].length===0),409,'OBSERVED_ACTIVATION_REQUIRED');
       const earlier=this.db.prepare('SELECT payload_json FROM ow_run_progress WHERE run_id=? ORDER BY id DESC LIMIT 1').get(run.id);
       if(earlier && TERMINAL.includes(run.state)) {
@@ -261,7 +292,7 @@ export class RunManager {
     const status=terminal?run.state:parse(ending).payload.outcome;
     const observed=AXES.reduce((v,k)=>intersect(v,summary.progress.axes[k]),plan.scored_intervals);
     if(status==='COMPLETED') requireThat(!subtract(plan.scored_intervals,observed).length && !summary.progress.gaps.length && !summary.progress.failures.length && summary.unresolved_records===0 && summary.progress.watermark && Date.parse(summary.progress.watermark)>=Date.parse(plan.scored_intervals.at(-1).end_utc),409,'COVERAGE_INCOMPLETE');
-    const start=this.db.prepare("SELECT created_at_utc FROM ow_events WHERE entity_id=? AND action='run-manager.activate' ORDER BY id LIMIT 1").get(run.id);
+    const start=this.db.prepare("SELECT created_at_utc FROM ow_events WHERE entity_id=? AND action IN ('run-manager.activate','operational.source-observed') ORDER BY id LIMIT 1").get(run.id);
     requireThat(status!=='COMPLETED'||start,409,'OBSERVED_ACTIVATION_REQUIRED');
     const closeTimes=this.db.prepare('SELECT payload_json FROM ow_evidence_revisions WHERE run_id=?').all(run.id).map(row=>parse(row).provenance.exit_time_utc);
     const completion={schema_version:'2.1.0',run_id:run.id,run_context_revision:context.revision,run_context_hash:context.context_hash,status,requested_coverage:plan.scored_intervals,observed_coverage:observed,watermark:summary.progress.watermark,unique_canonical_trade_count:summary.unique_canonical_count,processing_event_count:summary.processing_count,no_trade_interval_count:countNoTradeIntervals(observed,closeTimes,summary.unresolved_records),gaps:summary.progress.gaps,failures:summary.progress.failures.map(reason=>({code:'UNKNOWN',message:reason,retryable:false,quarantine_id:null})),dataset_manifest_hash:context.dataset_manifest_hash,started_at_utc:start?.created_at_utc||plan.created_at_utc,completed_at_utc:new Date().toISOString()};
@@ -303,10 +334,28 @@ export class RunManager {
   read(actor,runId) {
     const {run,plan,context}=this.load(actor,runId);const lease=this.db.prepare('SELECT * FROM ow_run_leases WHERE id=?').get(runId);
     let contextStatus='CURRENT';try{this.current(plan);}catch(e){contextStatus=e.code||'RECONCILIATION_REQUIRED';}
-    return {api_version:RUN_API,namespace:'TEST',actual_ingestion:'OFF',run_id:run.id,state:run.state,revision:run.revision,context,plan,context_status:contextStatus,lease:lease?{owner_id:lease.owner_id,heartbeat_utc:lease.heartbeat_utc,expires_ms:lease.expires_ms,expired:lease.expires_ms<=Date.now()}:null,...this.summary(run,plan),reservation_is_actual_sierra_start:false};
+    const namespace=this.namespace(actor,plan);
+    return {api_version:RUN_API,namespace,actual_ingestion:namespace==='OPERATIONAL'?'SCOPED_EVENT_ONLY':'OFF',run_id:run.id,state:run.state,revision:run.revision,context,plan,context_status:contextStatus,lease:lease?{owner_id:lease.owner_id,heartbeat_utc:lease.heartbeat_utc,expires_ms:lease.expires_ms,expired:lease.expires_ms<=Date.now()}:null,...this.summary(run,plan),reservation_is_actual_sierra_start:false};
+  }
+  runReadiness(strategy,versions,instances,settings,permissions) {
+    const currentVersions=versions.filter(version=>version.strategy_id===strategy.strategy_id && !version.blocked);
+    const replayInstances=instances.filter(instance=>instance.strategy_id===strategy.strategy_id && currentVersions.some(version=>version.version===instance.version_binding) && instance.capabilities.includes('REPLAY'));
+    const configuredInstances=replayInstances.filter(instance=>settings.some(setting=>setting.instance_id===instance.execution_instance_id));
+    const historicalPermissions=permissions.filter(permission=>permission.strategy_id===strategy.strategy_id && !permission.expired && permission.purposes.includes('HISTORICAL_BUILD') && permission.manifest.quality_status==='VERIFIED' && permission.manifest.gaps.length===0 && permission.manifest.partitions.some(partition=>partition.partition==='DISCOVERY' && partition.coverage_status==='COMPLETE'));
+    const missing=[];
+    if(!currentVersions.length)missing.push('REGISTERED_VERSION_REQUIRED');
+    if(!replayInstances.length)missing.push('REPLAY_INSTANCE_REQUIRED');
+    if(!configuredInstances.length)missing.push('EXECUTION_SETTINGS_REQUIRED');
+    if(!historicalPermissions.length)missing.push('APPROVED_HISTORICAL_DATASET_REQUIRED');
+    return {ready:missing.length===0,missing};
   }
   options(actor) {
     this.human(actor);
-    return {api_version:RUN_API,namespace:'TEST',actual_ingestion:'OFF',disabled_environments:['LIVE_REAL','BACKTEST','IMPORT'],purposes:PURPOSES,build_modes:MODES,strategies:this.db.prepare('SELECT payload_json FROM ow_strategies').all().map(parse),versions:this.db.prepare('SELECT payload_json FROM ow_run_versions').all().map(row=>{const v=parse(row);let blocked=null;try{this.versionsCurrent(v);}catch(e){blocked=e.code;}return {...v,blocked};}),instances:this.db.prepare('SELECT payload_json FROM ow_instances').all().map(parse),settings:this.db.prepare('SELECT payload_json FROM ow_run_settings').all().map(parse),permissions:this.db.prepare('SELECT payload_json FROM ow_dataset_permissions').all().map(row=>{const p=parse(row);return {...p,expired:!future(p.expires_at_utc),manifest:parse(this.b.one('ow_datasets',p.manifest_key))};}),presets:this.db.prepare('SELECT id,payload_json FROM ow_run_presets').all().map(row=>({id:row.id,...parse(row)})),pending_plans:this.db.prepare("SELECT id FROM ow_datasets WHERE kind='PENDING_PLAN'").all(),cases:this.db.prepare('SELECT id,strategy_id,instance_id,candidate_hash FROM ow_cases').all()};
+    const versions=this.db.prepare('SELECT payload_json FROM ow_run_versions').all().map(row=>{const v=parse(row);let blocked=null;try{this.versionsCurrent(v);}catch(e){blocked=e.code;}return {...v,blocked};});
+    const instances=this.db.prepare('SELECT payload_json FROM ow_instances').all().map(parse);
+    const settings=this.db.prepare('SELECT payload_json FROM ow_run_settings').all().map(parse);
+    const permissions=this.db.prepare('SELECT payload_json FROM ow_dataset_permissions').all().map(row=>{const p=parse(row);return {...p,expired:!future(p.expires_at_utc),manifest:parse(this.b.one('ow_datasets',p.manifest_key))};});
+    const strategies=this.db.prepare('SELECT payload_json FROM ow_strategies').all().map(parse).map(strategy=>({...strategy,run_readiness:this.runReadiness(strategy,versions,instances,settings,permissions)}));
+    return {api_version:RUN_API,namespace:'TEST',actual_ingestion:'OFF',disabled_environments:['LIVE_REAL','BACKTEST','IMPORT'],purposes:PURPOSES,build_modes:MODES,strategies,versions,instances,settings,permissions,presets:this.db.prepare('SELECT id,payload_json FROM ow_run_presets').all().map(row=>({id:row.id,...parse(row)})),pending_plans:this.db.prepare("SELECT id FROM ow_datasets WHERE kind='PENDING_PLAN'").all(),cases:this.db.prepare('SELECT id,strategy_id,instance_id,candidate_hash FROM ow_cases').all()};
   }
 }

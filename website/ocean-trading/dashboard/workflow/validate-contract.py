@@ -18,6 +18,7 @@ def main():
         "approval-decision": "approvalDecision",
         "handoff": "handoff",
         "workflow-event": "workflowEvent",
+        "trade-event": "tradeEvent",
         "source-state": "sourceState",
     }
     request = json.load(sys.stdin)

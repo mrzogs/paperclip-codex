@@ -1,6 +1,9 @@
 import { requireThat, id } from './common.mjs';
-import { orderedSetup } from './setup-operator.mjs';
-import { operationalPolicy } from './operational-transition.mjs';
+import { orderedSetup, setupTaskCapacity } from './setup-operator.mjs';
+import { OperationalPreparation } from './operational-preparation.mjs';
+import { MAX_SERVICE_IDENTITIES } from './provider-lifecycle.mjs';
+import { loadStrategyOnboarding, onboardingStrategyRow, readOnboardingActivationEvents, readOnboardingRegistration, readOnboardingStrategyId, readStrategyOnboardingEvents } from './strategy-onboarding.mjs';
+import { readOnboardingBrainOutbox } from './onboarding-brain-sync.mjs';
 
 export const UI_API_VERSION = 'ocean-workflow-ui/v1';
 const PAGE_SIZE = 50;
@@ -10,6 +13,29 @@ const pageOf = (db, table, offset, order = 'rowid DESC') => ({
   total: db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n,
   offset, page_size: PAGE_SIZE,
 });
+
+export function operationalView(backend) {
+  const db=backend.db;const readiness=backend.auth.readiness();
+  const states=new Map(readiness.bindings.map(row=>[row.identity_id,row]));
+  const services=backend.config.identities.map(identity=>{
+    const observed=states.get(identity.identity_id) || {};
+    return {identity_id:identity.identity_id,role:identity.role,namespace:identity.namespace,owner:identity.owner || identity.role,state:observed.state || 'UNKNOWN',reason:observed.reason || null,credential_version:identity.credential_version || 1,expires_at_utc:identity.expires_at_utc,renewal:identity.renewal_policy?'AUTOMATIC':'MANUAL',scopes:[...(identity.scopes || [])]};
+  });
+  const queue=Object.fromEntries(db.prepare('SELECT state,COUNT(*) AS n FROM ow_outbox GROUP BY state').all().map(row=>[row.state,row.n]));
+  const setupTotal=db.prepare('SELECT COUNT(*) AS n FROM ow_setup_receipts').get().n;
+  const identityStates=services.reduce((result,row)=>{result[row.state]=(result[row.state] || 0)+1;return result;},{});
+  return {
+    schema_version:'ocean-operational-view/v1',
+    safety:{execution:'TEST_ONLY',normal_ingestion:'OFF',live_real:backend.config.live_real,brain_submission:backend.config.brain_submission,dispatch_worker:backend.config.dispatch_worker,automatic_approval:'DISABLED'},
+    readiness:{machine:readiness.machine_readiness,human:readiness.human_readiness,maintenance:backend.maintenanceHealth?.state || 'NOT_INSTALLED_ISOLATED'},
+    registry:{used:services.length,capacity:MAX_SERVICE_IDENTITIES,remaining:MAX_SERVICE_IDENTITIES-services.length,state_counts:identityStates,tombstones:services.filter(row=>['REVOKED','EXPIRED'].includes(row.state)).length},
+    receipts:{registered:setupTotal,known_tasks:setupTaskCapacity,remaining:Math.max(0,setupTaskCapacity-setupTotal),classification:'HISTORICAL_SETUP_NOT_APPROVAL'},
+    queues:{pending:queue.PENDING || 0,leased:queue.LEASED || 0,failed:(queue.FAILED || 0)+(queue.DEAD_LETTER || 0),capacity:1000,lease_seconds:backend.leaseMs/1000},
+    maintenance:{...(backend.maintenanceHealth || {state:'NOT_INSTALLED_ISOLATED',last_success_utc:null,failures:0,expiry_alerts:[]})},
+    auth_failures:backend.authFailureReadiness(),
+    services:services.filter(row=>row.state!=='REVOKED'),
+  };
+}
 
 // These human-only projections omit credential metadata and private source paths.
 export function readWorkflowView(backend, actor, route) {
@@ -22,23 +48,10 @@ export function readWorkflowView(backend, actor, route) {
   requireThat(parts.length <= 4 && Number.isSafeInteger(offset) && offset >= 0 && offset <= 100000, 400, 'INVALID_VIEW_PAGE');
   const stamp = { view_version: UI_API_VERSION, namespace: 'TEST', refreshed_at_utc: new Date().toISOString() };
   const strategyName = (value) => parse(backend.one('ow_strategies', value)).strategy_name;
+  const operationalReleases = () => new OperationalPreparation(backend).list(actor).items;
   const caseRow = (value) => ({ ...backend.readCase(actor, value.id), strategy_name: strategyName(value.strategy_id), priority: value.stage === 'ROLLBACK_REVIEW' ? 'URGENT_REVIEW' : null });
   const runRow = (value) => ({ ...backend.readRun(actor, value.id), strategy_name: strategyName(value.strategy_id) });
   const artifactRow = (value) => ({ artifact_id: value.id, case_id: value.case_id, kind: value.kind, producer_id: value.producer_id, recipient_id: value.recipient_id, candidate_hash: value.candidate_hash, dependency_ids: JSON.parse(value.dependencies_json), manifest: JSON.parse(value.manifest_json) });
-  const setupRows = () => orderedSetup(db.prepare('SELECT payload_json FROM ow_setup_receipts').all()).map(row => {
-    const receipt = parse(row);
-    const status = receipt.status || receipt.final_status || 'UNKNOWN';
-    const members = receipt.verified_members ? Object.keys(receipt.verified_members) : [];
-    return {
-      task_id: receipt.task_id,
-      status,
-      owner: receipt.owner || receipt.project || 'Not recorded',
-      classification: 'HISTORICAL_SETUP_NOT_APPROVAL',
-      verified_bundle_sha256: receipt.verified_bundle_sha256 || null,
-      verified_member_count: members.length,
-      diagnostic_preserved: ['S23', 'S23.1', 'S24', 'S26.1'].includes(receipt.task_id),
-    };
-  });
   const approvalRow = (value) => {
     backend.verifySnapshot(value);
     const row = backend.one('ow_cases', value.case_id);
@@ -57,11 +70,24 @@ export function readWorkflowView(backend, actor, route) {
     const profile = parse(backend.one('ow_profiles', value.profile_id));
     return { strategy_id: value.id, strategy_name: registry.strategy_name, registry_revision: value.revision, activation_status: registry.activation_status, activation_decision_id: registry.activation_decision_id, baseline_version: registry.baseline_version, baseline_hash: value.baseline_hash, production_version: registry.production_version, profile: { profile_id: profile.profile_id, profile_version: profile.profile_version, profile_hash: profile.profile_hash, strategy_code_hash: profile.strategy_code_hash, strategy_config_hash: profile.strategy_config_hash }, cases: db.prepare('SELECT id FROM ow_cases WHERE strategy_id=? ORDER BY rowid DESC LIMIT 200').all(value.id).map(row => caseRow(backend.one('ow_cases', row.id))), cases_total: db.prepare('SELECT COUNT(*) AS n FROM ow_cases WHERE strategy_id=?').get(value.id).n };
   };
+  const onboarding = () => {
+    const strategyId = readOnboardingStrategyId(backend.config.strategy_onboarding_root);
+    return loadStrategyOnboarding({
+      root: backend.config.strategy_onboarding_root,
+      events: readStrategyOnboardingEvents(db, strategyId),
+      brainOutbox: readOnboardingBrainOutbox(db).filter(row => row.strategy_id === strategyId),
+      registration: readOnboardingRegistration(db, strategyId),
+      activationEvents: readOnboardingActivationEvents(db, strategyId),
+      runtimeProbe: backend.config.strategy_onboarding_runtime_probe,
+    });
+  };
+  const mergeOnboarding = (row, value) => row && value.strategy_id === row.strategy_id ? { ...value, onboarding: row } : value;
   if (collection === 'dashboard' && parts.length === 2) {
     const pending = db.prepare("SELECT * FROM ow_approval_requests WHERE state='PENDING' ORDER BY rowid DESC").all().map(approvalRow);
+    const releaseRequests = operationalReleases();
     const counts = {
-      action_required: pending.filter(row => row.actionable).length,
-      pending_gates: pending.length,
+      action_required: pending.filter(row => row.actionable).length + releaseRequests.filter(row => row.actionable).length,
+      pending_gates: pending.length + releaseRequests.filter(row => row.state === 'PENDING').length,
       urgent_reviews: db.prepare("SELECT COUNT(*) AS n FROM ow_cases WHERE stage='ROLLBACK_REVIEW' AND work_status<>'CANCELLED'").get().n,
       active_cases: db.prepare("SELECT COUNT(*) AS n FROM ow_cases WHERE stage<>'CLOSED' AND work_status NOT IN ('CANCELLED','BLOCKED','FAILED','PAUSED')").get().n,
       blocked_cases: db.prepare("SELECT COUNT(*) AS n FROM ow_cases WHERE work_status IN ('BLOCKED','FAILED')").get().n,
@@ -69,36 +95,7 @@ export function readWorkflowView(backend, actor, route) {
       pending_sync: db.prepare("SELECT COUNT(*) AS n FROM ow_outbox WHERE state<>'ACKNOWLEDGED'").get().n,
     };
     const health = db.prepare('SELECT payload_json FROM ow_health ORDER BY rowid DESC LIMIT 50').all().map(row => { const data = parse(row); return { ...data, stale: Date.now() - Date.parse(data.observed_at_utc) > 120000 }; });
-    const setup = setupRows();
-    const receipt = taskId => setup.find(row => row.task_id === taskId) || { task_id: taskId, status: 'NOT_IMPORTED', owner: 'Not recorded', classification: 'HISTORICAL_SETUP_NOT_APPROVAL', verified_bundle_sha256: null, verified_member_count: 0, diagnostic_preserved: ['S23', 'S23.1', 'S24', 'S26.1'].includes(taskId) };
-    const policy = operationalPolicy(backend.config);
-    const pendingOperational = backend.operational.pending(actor);
-    return {
-      ...stamp, counts, pending: pending.slice(0, 10),
-      cases: db.prepare("SELECT * FROM ow_cases WHERE stage<>'CLOSED' ORDER BY CASE WHEN work_status IN ('BLOCKED','FAILED') THEN 0 ELSE 1 END, rowid DESC LIMIT 10").all().map(caseRow),
-      health,
-      history: db.prepare('SELECT payload_json FROM ow_events ORDER BY id DESC LIMIT 12').all().map(row => parse(row)),
-      ...backend.auth.readiness(),
-      provider_binding: {
-        current_amended_provider: receipt('S23.3'),
-        immutable_machine_foundation: receipt('S23.2'),
-        persisted_receipts_total: setup.length,
-        historical_diagnostics: ['S23', 'S23.1', 'S24', 'S26.1', 'S26.2', 'S31.2', 'S32.2'].map(receipt),
-        receipt_order: 'setup-task-map sequence with literal amended IDs; diagnostics remain separate',
-      },
-      operational_readiness: {
-        schema_version: policy.schema_version,
-        replay_enabled: policy.modes.REPLAY.enabled,
-        paper_forward_enabled: policy.modes.PAPER_FORWARD.enabled,
-        live_real: policy.live_real,
-        normal_ingestion: policy.normal_ingestion,
-        future_owners: policy.future_owners,
-        pending_items: pendingOperational.items.slice(0, 10),
-        pending_total: pendingOperational.items.length,
-      },
-      setup_receipts: setup.slice(0, 12),
-      dispatch_worker: 'OFF', brain_submission: 'OFF', live_real: 'DISABLED',
-    };
+    return { ...stamp, counts, pending: pending.slice(0, 10), operational_releases:releaseRequests.slice(0,10), cases: db.prepare("SELECT * FROM ow_cases WHERE stage<>'CLOSED' ORDER BY CASE WHEN work_status IN ('BLOCKED','FAILED') THEN 0 ELSE 1 END, rowid DESC LIMIT 10").all().map(caseRow), health, history: db.prepare('SELECT payload_json FROM ow_events ORDER BY id DESC LIMIT 12').all().map(row => parse(row)), operations:operationalView(backend), ...backend.auth.readiness(), provider_binding: 'PENDING_FUTURE_CONSUMERS', dispatch_worker: 'OFF', brain_submission: 'OFF', live_real: 'DISABLED' };
   }
   const tables = { strategies: 'ow_strategies', cases: 'ow_cases', runs: 'ow_runs', approvals: 'ow_approval_requests', history: 'ow_events' };
   if (tables[collection] && (!key || key === 'page')) {
@@ -106,16 +103,28 @@ export function readWorkflowView(backend, actor, route) {
     const page = pageOf(db, tables[collection], offset, collection === 'history' ? 'id DESC' : 'rowid DESC');
     const formatter = { strategies: strategyRow, cases: caseRow, runs: runRow, approvals: approvalRow, history: row => ({ event_id: row.id, ...parse(row) }) }[collection];
     const setup = collection === 'history' ? orderedSetup(db.prepare('SELECT payload_json FROM ow_setup_receipts').all()).map(row => {
-      const receipt=parse(row);return {task_id:receipt.task_id,status:receipt.status,project:receipt.project,operator_id:receipt.operator_id || 'Historical operator',classification:'HISTORICAL_SETUP_NOT_APPROVAL'};
+      const receipt=parse(row);return {task_id:receipt.registered_task_id || receipt.task_id,status:receipt.status,project:receipt.project || receipt.owner,operator_id:receipt.operator_id || 'Historical operator',classification:'HISTORICAL_SETUP_NOT_APPROVAL'};
     }) : undefined;
-    return { ...stamp, ...page, rows: undefined, items: page.rows.map(formatter), setup };
+    let items = page.rows.map(formatter);
+    let total = page.total;
+    if (collection === 'strategies') {
+      const projected = onboarding();
+      const existing = items.findIndex(row => row.strategy_id === projected.strategy_id);
+      if (existing >= 0) items[existing] = mergeOnboarding(projected, items[existing]);
+      else if (offset === 0) { items = [onboardingStrategyRow(projected), ...items]; total += 1; }
+    }
+    return { ...stamp, ...page, total, rows: undefined, items, setup, ...(collection==='approvals'?{operational_releases:operationalReleases()}: {}) };
   }
   requireThat(key && parts.length === 3, 404, 'UNKNOWN_VIEW'); id(key);
   if (collection === 'strategies') {
-    const strategy = strategyRow(backend.one('ow_strategies', key));
+    const stored = db.prepare('SELECT * FROM ow_strategies WHERE id=?').get(key);
+    const onboardingProjection = onboarding();
+    const projected = key === onboardingProjection.strategy_id ? onboardingProjection : null;
+    requireThat(stored || projected, 404, 'ENTITY_NOT_FOUND');
+    const strategy = stored ? mergeOnboarding(projected, strategyRow(stored)) : onboardingStrategyRow(projected);
     const runs = db.prepare('SELECT * FROM ow_runs WHERE strategy_id=? ORDER BY rowid DESC LIMIT 200').all(key).map(runRow);
     const instances = db.prepare('SELECT payload_json FROM ow_instances WHERE strategy_id=?').all(key).map(row => parse(row));
-    return { ...stamp, ...strategy, runs, runs_total: db.prepare('SELECT COUNT(*) AS n FROM ow_runs WHERE strategy_id=?').get(key).n, instances };
+    return { ...stamp, ...strategy, runs, runs_total: db.prepare('SELECT COUNT(*) AS n FROM ow_runs WHERE strategy_id=?').get(key).n, instances: instances.length ? instances : projected?.instance?.execution_instance_id ? [projected.instance] : [] };
   }
   if (collection === 'runs') return { ...stamp, ...runRow(backend.one('ow_runs', key)) };
   if (collection === 'approvals') return { ...stamp, ...approvalRow(backend.one('ow_approval_requests', key)) };
