@@ -276,6 +276,7 @@ function strategyOnboardingPage(data) {
   const paperReconciliationRequired = paperWorkstreamStatus.includes('TELEMETRY_RECONCILIATION_PENDING');
   const paperAttributionRequired = paperWorkstreamStatus.includes('TELEMETRY_ATTRIBUTION_PENDING');
   const paperSafeCutoverPending = paperWorkstreamStatus.includes('SAFE_CUTOVER_PENDING');
+  const pendingAcceptanceGate = program.current_acceptance_assessment?.pending?.[0] || null;
   const checklist = `<ul class='onboarding-checklist'>${progress.checks.map(item => {
     const target = onboardingQuestionForStep(onboarding, item.id);
     const stateClass = item.state === 'COMPLETE' ? 'complete' : 'pending';
@@ -337,33 +338,36 @@ function strategyOnboardingPage(data) {
     <li class='${paperRuntimeActive || paperRuns.length ? 'current' : 'waiting'}'><span class='journey-marker'>3</span><div class='journey-copy'><div><h3>3. Paper forward testing</h3>${badge(paperState)}</div><p>After Replay evidence is reviewed, run the strategy in Paper. Completed Paper periods add trade and no-trade evidence continuously.</p><p class='journey-evidence'>${paperCompleted.length} completed run${paperCompleted.length === 1 ? '' : 's'} / ${paperTrades} trade${paperTrades === 1 ? '' : 's'} captured</p></div></li>
     <li class='${liveRuns.length ? 'current' : 'waiting'}'><span class='journey-marker'>4</span><div class='journey-copy'><div><h3>4. Live trading</h3>${badge(liveState)}</div><p>Live is a separate, explicit human decision after Replay and Paper evidence has been reviewed. Ocean never promotes a strategy automatically.</p></div></li>
   </ol>`;
-  const nextActionTitle = paperSafeCutoverPending ? 'Wait for the safe Paper cutover' : paperAttributionRequired ? 'Complete Paper trade attribution' : paperReconciliationRequired ? 'Reconcile Paper telemetry' : paperRuntimeActive ? 'Observe the Paper forward run' : campaign.status === 'COMPLETED' ? 'Evaluate the Replay-to-Paper gate' : campaign.status === 'FAILED' || campaign.state === 'ATTENTION_REQUIRED' ? 'Repair the bounded Replay failure' : campaign.status === 'RUNNING' ? `Replay ${campaign.current_window_id || 'window'} is running` : 'Continue the sealed Replay campaign';
+  const nextActionTitle = pendingAcceptanceGate?.title || (paperSafeCutoverPending ? 'Wait for the safe Paper cutover' : paperAttributionRequired ? 'Complete Paper trade attribution' : paperReconciliationRequired ? 'Reconcile Paper telemetry' : paperRuntimeActive ? 'Observe the Paper forward run' : campaign.status === 'COMPLETED' ? 'Evaluate the Replay-to-Paper gate' : campaign.status === 'FAILED' || campaign.state === 'ATTENTION_REQUIRED' ? 'Repair the bounded Replay failure' : campaign.status === 'RUNNING' ? `Replay ${campaign.current_window_id || 'window'} is running` : 'Continue the sealed Replay campaign');
   const nextActionHref = paperRuntimeActive ? '/paper-dashboard.html' : runtime.monitor.url;
   const nextActionLabel = paperRuntimeActive ? 'Open Paper Dashboard' : 'Open Replay Monitor';
+  const nextActionText = pendingAcceptanceGate?.resolution_action || paperWorkstream?.next_action || campaign.next_action;
+  const nextActionControls = pendingAcceptanceGate ? '' : `<div class='actions'><a class='button primary' ${paperRuntimeActive ? '' : 'data-replay-monitor'} href='${esc(nextActionHref)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}${nextActionLabel}</a></div>`;
   const nextAction = onboardingComplete
-    ? `<div class='strategy-next-action'><div><span>Current action</span><h3>${esc(nextActionTitle)}</h3><p>${esc(paperWorkstream?.next_action || campaign.next_action)}</p></div><div class='actions'><a class='button primary' ${paperRuntimeActive ? '' : 'data-replay-monitor'} href='${esc(nextActionHref)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}${nextActionLabel}</a></div></div>`
+    ? `<div class='strategy-next-action'><div><span>Current action</span><h3>${esc(nextActionTitle)}</h3><p>${esc(nextActionText)}</p>${pendingAcceptanceGate ? `<small>Owner: ${esc(pendingAcceptanceGate.owner)}</small>` : ''}</div>${nextActionControls}</div>`
     : `<div class='strategy-next-action'><div><span>Current action</span><h3>Finish the simple setup</h3><p>${registration.can_register ? 'The setup is confirmed. Let Ocean finish the Replay preparation.' : setupConfirmed ? 'Ocean is recording the confirmed setup. Refresh when synchronization is complete.' : 'Review the detected strategy, account, contract, and Replay instance once.'}</p></div><div class='actions'>${setupAction}</div></div>`;
   const completionBanner = onboardingComplete
-    ? `<div class='onboarding-complete-banner'>${icon('check')}<div><h2>Onboarding complete</h2><p>${paperRuntimeActive ? 'This strategy has progressed to Paper forward testing; Live remains a separate human-only decision.' : 'This strategy is ready to build history in Replay. Sierra running, stopped, or stale does not change this status.'}</p></div></div>`
+    ? `<div class='onboarding-complete-banner'>${icon('check')}<div><h2>Onboarding complete</h2><p>${pendingAcceptanceGate ? 'Operational Replay discovery is complete. Paper remains Sim1 non-promotional while the remaining acceptance gate is resolved; Live remains a separate human-only decision.' : paperRuntimeActive ? 'This strategy has progressed to Paper forward testing; Live remains a separate human-only decision.' : 'This strategy is ready to build history in Replay. Sierra running, stopped, or stale does not change this status.'}</p></div></div>`
     : '';
   const workstreamRows = (program.workstreams || []).map(item => [esc(item.id), esc(item.name), badge(item.status), esc(item.owner), esc(item.next_action || 'No separate action recorded')]);
   const campaignBody = facts([
     ['Program', badge(program.status)], ['Replay campaign', badge(campaign.status)], ['Campaign source', badge(campaign.state)],
     ['Current window', esc(campaign.current_window_id || 'None')], ['Completed windows', String(campaign.completed_count || 0)],
     ['Failed windows', String(campaign.failed_count || 0)], ['Execution instance', esc(campaign.execution_instance_id)],
-    ['LIVE_REAL', badge(campaign.live_real || 'DISABLED')], ['Last observed', esc(date(campaign.observed_at_utc))],
+    ['LIVE_REAL', badge(campaign.live_real || 'DISABLED')], ['Pending acceptance gates', String(program.current_acceptance_assessment?.pending?.length || 0)],
+    ['Promotion', esc(program.current_acceptance_assessment?.promotion_disposition || 'Not recorded')], ['Last observed', esc(date(campaign.observed_at_utc))],
   ]) + (workstreamRows.length ? table(['Lane','Workstream','State','Owner','Exact next action'], workstreamRows) : empty('The continuous-delivery program record is not available.'));
   return heading(onboarding.strategy_name, 'Strategy setup and testing', headingActions)
     + `<p class='readonly-note'>${icon('check')} Ocean reads the strategy and Sierra setup directly. You confirm the non-live setup once; testing evidence is collected afterwards.</p>`
     + completionBanner
     + `<div class='onboarding-status-band'>${[
       ['Onboarding', badge(onboardingComplete ? 'COMPLETE' : onboarding.onboarding_status)],
-      ['Current stage', onboardingComplete ? paperRuntimeActive ? 'Paper forward testing' : 'Replay history' : 'Strategy setup'],
+      ['Current stage', onboardingComplete ? pendingAcceptanceGate ? 'Post-discovery review' : paperRuntimeActive ? 'Paper forward testing' : 'Replay history' : 'Strategy setup'],
       ['Account', esc(instance.account_alias)],
-      ['Contract', esc(instance.symbol)],
+      [paperRuntimeActive ? 'Paper contract' : 'Replay contract', esc((paperRuntimeActive ? program.current_runtime_contracts?.paper : program.current_runtime_contracts?.replay) || instance.symbol)],
     ].map(([label,value]) => `<div><span>${esc(label)}</span><strong>${value}</strong></div>`).join('')}</div>`
     + nextAction
-    + section('CI/CD continuous run', campaignBody, `<span class='muted'>${esc(campaign.next_action)}</span>`)
+    + section('CI/CD continuous run', campaignBody, `<span class='muted'>${esc(nextActionText)}</span>`)
     + section('Strategy journey', journey, `<span class='muted'>${noTradeRuns} completed zero-trade period${noTradeRuns === 1 ? '' : 's'} recorded</span>`)
     + (!onboardingComplete ? section('Setup progress', `<div class='progress-summary'><strong>${progress.complete} of ${progress.total} complete</strong><span>${Math.round(progress.complete / progress.total * 100)}%</span></div><div class='progress-bar' aria-label='${progress.complete} of ${progress.total} onboarding steps complete'><span style='width:${Math.round(progress.complete / progress.total * 100)}%'></span></div>${checklist}${registration.receipt && registration.state === 'REGISTERED' ? '' : registrationBody}`) : '')
     + `<details class='onboarding-system-details'><summary>Replay and system details</summary>${section('Replay runtime and advanced controls', activationBody)}${section('Obsidian Brain record', brainRows.length ? table(['Milestone','Receipt','State','Attempts','Record','Action'], brainRows) : empty('Created after setup confirmation.'))}${section('Source checks', facts([['Profile',badge(onboarding.profile.validity)],['Instance',badge(instance.status)],['Source',badge(source.status)],['Last verified',esc(date(source.last_verified_at_utc))]]) + sourceStatus)}</details>`;
