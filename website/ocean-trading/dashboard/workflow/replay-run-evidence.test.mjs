@@ -41,7 +41,7 @@ function fixture() {
   const config = { workflow_db: workflowDb, telemetry_db: telemetryDb, strategy_id: 'cicd-vwap-pull-back-strategy', instance_id: 'test-cicd-vwap-pull-back-replay-two-v012', account_alias: 'Sim1', expected_symbol: 'MNQM25_FUT_CME', expected_strategy_version: 'v0.6.227' };
   const configFile = path.join(root, 'config.json');
   fs.writeFileSync(configFile, JSON.stringify(config));
-  return { root, configFile, runId, telemetryDb };
+  return { root, configFile, runId, telemetryDb, workflowDb };
 }
 
 function run(value) {
@@ -97,4 +97,29 @@ test('uses non-test evidence identities for an operational bridge', t => {
   assert.equal(result.actions[0].data.trade_id, 'sierra-trade-7');
   assert.equal(result.actions[1].data.event_id, 'sierra-event-7');
   assert.equal(result.actions[1].data.legacy_trade_id, 'sierra-legacy-7');
+});
+
+test('uses the sealed operational selection interval when scored_intervals is absent', t => {
+  const value = fixture();
+  t.after(() => fs.rmSync(value.root, { recursive: true, force: true }));
+  const workflow = new DatabaseSync(value.workflowDb);
+  workflow.prepare('UPDATE ow_run_plans SET payload_json=? WHERE id=?').run(JSON.stringify({
+    selection: {
+      interval: {
+        start_utc: '2025-05-01T00:00:00.000Z',
+        end_utc: '2025-06-01T00:00:00.000Z',
+      },
+    },
+  }), value.runId);
+  workflow.close();
+  const directory = path.join(value.root, 'evidence');
+  fs.mkdirSync(directory);
+  fs.writeFileSync(path.join(directory, `${value.runId}-sierra.png`), png);
+  const result = run(value);
+  assert.equal(result.status, 'READY');
+  assert.deepEqual(result.scored_intervals, [{
+    start_utc: '2025-05-01T00:00:00.000Z',
+    end_utc: '2025-06-01T00:00:00.000Z',
+  }]);
+  assert.equal(result.watermark, '2025-06-01T00:00:00.000Z');
 });
