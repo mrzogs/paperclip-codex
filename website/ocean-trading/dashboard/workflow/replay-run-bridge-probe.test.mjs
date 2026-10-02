@@ -25,7 +25,7 @@ function createFixture() {
       CREATE TABLE schema_version (version INTEGER);
       INSERT INTO schema_version VALUES (7);
       CREATE TABLE logger_health (health_id INTEGER PRIMARY KEY, message TEXT, created_utc TEXT);
-      INSERT INTO logger_health VALUES (1, 'logger_started version=v0.5.28 test', '2026-10-01T09:22:25Z');
+      INSERT INTO logger_health VALUES (1, 'logger_started version=v0.5.29 test', '2026-10-01T09:22:25Z');
       CREATE TABLE account_snapshot (account_snapshot_id INTEGER PRIMARY KEY, trade_account TEXT, is_simulated INTEGER, snapshot_utc TEXT);
       INSERT INTO account_snapshot VALUES (1, 'Sim1', 1, '2026-10-01T09:23:24Z');
       CREATE TABLE instrument_snapshot (instrument_snapshot_id INTEGER PRIMARY KEY, symbol TEXT);
@@ -55,7 +55,7 @@ function createFixture() {
     account_alias: 'Sim1',
     expected_symbol: 'MNQM25_FUT_CME',
     expected_strategy_version: 'v0.6.229',
-    expected_telemetry_version: 'v0.5.28',
+    expected_telemetry_version: 'v0.5.29',
     expected_sierra_exe: expectedExe,
     poll_seconds: 10,
     state_file: path.join(directory, 'state.json'),
