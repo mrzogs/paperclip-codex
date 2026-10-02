@@ -3,6 +3,7 @@ import { PURPOSES, interval, intersect, subtract } from './run-manager.mjs';
 import { OperationalPreparation, RELEASE_SCOPES } from './operational-preparation.mjs';
 
 export const OPERATIONAL_PREFIX='operational/v1';
+export const DATASET_OWNER_TASKS=['S31.3','S31.4'];
 export const operationalPolicy=(config={})=>({
   schema_version:'ocean-operational-transition/v1',shared_contract_release:'2.1.0',
   modes:Object.fromEntries(['REPLAY','PAPER_FORWARD'].map(mode=>[mode,{enabled:config.operational?.modes?.[mode]?.enabled===true}])),live_real:'DISABLED',
@@ -10,7 +11,7 @@ export const operationalPolicy=(config={})=>({
   separate_operational_enrollment_required:true,
   classification:PURPOSES.map(([environment,purpose,partition,permission])=>({environment,purpose,partition,permission})),
   required_authorities:['verified factual instance','strategy/profile/code/config pins','dataset manifest revision/hash and permission','genuine onboarding and dataset release','genuine per-run confirmation','pinned Run Context','compatible observed source handshake'],
-  future_owners:{dataset_manifest:'S31.3',human_access:'S33.2',human_release:'S40.4',per_run:'S41.3',first_replay_enablement:'S42.3',paper_enablement:'S49.2/S50.2'},
+  future_owners:{dataset_manifest:'S31.3/S31.4',human_access:'S33.2',human_release:'S40.4',per_run:'S41.3',first_replay_enablement:'S42.3',paper_enablement:'S49.2/S50.2'},
 });
 
 // Pending source observations and proposed manifests are not executable registrations.
@@ -93,7 +94,7 @@ export class OperationalTransition {
     requireThat(!input.instance_id.startsWith('test-'),403,'TEST_IDENTITY_PROMOTION_REJECTED');
     const binding=this.b.config.operational_factual_bindings?.find(value=>value.strategy_id===input.strategy_id && value.instance.execution_instance_id===input.instance_id);
     requireThat(actor.strategyIds.includes(input.strategy_id) && binding && binding.state==='VERIFIED_FACTS_ONLY' && sealedHash(binding,'binding_hash')===binding.binding_hash,403,'WRONG_PROPOSAL_SCOPE');
-    requireThat(input.source_task==='S31.3',422,'DATASET_OWNER_RECEIPT_REQUIRED');
+    requireThat(DATASET_OWNER_TASKS.includes(input.source_task),422,'DATASET_OWNER_RECEIPT_REQUIRED');
     const setup=this.db.prepare('SELECT payload_json FROM ow_setup_receipts WHERE id=?').get(input.source_task);
     requireThat(setup,409,'SEALED_DATASET_OWNER_RECEIPT_MISSING');
     const receipt=JSON.parse(setup.payload_json);
