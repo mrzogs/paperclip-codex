@@ -10,8 +10,8 @@
   "credential_ref": "OCEAN_VWAP_PULLBACK_REPLAY_TWO_V013_TELEMETRY_TOKEN",
   "account_alias": "Sim1",
   "expected_symbol": "MNQU25_FUT_CME",
-  "expected_strategy_version": "v0.6.228",
-  "expected_telemetry_version": "v0.5.27",
+  "expected_strategy_version": "v0.6.229",
+  "expected_telemetry_version": "v0.5.28",
   "expected_sierra_exe": "D:\\Trading\\SierraChart-Replay Two\\SierraChart_64.exe",
   "poll_seconds": 10,
   "state_file": "D:\\OceanTradingData\\website\\ocean-runtime\\replay-bridge-status.json"

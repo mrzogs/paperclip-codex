@@ -25,13 +25,13 @@ function createFixture() {
       CREATE TABLE schema_version (version INTEGER);
       INSERT INTO schema_version VALUES (7);
       CREATE TABLE logger_health (health_id INTEGER PRIMARY KEY, message TEXT, created_utc TEXT);
-      INSERT INTO logger_health VALUES (1, 'logger_started version=v0.5.27 test', '2026-10-01T09:22:25Z');
+      INSERT INTO logger_health VALUES (1, 'logger_started version=v0.5.28 test', '2026-10-01T09:22:25Z');
       CREATE TABLE account_snapshot (account_snapshot_id INTEGER PRIMARY KEY, trade_account TEXT, is_simulated INTEGER, snapshot_utc TEXT);
       INSERT INTO account_snapshot VALUES (1, 'Sim1', 1, '2026-10-01T09:23:24Z');
       CREATE TABLE instrument_snapshot (instrument_snapshot_id INTEGER PRIMARY KEY, symbol TEXT);
       INSERT INTO instrument_snapshot VALUES (1, 'MNQM25_FUT_CME');
       CREATE TABLE replay_runs (run_id TEXT, created_utc TEXT, strategy_id TEXT, instance_role TEXT, strategy_version TEXT);
-      INSERT INTO replay_runs VALUES ('test-run-1', '2026-10-01T09:22:26Z', 'cicd-vwap-pull-back-strategy', 'replay', 'v0.6.228');
+      INSERT INTO replay_runs VALUES ('test-run-1', '2026-10-01T09:22:26Z', 'cicd-vwap-pull-back-strategy', 'replay', 'v0.6.229');
       CREATE TABLE sierra_instance (instance_id TEXT, last_seen_utc TEXT, instance_role TEXT, sierra_exe_path TEXT);
       CREATE TABLE fills (id INTEGER, run_id TEXT);
       CREATE TABLE orders (id INTEGER, run_id TEXT);
@@ -54,8 +54,8 @@ function createFixture() {
     credential_ref: 'OCEAN_VWAP_PULLBACK_REPLAY_TWO_V013_TELEMETRY_TOKEN',
     account_alias: 'Sim1',
     expected_symbol: 'MNQM25_FUT_CME',
-    expected_strategy_version: 'v0.6.228',
-    expected_telemetry_version: 'v0.5.27',
+    expected_strategy_version: 'v0.6.229',
+    expected_telemetry_version: 'v0.5.28',
     expected_sierra_exe: expectedExe,
     poll_seconds: 10,
     state_file: path.join(directory, 'state.json'),
