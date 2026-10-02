@@ -11,7 +11,7 @@ export const operationalPolicy=(config={})=>({
   separate_operational_enrollment_required:true,
   classification:PURPOSES.map(([environment,purpose,partition,permission])=>({environment,purpose,partition,permission})),
   required_authorities:['verified factual instance','strategy/profile/code/config pins','dataset manifest revision/hash and permission','genuine onboarding and dataset release','genuine per-run confirmation','pinned Run Context','compatible observed source handshake'],
-  future_owners:{dataset_manifest:'S31.3',human_access:'S33.2',human_release:'S40.4',per_run:'S41.3',first_replay_enablement:'S42.3',paper_enablement:'S49.2/S50.2'},
+  future_owners:{dataset_manifest:'S31.3/S31.4',human_access:'S33.2',human_release:'S40.4',per_run:'S41.3',first_replay_enablement:'S42.3',paper_enablement:'S49.2/S50.2'},
 });
 
 // Pending source observations and proposed manifests are not executable registrations.
