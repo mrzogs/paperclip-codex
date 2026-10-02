@@ -23,7 +23,7 @@ const sources = {
     { id:'U26', owner:'Wayne/Ocean operator', resolution_action:'Approve non-live capabilities.' },
   ] },
   'replay-two-alert-remediation.json': { strategy_id:TEST_STRATEGY_ID, verified_through:'2026-09-29T07:14:21Z', diagnosis:{ dll_rebuild_required:false }, fix:{ alerts_enabled:false }, validation:{ automated_order_placement:false, telemetry_logging:false } },
-  'priority-completion-program.json': { schema_version:'cicd-vwap-priority-completion-program/v1', strategy_id:TEST_STRATEGY_ID, program_id:'test-priority-program', status:'IN_PROGRESS_POST_DISCOVERY_REVIEW', priority:'CRITICAL', authorization:{ live_real:'PROHIBITED' }, current_runtime_contracts:{ replay:'MNQH26_FUT_CME', paper:'MNQZ26_FUT_CME' }, current_acceptance_assessment:{ assessed_at:'2026-10-02T22:39:20Z', promotion_disposition:'NO_AUTOMATIC_PROMOTION', pending:[{ gate:'FROZEN_DATASET_LADDER_FULLY_QUALIFIED', title:'Acquire MNQZ25 history for backward regression', blocker:'The required segment is absent.', owner:'Coordinator', resolution_action:'Acquire the exact MNQZ25 SCID segment before backward regression.' }] }, workstreams:[{ id:'W5', name:'Paper simulation operation', owner:'Coordinator', status:'ACTIVE_SIM1_V234_V0532_VERIFIED_FLAT_CONNECTED', next_action:'Continue non-promotional Paper observation on Sim1.', exit:'Paper safety verified.' }] },
+  'priority-completion-program.json': { schema_version:'cicd-vwap-priority-completion-program/v1', strategy_id:TEST_STRATEGY_ID, program_id:'test-priority-program', status:'IN_PROGRESS_POST_DISCOVERY_REVIEW', priority:'CRITICAL', authorization:{ live_real:'PROHIBITED' }, current_runtime_contracts:{ replay:'MNQH26_FUT_CME', paper:'MNQZ26_FUT_CME' }, next_governed_action:{ title:'Review discovery and decide whether to freeze a candidate', owner:'Wayne with Ocean Trading', action:'Either freeze one new isolated candidate for backward regression or record NO_CHANGE.', automatic_action:'NONE_UNTIL_CANDIDATE_FREEZE', reason:'Non-discovery data remains sealed until candidate freeze.' }, current_acceptance_assessment:{ assessed_at:'2026-10-02T22:39:20Z', promotion_disposition:'NO_AUTOMATIC_PROMOTION', pending:[{ gate:'FROZEN_DATASET_LADDER_FULLY_QUALIFIED', title:'Acquire MNQZ25 history for backward regression', blocker:'The required segment is absent.', owner:'Coordinator', resolution_action:'Acquire the exact MNQZ25 SCID segment before backward regression.' }] }, workstreams:[{ id:'W5', name:'Paper simulation operation', owner:'Coordinator', status:'ACTIVE_SIM1_V234_V0532_VERIFIED_FLAT_CONNECTED', next_action:'Continue non-promotional Paper observation on Sim1.', exit:'Paper safety verified.' }] },
 };
 
 function writeSources(root) {
@@ -69,7 +69,7 @@ test('complete onboarding is actionable in the browser without touching producti
   const browserErrors = []; page.on('pageerror', error => browserErrors.push(error.message));
   try {
     await page.goto(`${base}/improvement/strategies/${TEST_STRATEGY_ID}`);
-    assert.match(await page.locator('script[type="module"]').getAttribute('src'),/program-gates-20261002-1/,'the deployed page must request the current workflow module version');
+    assert.match(await page.locator('script[type="module"]').getAttribute('src'),/governed-action-20261003-1/,'the deployed page must request the current workflow module version');
     await page.getByRole('button',{ name:'Sign in', exact:true }).click();
     await page.getByRole('link',{ name:'Help', exact:true }).click();
     await expect(page.getByRole('heading',{ name:'Onboarding help', exact:true })).toBeVisible();
@@ -119,6 +119,15 @@ test('complete onboarding is actionable in the browser without touching producti
     await expect(page.getByText('Post-discovery review',{ exact:true })).toBeVisible();
     await expect(page.getByText('MNQZ26_FUT_CME',{ exact:true })).toBeVisible();
     await expect(page.getByText('Operational Replay discovery is complete. Paper remains Sim1 non-promotional while the remaining acceptance gate is resolved; Live remains a separate human-only decision.',{ exact:true })).toBeVisible();
+    sources['priority-completion-program.json'].current_acceptance_assessment.pending = [];
+    sources['priority-completion-program.json'].status = 'CICD_GATES_PROVEN_READY_FOR_GOVERNED_CANDIDATE_DECISION';
+    fs.writeFileSync(path.join(sourceRoot,'priority-completion-program.json'),JSON.stringify(sources['priority-completion-program.json']));
+    await page.locator('#refresh').click();
+    await expect(page.getByRole('heading',{ name:'Review discovery and decide whether to freeze a candidate', exact:true })).toBeVisible();
+    await expect(page.getByText('Either freeze one new isolated candidate for backward regression or record NO_CHANGE.',{ exact:true }).first()).toBeVisible();
+    await expect(page.getByText('Owner: Wayne with Ocean Trading',{ exact:true })).toBeVisible();
+    await expect(page.getByText('Governed candidate decision',{ exact:true })).toBeVisible();
+    await expect(page.getByText('The CI/CD system is operational and the frozen data ladder is sealed. The next strategy change remains a governed human decision; Paper stays Sim1 non-promotional and Live stays disabled.',{ exact:true })).toBeVisible();
     await expect(page.getByRole('columnheader',{ name:'Exact next action', exact:true })).toBeVisible();
     await expect(page.getByRole('button',{ name:'Prepare Replay history run', exact:true })).toHaveCount(0);
     await expect(page.getByRole('heading',{ name:/Replay history/ })).toBeVisible();
