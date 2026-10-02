@@ -71,7 +71,7 @@ function New-BridgeClient($Binding) {
 }
 
 function Invoke-OceanRequest([string]$Method, [string]$Route, $Body = $null) {
-  if ($Route -cnotmatch '^/api/workflow/(status|health|run-manager/context/[A-Za-z0-9_.:-]+|run-manager/(claim|renew|activate|pin|evidence|progress|finish)|operational/v1/runs/[A-Za-z0-9_.:-]+|operational/v1/run/(claim|renew|activate|pin|evidence|progress|finish))$') { throw 'ROUTE_REJECTED' }
+  if ($Route -cnotmatch '^/api/workflow/(status|health|run-manager/context/[A-Za-z0-9_.:-]+|run-manager/(claim|renew|activate|pin|evidence|progress|end|finish)|operational/v1/runs/[A-Za-z0-9_.:-]+|operational/v1/run/(claim|renew|activate|pin|evidence|progress|end|finish))$') { throw 'ROUTE_REJECTED' }
   $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::new($Method), ($Config.base_url + $Route))
   try {
     if ($null -ne $Body) {
@@ -184,13 +184,18 @@ function Get-EvidencePlan([string]$RunId) {
 }
 
 function Submit-EvidencePlan($Plan, [string]$LeaseId) {
+  $actionIndex = 0
   foreach ($action in @($Plan.actions)) {
+    if ($actionIndex -gt 0 -and $actionIndex % 30 -eq 0) {
+      $null = Invoke-Mutation 'renew' @{run_id=[string]$Plan.run_id;lease_id=$LeaseId}
+    }
     $data = @{}
     foreach ($property in $action.data.PSObject.Properties) { $data[$property.Name] = $property.Value }
     $data.lease_id = $LeaseId
     if ($action.type -in @('pin-open','pin-close')) { $null = Invoke-Mutation 'pin' $data }
     elseif ($action.type -ceq 'evidence') { $null = Invoke-Mutation 'evidence' $data }
     else { throw 'REPLAY_EVIDENCE_ACTION_REJECTED' }
+    $actionIndex++
   }
 }
 
@@ -288,6 +293,14 @@ function Invoke-BridgeCycle {
       pending_events=0
       gaps=@()
       failures=@()
+    }
+    if ($evidencePlan.status -ceq 'READY' -and $context.state -ceq 'ACTIVE' -and
+        $evidencePlan.completion_receipt.status -ceq 'COMPLETED') {
+      $context = Invoke-Mutation 'end' @{
+        run_id=$runId
+        expected_revision=[int]$context.revision
+        outcome='COMPLETED'
+      }
     }
   }
   if ($context.state -eq 'COMPLETING') {
