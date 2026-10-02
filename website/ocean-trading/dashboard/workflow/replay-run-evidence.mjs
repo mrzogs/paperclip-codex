@@ -35,6 +35,20 @@ function inside(intervals, value) {
   return intervals.some(interval => interval.start_utc <= value && value < interval.end_utc);
 }
 
+function scoredIntervals(plan) {
+  const intervals = Array.isArray(plan.scored_intervals) && plan.scored_intervals.length
+    ? plan.scored_intervals
+    : plan.selection?.interval
+      ? [plan.selection.interval]
+      : [];
+  if (!intervals.length || intervals.some(interval => {
+    const start = Date.parse(interval?.start_utc || '');
+    const end = Date.parse(interval?.end_utc || '');
+    return !Number.isFinite(start) || !Number.isFinite(end) || start >= end;
+  })) fail('SCORED_INTERVALS_REQUIRED');
+  return intervals;
+}
+
 function evidenceImage(workflowDb, runId) {
   const filename = path.join(path.dirname(workflowDb), 'evidence', `${runId}-sierra.png`);
   if (!fs.existsSync(filename)) return { ready: false, path: filename };
@@ -55,7 +69,7 @@ function loadWorkflow(config, runId) {
     const plan = JSON.parse(planRow.payload_json);
     const pins = new Map(db.prepare('SELECT id,state FROM ow_trade_pins WHERE run_id=?').all(runId).map(row => [row.id, row.state]));
     const events = new Set(db.prepare('SELECT event_id FROM ow_evidence_revisions WHERE run_id=?').all(runId).map(row => row.event_id));
-    return { run, context, plan, pins, events };
+    return { run, context, plan, scoredIntervals: scoredIntervals(plan), pins, events };
   } finally {
     db.close();
   }
@@ -83,7 +97,7 @@ function loadTelemetry(config, runId, workflow, screenshotHash) {
       if (!trade.opening_order_id || !trade.closing_order_id) fail('ORDER_PROVENANCE_REQUIRED');
       const entryTime = sierraDateTimeToUtc(trade.entry_datetime);
       const exitTime = sierraDateTimeToUtc(trade.exit_datetime);
-      if (entryTime > exitTime || !inside(workflow.plan.scored_intervals, exitTime)) fail('TRADE_OUTSIDE_SCORED_INTERVAL');
+      if (entryTime > exitTime || !inside(workflow.scoredIntervals, exitTime)) fail('TRADE_OUTSIDE_SCORED_INTERVAL');
       const legs = db.prepare('SELECT * FROM trade_legs WHERE trade_id=? ORDER BY leg_id').all(trade.trade_id);
       if (legs.length < 2) fail('TRADE_LEGS_REQUIRED');
       const marketEventKeys = legs.map(leg => `sierra-leg:${leg.leg_id}:${leg.internal_order_id}:${leg.fill_datetime}:${leg.quantity}:${leg.fill_price}`);
@@ -167,8 +181,8 @@ try {
       run_id: runId,
       run_state: workflow.run.state,
       evidence_image: { path: image.path, sha256: image.hash, bytes: image.bytes },
-      scored_intervals: workflow.plan.scored_intervals,
-      watermark: workflow.plan.scored_intervals.at(-1).end_utc,
+      scored_intervals: workflow.scoredIntervals,
+      watermark: workflow.scoredIntervals.at(-1).end_utc,
       ...telemetry,
     }));
   }
