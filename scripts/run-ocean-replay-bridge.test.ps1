@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 $scriptPath = Join-Path $PSScriptRoot 'run-ocean-replay-bridge.ps1'
 $source = [IO.File]::ReadAllText($scriptPath)
 
-if ($source -cnotmatch 'run-manager/\(claim\|renew\|activate\|pin\|evidence\|progress\|finish\)') {
+if ($source -cnotmatch 'run-manager/\(claim\|renew\|activate\|pin\|evidence\|progress\|end\|finish\)') {
   throw 'FINISH_ROUTE_NOT_ALLOWED'
 }
 if (-not $source.Contains("if (`$context.state -eq 'COMPLETING') {") -or
@@ -52,6 +52,15 @@ if (-not $source.Contains('$process.StandardOutput.ReadToEndAsync()') -or
     $source.IndexOf('$process.StandardOutput.ReadToEndAsync()', [StringComparison]::Ordinal) -ge
     $source.IndexOf('$process.WaitForExit($TimeoutMilliseconds)', [StringComparison]::Ordinal)) {
   throw 'REDIRECTED_STREAMS_MUST_DRAIN_BEFORE_WAIT'
+}
+if (-not $source.Contains("Invoke-Mutation 'renew' @{run_id=[string]`$Plan.run_id;lease_id=`$LeaseId}") -or
+    -not $source.Contains("`$evidencePlan.completion_receipt.status -ceq 'COMPLETED'") -or
+    -not $source.Contains("`$context = Invoke-Mutation 'end'") -or
+    $source.IndexOf("Invoke-Mutation 'progress'", [StringComparison]::Ordinal) -ge
+    $source.IndexOf("`$context = Invoke-Mutation 'end'", [StringComparison]::Ordinal) -or
+    $source.IndexOf("`$context = Invoke-Mutation 'end'", [StringComparison]::Ordinal) -ge
+    $source.IndexOf("if (`$context.state -eq 'COMPLETING')", [StringComparison]::Ordinal)) {
+  throw 'SEALED_COMPLETION_MUST_RENEW_END_AND_FINISH'
 }
 
 Write-Output 'PASS: Replay bridge preserves TEST behavior and adds a fail-closed, exact-binding OPERATIONAL route without LIVE_REAL authority.'
