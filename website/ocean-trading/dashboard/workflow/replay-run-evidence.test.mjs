@@ -83,3 +83,18 @@ test('rejects a trade from the wrong contract', t => {
   db.close();
   assert.throws(() => run(value), /TRADE_SCOPE_MISMATCH/);
 });
+
+test('uses non-test evidence identities for an operational bridge', t => {
+  const value = fixture();
+  t.after(() => fs.rmSync(value.root, { recursive: true, force: true }));
+  const config = JSON.parse(fs.readFileSync(value.configFile, 'utf8'));
+  config.schema_version = 'ocean-replay-run-bridge/v4';
+  fs.writeFileSync(value.configFile, JSON.stringify(config));
+  const directory = path.join(value.root, 'evidence');
+  fs.mkdirSync(directory);
+  fs.writeFileSync(path.join(directory, `${value.runId}-sierra.png`), png);
+  const result = run(value);
+  assert.equal(result.actions[0].data.trade_id, 'sierra-trade-7');
+  assert.equal(result.actions[1].data.event_id, 'sierra-event-7');
+  assert.equal(result.actions[1].data.legacy_trade_id, 'sierra-legacy-7');
+});

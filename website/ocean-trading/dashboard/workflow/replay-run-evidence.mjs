@@ -87,9 +87,10 @@ function loadTelemetry(config, runId, workflow, screenshotHash) {
       const legs = db.prepare('SELECT * FROM trade_legs WHERE trade_id=? ORDER BY leg_id').all(trade.trade_id);
       if (legs.length < 2) fail('TRADE_LEGS_REQUIRED');
       const marketEventKeys = legs.map(leg => `sierra-leg:${leg.leg_id}:${leg.internal_order_id}:${leg.fill_datetime}:${leg.quantity}:${leg.fill_price}`);
-      const pinId = `test-sierra-trade-${trade.trade_id}`;
-      const eventId = `test-sierra-event-${trade.trade_id}`;
-      const legacyId = `test-sierra-legacy-${trade.trade_id}`;
+      const idPrefix = config.schema_version === 'ocean-replay-run-bridge/v4' ? 'sierra' : 'test-sierra';
+      const pinId = `${idPrefix}-trade-${trade.trade_id}`;
+      const eventId = `${idPrefix}-event-${trade.trade_id}`;
+      const legacyId = `${idPrefix}-legacy-${trade.trade_id}`;
       const direction = String(trade.direction || '').toUpperCase();
       if (!['LONG', 'SHORT'].includes(direction)) fail('TRADE_DIRECTION_REQUIRED');
       const sourceBundle = { trade, legs };
