@@ -183,6 +183,16 @@ function Get-EvidencePlan([string]$RunId) {
   return $raw | ConvertFrom-Json
 }
 
+function ConvertTo-UtcTimestamp($Value) {
+  if ($Value -is [DateTime]) {
+    return $Value.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ', [Globalization.CultureInfo]::InvariantCulture)
+  }
+  if ($Value -is [DateTimeOffset]) {
+    return $Value.UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ss.fffZ', [Globalization.CultureInfo]::InvariantCulture)
+  }
+  return [string]$Value
+}
+
 function Submit-EvidencePlan($Plan, [string]$LeaseId) {
   $actionIndex = 0
   foreach ($action in @($Plan.actions)) {
@@ -279,7 +289,7 @@ function Invoke-BridgeCycle {
       Submit-EvidencePlan $evidencePlan $leaseId
       $reconciliation = [ordered]@{status=$evidencePlan.status;evidence_image=$evidencePlan.evidence_image;metrics=$evidencePlan.metrics;action_count=@($evidencePlan.actions).Count}
       $axes = @{source_market=@($evidencePlan.scored_intervals);strategy_execution=@($evidencePlan.scored_intervals);processing_review=@($evidencePlan.scored_intervals)}
-      $watermark = [string]$evidencePlan.watermark
+      $watermark = ConvertTo-UtcTimestamp $evidencePlan.watermark
     } elseif ($evidencePlan.status -in @('AWAITING_SIERRA_EVIDENCE_IMAGE','AWAITING_REPLAY_COMPLETION') -and $context.state -ceq 'ACTIVE') {
       $reconciliation = [ordered]@{status=$evidencePlan.status;evidence_image=$evidencePlan.evidence_image;metrics=$null;action_count=0}
       $axes = @{source_market=@();strategy_execution=@();processing_review=@()}
