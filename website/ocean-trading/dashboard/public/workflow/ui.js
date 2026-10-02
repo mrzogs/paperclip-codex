@@ -274,6 +274,7 @@ function strategyOnboardingPage(data) {
   const paperWorkstreamStatus = String(paperWorkstream?.status || '');
   const paperRuntimeActive = paperWorkstreamStatus.startsWith('ACTIVE_SIM1_') || paperWorkstreamStatus === 'ACTIVE';
   const paperReconciliationRequired = paperWorkstreamStatus.includes('TELEMETRY_RECONCILIATION_PENDING');
+  const paperAttributionRequired = paperWorkstreamStatus.includes('TELEMETRY_ATTRIBUTION_PENDING');
   const checklist = `<ul class='onboarding-checklist'>${progress.checks.map(item => {
     const target = onboardingQuestionForStep(onboarding, item.id);
     const stateClass = item.state === 'COMPLETE' ? 'complete' : 'pending';
@@ -327,7 +328,7 @@ function strategyOnboardingPage(data) {
         ? button('activate-onboarding', 'Make Replay ready', `class='primary' data-environment='${replayEnvironment.environment}'`, 'play')
         : '';
   const replayState = !onboardingComplete ? 'WAITING' : campaign.status === 'COMPLETED' ? 'HISTORY_AVAILABLE' : campaign.status === 'RUNNING' ? 'BUILDING_HISTORY' : campaign.status === 'FAILED' || campaign.state === 'ATTENTION_REQUIRED' ? 'ATTENTION_REQUIRED' : paperRuns.length ? 'HISTORY_AVAILABLE' : replayRuns.length ? 'BUILDING_HISTORY' : 'READY';
-  const paperState = !onboardingComplete ? 'WAITING' : paperReconciliationRequired ? 'ATTENTION_REQUIRED' : paperRuntimeActive || paperRuns.length ? 'FORWARD_TESTING' : 'NEXT';
+  const paperState = !onboardingComplete ? 'WAITING' : paperReconciliationRequired || paperAttributionRequired ? 'ATTENTION_REQUIRED' : paperRuntimeActive || paperRuns.length ? 'FORWARD_TESTING' : 'NEXT';
   const liveState = liveRuns.length ? 'LIVE_ACTIVE' : 'HUMAN_APPROVAL_REQUIRED';
   const journey = `<ol class='strategy-journey' aria-label='Strategy testing journey'>
     <li class='complete'><span class='journey-marker'>${icon('check')}</span><div class='journey-copy'><div><h3>1. Strategy setup</h3>${badge(onboardingComplete ? 'COMPLETE' : 'IN_PROGRESS')}</div><p>Ocean reads the strategy and Sierra setup. One confirmation makes it ready for non-live testing.</p></div></li>
@@ -335,7 +336,7 @@ function strategyOnboardingPage(data) {
     <li class='${paperRuntimeActive || paperRuns.length ? 'current' : 'waiting'}'><span class='journey-marker'>3</span><div class='journey-copy'><div><h3>3. Paper forward testing</h3>${badge(paperState)}</div><p>After Replay evidence is reviewed, run the strategy in Paper. Completed Paper periods add trade and no-trade evidence continuously.</p><p class='journey-evidence'>${paperCompleted.length} completed run${paperCompleted.length === 1 ? '' : 's'} / ${paperTrades} trade${paperTrades === 1 ? '' : 's'} captured</p></div></li>
     <li class='${liveRuns.length ? 'current' : 'waiting'}'><span class='journey-marker'>4</span><div class='journey-copy'><div><h3>4. Live trading</h3>${badge(liveState)}</div><p>Live is a separate, explicit human decision after Replay and Paper evidence has been reviewed. Ocean never promotes a strategy automatically.</p></div></li>
   </ol>`;
-  const nextActionTitle = paperReconciliationRequired ? 'Reconcile Paper telemetry' : paperRuntimeActive ? 'Observe the Paper forward run' : campaign.status === 'COMPLETED' ? 'Evaluate the Replay-to-Paper gate' : campaign.status === 'FAILED' || campaign.state === 'ATTENTION_REQUIRED' ? 'Repair the bounded Replay failure' : campaign.status === 'RUNNING' ? `Replay ${campaign.current_window_id || 'window'} is running` : 'Continue the sealed Replay campaign';
+  const nextActionTitle = paperAttributionRequired ? 'Complete Paper trade attribution' : paperReconciliationRequired ? 'Reconcile Paper telemetry' : paperRuntimeActive ? 'Observe the Paper forward run' : campaign.status === 'COMPLETED' ? 'Evaluate the Replay-to-Paper gate' : campaign.status === 'FAILED' || campaign.state === 'ATTENTION_REQUIRED' ? 'Repair the bounded Replay failure' : campaign.status === 'RUNNING' ? `Replay ${campaign.current_window_id || 'window'} is running` : 'Continue the sealed Replay campaign';
   const nextActionHref = paperRuntimeActive ? '/paper-dashboard.html' : runtime.monitor.url;
   const nextActionLabel = paperRuntimeActive ? 'Open Paper Dashboard' : 'Open Replay Monitor';
   const nextAction = onboardingComplete
