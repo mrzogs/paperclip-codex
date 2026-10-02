@@ -51,6 +51,19 @@ export function subtract(left,right) {
 export function countNoTradeIntervals(observed,closeTimes,unresolved=0) {
   return unresolved?0:observed.filter(v=>!closeTimes.some(t=>v.start_utc<=t && t<v.end_utc)).length;
 }
+export function isOperationalCompletionProducer(actor,plan,outcome) {
+  return actor.role==='TELEMETRY' && actor.namespace==='OPERATIONAL'
+    && Boolean(plan.operational_review) && plan.instance.telemetry_producer_id===actor.id
+    && outcome==='COMPLETED';
+}
+export function isOperationalCompletionReady(run,plan,summary) {
+  const progress=summary.progress;
+  if(run.state!=='ACTIVE' || !progress || summary.open_pins!==0 || summary.unresolved_records!==0
+    || progress.pending_events!==0 || progress.gaps.length || progress.failures.length || !progress.watermark)return false;
+  const observed=AXES.reduce((value,key)=>intersect(value,progress.axes[key]),plan.scored_intervals);
+  return !subtract(plan.scored_intervals,observed).length
+    && Date.parse(progress.watermark)>=Date.parse(plan.scored_intervals.at(-1).end_utc);
+}
 
 // This component writes only the separate workflow TEST store. No producer or Brain ingestion is enabled.
 export class RunManager {
@@ -74,7 +87,7 @@ export class RunManager {
     }
   }
   perform(action,actor,data) {
-    if(['version','settings','permission','preview','prepare','preset','end'].includes(action))this.human(actor);
+    if(['version','settings','permission','preview','prepare','preset'].includes(action))this.human(actor);
     if(action==='version') {
       exactKeys(data,['version_id','strategy_id','kind','version','code_hash','profile_key','artifact_id','case_id']);
       requireThat(['BASELINE','CANDIDATE'].includes(data.kind),422,'INVALID_VERSION_KIND'); bounded(data.version);hash(data.code_hash);
@@ -111,8 +124,12 @@ export class RunManager {
     if(action==='prepare')return this.prepare(actor,data);
     if(action==='end') {
       exactKeys(data,['run_id','expected_revision','outcome']);
-      const {run}=this.load(actor,data.run_id,'read');this.b.expect(run,data.expected_revision);
+      const {run,plan}=this.load(actor,data.run_id,'read');this.b.expect(run,data.expected_revision);
       requireThat(['READY','ACTIVE'].includes(run.state) && ['COMPLETED','CANCELLED','FAILED'].includes(data.outcome),409,'RUN_END_REJECTED');
+      if(actor.role!=='HUMAN') {
+        requireThat(isOperationalCompletionProducer(actor,plan,data.outcome),403,'WAYNE_BROWSER_ONLY');
+        requireThat(isOperationalCompletionReady(run,plan,this.summary(run)),409,'OPERATIONAL_COMPLETION_NOT_READY');
+      }
       this.db.prepare("UPDATE ow_runs SET state='COMPLETING',revision=revision+1 WHERE id=?").run(run.id);
       this.b.event(run.id,'run-manager.end',actor,{outcome:data.outcome});
       return this.read(actor,run.id);
