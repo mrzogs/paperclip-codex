@@ -27,10 +27,23 @@ function tableColumns(db, table) {
 
 function openTradeCounts(db, authoritativeAccount) {
   const columns = tableColumns(db, "trades");
-  if (!columns.has("status")) return { openTrades: null, legacyOpenTrades: null };
+  if (!columns.has("status")) return { openTrades: null, legacyOpenTrades: null, unattributedOpenTrades: null };
   const openTrades = Number(db.prepare("SELECT COUNT(*) AS count FROM trades WHERE lower(trim(status)) = 'open'").get().count);
+  const attributionColumns = ["strategy_id", "strategy_name", "strategy_version"];
+  const unattributedOpenTrades = attributionColumns.every(column => columns.has(column))
+    ? Number(db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM trades
+        WHERE lower(trim(status)) = 'open'
+          AND (
+            coalesce(trim(strategy_id), '') = ''
+            OR coalesce(trim(strategy_name), '') = ''
+            OR coalesce(trim(strategy_version), '') = ''
+          )
+      `).get().count)
+    : null;
   if (!columns.has("trade_account") || !authoritativeAccount) {
-    return { openTrades, legacyOpenTrades: null };
+    return { openTrades, legacyOpenTrades: null, unattributedOpenTrades };
   }
   const legacyOpenTrades = Number(db.prepare(`
     SELECT COUNT(*) AS count
@@ -38,7 +51,7 @@ function openTradeCounts(db, authoritativeAccount) {
     WHERE lower(trim(status)) = 'open'
       AND coalesce(trim(trade_account), '') <> trim(?)
   `).get(authoritativeAccount).count);
-  return { openTrades, legacyOpenTrades };
+  return { openTrades, legacyOpenTrades, unattributedOpenTrades };
 }
 
 export function readProjectPaperTelemetry(sqliteFile, options = {}) {
@@ -78,13 +91,14 @@ export function readProjectPaperTelemetry(sqliteFile, options = {}) {
     const fresh = ageMs !== null && ageMs <= staleAfterMs;
     const tradeCounts = openTradeCounts(db, account?.trade_account || null);
     const reconciliationRequired = Number(tradeCounts.legacyOpenTrades || 0) > 0;
-    const healthy = Boolean(account && instrument && health && expectedPaperIdentity && expectedSimulationIdentity && fresh && !reconciliationRequired);
+    const attributionRequired = Number(tradeCounts.unattributedOpenTrades || 0) > 0;
+    const healthy = Boolean(account && instrument && health && expectedPaperIdentity && expectedSimulationIdentity && fresh && !reconciliationRequired && !attributionRequired);
     const loggerVersion = String(health?.message || "").match(/\bversion=([^\s]+)/i)?.[1] || null;
 
     return {
       available: true,
       healthy,
-      status: healthy ? "active" : reconciliationRequired ? "reconciliation_required" : fresh ? "identity_mismatch" : "stale",
+      status: healthy ? "active" : reconciliationRequired ? "reconciliation_required" : attributionRequired ? "attribution_required" : fresh ? "identity_mismatch" : "stale",
       sqliteFile,
       instanceName: instance?.instance_name || account?.instance_name || null,
       instanceRole: instance?.instance_role || account?.instance_role || null,
@@ -102,11 +116,14 @@ export function readProjectPaperTelemetry(sqliteFile, options = {}) {
         trades: countRows(db, "trades"),
         openTrades: tradeCounts.openTrades,
         legacyOpenTrades: tradeCounts.legacyOpenTrades,
+        unattributedOpenTrades: tradeCounts.unattributedOpenTrades,
       },
       warning: healthy
         ? null
         : reconciliationRequired
           ? `${tradeCounts.legacyOpenTrades} open trade record(s) belong to a non-authoritative Paper account and require audited reconciliation.`
+          : attributionRequired
+            ? `${tradeCounts.unattributedOpenTrades} open trade record(s) lack the required strategy identity and require evidence-backed attribution.`
           : !fresh
           ? "The dedicated VWAP Paper telemetry heartbeat is stale."
           : "The dedicated telemetry database is not reporting the expected Paper simulation identity.",

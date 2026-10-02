@@ -4082,6 +4082,7 @@ function renderPaperDashboard(paper) {
       ${summaryTile("Logger", projectTelemetry.loggerVersion || "n/a", projectTelemetry.loggerVersion ? "good" : "warn")}
       ${summaryTile("Orders / fills / trades", `${projectTelemetry.counts?.orders ?? 0} / ${projectTelemetry.counts?.fills ?? 0} / ${projectTelemetry.counts?.trades ?? 0}`)}
       ${summaryTile("Open / legacy-open trades", `${projectTelemetry.counts?.openTrades ?? 0} / ${projectTelemetry.counts?.legacyOpenTrades ?? 0}`, Number(projectTelemetry.counts?.legacyOpenTrades || 0) > 0 ? "warn" : "good")}
+      ${summaryTile("Unattributed open trades", `${projectTelemetry.counts?.unattributedOpenTrades ?? 0}`, Number(projectTelemetry.counts?.unattributedOpenTrades || 0) > 0 ? "warn" : "good")}
     </div>
     ${keyValueTable([
       ["Dedicated instance", projectTelemetry.instanceName || "n/a"],
