@@ -133,9 +133,19 @@ export function readPriorityProgram(root = DEFAULT_ONBOARDING_ROOT, strategyId =
         display_suffix_policy:value.current_runtime_contracts.display_suffix_policy || null,
       }
       : null;
+    const nextGovernedAction = value.next_governed_action && typeof value.next_governed_action === 'object'
+      ? {
+        title:String(value.next_governed_action.title || 'Review the next governed action'),
+        owner:String(value.next_governed_action.owner || 'Not recorded'),
+        action:String(value.next_governed_action.action || 'Review the durable program record.'),
+        automatic_action:String(value.next_governed_action.automatic_action || 'NONE'),
+        reason:String(value.next_governed_action.reason || 'No reason recorded.'),
+      }
+      : null;
     return {
       state:'AVAILABLE', program_id:value.program_id, status:value.status, priority:value.priority, workstreams,
       current_runtime_contracts:currentRuntimeContracts,
+      next_governed_action:nextGovernedAction,
       current_acceptance_assessment:{
         assessed_at:value.current_acceptance_assessment?.assessed_at || null,
         promotion_disposition:value.current_acceptance_assessment?.promotion_disposition || null,
