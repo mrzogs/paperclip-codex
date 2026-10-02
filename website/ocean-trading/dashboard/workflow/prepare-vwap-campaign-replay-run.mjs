@@ -4,6 +4,7 @@ import { workflowFromEnvironment } from './backend.mjs';
 const STRATEGY_ID = 'cicd-vwap-pull-back-strategy';
 const VERSION_ID = 'test-replay-baseline-cicd-vwap-v010-profile-v012';
 const INSTANCE_ID = 'test-cicd-vwap-pull-back-replay-two-v013';
+const ACTOR = { id: 'wayne-ocean-ui', role: 'HUMAN', namespace: 'TEST', scopes: [], strategyIds: [], instanceIds: [] };
 
 function argumentsFrom(argv) {
   const values = {};
@@ -67,11 +68,10 @@ export function validateExistingRun(result, runId) {
 }
 
 export function prepareCampaignRun(backend, input) {
-  const actor = { id: 'wayne-ocean-ui', role: 'HUMAN', namespace: 'TEST', scopes: [], strategyIds: [], instanceIds: [] };
   const selection = selectionFor(input);
   const existing = backend.db.prepare('SELECT id FROM ow_runs WHERE id=?').get(input.run_id);
-  if (existing) return { status: 'EXISTING', run: validateExistingRun(backend.runs.read(actor, input.run_id), input.run_id) };
-  const preview = backend.runs.perform('preview', actor, { selection });
+  if (existing) return { status: 'EXISTING', run: validateExistingRun(backend.runs.read(ACTOR, input.run_id), input.run_id) };
+  const preview = backend.runs.perform('preview', ACTOR, { selection });
   if (!preview.can_prepare || preview.scored_intervals.length !== 1 || preview.symbol !== 'MNQU25_FUT_CME') {
     throw new Error(`SEALED_CAMPAIGN_RUN_PREVIEW_REJECTED:${JSON.stringify({
       instance_busy: preview.instance_busy,
@@ -80,7 +80,7 @@ export function prepareCampaignRun(backend, input) {
       symbol: preview.symbol,
     })}`);
   }
-  const run = backend.runs.perform('prepare', actor, {
+  const run = backend.runs.perform('prepare', ACTOR, {
     run_id: input.run_id,
     selection,
     review_hash: preview.review_hash,
@@ -89,12 +89,37 @@ export function prepareCampaignRun(backend, input) {
   return { status: 'PREPARED', threshold_selection_allowed: false, brain_submission: 'OFF', run };
 }
 
+export function terminalCampaignRun(backend, input, outcome) {
+  if (!/^test-[A-Za-z0-9_.-]+$/.test(input.run_id || '')) throw new Error('TEST_RUN_ID_REQUIRED');
+  if (!['COMPLETED', 'FAILED'].includes(outcome)) throw new Error('BOUNDED_TERMINAL_OUTCOME_REQUIRED');
+  const current = validateExistingRun(backend.runs.read(ACTOR, input.run_id), input.run_id);
+  if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(current.state)) {
+    if (current.state !== outcome) throw new Error('TERMINAL_RUN_OUTCOME_CONFLICT');
+    return { status: 'EXISTING_TERMINAL', run: current };
+  }
+  if (current.state === 'COMPLETING') return { status: 'COMPLETING', run: current };
+  if (!['READY', 'ACTIVE'].includes(current.state)) throw new Error('RUN_NOT_TERMINABLE');
+  const run = backend.runs.perform('end', ACTOR, {
+    run_id: input.run_id,
+    expected_revision: current.revision,
+    outcome,
+  });
+  return { status: 'TERMINAL_REQUESTED', outcome, run };
+}
+
 export function main(argv = process.argv.slice(2), environment = process.env) {
   const input = argumentsFrom(argv);
   const backend = workflowFromEnvironment(environment);
   if (!backend) throw new Error('OCEAN_WORKFLOW_REQUIRED');
   try {
-    const output = prepareCampaignRun(backend, input);
+    const action = input.action || 'prepare';
+    const output = action === 'prepare'
+      ? prepareCampaignRun(backend, input)
+      : action === 'complete'
+        ? terminalCampaignRun(backend, input, 'COMPLETED')
+        : action === 'fail'
+          ? terminalCampaignRun(backend, input, 'FAILED')
+          : (() => { throw new Error('CAMPAIGN_RUN_ACTION_REQUIRED'); })();
     process.stdout.write(`${JSON.stringify(output)}\n`);
   } finally {
     backend.close();
