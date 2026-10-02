@@ -23,7 +23,7 @@ const sources = {
     { id:'U26', owner:'Wayne/Ocean operator', resolution_action:'Approve non-live capabilities.' },
   ] },
   'replay-two-alert-remediation.json': { strategy_id:TEST_STRATEGY_ID, verified_through:'2026-09-29T07:14:21Z', diagnosis:{ dll_rebuild_required:false }, fix:{ alerts_enabled:false }, validation:{ automated_order_placement:false, telemetry_logging:false } },
-  'priority-completion-program.json': { schema_version:'cicd-vwap-priority-completion-program/v1', strategy_id:TEST_STRATEGY_ID, program_id:'test-priority-program', status:'IN_PROGRESS', priority:'CRITICAL', authorization:{ live_real:'PROHIBITED' }, workstreams:[{ id:'W5', name:'Paper simulation operation', owner:'Coordinator', status:'V233_TRADE4_PRESERVED_V234_AND_V0531_SAFE_CUTOVER_PENDING', next_action:'Preserve Sim1 trade 4. After natural closure, deploy the approved strategy and telemetry builds.', exit:'Paper safety verified.' }] },
+  'priority-completion-program.json': { schema_version:'cicd-vwap-priority-completion-program/v1', strategy_id:TEST_STRATEGY_ID, program_id:'test-priority-program', status:'IN_PROGRESS_POST_DISCOVERY_REVIEW', priority:'CRITICAL', authorization:{ live_real:'PROHIBITED' }, current_runtime_contracts:{ replay:'MNQH26_FUT_CME', paper:'MNQZ26_FUT_CME' }, current_acceptance_assessment:{ assessed_at:'2026-10-02T22:39:20Z', promotion_disposition:'NO_AUTOMATIC_PROMOTION', pending:[{ gate:'FROZEN_DATASET_LADDER_FULLY_QUALIFIED', title:'Acquire MNQZ25 history for backward regression', blocker:'The required segment is absent.', owner:'Coordinator', resolution_action:'Acquire the exact MNQZ25 SCID segment before backward regression.' }] }, workstreams:[{ id:'W5', name:'Paper simulation operation', owner:'Coordinator', status:'ACTIVE_SIM1_V234_V0532_VERIFIED_FLAT_CONNECTED', next_action:'Continue non-promotional Paper observation on Sim1.', exit:'Paper safety verified.' }] },
 };
 
 function writeSources(root) {
@@ -69,7 +69,7 @@ test('complete onboarding is actionable in the browser without touching producti
   const browserErrors = []; page.on('pageerror', error => browserErrors.push(error.message));
   try {
     await page.goto(`${base}/improvement/strategies/${TEST_STRATEGY_ID}`);
-    assert.match(await page.locator('script[type="module"]').getAttribute('src'),/qualified-history-20260930-3/,'the deployed page must request the current workflow module version');
+    assert.match(await page.locator('script[type="module"]').getAttribute('src'),/program-gates-20261002-1/,'the deployed page must request the current workflow module version');
     await page.getByRole('button',{ name:'Sign in', exact:true }).click();
     await page.getByRole('link',{ name:'Help', exact:true }).click();
     await expect(page.getByRole('heading',{ name:'Onboarding help', exact:true })).toBeVisible();
@@ -114,19 +114,21 @@ test('complete onboarding is actionable in the browser without touching producti
     await expect(page.locator('#notice')).toContainText('Open Replay Monitor to view Ocean data');
     await expect(page.getByRole('heading',{ name:'Onboarding complete', exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'CI/CD continuous run', exact:true })).toBeVisible();
-    await expect(page.getByRole('heading',{ name:'Wait for the safe Paper cutover', exact:true })).toBeVisible();
-    await expect(page.getByText('Preserve Sim1 trade 4. After natural closure, deploy the approved strategy and telemetry builds.',{ exact:true }).first()).toBeVisible();
+    await expect(page.getByRole('heading',{ name:'Acquire MNQZ25 history for backward regression', exact:true })).toBeVisible();
+    await expect(page.getByText('Acquire the exact MNQZ25 SCID segment before backward regression.',{ exact:true }).first()).toBeVisible();
+    await expect(page.getByText('Post-discovery review',{ exact:true })).toBeVisible();
+    await expect(page.getByText('MNQZ26_FUT_CME',{ exact:true })).toBeVisible();
+    await expect(page.getByText('Operational Replay discovery is complete. Paper remains Sim1 non-promotional while the remaining acceptance gate is resolved; Live remains a separate human-only decision.',{ exact:true })).toBeVisible();
     await expect(page.getByRole('columnheader',{ name:'Exact next action', exact:true })).toBeVisible();
     await expect(page.getByRole('button',{ name:'Prepare Replay history run', exact:true })).toHaveCount(0);
     await expect(page.getByRole('heading',{ name:/Replay history/ })).toBeVisible();
     await expect(page.getByRole('heading',{ name:/Paper forward testing/ })).toBeVisible();
     await expect(page.getByRole('heading',{ name:/Live trading/ })).toBeVisible();
     await expect(page.getByText(/zero-trade result when no trade occurred/)).toBeVisible();
-    await expect(page.getByText(/Sierra running, stopped, or stale does not change this status/)).toBeVisible();
+    await page.locator('details.onboarding-system-details > summary').click();
     const monitorLink = page.getByRole('link',{ name:'Open Replay Monitor', exact:true }).first();
     await expect(monitorLink).toHaveAttribute('href','/replay-monitor.html');
     await expect(monitorLink).toHaveAttribute('target','_blank');
-    await page.locator('details.onboarding-system-details > summary').click();
     const replay = page.locator('.activation-item').filter({ has:page.getByRole('heading',{ name:'Advanced Replay control', exact:true }) });
     await expect(page.getByText('Exact process and chartbook verified on chart 1.',{ exact:true })).toBeVisible();
     await expect(page.getByText('A fresh Replay Two controller observation confirms chart replay is stopped.',{ exact:true })).toBeVisible();

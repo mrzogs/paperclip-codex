@@ -117,7 +117,32 @@ export function readPriorityProgram(root = DEFAULT_ONBOARDING_ROOT, strategyId =
       next_action:item.next_action || null,
       exit:item.exit,
     })) : [];
-    return { state:'AVAILABLE', program_id:value.program_id, status:value.status, priority:value.priority, workstreams, path:programPath, sha256:fileDigest(content), observed_at_utc:fs.statSync(programPath).mtime.toISOString(), live_real:'DISABLED' };
+    const pending = Array.isArray(value.current_acceptance_assessment?.pending)
+      ? value.current_acceptance_assessment.pending.map(item => ({
+        gate:String(item.gate || 'UNKNOWN'),
+        title:String(item.title || 'Resolve the remaining acceptance gate'),
+        blocker:String(item.blocker || 'The acceptance gate is not complete.'),
+        owner:String(item.owner || 'Not recorded'),
+        resolution_action:String(item.resolution_action || 'Review the durable program record.'),
+      }))
+      : [];
+    const currentRuntimeContracts = value.current_runtime_contracts && typeof value.current_runtime_contracts === 'object'
+      ? {
+        replay:value.current_runtime_contracts.replay || null,
+        paper:value.current_runtime_contracts.paper || null,
+        display_suffix_policy:value.current_runtime_contracts.display_suffix_policy || null,
+      }
+      : null;
+    return {
+      state:'AVAILABLE', program_id:value.program_id, status:value.status, priority:value.priority, workstreams,
+      current_runtime_contracts:currentRuntimeContracts,
+      current_acceptance_assessment:{
+        assessed_at:value.current_acceptance_assessment?.assessed_at || null,
+        promotion_disposition:value.current_acceptance_assessment?.promotion_disposition || null,
+        pending,
+      },
+      path:programPath, sha256:fileDigest(content), observed_at_utc:fs.statSync(programPath).mtime.toISOString(), live_real:'DISABLED',
+    };
   } catch (error) {
     return { state:error?.code === 'ENOENT' ? 'NOT_CONFIGURED' : 'ATTENTION_REQUIRED', status:'UNKNOWN', workstreams:[], path:programPath, reason:error?.code || error?.message || 'PRIORITY_PROGRAM_INVALID', live_real:'DISABLED' };
   }
