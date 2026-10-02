@@ -1,0 +1,29 @@
+{
+  "identity_id": "test-cicd-vwap-pull-back-replay-two-v013-telemetry",
+  "role": "TELEMETRY",
+  "namespace": "TEST",
+  "credential_ref": "OCEAN_VWAP_PULLBACK_REPLAY_TWO_V013_TELEMETRY_TOKEN",
+  "strategy_ids": [
+    "cicd-vwap-pull-back-strategy"
+  ],
+  "instance_ids": [
+    "test-cicd-vwap-pull-back-replay-two-v013"
+  ],
+  "scopes": [
+    "read",
+    "event.write",
+    "health.write"
+  ],
+  "expires_at_utc": "2026-10-31T23:59:59.000Z",
+  "owner": "VWAP Pullback / Ocean Replay Two v013",
+  "evidence_path": "D:\\Paperclip-codex\\website\\ocean-trading\\dashboard\\artifacts\\vwap-pullback-replay-v013-identity-evidence-20261001.md",
+  "evidence_sha256": "8fb31c261f23214fb551f05d4f14f0594b4025360751bccfe8855f7bbfd44243",
+  "verification_only": false,
+  "renewal_policy": {
+    "lifetime_seconds": 2592000,
+    "renew_before_seconds": 604800,
+    "runner": "ocean-website-maintenance",
+    "destination": "dpapi-current-operator"
+  },
+  "factual_binding_hash": null
+}
