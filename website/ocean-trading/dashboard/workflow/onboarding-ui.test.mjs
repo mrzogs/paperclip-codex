@@ -23,6 +23,7 @@ const sources = {
     { id:'U26', owner:'Wayne/Ocean operator', resolution_action:'Approve non-live capabilities.' },
   ] },
   'replay-two-alert-remediation.json': { strategy_id:TEST_STRATEGY_ID, verified_through:'2026-09-29T07:14:21Z', diagnosis:{ dll_rebuild_required:false }, fix:{ alerts_enabled:false }, validation:{ automated_order_placement:false, telemetry_logging:false } },
+  'priority-completion-program.json': { schema_version:'cicd-vwap-priority-completion-program/v1', strategy_id:TEST_STRATEGY_ID, program_id:'test-priority-program', status:'IN_PROGRESS', priority:'CRITICAL', authorization:{ live_real:'PROHIBITED' }, workstreams:[{ id:'W5', name:'Paper simulation operation', owner:'Coordinator', status:'V233_TRADE4_PRESERVED_V234_AND_V0531_SAFE_CUTOVER_PENDING', next_action:'Preserve Sim1 trade 4. After natural closure, deploy the approved strategy and telemetry builds.', exit:'Paper safety verified.' }] },
 };
 
 function writeSources(root) {
@@ -113,6 +114,9 @@ test('complete onboarding is actionable in the browser without touching producti
     await expect(page.locator('#notice')).toContainText('Open Replay Monitor to view Ocean data');
     await expect(page.getByRole('heading',{ name:'Onboarding complete', exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'CI/CD continuous run', exact:true })).toBeVisible();
+    await expect(page.getByRole('heading',{ name:'Wait for the safe Paper cutover', exact:true })).toBeVisible();
+    await expect(page.getByText('Preserve Sim1 trade 4. After natural closure, deploy the approved strategy and telemetry builds.',{ exact:true }).first()).toBeVisible();
+    await expect(page.getByRole('columnheader',{ name:'Exact next action', exact:true })).toBeVisible();
     await expect(page.getByRole('button',{ name:'Prepare Replay history run', exact:true })).toHaveCount(0);
     await expect(page.getByRole('heading',{ name:/Replay history/ })).toBeVisible();
     await expect(page.getByRole('heading',{ name:/Paper forward testing/ })).toBeVisible();
