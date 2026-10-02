@@ -1,0 +1,131 @@
+{
+  "schema_version": "shared-contracts-release-manifest/v1",
+  "release_version": "2.1.0",
+  "pack_version": "13.0",
+  "task_id": "S10-R2",
+  "producer": "Obsidian Brain",
+  "supersedes_release": {
+    "release_version": "2.0.1",
+    "bundle_sha256": "f86476b54db071aa5d8623f069b016191f6c32bfffa8315000b582b7a76e1437",
+    "change_scope": "Backward-compatible Paper designation, release-history and identifier support; no aliasing, runtime binding or production activation."
+  },
+  "intended_consumers": [
+    "Ocean Trading Website",
+    "Telemetry Data Logger",
+    "VWAP Strategy",
+    "Hermes Brain"
+  ],
+  "authority": {
+    "wire_contract_coordinator": "Hermes Brain",
+    "operational_registry_and_approvals": "Ocean Trading",
+    "strategy_rules": "Strategy project",
+    "source_observation_and_legacy_ledger": "Telemetry Data Logger"
+  },
+  "compatibility": {
+    "preserved_versions": [
+      "Brain trade-event 1.0.0",
+      "Brain trade-assessment-profile 1.0.0",
+      "Telemetry Replay 7",
+      "Telemetry Paper 3",
+      "Telemetry Live 5"
+    ],
+    "migration_mode": "ADDITIVE_ADAPTER_ONLY",
+    "unknown_policy": "QUARANTINE_DO_NOT_GUESS"
+  },
+  "input_bundle_sha256": {
+    "S04-VWAP-DRAFT-RESULT.zip": "fe579e16d37535fde94b1fc283bdb0dd4844f8215bcdfad357caec2d04d66705",
+    "S06-TELEMETRY-BASELINE-RESULT.zip": "cf3f66cf96fb6e7f295ef8fedd43ec55167601215ffb56b75a2e8434e66ceb10",
+    "S07-OCEAN-LEDGER-BASELINE-RESULT.zip": "07f2b45309430aa20d25237a8f50a7cf6de257e50d643e7c377da737622fbc73",
+    "S08-BRAIN-SAFE-RECONCILIATION-RESULT.zip": "38a5fc9d808c2f432ad478807f4262047a424c258f51bfe27f09e66c7ac21de2"
+  },
+  "files": [
+    {
+      "path": "shared-contracts/adapters/legacy-brain-v1.adapter.json",
+      "sha256": "6eb6e43e7976ce32e241ce6f36694320e699d3ae683f423e749a91c94dd5b4b2"
+    },
+    {
+      "path": "shared-contracts/adapters/telemetry-sqlite-v7.adapter.json",
+      "sha256": "19f69210056fd90f6d70b1e2446f29fb3d00a33a69648a4dd396420bd6effc92"
+    },
+    {
+      "path": "shared-contracts/examples/negative-examples.json",
+      "sha256": "99b97cd316c70b1e7caae887a8ab05c7208697fc3ac243f930d219dca891a0c5"
+    },
+    {
+      "path": "shared-contracts/examples/positive-examples.json",
+      "sha256": "579d67177847e6354ebcff701710844bc5209d90a6e3ee5610b8cc8ba5426e02"
+    },
+    {
+      "path": "shared-contracts/examples/scenario-examples.json",
+      "sha256": "9fd295cee9ff01f0b605c4d06aacc14b3965173d7b854709882f9581e2276e31"
+    },
+    {
+      "path": "shared-contracts/permission-matrix.json",
+      "sha256": "473e479f647d700abcfbc5eb1c16705550683732593b9ff523e592eaa5d1e71e"
+    },
+    {
+      "path": "shared-contracts/README.md",
+      "sha256": "b79663be07103adc563aa1fe0447119db0d98ebd0e4bef2c714677c8a730cdd1"
+    },
+    {
+      "path": "shared-contracts/schemas/approval-decision.schema.json",
+      "sha256": "1090ae727df2d263d20945ea95e396308cc1002125ffde49f82d6757b37a7ac0"
+    },
+    {
+      "path": "shared-contracts/schemas/artifact-manifest.schema.json",
+      "sha256": "5d6d5f0c201beda39893ab050ff86588f3b21ff5642fad3fd84203d6db688107"
+    },
+    {
+      "path": "shared-contracts/schemas/candidate-result.schema.json",
+      "sha256": "b2f4209ae4180767d6b7f859285aefd84dad635fa758f7f7a1c77052e4f83cce"
+    },
+    {
+      "path": "shared-contracts/schemas/dataset-manifest.schema.json",
+      "sha256": "8fb1246b914c75d8996b96d0d5280c681b70687c29a7596d4b160e02bd42d357"
+    },
+    {
+      "path": "shared-contracts/schemas/handoff.schema.json",
+      "sha256": "09595e65d92cc975dc2d0c42098d9add0e65dd15b592e45aeac28aac4e7f55cf"
+    },
+    {
+      "path": "shared-contracts/schemas/run-completion.schema.json",
+      "sha256": "223d7e0d322f0d88fd84d1a5d8d3a6be486ad71de52bc70587a099c581841304"
+    },
+    {
+      "path": "shared-contracts/schemas/run-context.schema.json",
+      "sha256": "dee4702919be02b16b92ad6e9505e0727163f13bfe54b31f90c87d6fa3a9eec9"
+    },
+    {
+      "path": "shared-contracts/schemas/source-adapter-requirements.schema.json",
+      "sha256": "0f21e36de43d0f360705959cd2a3d16dc38c6e6ca4f2c92b92f203113cf78134"
+    },
+    {
+      "path": "shared-contracts/schemas/strategy-profile.schema.json",
+      "sha256": "f5b208fe6a3991b3f0c564f7f557b599ccd57f0e1ec7584daf72e47d88c64af0"
+    },
+    {
+      "path": "shared-contracts/schemas/strategy-registry.schema.json",
+      "sha256": "aa760a2ec66064bc429aa05c35d23b3ea980ca81f81532d30f5b212edb2fa221"
+    },
+    {
+      "path": "shared-contracts/schemas/trade-assessment-profile.schema.json",
+      "sha256": "561b43cf69736b96ceaf57cccc6695f04c75c9c415f365547d66a32d3ef22b1b"
+    },
+    {
+      "path": "shared-contracts/schemas/trade-event.schema.json",
+      "sha256": "b6849f85da61160ce876592e81604bda70c809e35541ec5c1c4abee9d95f42c3"
+    },
+    {
+      "path": "shared-contracts/schemas/workflow-event.schema.json",
+      "sha256": "dafddc46ff4f546a09cc0b0c6b0908269773bb431eb6cf562f6931ccffefeb03"
+    },
+    {
+      "path": "shared-contracts/shared-contracts.schema.json",
+      "sha256": "cbe51e301abfbfb23973d04fe90aeb0b9be776a67da0ac4da0c03bd8e29e4b62"
+    },
+    {
+      "path": "shared-contracts/source-adapter-requirements.md",
+      "sha256": "b669e67f9c4af13458fe5d9e6e749ec719db006e6b6ee5d408202174d6976a85"
+    }
+  ]
+}

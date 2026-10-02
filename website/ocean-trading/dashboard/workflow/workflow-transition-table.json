@@ -1,0 +1,42 @@
+{
+  "schema_version": "ocean-workflow-transition-table/v1",
+  "contract_release": "2.1.0",
+  "namespace": "TEST",
+  "work_statuses": ["READY", "RUNNING", "BLOCKED", "FAILED", "PAUSED", "COMPLETED", "CANCELLED"],
+  "normal_transitions": [
+    {"from":"DISCOVERY","to":"EVIDENCE","roles":["HUMAN","BRAIN"],"artifact":null},
+    {"from":"EVIDENCE","to":"RESEARCH","roles":["HUMAN","BRAIN"],"artifact":"EVIDENCE"},
+    {"from":"RESEARCH","to":"DEVELOPMENT_REVIEW","roles":["HUMAN","BRAIN"],"artifact":"RECOMMENDATION"},
+    {"from":"DEVELOPMENT_REVIEW","to":"DEVELOPMENT_HANDOFF","roles":["HUMAN"],"gate":"DEVELOPMENT"},
+    {"from":"DEVELOPMENT_HANDOFF","to":"CANDIDATE_DEVELOPMENT","roles":["HUMAN","STRATEGY"],"handoff_gate":"DEVELOPMENT"},
+    {"from":"CANDIDATE_DEVELOPMENT","to":"HISTORICAL_VALIDATION","roles":["HUMAN","STRATEGY"],"artifact":"CANDIDATE"},
+    {"from":"HISTORICAL_VALIDATION","to":"CANDIDATE_EVALUATION","roles":["HUMAN","STRATEGY"],"subtests":["BACKTEST","ROBUSTNESS","WALK_FORWARD","OOS_HOLDOUT"]},
+    {"from":"CANDIDATE_EVALUATION","to":"SHADOW_REVIEW","roles":["HUMAN","BRAIN"],"artifact":"EVALUATION"},
+    {"from":"SHADOW_REVIEW","to":"SHADOW_HANDOFF","roles":["HUMAN"],"gate":"SHADOW"},
+    {"from":"SHADOW_HANDOFF","to":"FORWARD_VALIDATION","roles":["HUMAN","STRATEGY"],"handoff_gate":"SHADOW"},
+    {"from":"FORWARD_VALIDATION","to":"FORWARD_EVALUATION","roles":["HUMAN","STRATEGY"],"artifact":"FORWARD_RESULT"},
+    {"from":"FORWARD_EVALUATION","to":"DEPLOYMENT_REVIEW","roles":["HUMAN","BRAIN"],"artifact":"FORWARD_EVALUATION"},
+    {"from":"DEPLOYMENT_REVIEW","to":"DEPLOYMENT_HANDOFF","roles":["HUMAN"],"gate":"PRODUCTION"},
+    {"from":"DEPLOYMENT_HANDOFF","to":"POST_DEPLOYMENT_VALIDATION","roles":["HUMAN","STRATEGY"],"handoff_gate":"PRODUCTION"},
+    {"from":"ROLLBACK_REVIEW","to":"ROLLBACK_HANDOFF","roles":["HUMAN"],"gate":"ROLLBACK"},
+    {"from":"ROLLBACK_HANDOFF","to":"POST_DEPLOYMENT_VALIDATION","roles":["HUMAN","STRATEGY"],"handoff_gate":"ROLLBACK"},
+    {"from":"POST_DEPLOYMENT_VALIDATION","to":"RETROSPECTIVE","roles":["HUMAN","STRATEGY"],"artifact":"VALIDATION_REPORT"},
+    {"from":"RETROSPECTIVE","to":"CLOSED","roles":["HUMAN"],"artifacts":["OUTCOME","LESSON"]}
+  ],
+  "branches": {
+    "pause": {"roles":["HUMAN"],"preserves_stage":true,"affects_trading_controls":false},
+    "resume": {"roles":["HUMAN"],"revalidates_baseline_and_decisions":true},
+    "cancel": {"roles":["HUMAN"],"preserves_stage":true,"affects_trading_controls":false},
+    "fail": {"roles":["HUMAN","BRAIN","STRATEGY"],"preserves_stage":true},
+    "block": {"roles":["HUMAN","BRAIN","STRATEGY"],"requires_owner_and_action":true},
+    "retry": {"roles":["HUMAN"],"revalidates_baseline_and_decisions":true},
+    "no_benefit": {"roles":["HUMAN","BRAIN"],"to":"RETROSPECTIVE","requires_artifact":"NO_BENEFIT"},
+    "rollback_review": {"roles":["HUMAN"],"to":"ROLLBACK_REVIEW","requires_artifact":"ROLLBACK_PLAN"}
+  },
+  "approval_actions": ["APPROVED","REJECTED","MORE_EVIDENCE"],
+  "approval_note": "MORE_EVIDENCE is an ApprovalRequest/CaseEvent action, never an invented approval-decision wire enum. Shared scope is a category; exact case/gate/recipient/tests/hash binding is mandatory execution authority.",
+  "gate_scope_categories": {"ONBOARDING":"STRATEGY_ONBOARDING","DEVELOPMENT":"RUN_RELEASE","SHADOW":"RUN_RELEASE","PRODUCTION":"PRODUCTION_CHANGE","ROLLBACK":"PRODUCTION_CHANGE"},
+  "run_transitions": {"DRAFT":["READY","FAILED","CANCELLED"],"READY":["ACTIVE","FAILED","CANCELLED"],"ACTIVE":["COMPLETING","FAILED","CANCELLED"],"COMPLETING":["COMPLETED","FAILED","CANCELLED"],"COMPLETED":[],"FAILED":[],"CANCELLED":[]},
+  "handoff_lifecycle": ["CREATED","READY","DISPATCHED","ACKNOWLEDGED","WORK_IN_PROGRESS","RESULT_RETURNED","CLOSED"],
+  "s20_authority_boundary": "All runs/cases/handoffs are synthetic TEST; no actual activation, dispatch worker, Sierra command, candidate modification or live-money action exists."
+}

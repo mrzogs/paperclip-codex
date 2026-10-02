@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Strategies | Ocean Trading</title>
+    <link rel="stylesheet" href="/styles.css?v=20260519-grouped-trades-2" />
+  </head>
+  <body data-page="strategies">
+    <header class="topbar">
+      <div class="topbar-main">
+        <a class="brand brand-logo" href="/" aria-label="Ocean Trading dashboard"><img src="/assets/ocean-trading-icon.png" alt="Ocean Trading" /></a>
+        <nav class="main-nav" aria-label="Primary navigation">
+          <a href="/" data-nav-page="dashboard">Dashboard</a>
+          <a href="/paper-dashboard.html" data-nav-page="paper">Paper</a>
+          <a href="/live-dashboard.html" data-nav-page="live">Live</a>
+          <a href="/open-trades.html" data-nav-page="open">Open Trades</a>
+          <a href="/ledger.html" data-nav-page="ledger">Ledgers</a>
+          <a href="/daily-report.html" data-nav-page="daily">Daily Report</a>
+          <a href="/research.html" data-nav-page="research">Research</a>
+          <a href="/strategies.html" data-nav-page="strategies">Strategies</a>
+          <a href="/rules.html" data-nav-page="rules">Rules</a>
+          <a href="#" data-nav-page="paperclip" target="_blank" rel="noopener">Paperclip</a>
+          <a href="/sources.html" data-nav-page="sources">Sources</a>
+        </nav>
+      </div>
+      <div class="breadcrumb-bar">
+        <button class="back-button" type="button" data-nav-back>Back</button>
+        <nav class="breadcrumbs" aria-label="Breadcrumb">
+          <a href="/">Dashboard</a>
+          <span aria-hidden="true">/</span>
+          <span id="breadcrumb-current">Loading</span>
+        </nav>
+        <button class="dashboard-button" type="button" data-monitor-toggle>Monitor</button>
+      </div>
+    </header>
+    <main class="page">
+      <section class="hero compact">
+        <p class="eyebrow">Strategy analytics</p>
+        <h1>Strategies</h1>
+        <p id="generated">Loading...</p>
+      </section>
+      <section class="panel">
+        <div class="section-head">
+          <div>
+            <h2>Separated Strategy Performance</h2>
+            <p>Backtesting, paper trading, and live trading are tracked independently.</p>
+          </div>
+        </div>
+        <div id="performance-split"></div>
+      </section>
+      <section class="panel">
+        <div class="section-head">
+          <div>
+            <h2>Historical Data Cache</h2>
+            <p>Loaded Sierra Chart market data available for strategy backtests.</p>
+          </div>
+        </div>
+        <div id="historical-cache">Loading...</div>
+      </section>
+      <section class="panel">
+        <div class="section-head">
+          <div>
+            <h2>Backtester Engine Runs</h2>
+            <p>Latest cached-data strategy runs and optimization variants.</p>
+          </div>
+        </div>
+        <div id="backtest-engine-runs">Loading...</div>
+      </section>
+      <section class="panel">
+        <div class="section-head">
+          <div>
+            <h2>Backtest Charts</h2>
+            <p>Charts use historical backtest metrics only.</p>
+          </div>
+        </div>
+        <div class="chart-grid">
+          <article class="chart-card"><h3>Net profit</h3><canvas id="profitChart"></canvas></article>
+          <article class="chart-card"><h3>Trade count</h3><canvas id="tradeCountChart"></canvas></article>
+          <article class="chart-card"><h3>Win rate</h3><canvas id="winRateChart"></canvas></article>
+          <article class="chart-card"><h3>Max drawdown</h3><canvas id="drawdownChart"></canvas></article>
+        </div>
+        <h2>Strategy Catalog</h2>
+        <div id="metrics">Loading...</div>
+      </section>
+    </main>
+    <script src="/app.js?v=20260612-live-calendar-refresh" defer></script>
+  </body>
+</html>
+
+

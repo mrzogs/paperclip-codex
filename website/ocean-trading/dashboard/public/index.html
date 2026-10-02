@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ocean Trading Dashboard</title>
+    <link rel="stylesheet" href="/styles.css?v=20260828-live-broker-balance-4" />
+  </head>
+  <body data-page="dashboard">
+    <header class="topbar">
+      <div class="topbar-main">
+        <a class="brand brand-logo" href="/" aria-label="Ocean Trading dashboard"><img src="/assets/ocean-trading-icon.png" alt="Ocean Trading" /></a>
+        <nav class="main-nav" aria-label="Primary navigation">
+          <a href="/" data-nav-page="dashboard">Dashboard</a>
+          <a href="/paper-dashboard.html" data-nav-page="paper">Paper</a>
+          <a href="/live-dashboard.html" data-nav-page="live">Live</a>
+          <a href="/open-trades.html" data-nav-page="open">Open Trades</a>
+          <a href="/ledger.html" data-nav-page="ledger">Ledgers</a>
+          <a href="/daily-report.html" data-nav-page="daily">Daily Report</a>
+          <a href="/research.html" data-nav-page="research">Research</a>
+          <a href="/strategies.html" data-nav-page="strategies">Strategies</a>
+          <a href="/rules.html" data-nav-page="rules">Rules</a>
+          <a href="#" data-nav-page="paperclip" target="_blank" rel="noopener">Paperclip</a>
+          <a href="/sources.html" data-nav-page="sources">Sources</a>
+        </nav>
+      </div>
+      <div class="breadcrumb-bar">
+        <button class="back-button" type="button" data-nav-back>Back</button>
+        <nav class="breadcrumbs" aria-label="Breadcrumb">
+          <a href="/">Dashboard</a>
+          <span aria-hidden="true">/</span>
+          <span id="breadcrumb-current">Loading</span>
+        </nav>
+        <button class="dashboard-button" type="button" data-monitor-toggle>Monitor</button>
+      </div>
+    </header>
+
+    <main class="page">
+      <section id="dashboard-performance-calendar"></section>
+
+      <section class="mode-grid">
+        <article class="mode-panel paper">
+          <div>
+            <p class="eyebrow">Paper Trading</p>
+            <h2>Simulation dashboard</h2>
+            <p id="paper-mode-summary">Loading paper trading state...</p>
+          </div>
+          <a class="button-link" href="/paper-dashboard.html">Open paper dashboard</a>
+        </article>
+        <article class="mode-panel live">
+          <div>
+            <p class="eyebrow">Live Trading</p>
+            <h2>Live dashboard</h2>
+            <p id="live-mode-summary">Loading live trading state...</p>
+          </div>
+          <a class="button-link" href="/live-dashboard.html">Open live dashboard</a>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="section-head">
+          <div>
+            <h2>Strategy Performance</h2>
+            <p>Separated backtesting, paper trading, and live trading performance.</p>
+          </div>
+          <a class="text-link" href="/strategies.html">View strategy details</a>
+        </div>
+        <div id="performance-split"></div>
+        <div class="chart-grid">
+          <article class="chart-card">
+            <h3>Backtest net profit</h3>
+            <canvas id="profitChart"></canvas>
+          </article>
+          <article class="chart-card">
+            <h3>Backtest max drawdown</h3>
+            <canvas id="drawdownChart"></canvas>
+          </article>
+          <article class="chart-card">
+            <h3>Backtest win rate</h3>
+            <canvas id="winRateChart"></canvas>
+          </article>
+          <article class="chart-card">
+            <h3>Backtest long / short split</h3>
+            <canvas id="directionChart"></canvas>
+            <p class="legend"><span class="blue"></span> Long <span class="red"></span> Short</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="section-head">
+          <div>
+            <h2>Lucid Flex 50K Risk Rules</h2>
+            <p>Guardrails used for live-account simulation, strategy acceptance, and reporting.</p>
+          </div>
+          <a class="text-link" href="/live-dashboard.html">Open live controls</a>
+        </div>
+        <div id="risk-profile"></div>
+      </section>
+
+      <section class="dashboard-links">
+        <a href="/replay-monitor.html">
+          <strong>Replay Monitor</strong>
+          <span>Track replay-validation status, latest parity artifacts, and the current local monitor state.</span>
+        </a>
+        <a href="/ledger.html">
+          <strong>Ledgers</strong>
+          <span>Separated paper and live trade journals, status, fills, missed signals, and setup notes.</span>
+        </a>
+        <a href="/daily-report.html">
+          <strong>Daily Report</strong>
+          <span>Daily performance, observations, and Sierra paper setup summary.</span>
+        </a>
+        <a href="/research.html">
+          <strong>Research & Backtests</strong>
+          <span>Recent strategy run artifacts, variants, profit, win rate, and direction split.</span>
+        </a>
+        <a href="/sources.html">
+          <strong>Source Artifacts</strong>
+          <span>Trace every dashboard figure back to the local file it came from.</span>
+        </a>
+      </section>
+    </main>
+    <script src="/broker-account-balance.js?v=20260902-settled-balance-2" defer></script>
+    <script src="/app.js?v=20260902-live-balance-reconciliation-1" defer></script>
+  </body>
+</html>
+
+

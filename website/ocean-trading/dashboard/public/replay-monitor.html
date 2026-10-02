@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Replay Monitor | Ocean Trading</title>
+    <link rel="stylesheet" href="/styles.css?v=20260619-replay-compact-account-row" />
+    <style>
+      .replay-account-clear-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.85rem;
+        padding: 0.72rem 0.85rem;
+        background: #ffffff;
+        border: 1px solid #d8dee6;
+        border-radius: 8px;
+      }
+
+      .replay-dashboard-stats {
+        grid-template-columns: minmax(330px, 1.2fr) repeat(4, minmax(155px, 1fr));
+      }
+
+      .replay-dashboard-account-select select {
+        width: 100%;
+      }
+
+      .replay-account-clear-chips {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        min-width: 0;
+      }
+
+      .replay-account-chip {
+        display: inline-flex;
+        align-items: center;
+        min-height: 2rem;
+        padding: 0.3rem 0.65rem;
+        color: #1c4b81;
+        background: #eef4fb;
+        border: 1px solid transparent;
+        border-radius: 999px;
+        font: inherit;
+        font-size: 0.82rem;
+        font-weight: 800;
+      }
+
+      .replay-account-clear-chips button.replay-account-chip {
+        cursor: pointer;
+      }
+
+      .replay-account-clear-chips button.replay-account-chip:hover,
+      .replay-account-clear-chips button.replay-account-chip:focus-visible {
+        border-color: #93b4dd;
+        box-shadow: 0 0 0 2px rgba(36, 91, 143, 0.1);
+        outline: none;
+      }
+
+      .replay-account-chip.selected {
+        color: #008a3d;
+        background: #edf9f0;
+      }
+
+      .replay-account-chip.active-source:not(.selected) {
+        color: #17415f;
+        background: #eaf2fb;
+      }
+
+      .replay-account-note {
+        color: #5e6b7f;
+        background: #f5f8fc;
+      }
+
+      @media (max-width: 720px) {
+        .replay-dashboard-stats {
+          grid-template-columns: 1fr;
+        }
+
+        .replay-account-clear-toolbar {
+          align-items: stretch;
+          flex-direction: column;
+        }
+
+        .replay-account-clear-button {
+          width: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body data-page="replay">
+    <header class="topbar">
+      <div class="topbar-main">
+        <a class="brand brand-logo" href="/" aria-label="Ocean Trading dashboard"><img src="/assets/ocean-trading-icon.png" alt="Ocean Trading" /></a>
+        <nav class="main-nav" aria-label="Primary navigation">
+          <a href="/" data-nav-page="dashboard">Dashboard</a>
+          <a href="/paper-dashboard.html" data-nav-page="paper">Paper</a>
+          <a href="/live-dashboard.html" data-nav-page="live">Live</a>
+          <a href="/open-trades.html" data-nav-page="open">Open Trades</a>
+          <a href="/replay-monitor.html" data-nav-page="replay">Replay</a>
+          <a href="/ledger.html" data-nav-page="ledger">Ledgers</a>
+          <a href="/daily-report.html" data-nav-page="daily">Daily Report</a>
+          <a href="/research.html" data-nav-page="research">Research</a>
+          <a href="/strategies.html" data-nav-page="strategies">Strategies</a>
+          <a href="/rules.html" data-nav-page="rules">Rules</a>
+          <a href="#" data-nav-page="paperclip" target="_blank" rel="noopener">Paperclip</a>
+          <a href="/sources.html" data-nav-page="sources">Sources</a>
+        </nav>
+      </div>
+      <div class="breadcrumb-bar">
+        <button class="back-button" type="button" data-nav-back>Back</button>
+        <nav class="breadcrumbs" aria-label="Breadcrumb">
+          <a href="/">Dashboard</a>
+          <span aria-hidden="true">/</span>
+          <span id="breadcrumb-current">Loading</span>
+        </nav>
+        <button class="dashboard-button" type="button" data-monitor-toggle>Monitor</button>
+      </div>
+    </header>
+    <main class="page">
+      <section class="hero compact">
+        <p class="eyebrow">Replay and parity tracking</p>
+        <h1>Replay Monitor</h1>
+        <p id="generated">Loading...</p>
+      </section>
+      <section class="panel">
+        <div id="replay-monitor">Loading replay monitor...</div>
+      </section>
+    </main>
+    <script src="/app.js?v=20260904-replay-run-scope" defer></script>
+</body>
+</html>

@@ -1,0 +1,37 @@
+{
+  "schema_version": "shared-contract-permission-matrix/v1",
+  "release_version": "2.1.0",
+  "authority_rule": "Permissions are computed by the authenticated provider. Caller fields never grant authority.",
+  "roles": {
+    "BRAIN_CONTRACT_PUBLISHER": {
+      "read": ["shared-contracts", "approved-library"],
+      "write": ["versioned-shared-contract-release"],
+      "deny": ["strategy-source", "ocean-runtime-state", "telemetry-ledger", "production-activation"]
+    },
+    "OCEAN_OPERATIONAL_AUTHORITY": {
+      "read": ["shared-contracts", "strategy-profile-mirror", "run-results"],
+      "write": ["strategy-registry", "activation-decision", "run-workflow", "approval-decision", "handoff"],
+      "deny": ["strategy-source", "brain-analytical-profile", "telemetry-ledger"]
+    },
+    "TELEMETRY_PRODUCER": {
+      "read": ["resolved-run-context", "source-adapter"],
+      "write": ["trade-event", "workflow-event", "artifact-manifest", "run-completion"],
+      "deny": ["approval-decision", "strategy-registry", "learner-permission", "production-activation"]
+    },
+    "STRATEGY_PROJECT": {
+      "read": ["own-strategy-profile", "own-run-context", "shared-contracts", "approved-library"],
+      "write": ["candidate-result", "handoff-acknowledgement"],
+      "deny": ["other-strategy-private-evidence", "approval-decision", "global-brain-write", "production-activation"]
+    },
+    "HOLDOUT_EVALUATOR": {
+      "read": ["authorised-holdout-manifest", "frozen-candidate"],
+      "write": ["restricted-candidate-result"],
+      "deny": ["learning-catalogue", "strategy-redesign", "unreleased-holdout-result"]
+    },
+    "GENERAL_BRAIN_CLIENT": {
+      "read": ["shared-contracts", "authorised-general-memory", "approved-library"],
+      "write": ["general-brain-routes-authorised-by-server"],
+      "deny": ["trading-approval-authority", "strategy-scoped-client-impersonation"]
+    }
+  }
+}

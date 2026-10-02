@@ -1,0 +1,44 @@
+{
+  "schema_version": "ocean-website-operator-host/v2",
+  "owner": "Ocean Trading Website",
+  "parent_task_id": "S30.2",
+  "repair_id": "S30.2-OCEAN-HOST-ADOPTION",
+  "supersedes_for_current_adoption": "website-operator-host-v1.json",
+  "historical_contracts_unchanged": ["website-operator-host-v1.json", "mutation-operator-host-v1.json"],
+  "host": {
+    "path": "C:\\Users\\wayne\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\powershell\\pwsh.exe",
+    "sha256": "362a356ce7f0940ec74f73a8fc2c990a2cc24a38a11c90bbd8eca947110ad139",
+    "edition": "Core",
+    "minimum_version": "7.5",
+    "verified_version": "7.6.5",
+    "execution_policy_override": false,
+    "fallback_host": null,
+    "interactive_prompt": false
+  },
+  "operator": {
+    "path": "D:\\Paperclip-codex\\scripts\\ocean-workflow-operator.ps1",
+    "sha256": "4c2b1525b492a301168cbe518dedd7968ea9eb918113d53aa33c0f244e196032",
+    "read_only_actions": ["Status", "Runtime", "Read-Facts"],
+    "startup_action": "Bootstrap-Runtime",
+    "startup_semantics": "Captured-output startup only. Validate existing protected root, state, lock, exact database path and file ACLs; reject missing database and pending credential publication. Under the existing exclusive bounded operator lock, use existing issuer verification/store preparation and return the verified runtime in captured memory. This does not enroll, renew, rotate, publish handoffs or create a substitute database.",
+    "sidecar_lifetime": "SQLite may remove WAL/SHM when the last writer closes. Startup verification may prepare the existing store; the backend then opens its normal writer directly without a second strict read-only call in between. No permanent auxiliary writer is required.",
+    "reader_semantics": "Status, Runtime and Read-Facts retain verify-readonly/facts-readonly and never prepare a store. Missing required reader resources fail closed."
+  },
+  "callers": {
+    "loader": {"path": "website/ocean-trading/dashboard/workflow/backend.mjs", "sha256": "80a1839e413f305f34b2e06069e7ac5b1938d23ef8971211f09223015150a869", "initial_action": "Bootstrap-Runtime"},
+    "maintenance": {"path": "website/ocean-trading/dashboard/workflow/maintenance.mjs", "sha256": "02fd797367169f5a1897edae95e6312cdcb8cdaa3a094e849df2956cffe613cf", "runtime_action": "Runtime", "mutation_action": "Maintenance"},
+    "launcher": {"path": "scripts/start-ocean-website.ps1", "sha256": "6b8964e0fe3bb31397bb518d20613849a3704cd45336970cd3ce5acae422f316"},
+    "arguments": ["-NoProfile", "-NonInteractive", "-File", "<operator>", "-Action", "<named action>", "-Root", "<existing protected root>"],
+    "windows_hidden": true,
+    "runtime_output": "Captured only; no plaintext credentials in evidence or logs."
+  },
+  "preservation": [
+    "Existing Node issuer/store, schemas and bounded transaction semantics unchanged",
+    "Existing identities, TEST history, encrypted state and finite credential policies preserved",
+    "No browser login, default password or global token for services",
+    "Normal ingestion, Brain submission and dispatch OFF; LIVE_REAL DISABLED",
+    "No strategy, telemetry writer, ledger, Library or unrelated service changes"
+  ],
+  "acceptance": "Require exact pins, two actual no-sidecar private cold-start/shutdown cycles, missing-database fail-closed test, caller and read-only regression checks, deployed website-only restart, readiness and ledger parity. Historical source certification alone is not deployed acceptance.",
+  "scope_boundary": "This host contract grants no physical-fact approval, service enrollment, run activation, human approval or later-card authority. Those require their separate verified owner artifacts and bounded authorization."
+}

@@ -1,0 +1,6 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hermes-brain:shared-contracts:trade-assessment-profile:2.1.0",
+  "title": "Hermes Brain trade-assessment-profile contract 2.1.0",
+  "$ref": "urn:hermes-brain:shared-contracts:2.1.0#/$defs/tradeAssessmentProfile"
+}

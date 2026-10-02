@@ -1,0 +1,131 @@
+import fs from "node:fs";
+import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { requireThat } from "./common.mjs";
+
+const IMMUTABLE = ["ow_profiles", "ow_artifacts", "ow_decisions", "ow_events", "ow_decision_revocations", "ow_setup_receipts"];
+const RUN_IMMUTABLE = ["ow_run_versions", "ow_run_settings", "ow_dataset_permissions", "ow_run_plans", "ow_run_progress", "ow_coverage_receipts", "ow_evidence_revisions", "ow_run_presets"];
+const SQLITE_BUSY_TIMEOUT_MS = 5000;
+
+export class WorkflowStore {
+  constructor(filename, { readOnly = false } = {}) {
+    requireThat(typeof filename === "string" && path.isAbsolute(filename), 503, "ABSOLUTE_WORKFLOW_DB_REQUIRED");
+    requireThat(typeof readOnly === "boolean", 503, "BOOLEAN_READONLY_MODE_REQUIRED");
+    if (readOnly) {
+      const regular = (file) => fs.existsSync(file) && fs.lstatSync(file).isFile() && !fs.lstatSync(file).isSymbolicLink();
+      requireThat(regular(filename), 503, "EXISTING_WORKFLOW_DB_REQUIRED");
+      const header = Buffer.alloc(100);
+      const descriptor = fs.openSync(filename, "r");
+      try { requireThat(fs.readSync(descriptor, header, 0, 100, 0) === 100 && header.subarray(0, 16).toString() === "SQLite format 3\0", 503, "EXISTING_WORKFLOW_DB_REQUIRED"); }
+      finally { fs.closeSync(descriptor); }
+      // A read-only WAL connection can otherwise create sidecars. Never initialize them here.
+      if (header[18] === 2 || header[19] === 2) {
+        requireThat(regular(`${filename}-wal`) && regular(`${filename}-shm`), 503, "EXISTING_WORKFLOW_WAL_REQUIRED");
+      }
+      this.db = new DatabaseSync(filename, { readOnly: true, timeout: SQLITE_BUSY_TIMEOUT_MS });
+      try {
+        this.db.exec(`PRAGMA query_only=ON; PRAGMA busy_timeout=${SQLITE_BUSY_TIMEOUT_MS};`);
+        const tables = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all().map(row => row.name);
+        requireThat(tables.length > 0 && tables.every(name => name.startsWith("ow_")), 503, "EXISTING_NON_WORKFLOW_DATABASE_REJECTED");
+        requireThat(["ow_schema_migrations", "ow_auth_state", "ow_auth_audit", "ow_identities"].every(name => tables.includes(name)), 503, "EXISTING_WORKFLOW_SCHEMA_REQUIRED");
+        requireThat(this.db.prepare("SELECT MAX(version) AS version FROM ow_schema_migrations").get().version === 10, 503, "READONLY_WORKFLOW_MIGRATION_REQUIRED");
+      } catch (error) { this.db.close(); throw error; }
+      return;
+    }
+    fs.mkdirSync(path.dirname(filename), { recursive: true });
+    if (fs.existsSync(filename)) {
+      const probe = new DatabaseSync(filename, { readOnly: true, timeout: SQLITE_BUSY_TIMEOUT_MS });
+      try {
+        const tables = probe.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all();
+        requireThat(!tables.length || tables.every((table) => table.name.startsWith("ow_")), 503, "EXISTING_NON_WORKFLOW_DATABASE_REJECTED");
+      } finally { probe.close(); }
+    }
+    this.db = new DatabaseSync(filename, { timeout: SQLITE_BUSY_TIMEOUT_MS });
+    try {
+      this.db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=${SQLITE_BUSY_TIMEOUT_MS};`);
+      const applied = this.db.prepare("SELECT name FROM sqlite_master WHERE name='ow_schema_migrations'").get();
+      if (!applied) {
+        requireThat(this.db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").get().n === 0, 503, "EXISTING_NON_WORKFLOW_DATABASE_REJECTED");
+        this.transaction(() => {
+          this.db.exec(fs.readFileSync(new URL("./migrations/001-up.sql", import.meta.url), "utf8"));
+          for (const table of IMMUTABLE) {
+            for (const action of ["UPDATE", "DELETE"]) this.db.exec(`CREATE TRIGGER ${table}_no_${action.toLowerCase()} BEFORE ${action} ON ${table} BEGIN SELECT RAISE(ABORT,'immutable workflow record'); END;`);
+          }
+        });
+      }
+      const version = this.db.prepare("SELECT MAX(version) AS version FROM ow_schema_migrations").get().version;
+      requireThat([1,2,3,4,5,6,7,8,9,10].includes(version), 503, "WORKFLOW_MIGRATION_VERSION_CONFLICT");
+      if (version === 1) this.transaction(() => {
+        this.db.exec(fs.readFileSync(new URL("./migrations/002-up.sql", import.meta.url), "utf8"));
+        for (const table of RUN_IMMUTABLE) for (const action of ["UPDATE","DELETE"]) this.db.exec(`CREATE TRIGGER ${table}_no_${action.toLowerCase()} BEFORE ${action} ON ${table} BEGIN SELECT RAISE(ABORT,'immutable run record'); END;`);
+      });
+      if (version < 3) this.transaction(() => {
+        this.db.exec(fs.readFileSync(new URL("./migrations/003-up.sql", import.meta.url), "utf8"));
+        this.db.exec("DELETE FROM ow_sessions");
+        for (const action of ["UPDATE", "DELETE"]) this.db.exec(`CREATE TRIGGER ow_auth_audit_no_${action.toLowerCase()} BEFORE ${action} ON ow_auth_audit BEGIN SELECT RAISE(ABORT,'immutable auth audit'); END;`);
+      });
+      if (version < 4) this.transaction(() => this.db.exec(fs.readFileSync(new URL("./migrations/004-up.sql", import.meta.url), "utf8")));
+      if (version < 5) this.transaction(() => this.db.exec(fs.readFileSync(new URL("./migrations/005-up.sql", import.meta.url), "utf8")));
+      if (version < 6) this.transaction(() => this.db.exec(fs.readFileSync(new URL("./migrations/006-up.sql", import.meta.url), "utf8")));
+      if (version < 7) this.transaction(() => this.db.exec(fs.readFileSync(new URL("./migrations/007-up.sql", import.meta.url), "utf8")));
+      if (version < 8) this.transaction(() => this.db.exec(fs.readFileSync(new URL("./migrations/008-up.sql", import.meta.url), "utf8")));
+      if (version < 9) this.transaction(() => this.db.exec(fs.readFileSync(new URL("./migrations/009-up.sql", import.meta.url), "utf8")));
+      if (version < 10) this.transaction(() => this.db.exec(fs.readFileSync(new URL("./migrations/010-up.sql", import.meta.url), "utf8")));
+    } catch (error) { this.db.close(); throw error; }
+  }
+  transaction(work) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = work();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  registerIdentity(identity) {
+    const current = this.db.prepare("SELECT metadata_json FROM ow_identities WHERE id=?").get(identity.identity_id);
+    if (current) requireThat(current.metadata_json === JSON.stringify(identity), 503, "IDENTITY_RECONCILIATION_REQUIRED");
+    else this.db.prepare("INSERT INTO ow_identities VALUES(?,?,?)").run(identity.identity_id, identity.role, JSON.stringify(identity));
+  }
+  identityCurrent(identity) {
+    return this.db.prepare("SELECT metadata_json FROM ow_identities WHERE id=?").get(identity.identity_id)?.metadata_json === JSON.stringify(identity);
+  }
+  saveSession(hash, csrf, subject, expiry) {
+    this.db.prepare("DELETE FROM ow_sessions WHERE expires_ms<=?").run(Date.now());
+    requireThat(this.db.prepare("SELECT COUNT(*) AS n FROM ow_sessions").get().n < 100, 429, "SESSION_CAPACITY");
+    this.db.prepare("INSERT INTO ow_sessions VALUES(?,?,?,?)").run(hash, csrf, subject, expiry);
+  }
+  getSession(hash) { return this.db.prepare("SELECT * FROM ow_sessions WHERE session_hash=?").get(hash); }
+  browserCurrent(hash) { return this.db.prepare("SELECT credential_hash FROM ow_auth_state WHERE id='browser'").get()?.credential_hash === hash; }
+  bindBrowser(hash, managed = false) {
+    const current = this.db.prepare("SELECT credential_hash FROM ow_auth_state WHERE id='browser'").get();
+    if (!current && !managed) this.db.prepare("INSERT INTO ow_auth_state VALUES('browser',?)").run(hash);
+    else requireThat(current?.credential_hash === hash, 503, "BROWSER_RECOVERY_REQUIRED");
+  }
+  close() { this.db.close(); }
+  revertEmptyMigration() {
+    const count = this.db.prepare("SELECT (SELECT COUNT(*) FROM ow_cases)+(SELECT COUNT(*) FROM ow_runs)+(SELECT COUNT(*) FROM ow_setup_receipts) AS n").get().n;
+    requireThat(count === 0, 409, "POPULATED_WORKFLOW_REQUIRES_BACKUP_AND_OPERATOR_ROLLBACK");
+    this.transaction(() => {
+      requireThat(this.db.prepare('SELECT (SELECT COUNT(*) FROM ow_onboarding_brain_outbox)+(SELECT COUNT(*) FROM ow_onboarding_registrations)+(SELECT COUNT(*) FROM ow_onboarding_activation_events) AS n').get().n===0,409,'ONBOARDING_LIFECYCLE_HISTORY_REQUIRES_BACKUP_ROLLBACK');
+      this.db.exec('DROP TABLE ow_onboarding_activation_events; DROP TABLE ow_onboarding_registrations; DROP TABLE ow_onboarding_brain_outbox; DELETE FROM ow_schema_migrations WHERE version=10;');
+      requireThat(this.db.prepare('SELECT COUNT(*) AS n FROM ow_operational_trade_events').get().n===0,409,'OPERATIONAL_TRADE_EVENT_HISTORY_REQUIRES_BACKUP_ROLLBACK');
+      this.db.exec('DROP TABLE ow_operational_trade_events; DELETE FROM ow_schema_migrations WHERE version=9;');
+      requireThat(this.db.prepare('SELECT (SELECT COUNT(*) FROM ow_operational_brain_results)+(SELECT COUNT(*) FROM ow_operational_brain_callbacks) AS n').get().n===0,409,'OPERATIONAL_BRAIN_HISTORY_REQUIRES_BACKUP_ROLLBACK');
+      this.db.exec('DROP TABLE ow_operational_brain_callbacks; DROP TABLE ow_operational_brain_results; DELETE FROM ow_schema_migrations WHERE version=8;');
+      requireThat(this.db.prepare('SELECT (SELECT COUNT(*) FROM ow_operational_release_requests)+(SELECT COUNT(*) FROM ow_operational_release_receipts) AS n').get().n===0,409,'OPERATIONAL_RELEASE_HISTORY_REQUIRES_BACKUP_ROLLBACK');
+      this.db.exec('DROP TABLE ow_operational_release_receipts; DROP TABLE ow_operational_release_requests; DELETE FROM ow_schema_migrations WHERE version=7;');
+      requireThat(this.db.prepare('SELECT (SELECT COUNT(*) FROM ow_operational_decisions)+(SELECT COUNT(*) FROM ow_operational_releases) AS n').get().n===0,409,'OPERATIONAL_HISTORY_REQUIRES_BACKUP_ROLLBACK');
+      this.db.exec('DROP TABLE ow_operational_releases; DROP TABLE ow_operational_revocations; DROP TABLE ow_operational_decisions; DELETE FROM ow_schema_migrations WHERE version=6;');
+      requireThat(this.db.prepare('SELECT (SELECT COUNT(*) FROM ow_integration_bindings)+(SELECT COUNT(*) FROM ow_operational_pending)+(SELECT COUNT(*) FROM ow_operational_receipts) AS n').get().n===0,409,'INTEGRATION_HISTORY_REQUIRES_BACKUP_ROLLBACK');
+      this.db.exec('DROP TABLE ow_operational_receipts; DROP TABLE ow_operational_pending; DROP TABLE ow_integration_bindings; DELETE FROM ow_schema_migrations WHERE version=5;');
+      requireThat(this.db.prepare('SELECT COUNT(*) AS n FROM ow_test_fixtures').get().n === 0,409,'TEST_FIXTURES_REQUIRE_BACKUP_ROLLBACK');
+      this.db.exec('DROP TABLE ow_test_conflicts; DROP TABLE ow_test_receipts; DROP TABLE ow_test_fixtures; DROP TABLE ow_test_declarations; DELETE FROM ow_schema_migrations WHERE version=4;');
+      this.db.exec("DROP TABLE ow_auth_audit; DROP TABLE ow_auth_state; DELETE FROM ow_schema_migrations WHERE version=3;");
+      this.db.exec(fs.readFileSync(new URL("./migrations/002-down.sql", import.meta.url), "utf8"));
+      this.db.exec(fs.readFileSync(new URL("./migrations/001-down.sql", import.meta.url), "utf8"));
+    });
+  }
+}

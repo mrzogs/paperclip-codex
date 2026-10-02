@@ -1,0 +1,22 @@
+# VWAP Pullback Replay Two v0.1.3 identity evidence
+
+- Owner: VWAP Pullback / Ocean Replay Two v013
+- Strategy: `cicd-vwap-pull-back-strategy`
+- Execution instance: `test-cicd-vwap-pull-back-replay-two-v013`
+- Identity: `test-cicd-vwap-pull-back-replay-two-v013-telemetry`
+- Namespace: `TEST`
+- Role: `TELEMETRY`
+- Scopes: `read`, `event.write`, `health.write`
+- Physical installation: `D:\Trading\SierraChart-Replay Two`
+- Chartbook: `D:\Trading\SierraChart-Replay Two\Data\CICD - VWAP Pull Back Strategy.Cht`
+- Strategy study: `StudyID6`
+- Physical strategy artifact: `v0.6.228-replay-controller-lifecycle-candidate`
+- Strategy binary SHA-256: `43b429d9fdb369e09bd454db5c02528a173492edc0c2f6283943a305ebb8e260`
+- Telemetry study: `StudyID2`, Sierra Trade Telemetry Logger `v0.5.26`
+- Telemetry database root: `D:\Trading\CICD\runtime\cicd-vwap-pull-back-strategy\ReplayTwo-v013`
+- Contracts: `MNQM25_FUT_CME[M]` before the sealed 2025-06-16 rollover; `MNQU25_FUT_CME[M]` from the rollover onward.
+- Bar period: `5 minutes`
+- Account: `Sim1`
+- Purpose: append-only TEST telemetry identity for two sealed June 2025 Replay segments under the v0.6.228 controller-lifecycle artifact.
+- Safety: simulation only, TEST namespace, normal ingestion OFF, Brain submission OFF, automatic approval OFF, Paper unchanged, LIVE_REAL disabled.
+- Supersedes runtime binding `test-cicd-vwap-pull-back-replay-two-v012`; the completed May run and all prior receipts remain immutable.

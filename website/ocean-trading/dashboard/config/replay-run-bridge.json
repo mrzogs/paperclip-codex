@@ -1,0 +1,18 @@
+{
+  "schema_version": "ocean-replay-run-bridge/v3",
+  "base_url": "http://127.0.0.1:3102",
+  "workflow_db": "D:\\OceanTradingData\\website\\workflow\\workflow.sqlite",
+  "telemetry_db": "D:\\Trading\\CICD\\runtime\\cicd-vwap-pull-back-strategy\\ReplayTwo-v013\\test-cicd-vwap-pull-back-replay-two-v013\\TradeTelemetry_test-cicd-vwap-pull-back-replay-two-v013.sqlite",
+  "handoff_path": "D:\\OceanTradingData\\website\\workflow\\handoffs\\test-cicd-vwap-pull-back-replay-two-v013-telemetry.dpapi",
+  "strategy_id": "cicd-vwap-pull-back-strategy",
+  "instance_id": "test-cicd-vwap-pull-back-replay-two-v013",
+  "identity_id": "test-cicd-vwap-pull-back-replay-two-v013-telemetry",
+  "credential_ref": "OCEAN_VWAP_PULLBACK_REPLAY_TWO_V013_TELEMETRY_TOKEN",
+  "account_alias": "Sim1",
+  "expected_symbol": "MNQU25_FUT_CME",
+  "expected_strategy_version": "v0.6.229",
+  "expected_telemetry_version": "v0.5.29",
+  "expected_sierra_exe": "D:\\Trading\\SierraChart-Replay Two\\SierraChart_64.exe",
+  "poll_seconds": 10,
+  "state_file": "D:\\OceanTradingData\\website\\ocean-runtime\\replay-bridge-status.json"
+}

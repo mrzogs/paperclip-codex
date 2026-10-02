@@ -1,0 +1,26 @@
+{
+  "schema_version":"ocean-provider-lifecycle/v1",
+  "identity_capacity":{"hard_maximum":64,"includes_expired_and_revoked":true,"renewal_allocates_slot":false,"production_fixture_budget":0,"planned_factual_identities":2,"one_strategy_instance_and_binding_per_operational_identity":true},
+  "identity_readback":{
+    "schema_version":"ocean-service-identity/v1",
+    "method":"GET",
+    "routes":{"TEST":"/api/workflow/identity/v1","OPERATIONAL":"/api/workflow/operational/v1/identity"},
+    "audiences":{"TEST":"Ocean workflow TEST","OPERATIONAL":"Ocean workflow operational v1"},
+    "required_scope":"read",
+    "identity_fields":["id","role","namespace","audience","scopes","strategy_ids","instance_ids","factual_binding_hash","credential_version","expires_at_utc"],
+    "top_level_fields":["schema_version","identity","operational_ingestion","live_real","approval_authority"],
+    "operational_ingestion":"OFF","live_real":"DISABLED","approval_authority":false,
+    "cross_namespace_and_browser_denied":true,
+    "legacy_test_status_route_unchanged":true
+  },
+  "native_handoff":{"fields":["identity_id","credential_ref","token","expires_at_utc","credential_version","revoked","audience","owner"],"encryption":"Windows DPAPI CurrentUser","audience":"Copied exactly from provider-issued identity","secrets_exported":false},
+  "factual_readback":{
+    "action":"Read-Facts","selector_parameter":"IdentityId","selector_meaning":"exact execution_instance_id, not caller identity_id",
+    "command":"scripts/ocean-workflow-operator.ps1",
+    "schema_version":"ocean-factual-registration-readback/v1",
+    "fields":["schema_version","registry_revision","binding"],
+    "binding":"Full registered ocean-operational-factual-binding/v1 including its binding_hash; verified against protected state and durable registry before return",
+    "hash_algorithm":"sha256 of common.mjs canonical JSON of binding excluding binding_hash",
+    "is_approval":false,"http_route":null
+  }
+}

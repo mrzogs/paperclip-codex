@@ -1,0 +1,27 @@
+{
+  "schema_version": "2.1.0",
+  "adapter_id": "hermes-brain-trade-v1-to-shared-v2",
+  "adapter_version": "1.0.0",
+  "source_system": "Hermes Brain",
+  "source_schema": "trade-event 1.0.0 and trade-assessment-profile 1.0.0",
+  "target_release": "2.1.0",
+  "field_mappings": [
+    {"source": "trade_id", "target": "legacy_trade_id", "conversion": "preserve; do not promote to canonical_trade_id without sufficient provenance", "nullable": false},
+    {"source": "result_type", "target": "financial_outcome", "conversion": "WIN/LOSS map directly; FAILED/ABORTED/REJECTED map to execution_status with outcome UNKNOWN", "nullable": true},
+    {"source": "realised_points", "target": "gross_points_per_contract", "conversion": "map only when producer unit meaning is verified", "nullable": true},
+    {"source": "realised_currency", "target": "net_currency_total", "conversion": "map with currency and fee provenance; otherwise null", "nullable": true},
+    {"source": "known_at_signal/entry/during_trade", "target": "decision_evidence", "conversion": "retain captured/known timestamps; missing availability remains unknown", "nullable": true},
+    {"source": "known_after_exit", "target": "late_evidence_ids", "conversion": "emit immutable evidence attachment; never rewrite decision-time evidence", "nullable": true},
+    {"source": "run fields", "target": "run-context 2.1.0", "conversion": "explicit mapping only; invalid or ambiguous combinations are quarantined", "nullable": true}
+  ],
+  "identity_policy": "Stored v1 payloads remain immutable. New v2 identities are additive and linked by an adapter receipt.",
+  "environment_policy": "data_origin and execution_environment must agree; IMPORT remains transport only.",
+  "unknown_policy": "QUARANTINE_DO_NOT_GUESS",
+  "idempotency_policy": "IDENTICAL_RETRY_RETURNS_PRIOR_RECEIPT_CONFLICTING_ID_QUARANTINED",
+  "permission_scope": "PROVIDER_INTERNAL",
+  "compatibility_evidence": [
+    "contracts/trade-event.schema.json",
+    "contracts/trade-assessment-profile.schema.json",
+    "S08-BRAIN-SAFE-RECONCILIATION-RESULT.zip"
+  ]
+}

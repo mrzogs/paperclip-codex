@@ -1,0 +1,50 @@
+{
+  "schema_version": "ocean-mutation-operator-host/v1",
+  "owner": "Ocean Trading Website",
+  "parent_task_id": "S30.2",
+  "repair_id": "S30.2-OCEAN-MUTATION-OPERATOR-REPAIR",
+  "delivery_scope": "SOURCE_AND_PRIVATE_FIXTURE_CERTIFICATION_ONLY",
+  "production_installed": false,
+  "operator_relative_path": "scripts/ocean-workflow-operator.ps1",
+  "target_operator_path_after_separate_approval": "D:\\Paperclip-codex\\scripts\\ocean-workflow-operator.ps1",
+  "supported_host": {
+    "platform": "Windows",
+    "edition": "Core",
+    "minimum_version": "7.5",
+    "verified_version": "7.6.5",
+    "verified_executable": "C:\\Users\\wayne\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\powershell\\pwsh.exe",
+    "execution_policy_override": false,
+    "windows_powershell_forwarding": false,
+    "core_below_minimum": "Rejected before root creation"
+  },
+  "named_lifecycle_actions_certified_in_private_fixtures": [
+    "Bootstrap", "Enroll", "Rotate", "Maintenance", "Revoke", "Resume",
+    "Register-Facts", "Read-Facts", "Status", "Runtime", "Transfer", "Probe"
+  ],
+  "human_commands": {
+    "redirected_input": "Initialize rejects noninteractive human setup",
+    "genuine_interactive_setup": "NOT_RUN; not authorized by this repair"
+  },
+  "native_host": {
+    "edition": "Desktop",
+    "legacy_branches_retained": true,
+    "full_operator_execution": "NOT_RUN_POLICY_RESTRICTED",
+    "fixture_crypto_interoperability": "Built-in DPAPI CurrentUser in both directions only; not full native operator coverage",
+    "execution_policy_changed": false
+  },
+  "unchanged_semantics": [
+    "Existing Node operator and receiving-provider credential issuer",
+    "Exact namespace, audience, role, strategy, instance and action scope",
+    "Existing facts qualification, request schemas and finite expiry",
+    "CurrentUser DPAPI with current-user/SYSTEM protected directory ACL",
+    "Existing exclusive operator lock with bounded eight-second wait",
+    "WriteThrough and Flush(true), encrypted pending plan, database transaction, atomic state replacement, handoff publication and pending removal",
+    "Existing idempotent resume and revocation of an interrupted renewal",
+    "No TEST identity promotion and no operational activation"
+  ],
+  "json_fidelity": "Every Core state/request/Node-result decode uses ConvertFrom-Json -DateKind String; exact timestamp text is part of hashed identity and state contracts.",
+  "read_only_contract": "readonly-operator-v1.json remains unchanged; Status/Runtime/Read-Facts retain its existing Core read-only path. This release replaces only its historical non-read forwarding limitation when separately adopted.",
+  "credential_output": "Runtime and fixture decrypt output must stay captured in process memory; never print, persist, or export plaintext credentials.",
+  "activation_gate": "Exact source and contract pins plus explicit coordinator acknowledgement are required before separately approved production installation or operations. Source acceptance does not authorize Register-Facts, enrollment, trading, ingestion, human decisions or full S30.2 PASS.",
+  "consumer_acknowledgement": "PENDING_EXACT_BYTES_REVIEW"
+}
