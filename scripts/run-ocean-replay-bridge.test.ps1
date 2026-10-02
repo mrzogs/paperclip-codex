@@ -47,5 +47,11 @@ if (-not $source.Contains('Test-OperationalPhysicalBinding') -or
     -not $source.Contains('EXPECTED_CHARTBOOK_NOT_OPEN')) {
   throw 'OPERATIONAL_PHYSICAL_BINDING_REQUIRED'
 }
+if (-not $source.Contains('$process.StandardOutput.ReadToEndAsync()') -or
+    -not $source.Contains('$process.StandardError.ReadToEndAsync()') -or
+    $source.IndexOf('$process.StandardOutput.ReadToEndAsync()', [StringComparison]::Ordinal) -ge
+    $source.IndexOf('$process.WaitForExit($TimeoutMilliseconds)', [StringComparison]::Ordinal)) {
+  throw 'REDIRECTED_STREAMS_MUST_DRAIN_BEFORE_WAIT'
+}
 
 Write-Output 'PASS: Replay bridge preserves TEST behavior and adds a fail-closed, exact-binding OPERATIONAL route without LIVE_REAL authority.'

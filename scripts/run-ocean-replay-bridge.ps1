@@ -157,13 +157,17 @@ function Invoke-BoundedNode([string]$Script, [string[]]$Arguments, [int]$Timeout
   $process.StartInfo = $start
   try {
     if (-not $process.Start()) { throw $FailureCode }
+    # Drain both redirected streams while the child is running. Waiting first can
+    # deadlock once a multi-trade evidence plan fills an OS pipe buffer.
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
     if (-not $process.WaitForExit($TimeoutMilliseconds)) {
       try { $process.Kill() } catch {}
       $process.WaitForExit()
       throw ($FailureCode + '_TIMEOUT')
     }
-    $stdout = $process.StandardOutput.ReadToEnd()
-    $stderr = $process.StandardError.ReadToEnd()
+    $stdout = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
     if ($process.ExitCode -ne 0) { throw $FailureCode }
     return $stdout
   } finally { $process.Dispose() }
