@@ -8,6 +8,7 @@ import {
   visibleReplayTrades,
 } from "./replay-session-scope.mjs";
 import { withManifestBuildLock } from "./manifest-build-lock.mjs";
+import { readProjectPaperTelemetry } from "./project-paper-telemetry.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const REPLAY_CONNECTOR_RELATIVE_PATH = path.join("connectors", "sierra-chart", "src", "replay-orchestration.mjs");
@@ -58,6 +59,9 @@ const PAPER_TRADE_ACCOUNT_DATA_DIR = path.join(PAPER_SIERRA_ROOT, "TradeAccountD
 const PATRADING_PAPER_SQLITE_FILE =
   process.env.PATRADING_PAPER_SQLITE_FILE ||
   path.join(PAPER_SIERRA_ROOT, "Data", "TradeTelemetry", "PaperTrading", "TradeTelemetry_PaperTrading.sqlite");
+const VWAP_PROJECT_PAPER_SQLITE_FILE =
+  process.env.VWAP_PROJECT_PAPER_SQLITE_FILE ||
+  "D:\\Trading\\CICD\\runtime\\cicd-vwap-pull-back-strategy\\PaperTrading\\PaperTrading_CICD_VWAP_Pullback\\TradeTelemetry_PaperTrading_CICD_VWAP_Pullback.sqlite";
 const REPLAY_SIERRA_ROOT = process.env.SIERRA_REPLAY_ROOT || "D:\\Trading\\SierraChart-Replay";
 const REPLAY_TRADE_LOG_DIR = path.join(REPLAY_SIERRA_ROOT, "TradeActivityLogs");
 const PATRADING_REPLAY_SQLITE_FILE =
@@ -1258,8 +1262,10 @@ def table_exists(name):
 def rows(sql):
     return [dict(row) for row in conn.execute(sql).fetchall()]
 
-counts = {}
-for table in ["trades", "fills", "orders", "account_snapshot"]:
+counts = {"account_snapshot": None}
+# Replay rendering consumes closed trades only. Counting every account snapshot
+# scans a large append-only table and can block the bounded read unnecessarily.
+for table in ["trades", "fills", "orders"]:
     counts[table] = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]) if table_exists(table) else None
 
 trade_rows = rows("""
@@ -1284,7 +1290,7 @@ print(json.dumps({"ok": True, "sourceFile": str(db_path), "counts": counts, "tra
   try {
     const payload = JSON.parse(execFileSync(PYTHON_EXECUTABLE, ["-c", script, PATRADING_REPLAY_SQLITE_FILE], {
       encoding: "utf8",
-      timeout: 5000,
+      timeout: 15000,
       maxBuffer: 32 * 1024 * 1024,
       windowsHide: true,
     }));
@@ -2056,6 +2062,7 @@ function parsePaperTradingPlan() {
   const statusText = readText(status) || "";
   const hygiene = buildPaperDataHygiene();
   const imported = importPaperSqliteTrades();
+  const projectTelemetry = readProjectPaperTelemetry(VWAP_PROJECT_PAPER_SQLITE_FILE);
   const cleanStart = readJson(PAPER_TRADING_CLEAN_START_FILE, null);
   const sierraConfig = readSierraSymbolConfig();
   const paperSymbol = sierraConfig.paper.symbol;
@@ -2110,6 +2117,7 @@ function parsePaperTradingPlan() {
       status,
       cleanStart ? PAPER_TRADING_CLEAN_START_FILE : null,
       ...(imported.sourceFiles || []),
+      projectTelemetry.available ? VWAP_PROJECT_PAPER_SQLITE_FILE : null,
     ].filter((file) => file && fs.existsSync(file)),
     account: sierraConfig.paper.account || "Sim1",
     instanceRoot: sierraConfig.paper.root || PAPER_SIERRA_ROOT,
@@ -2141,6 +2149,7 @@ function parsePaperTradingPlan() {
     cleanStart,
     accountMonitor: imported.accountMonitor,
     reconciliation: imported.reconciliation,
+    projectTelemetry,
     dtcSnapshot: imported.dtcSnapshot || imported.summary?.dtcSnapshot || null,
     fullLedgerFile: imported.fullLedgerFile,
     reconciliationReportFile: imported.reconciliationReportFile,

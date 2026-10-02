@@ -26,6 +26,9 @@ const PATRADING_LIVE_SQLITE_FILE =
 const PATRADING_PAPER_SQLITE_FILE =
   process.env.PATRADING_PAPER_SQLITE_FILE ||
   "D:\\Trading\\SierraChart-PaperTrading\\Data\\TradeTelemetry\\PaperTrading\\TradeTelemetry_PaperTrading.sqlite";
+const VWAP_PROJECT_PAPER_SQLITE_FILE =
+  process.env.VWAP_PROJECT_PAPER_SQLITE_FILE ||
+  "D:\\Trading\\CICD\\runtime\\cicd-vwap-pull-back-strategy\\PaperTrading\\PaperTrading_CICD_VWAP_Pullback\\TradeTelemetry_PaperTrading_CICD_VWAP_Pullback.sqlite";
 const PROP_FIRM_ACCOUNTS_FILE = path.join(__dirname, "data", "prop-firm-accounts.json");
 const BACKTEST_REQUESTS_FILE = path.join(__dirname, "data", "backtest-requests.json");
 const PAPERCLIP_SYNC_FILE = path.join(__dirname, "data", "paperclip-sync.json");
@@ -78,12 +81,35 @@ const PORT = Number(process.env.DASHBOARD_PORT || 3102);
 let workflowBackend = null;
 let workflowStartupFailed = false;
 let workflowEnrollmentRequired = false;
-try {
-  workflowBackend = workflowFromEnvironment(process.env, PYTHON_EXE);
-} catch (error) {
-  workflowStartupFailed = true;
-  workflowEnrollmentRequired = error.code === 'WAYNE_LOCAL_ENROLLMENT_REQUIRED';
+let workflowRetryTimer = null;
+let workflowRetryAttempt = 0;
+
+function scheduleWorkflowStartupRetry() {
+  if (workflowRetryTimer || workflowBackend || process.env.OCEAN_WORKFLOW_ENABLED !== "1") return;
+  const delayMs = Math.min(300_000, 10_000 * (3 ** workflowRetryAttempt));
+  workflowRetryAttempt += 1;
+  workflowRetryTimer = setTimeout(() => {
+    workflowRetryTimer = null;
+    initializeWorkflowBackend();
+  }, delayMs);
+  workflowRetryTimer.unref();
 }
+
+function initializeWorkflowBackend() {
+  try {
+    workflowBackend = workflowFromEnvironment(process.env, PYTHON_EXE);
+    workflowStartupFailed = false;
+    workflowEnrollmentRequired = false;
+    workflowRetryAttempt = 0;
+    if (workflowBackend) console.log("Ocean workflow backend ready.");
+  } catch (error) {
+    workflowStartupFailed = true;
+    workflowEnrollmentRequired = error.code === "WAYNE_LOCAL_ENROLLMENT_REQUIRED";
+    console.warn(`Ocean workflow backend startup unavailable: ${error.code || error.name || "UNKNOWN_ERROR"}`);
+    if (error.code === "PROTECTED_OPERATOR_STATE_UNAVAILABLE") scheduleWorkflowStartupRetry();
+  }
+}
+initializeWorkflowBackend();
 const PAPERCLIP_API = process.env.PAPERCLIP_API || "http://127.0.0.1:3100/api";
 const PAPERCLIP_WEB_BASE_URL = resolvePaperclipWebBaseUrl();
 const PAPERCLIP_SYNC_TTL_MS = Number(process.env.PAPERCLIP_SYNC_TTL_MS || 300_000);
@@ -198,6 +224,7 @@ function manifestInputFiles(manifestPath) {
   const replayLogDir = sierraConfig.replay?.tradeActivityLogDir || path.join(sierraConfig.replay?.root || "D:\\Trading\\SierraChart-Replay", "TradeActivityLogs");
   for (const file of sqliteInputFiles(sierraConfig.live?.patradingSqliteFile || PATRADING_LIVE_SQLITE_FILE)) files.add(file);
   for (const file of sqliteInputFiles(sierraConfig.paper?.patradingSqliteFile || PATRADING_PAPER_SQLITE_FILE)) files.add(file);
+  for (const file of sqliteInputFiles(VWAP_PROJECT_PAPER_SQLITE_FILE)) files.add(file);
   for (const file of sqliteInputFiles(sierraConfig.replay?.patradingSqliteFile || path.join(sierraConfig.replay?.root || "D:\\Trading\\SierraChart-Replay", "Data", "TradeTelemetry", "Replay", "TradeTelemetry_Replay.sqlite"))) files.add(file);
   for (const file of listWatchedTradeLogs(liveLogDir, "live")) files.add(file);
   for (const file of listWatchedTradeLogs(paperLogDir, "paper")) files.add(file);
@@ -280,20 +307,48 @@ function rebuildManifestAsync() {
   });
 }
 
+let backgroundManifestBuild = null;
+let manifestFreshnessTimer = null;
+
+function scheduleManifestRebuild() {
+  if (backgroundManifestBuild) return backgroundManifestBuild;
+  backgroundManifestBuild = rebuildManifestAsync()
+    .catch((error) => {
+      console.error(`Background manifest rebuild failed: ${error?.message || error}`);
+    })
+    .finally(() => {
+      backgroundManifestBuild = null;
+    });
+  return backgroundManifestBuild;
+}
+
+function startManifestFreshnessPoll() {
+  if (manifestFreshnessTimer) return;
+  const manifestPath = path.join(ROOT_DIR, "dashboard", "dashboard-data.json");
+  const pollMs = Math.max(1000, Number(process.env.OCEAN_MANIFEST_FRESHNESS_POLL_MS) || 5000);
+  const poll = () => {
+    try {
+      const manifestMtime = fileMtimeMs(manifestPath);
+      const projectTelemetryChanged = sqliteInputFiles(VWAP_PROJECT_PAPER_SQLITE_FILE)
+        .some((file) => fileMtimeMs(file) > manifestMtime + 1);
+      if (!fs.existsSync(manifestPath) || projectTelemetryChanged) void scheduleManifestRebuild();
+    } catch (error) {
+      console.error(`Manifest freshness check failed: ${error?.message || error}`);
+    }
+  };
+  poll();
+  manifestFreshnessTimer = setInterval(poll, pollMs);
+  manifestFreshnessTimer.unref?.();
+}
+
 function buildManifest(options = {}) {
   const manifestPath = path.join(ROOT_DIR, "dashboard", "dashboard-data.json");
   const needsRebuild = !options.skipRebuildCheck && (options.forceRebuild || shouldRebuildManifest(manifestPath));
   if (needsRebuild) {
-    const builderPath = path.join(ROOT_DIR, "dashboard", "build-manifest.mjs");
-    execFileSync(process.execPath, [builderPath], {
-      stdio: "inherit",
-      cwd: ROOT_DIR,
-      encoding: "utf8",
-      timeout: 90000,
-      windowsHide: true,
-    });
-    cachedManifestPayload = null;
-    cachedManifestSignature = null;
+    // Keep dashboard reads available while telemetry is publishing. The monitor
+    // or this single-flight background job refreshes the snapshot; /api/rebuild
+    // remains the explicit route that waits for completion.
+    void scheduleManifestRebuild();
   }
   if (options.preferFile === true) return fs.readFileSync(manifestPath, "utf8");
   const snapshotPayload = readLatestManifestSnapshot();
@@ -3827,11 +3882,18 @@ const server = http.createServer((req, res) => {
   res.end("not found");
 });
 
-server.on("close", () => workflowBackend?.close());
-installWebsiteControl(server, __dirname, Boolean(workflowBackend));
+server.on("close", () => {
+  if (manifestFreshnessTimer) clearInterval(manifestFreshnessTimer);
+  manifestFreshnessTimer = null;
+  if (workflowRetryTimer) clearTimeout(workflowRetryTimer);
+  workflowRetryTimer = null;
+  workflowBackend?.close();
+});
+installWebsiteControl(server, __dirname, () => Boolean(workflowBackend));
 
 if (process.env.NODE_ENV !== "test") {
   server.listen(PORT, () => {
+    startManifestFreshnessPoll();
     console.log(`Ocean Trading local dashboard running on http://localhost:${PORT}`);
     console.log("Manifest endpoint: /api/manifest");
     console.log("Rebuild endpoint: /api/rebuild");
