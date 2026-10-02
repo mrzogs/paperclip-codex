@@ -102,3 +102,69 @@ export function visibleReplayTrades(accounts, clears) {
     return (account.groupedTrades || []).filter((trade) => !hidden.has(replayTradeIdentity(trade)));
   });
 }
+
+const money = (value) => Number((Number(value) || 0).toFixed(2));
+
+export function applyReplayClearsToSession(session, clears = { accounts: {} }) {
+  if (!session) return session;
+  const groupedTrades = Array.isArray(session.groupedTrades) ? session.groupedTrades : [];
+  const openPositions = Array.isArray(session.openPositions) ? session.openPositions : [];
+  const accountIds = new Set([
+    ...(session.replayAccounts || []).map((account) => account.accountId),
+    ...(session.replayAccountSummaries || []).map((account) => account.accountId),
+    ...groupedTrades.map((trade) => trade.replayAccountId),
+  ].filter(Boolean));
+  const accounts = Object.fromEntries([...accountIds].map((accountId) => [accountId, {
+    accountId,
+    groupedTrades: groupedTrades.filter((trade) => trade.replayAccountId === accountId),
+  }]));
+  const visibleTrades = visibleReplayTrades(accounts, clears);
+  const openPnl = (accountId = null) => money(openPositions
+    .filter((position) => !accountId || String(position.account || "Sim1") === accountId)
+    .reduce((sum, position) => sum + (Number(position.unrealizedPnlDollars) || 0), 0));
+  const closedPnl = (trades) => money(trades.reduce((sum, trade) => sum + (Number(trade.realizedPnlDollars) || 0), 0));
+  const summarize = (account) => {
+    const accountId = account.accountId;
+    const all = groupedTrades.filter((trade) => trade.replayAccountId === accountId);
+    const visible = visibleTrades.filter((trade) => trade.replayAccountId === accountId);
+    const accountOpenPnl = openPnl(accountId);
+    return {
+      ...account,
+      groupedTradesCount: all.length,
+      groupedTradesVisibleCount: visible.length,
+      realizedTrades: visible.length,
+      closedNetPnlDollars: closedPnl(visible),
+      openPnlDollars: accountOpenPnl,
+      netPnlDollars: money(closedPnl(visible) + accountOpenPnl),
+    };
+  };
+  const replayAccounts = (session.replayAccounts || []).map(summarize);
+  const summarySource = session.replayAccountSummaries?.length ? session.replayAccountSummaries : replayAccounts;
+  const replayAccountSummaries = summarySource.map(summarize);
+  const allClosedPnl = closedPnl(groupedTrades);
+  const visibleClosedPnl = closedPnl(visibleTrades);
+  const totalOpenPnl = openPnl();
+  return {
+    ...session,
+    replayAccounts,
+    replayAccountSummaries,
+    groupedTradesVisible: visibleTrades,
+    groupedTradesCount: groupedTrades.length,
+    groupedTradesVisibleCount: visibleTrades.length,
+    groupedTradesNetPnlDollars: money(visibleClosedPnl + totalOpenPnl),
+    closedTradesNetPnlDollars: visibleClosedPnl,
+    openPositionsNetPnlDollars: totalOpenPnl,
+    lastClearedAtUtc: clears.accounts?.[session.activeReplayAccountId]?.clearedAtUtc || null,
+    audit: {
+      ...(session.audit || {}),
+      groupedTradesFound: groupedTrades.length,
+      groupedTradesVisible: visibleTrades.length,
+      groupedTradesHiddenAfterClear: Math.max(groupedTrades.length - visibleTrades.length, 0),
+      groupedTradesNetPnlDollars: money(allClosedPnl + totalOpenPnl),
+      visibleNetPnlDollars: money(visibleClosedPnl + totalOpenPnl),
+      closedNetPnlDollars: allClosedPnl,
+      openNetPnlDollars: totalOpenPnl,
+      accounts: replayAccountSummaries,
+    },
+  };
+}
