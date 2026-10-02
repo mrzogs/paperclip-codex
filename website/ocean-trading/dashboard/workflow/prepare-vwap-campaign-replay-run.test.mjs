@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { selectionFor, validateExistingRun } from './prepare-vwap-campaign-replay-run.mjs';
+import { selectionFor, terminalCampaignRun, validateExistingRun } from './prepare-vwap-campaign-replay-run.mjs';
 
 const valid = {
   run_id: 'test-run-cicd-vwap-july-2025-u25-20261002T120000Z',
@@ -48,4 +48,33 @@ test('accepts only an exact existing isolated run binding', () => {
   };
   assert.equal(validateExistingRun(run, valid.run_id), run);
   assert.throws(() => validateExistingRun({ context: { ...run.context, learner_permission: 'LEARNING' } }, valid.run_id), /AUTHORITY_CONFLICT/);
+});
+
+test('requests a bounded completed transition for an active managed run', () => {
+  const run = {
+    state: 'ACTIVE',
+    revision: 2,
+    context: {
+      run_id: valid.run_id,
+      strategy_id: 'cicd-vwap-pull-back-strategy',
+      execution_instance_id: 'test-cicd-vwap-pull-back-replay-two-v013',
+      expected_environment: 'REPLAY',
+      evidence_purpose: 'NOT_ELIGIBLE',
+      learner_permission: 'NONE',
+    },
+  };
+  let request;
+  const backend = {
+    runs: {
+      read: () => run,
+      perform: (action, actor, data) => {
+        request = { action, actor, data };
+        return { ...run, state: 'COMPLETING', revision: 3 };
+      },
+    },
+  };
+  const result = terminalCampaignRun(backend, { run_id: valid.run_id }, 'COMPLETED');
+  assert.equal(result.status, 'TERMINAL_REQUESTED');
+  assert.equal(request.action, 'end');
+  assert.deepEqual(request.data, { run_id: valid.run_id, expected_revision: 2, outcome: 'COMPLETED' });
 });
