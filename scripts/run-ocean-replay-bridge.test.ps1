@@ -62,5 +62,10 @@ if (-not $source.Contains("Invoke-Mutation 'renew' @{run_id=[string]`$Plan.run_i
     $source.IndexOf("if (`$context.state -eq 'COMPLETING')", [StringComparison]::Ordinal)) {
   throw 'SEALED_COMPLETION_MUST_RENEW_END_AND_FINISH'
 }
+if (-not $source.Contains('function ConvertTo-UtcTimestamp($Value)') -or
+    -not $source.Contains("ToString('yyyy-MM-ddTHH:mm:ss.fffZ', [Globalization.CultureInfo]::InvariantCulture)") -or
+    -not $source.Contains('$watermark = ConvertTo-UtcTimestamp $evidencePlan.watermark')) {
+  throw 'JSON_DATE_WATERMARK_MUST_BE_UTC_NORMALIZED'
+}
 
 Write-Output 'PASS: Replay bridge preserves TEST behavior and adds a fail-closed, exact-binding OPERATIONAL route without LIVE_REAL authority.'
