@@ -92,7 +92,7 @@ function createOperationalFixture() {
     ALTER TABLE replay_runs ADD COLUMN bar_period TEXT;
   `);
   telemetry.prepare('UPDATE replay_runs SET run_id=?, strategy_version=?, chartbook=?, chart_number=?, bar_period=?')
-    .run(runId, 'v0.6.234', chartbook, 1, 'intraday_type=0;p1=60;seconds=60');
+    .run(runId, 'v0.6.234', chartbook, 1, 'intraday_type=0;p1=300;seconds=300');
   telemetry.close();
   const config = {
     ...fixture.config,
@@ -109,7 +109,7 @@ function createOperationalFixture() {
     expected_telemetry_version: 'v0.5.31',
     expected_chartbook_path: chartbook,
     expected_chart_number: 1,
-    expected_bar_period_seconds: 60,
+    expected_bar_period_seconds: 300,
     expected_strategy_module_path: strategyModule,
     expected_strategy_module_sha256: `sha256:${'7'.repeat(64)}`,
     expected_telemetry_module_path: telemetryModule,
