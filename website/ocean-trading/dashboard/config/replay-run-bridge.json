@@ -25,5 +25,6 @@
   "expected_strategy_module_path": "D:\\Trading\\SierraChart-Replay Two\\Data\\CICD_VWAPPullback_v228_64.dll",
   "expected_strategy_module_sha256": "sha256:7cc09f2fcdf8043e2c4b4d61273ee76b4893fa618e38631fb9049c38cbfb6375",
   "expected_telemetry_module_path": "D:\\Trading\\SierraChart-Replay Two\\Data\\CICD_VWAPPullback_Telemetry_v0526_64.dll",
-  "expected_telemetry_module_sha256": "sha256:4cbd17bf231cf2b426c5211235eb50c41729158f98ca1d29e390d462581ee159"
+  "expected_telemetry_module_sha256": "sha256:4cbd17bf231cf2b426c5211235eb50c41729158f98ca1d29e390d462581ee159",
+  "source_preflight_status_path": "D:\\Trading\\SierraChart-Replay Two\\connector-control\\oql-vwap-replay-isolated\\vwap-replay-status.txt"
 }
