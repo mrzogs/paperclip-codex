@@ -271,7 +271,7 @@ function Invoke-BridgeCycle {
       $reconciliation = [ordered]@{status=$evidencePlan.status;evidence_image=$evidencePlan.evidence_image;metrics=$evidencePlan.metrics;action_count=@($evidencePlan.actions).Count}
       $axes = @{source_market=@($evidencePlan.scored_intervals);strategy_execution=@($evidencePlan.scored_intervals);processing_review=@($evidencePlan.scored_intervals)}
       $watermark = [string]$evidencePlan.watermark
-    } elseif ($evidencePlan.status -ceq 'AWAITING_SIERRA_EVIDENCE_IMAGE' -and $context.state -ceq 'ACTIVE') {
+    } elseif ($evidencePlan.status -in @('AWAITING_SIERRA_EVIDENCE_IMAGE','AWAITING_REPLAY_COMPLETION') -and $context.state -ceq 'ACTIVE') {
       $reconciliation = [ordered]@{status=$evidencePlan.status;evidence_image=$evidencePlan.evidence_image;metrics=$null;action_count=0}
       $axes = @{source_market=@();strategy_execution=@();processing_review=@()}
       $watermark = $null

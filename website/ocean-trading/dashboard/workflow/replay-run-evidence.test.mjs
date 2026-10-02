@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -48,6 +49,25 @@ function run(value) {
   return JSON.parse(execFileSync(process.execPath, [script, value.configFile, value.runId], { encoding: 'utf8' }));
 }
 
+function writeOperationalCompletion(value) {
+  const directory = path.join(value.root, 'evidence');
+  const image = fs.readFileSync(path.join(directory, `${value.runId}-sierra.png`));
+  fs.writeFileSync(path.join(directory, `${value.runId}-completion.json`), JSON.stringify({
+    schema_version: 'ocean-replay-completion/v1',
+    run_id: value.runId,
+    status: 'COMPLETED',
+    replay_start_utc: '2025-04-17T00:00:00.000Z',
+    scored_start_utc: '2025-05-01T00:00:00.000Z',
+    end_exclusive_utc: '2025-06-01T00:00:00.000Z',
+    completed_at_utc: new Date().toISOString(),
+    evidence_image_sha256: `sha256:${createHash('sha256').update(image).digest('hex')}`,
+    lifecycle_sha256: `sha256:${'2'.repeat(64)}`,
+    candidate_sha256: `sha256:${'3'.repeat(64)}`,
+    simulation_account: 'Sim1',
+    live_real: 'DISABLED',
+  }));
+}
+
 test('waits for a genuine Sierra evidence image before exposing trade evidence', t => {
   const value = fixture();
   t.after(() => fs.rmSync(value.root, { recursive: true, force: true }));
@@ -93,10 +113,25 @@ test('uses non-test evidence identities for an operational bridge', t => {
   const directory = path.join(value.root, 'evidence');
   fs.mkdirSync(directory);
   fs.writeFileSync(path.join(directory, `${value.runId}-sierra.png`), png);
+  writeOperationalCompletion(value);
   const result = run(value);
   assert.equal(result.actions[0].data.trade_id, 'sierra-trade-7');
   assert.equal(result.actions[1].data.event_id, 'sierra-event-7');
   assert.equal(result.actions[1].data.legacy_trade_id, 'sierra-legacy-7');
+});
+
+test('operational evidence waits for the post-validation completion receipt', t => {
+  const value = fixture();
+  t.after(() => fs.rmSync(value.root, { recursive: true, force: true }));
+  const config = JSON.parse(fs.readFileSync(value.configFile, 'utf8'));
+  config.schema_version = 'ocean-replay-run-bridge/v4';
+  fs.writeFileSync(value.configFile, JSON.stringify(config));
+  const directory = path.join(value.root, 'evidence');
+  fs.mkdirSync(directory);
+  fs.writeFileSync(path.join(directory, `${value.runId}-sierra.png`), png);
+  const result = run(value);
+  assert.equal(result.status, 'AWAITING_REPLAY_COMPLETION');
+  assert.match(result.completion_receipt, /test-run-1-completion\.json$/);
 });
 
 test('uses the sealed operational selection interval when scored_intervals is absent', t => {
