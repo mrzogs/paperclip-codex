@@ -79,8 +79,10 @@ export function readReplayCampaign(statePath = DEFAULT_REPLAY_CAMPAIGN_STATE, st
     requireThat(value.live_real === 'DISABLED', 422, 'REPLAY_CAMPAIGN_LIVE_REAL_INVALID');
     const completed = Array.isArray(value.completed_windows) ? value.completed_windows : [];
     const failed = Array.isArray(value.failed_windows) ? value.failed_windows : [];
+    const status = String(value.status || 'UNKNOWN');
+    const state = status === 'FAILED' || status.startsWith('FAILED_') ? 'ATTENTION_REQUIRED' : 'AVAILABLE';
     return {
-      state: 'AVAILABLE', status: String(value.status || 'UNKNOWN'), execution_instance_id: value.execution_instance_id,
+      state, status, execution_instance_id: value.execution_instance_id,
       current_window_id: value.current_window_id || null, completed_windows: completed, completed_count: completed.length,
       failed_windows: failed, failed_count: failed.length, next_action: String(value.next_action || 'Review the campaign state.'),
       manifest_sha256: value.manifest_sha256 || null, last_exit_code: value.last_exit_code ?? null,

@@ -46,6 +46,17 @@ test('projects a validated isolated Replay campaign without granting Live author
     assert.equal(result.current_window_id, 'july-2025-u25');
     assert.equal(result.live_real, 'DISABLED');
     assert.match(result.state_sha256, /^sha256:[a-f0-9]{64}$/);
+
+    fs.writeFileSync(statePath, JSON.stringify({
+      schema_version:'cicd-vwap-replay-campaign-state/v1', strategy_id:ONBOARDING_STRATEGY_ID,
+      execution_instance_id:'test-cicd-vwap-pull-back-replay-two-v013', status:'FAILED_ACCOUNT_INTEGRITY_RETRY_PENDING',
+      current_window_id:'july-2025-u25', completed_windows:[], failed_windows:[{window_id:'july-2025-u25',exit_code:2}],
+      next_action:'Install v229 and retry the clean Sim1 window.', live_real:'DISABLED',
+    }));
+    const failed = readReplayCampaign(statePath);
+    assert.equal(failed.state, 'ATTENTION_REQUIRED');
+    assert.equal(failed.status, 'FAILED_ACCOUNT_INTEGRITY_RETRY_PENDING');
+    assert.match(failed.next_action, /v229/);
   } finally { fs.rmSync(root, { recursive:true, force:true }); }
 });
 
