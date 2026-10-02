@@ -109,7 +109,14 @@ export function readPriorityProgram(root = DEFAULT_ONBOARDING_ROOT, strategyId =
     requireThat(value.schema_version === 'cicd-vwap-priority-completion-program/v1', 422, 'PRIORITY_PROGRAM_SCHEMA_INVALID');
     requireThat(value.strategy_id === strategyId, 422, 'PRIORITY_PROGRAM_STRATEGY_MISMATCH');
     requireThat(value.authorization?.live_real === 'PROHIBITED', 422, 'PRIORITY_PROGRAM_LIVE_REAL_INVALID');
-    const workstreams = Array.isArray(value.workstreams) ? value.workstreams.map(item => ({ id:item.id, name:item.name, owner:item.owner, status:item.status, exit:item.exit })) : [];
+    const workstreams = Array.isArray(value.workstreams) ? value.workstreams.map(item => ({
+      id:item.id,
+      name:item.name,
+      owner:item.owner,
+      status:item.status,
+      next_action:item.next_action || null,
+      exit:item.exit,
+    })) : [];
     return { state:'AVAILABLE', program_id:value.program_id, status:value.status, priority:value.priority, workstreams, path:programPath, sha256:fileDigest(content), observed_at_utc:fs.statSync(programPath).mtime.toISOString(), live_real:'DISABLED' };
   } catch (error) {
     return { state:error?.code === 'ENOENT' ? 'NOT_CONFIGURED' : 'ATTENTION_REQUIRED', status:'UNKNOWN', workstreams:[], path:programPath, reason:error?.code || error?.message || 'PRIORITY_PROGRAM_INVALID', live_real:'DISABLED' };
