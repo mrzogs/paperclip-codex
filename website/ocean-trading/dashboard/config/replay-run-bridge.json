@@ -21,7 +21,7 @@
   "freshness_seconds": 120,
   "expected_chartbook_path": "D:\\Trading\\SierraChart-Replay Two\\Data\\CICD - VWAP Pull Back Strategy.Cht",
   "expected_chart_number": 1,
-  "expected_bar_period_seconds": 60,
+  "expected_bar_period_seconds": 300,
   "expected_strategy_module_path": "D:\\Trading\\SierraChart-Replay Two\\Data\\CICD_VWAPPullback_v228_64.dll",
   "expected_strategy_module_sha256": "sha256:7cc09f2fcdf8043e2c4b4d61273ee76b4893fa618e38631fb9049c38cbfb6375",
   "expected_telemetry_module_path": "D:\\Trading\\SierraChart-Replay Two\\Data\\CICD_VWAPPullback_Telemetry_v0526_64.dll",

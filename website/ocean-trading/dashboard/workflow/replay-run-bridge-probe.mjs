@@ -41,7 +41,7 @@ function readConfig(filename) {
     if (!Number.isInteger(value.minimum_schema_version) || value.minimum_schema_version < 9) fail('SCHEMA_FLOOR_REJECTED');
     if (!Number.isInteger(value.freshness_seconds) || value.freshness_seconds < 30 || value.freshness_seconds > 300) fail('FRESHNESS_WINDOW_REJECTED');
     if (!Number.isInteger(value.expected_chart_number) || value.expected_chart_number < 1) fail('CHART_NUMBER_REJECTED');
-    if (!Number.isInteger(value.expected_bar_period_seconds) || value.expected_bar_period_seconds !== 60) fail('BAR_PERIOD_REJECTED');
+    if (!Number.isInteger(value.expected_bar_period_seconds) || value.expected_bar_period_seconds !== 300) fail('BAR_PERIOD_REJECTED');
     for (const key of ['expected_strategy_module_sha256', 'expected_telemetry_module_sha256']) {
       if (!/^sha256:[a-f0-9]{64}$/.test(value[key])) fail('MODULE_HASH_REJECTED');
     }
