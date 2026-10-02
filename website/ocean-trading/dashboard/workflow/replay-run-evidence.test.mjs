@@ -49,7 +49,7 @@ function run(value) {
   return JSON.parse(execFileSync(process.execPath, [script, value.configFile, value.runId], { encoding: 'utf8' }));
 }
 
-function writeOperationalCompletion(value) {
+function writeOperationalCompletion(value, overrides = {}) {
   const directory = path.join(value.root, 'evidence');
   const image = fs.readFileSync(path.join(directory, `${value.runId}-sierra.png`));
   fs.writeFileSync(path.join(directory, `${value.runId}-completion.json`), JSON.stringify({
@@ -65,6 +65,7 @@ function writeOperationalCompletion(value) {
     candidate_sha256: `sha256:${'3'.repeat(64)}`,
     simulation_account: 'Sim1',
     live_real: 'DISABLED',
+    ...overrides,
   }));
 }
 
@@ -118,6 +119,22 @@ test('uses non-test evidence identities for an operational bridge', t => {
   assert.equal(result.actions[0].data.trade_id, 'sierra-trade-7');
   assert.equal(result.actions[1].data.event_id, 'sierra-event-7');
   assert.equal(result.actions[1].data.legacy_trade_id, 'sierra-legacy-7');
+});
+
+test('accepts equivalent ISO-8601 completion boundaries with omitted milliseconds', t => {
+  const value = fixture();
+  t.after(() => fs.rmSync(value.root, { recursive: true, force: true }));
+  const config = JSON.parse(fs.readFileSync(value.configFile, 'utf8'));
+  config.schema_version = 'ocean-replay-run-bridge/v4';
+  fs.writeFileSync(value.configFile, JSON.stringify(config));
+  const directory = path.join(value.root, 'evidence');
+  fs.mkdirSync(directory);
+  fs.writeFileSync(path.join(directory, `${value.runId}-sierra.png`), png);
+  writeOperationalCompletion(value, {
+    scored_start_utc: '2025-05-01T00:00:00Z',
+    end_exclusive_utc: '2025-06-01T00:00:00Z',
+  });
+  assert.equal(run(value).status, 'READY');
 });
 
 test('operational evidence waits for the post-validation completion receipt', t => {

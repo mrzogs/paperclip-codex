@@ -11,7 +11,7 @@
   "account_alias": "Sim1",
   "expected_symbol": "MNQH26_FUT_CME",
   "expected_strategy_version": "v0.6.234",
-  "expected_telemetry_version": "v0.5.31",
+  "expected_telemetry_version": "v0.5.32",
   "expected_sierra_exe": "D:\\Trading\\SierraChart-Replay Two\\SierraChart_64.exe",
   "poll_seconds": 10,
   "state_file": "D:\\OceanTradingData\\website\\ocean-runtime\\replay-bridge-status.json",
@@ -25,6 +25,6 @@
   "expected_strategy_module_path": "D:\\Trading\\SierraChart-Replay Two\\Data\\CICD_VWAPPullback_v228_64.dll",
   "expected_strategy_module_sha256": "sha256:7cc09f2fcdf8043e2c4b4d61273ee76b4893fa618e38631fb9049c38cbfb6375",
   "expected_telemetry_module_path": "D:\\Trading\\SierraChart-Replay Two\\Data\\CICD_VWAPPullback_Telemetry_v0526_64.dll",
-  "expected_telemetry_module_sha256": "sha256:4cbd17bf231cf2b426c5211235eb50c41729158f98ca1d29e390d462581ee159",
+  "expected_telemetry_module_sha256": "sha256:5cdd46f576b36a3ec7b73dec3cfe638f264bf749357108b542b829b6c6dced87",
   "source_preflight_status_path": "D:\\Trading\\SierraChart-Replay Two\\connector-control\\oql-vwap-replay-isolated\\vwap-replay-status.txt"
 }

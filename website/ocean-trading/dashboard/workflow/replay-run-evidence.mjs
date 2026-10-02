@@ -70,13 +70,19 @@ function completionReceipt(config, runId, image, intervals) {
   if (Object.keys(receipt).sort().join('\n') !== required.sort().join('\n')) fail('REPLAY_COMPLETION_FIELDS_REJECTED');
   const first = intervals[0];
   const last = intervals.at(-1);
+  const replayStart = Date.parse(receipt.replay_start_utc);
+  const scoredStart = Date.parse(receipt.scored_start_utc);
+  const endExclusive = Date.parse(receipt.end_exclusive_utc);
   const completed = Date.parse(receipt.completed_at_utc);
   if (receipt.schema_version !== 'ocean-replay-completion/v1'
     || receipt.run_id !== runId
     || receipt.status !== 'COMPLETED'
-    || receipt.scored_start_utc !== first.start_utc
-    || receipt.end_exclusive_utc !== last.end_utc
-    || Date.parse(receipt.replay_start_utc) > Date.parse(receipt.scored_start_utc)
+    || !Number.isFinite(replayStart)
+    || !Number.isFinite(scoredStart)
+    || !Number.isFinite(endExclusive)
+    || scoredStart !== Date.parse(first.start_utc)
+    || endExclusive !== Date.parse(last.end_utc)
+    || replayStart > scoredStart
     || !Number.isFinite(completed)
     || completed > Date.now() + 5000
     || receipt.evidence_image_sha256 !== image.hash
