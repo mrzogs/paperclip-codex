@@ -270,6 +270,10 @@ function strategyOnboardingPage(data) {
   const replayTrades = replayCompleted.reduce((total, run) => total + evidenceCount(run), 0);
   const paperTrades = paperCompleted.reduce((total, run) => total + evidenceCount(run), 0);
   const noTradeRuns = [...replayCompleted, ...paperCompleted].filter(run => evidenceCount(run) === 0).length;
+  const paperWorkstream = (program.workstreams || []).find(item => item.id === 'W5' || /paper/i.test(item.name || ''));
+  const paperWorkstreamStatus = String(paperWorkstream?.status || '');
+  const paperRuntimeActive = paperWorkstreamStatus.startsWith('ACTIVE_SIM1_') || paperWorkstreamStatus === 'ACTIVE';
+  const paperReconciliationRequired = paperWorkstreamStatus.includes('TELEMETRY_RECONCILIATION_PENDING');
   const checklist = `<ul class='onboarding-checklist'>${progress.checks.map(item => {
     const target = onboardingQuestionForStep(onboarding, item.id);
     const stateClass = item.state === 'COMPLETE' ? 'complete' : 'pending';
@@ -323,20 +327,22 @@ function strategyOnboardingPage(data) {
         ? button('activate-onboarding', 'Make Replay ready', `class='primary' data-environment='${replayEnvironment.environment}'`, 'play')
         : '';
   const replayState = !onboardingComplete ? 'WAITING' : campaign.status === 'COMPLETED' ? 'HISTORY_AVAILABLE' : campaign.status === 'RUNNING' ? 'BUILDING_HISTORY' : campaign.status === 'FAILED' || campaign.state === 'ATTENTION_REQUIRED' ? 'ATTENTION_REQUIRED' : paperRuns.length ? 'HISTORY_AVAILABLE' : replayRuns.length ? 'BUILDING_HISTORY' : 'READY';
-  const paperState = !onboardingComplete ? 'WAITING' : paperRuns.length ? 'FORWARD_TESTING' : 'NEXT';
+  const paperState = !onboardingComplete ? 'WAITING' : paperReconciliationRequired ? 'ATTENTION_REQUIRED' : paperRuntimeActive || paperRuns.length ? 'FORWARD_TESTING' : 'NEXT';
   const liveState = liveRuns.length ? 'LIVE_ACTIVE' : 'HUMAN_APPROVAL_REQUIRED';
   const journey = `<ol class='strategy-journey' aria-label='Strategy testing journey'>
     <li class='complete'><span class='journey-marker'>${icon('check')}</span><div class='journey-copy'><div><h3>1. Strategy setup</h3>${badge(onboardingComplete ? 'COMPLETE' : 'IN_PROGRESS')}</div><p>Ocean reads the strategy and Sierra setup. One confirmation makes it ready for non-live testing.</p></div></li>
-    <li class='${onboardingComplete ? 'current' : 'waiting'}'><span class='journey-marker'>2</span><div class='journey-copy'><div><h3>2. Replay history</h3>${badge(replayState)}</div><p>Run historical Replay tests. Each completed run records its covered period, trades, and a zero-trade result when no trade occurred.</p><p class='journey-evidence'>${replayCompleted.length} completed run${replayCompleted.length === 1 ? '' : 's'} / ${replayTrades} trade${replayTrades === 1 ? '' : 's'} captured</p></div></li>
-    <li class='${paperRuns.length ? 'current' : 'waiting'}'><span class='journey-marker'>3</span><div class='journey-copy'><div><h3>3. Paper forward testing</h3>${badge(paperState)}</div><p>After Replay evidence is reviewed, run the strategy in Paper. Completed Paper periods add trade and no-trade evidence continuously.</p><p class='journey-evidence'>${paperCompleted.length} completed run${paperCompleted.length === 1 ? '' : 's'} / ${paperTrades} trade${paperTrades === 1 ? '' : 's'} captured</p></div></li>
+    <li class='${!onboardingComplete ? 'waiting' : paperRuntimeActive ? 'complete' : 'current'}'><span class='journey-marker'>${paperRuntimeActive ? icon('check') : '2'}</span><div class='journey-copy'><div><h3>2. Replay history</h3>${badge(replayState)}</div><p>Run historical Replay tests. Each completed run records its covered period, trades, and a zero-trade result when no trade occurred.</p><p class='journey-evidence'>${replayCompleted.length} completed run${replayCompleted.length === 1 ? '' : 's'} / ${replayTrades} trade${replayTrades === 1 ? '' : 's'} captured</p></div></li>
+    <li class='${paperRuntimeActive || paperRuns.length ? 'current' : 'waiting'}'><span class='journey-marker'>3</span><div class='journey-copy'><div><h3>3. Paper forward testing</h3>${badge(paperState)}</div><p>After Replay evidence is reviewed, run the strategy in Paper. Completed Paper periods add trade and no-trade evidence continuously.</p><p class='journey-evidence'>${paperCompleted.length} completed run${paperCompleted.length === 1 ? '' : 's'} / ${paperTrades} trade${paperTrades === 1 ? '' : 's'} captured</p></div></li>
     <li class='${liveRuns.length ? 'current' : 'waiting'}'><span class='journey-marker'>4</span><div class='journey-copy'><div><h3>4. Live trading</h3>${badge(liveState)}</div><p>Live is a separate, explicit human decision after Replay and Paper evidence has been reviewed. Ocean never promotes a strategy automatically.</p></div></li>
   </ol>`;
-  const nextActionTitle = campaign.status === 'COMPLETED' ? 'Evaluate the Replay-to-Paper gate' : campaign.status === 'FAILED' || campaign.state === 'ATTENTION_REQUIRED' ? 'Repair the bounded Replay failure' : campaign.status === 'RUNNING' ? `Replay ${campaign.current_window_id || 'window'} is running` : 'Continue the sealed Replay campaign';
+  const nextActionTitle = paperReconciliationRequired ? 'Reconcile Paper telemetry' : paperRuntimeActive ? 'Observe the Paper forward run' : campaign.status === 'COMPLETED' ? 'Evaluate the Replay-to-Paper gate' : campaign.status === 'FAILED' || campaign.state === 'ATTENTION_REQUIRED' ? 'Repair the bounded Replay failure' : campaign.status === 'RUNNING' ? `Replay ${campaign.current_window_id || 'window'} is running` : 'Continue the sealed Replay campaign';
+  const nextActionHref = paperRuntimeActive ? '/paper-dashboard.html' : runtime.monitor.url;
+  const nextActionLabel = paperRuntimeActive ? 'Open Paper Dashboard' : 'Open Replay Monitor';
   const nextAction = onboardingComplete
-    ? `<div class='strategy-next-action'><div><span>Current action</span><h3>${esc(nextActionTitle)}</h3><p>${esc(campaign.next_action)}</p></div><div class='actions'><a class='button primary' data-replay-monitor href='${esc(runtime.monitor.url)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}Open Replay Monitor</a></div></div>`
+    ? `<div class='strategy-next-action'><div><span>Current action</span><h3>${esc(nextActionTitle)}</h3><p>${esc(campaign.next_action)}</p></div><div class='actions'><a class='button primary' ${paperRuntimeActive ? '' : 'data-replay-monitor'} href='${esc(nextActionHref)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}${nextActionLabel}</a></div></div>`
     : `<div class='strategy-next-action'><div><span>Current action</span><h3>Finish the simple setup</h3><p>${registration.can_register ? 'The setup is confirmed. Let Ocean finish the Replay preparation.' : setupConfirmed ? 'Ocean is recording the confirmed setup. Refresh when synchronization is complete.' : 'Review the detected strategy, account, contract, and Replay instance once.'}</p></div><div class='actions'>${setupAction}</div></div>`;
   const completionBanner = onboardingComplete
-    ? `<div class='onboarding-complete-banner'>${icon('check')}<div><h2>Onboarding complete</h2><p>This strategy is ready to build history in Replay. Sierra running, stopped, or stale does not change this status.</p></div></div>`
+    ? `<div class='onboarding-complete-banner'>${icon('check')}<div><h2>Onboarding complete</h2><p>${paperRuntimeActive ? 'This strategy has progressed to Paper forward testing; Live remains a separate human-only decision.' : 'This strategy is ready to build history in Replay. Sierra running, stopped, or stale does not change this status.'}</p></div></div>`
     : '';
   const workstreamRows = (program.workstreams || []).map(item => [esc(item.id), esc(item.name), badge(item.status), esc(item.owner)]);
   const campaignBody = facts([
@@ -350,7 +356,7 @@ function strategyOnboardingPage(data) {
     + completionBanner
     + `<div class='onboarding-status-band'>${[
       ['Onboarding', badge(onboardingComplete ? 'COMPLETE' : onboarding.onboarding_status)],
-      ['Current stage', onboardingComplete ? 'Replay history' : 'Strategy setup'],
+      ['Current stage', onboardingComplete ? paperRuntimeActive ? 'Paper forward testing' : 'Replay history' : 'Strategy setup'],
       ['Account', esc(instance.account_alias)],
       ['Contract', esc(instance.symbol)],
     ].map(([label,value]) => `<div><span>${esc(label)}</span><strong>${value}</strong></div>`).join('')}</div>`
