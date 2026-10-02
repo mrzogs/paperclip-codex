@@ -73,9 +73,22 @@ function createOperationalFixture() {
   const chartbook = path.join(fixture.directory, 'CICD - VWAP Pull Back Strategy.Cht');
   const strategyModule = path.join(fixture.directory, 'CICD_VWAPPullback_v228_64.dll');
   const telemetryModule = path.join(fixture.directory, 'CICD_VWAPPullback_Telemetry_v0526_64.dll');
+  const sourcePreflightStatus = path.join(fixture.directory, 'vwap-replay-status.txt');
   fs.writeFileSync(chartbook, 'fixture');
   fs.writeFileSync(strategyModule, 'fixture');
   fs.writeFileSync(telemetryModule, 'fixture');
+  fs.writeFileSync(sourcePreflightStatus, [
+    'commandId=operational-preflight-fixture',
+    'action=prepare_contract',
+    'status=contract_prepared',
+    'chartNumber=1',
+    'symbol=MNQH26_FUT_CME',
+    'isReplayRunning=false',
+    'replayStatus=0',
+    'secondsPerBar=300',
+    'detail=requested_symbol=MNQH26_FUT_CME; historical_open_chart_result=1; historical_recalculate_chart_result=1; intraday_open_chart_result=1; intraday_recalculate_chart_result=1; requested_intraday_bar_seconds=300; session_read_result=1',
+    '',
+  ].join('\n'));
 
   const workflow = new DatabaseSync(fixture.workflowDb);
   workflow.exec('CREATE TABLE ow_operational_releases (run_id TEXT, context_hash TEXT, payload_json TEXT)');
@@ -114,6 +127,7 @@ function createOperationalFixture() {
     expected_strategy_module_sha256: `sha256:${'7'.repeat(64)}`,
     expected_telemetry_module_path: telemetryModule,
     expected_telemetry_module_sha256: `sha256:${'8'.repeat(64)}`,
+    source_preflight_status_path: sourcePreflightStatus,
   };
   fs.writeFileSync(fixture.configFile, JSON.stringify(config));
   return { ...fixture, runId, instanceId, config };
@@ -208,14 +222,25 @@ test('v4 probe keeps source preflight distinct from the not-yet-started Replay r
   assert.equal(result.telemetry.reason, 'AWAITING_MATCHING_REPLAY_RUN');
 });
 
-test('v4 probe rejects stale source-account telemetry', t => {
+test('v4 probe accepts stale idle telemetry when fresh strategy source preflight proves the current chart', t => {
   const fixture = createOperationalFixture();
   t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
   const telemetry = new DatabaseSync(fixture.telemetryDb);
   telemetry.exec("UPDATE account_snapshot SET snapshot_utc='2026-01-01 00:00:00'");
   telemetry.close();
   const result = JSON.parse(execFileSync(process.execPath, [probe, fixture.configFile], { encoding: 'utf8' }));
+  assert.equal(result.telemetry.preflight_verified, true);
+  assert.equal(result.telemetry.source_preflight.verified, true);
+});
+
+test('v4 probe rejects a stale strategy source preflight even when idle telemetry is otherwise bound', t => {
+  const fixture = createOperationalFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  const stale = new Date(Date.now() - 10 * 60 * 1000);
+  fs.utimesSync(fixture.config.source_preflight_status_path, stale, stale);
+  const result = JSON.parse(execFileSync(process.execPath, [probe, fixture.configFile], { encoding: 'utf8' }));
   assert.equal(result.telemetry.preflight_verified, false);
+  assert.equal(result.telemetry.source_preflight.reason, 'SOURCE_PREFLIGHT_STATUS_STALE');
   assert.equal(result.telemetry.reason, 'TELEMETRY_PREFLIGHT_NOT_VERIFIED');
 });
 

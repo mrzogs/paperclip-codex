@@ -25,7 +25,7 @@ function Read-BridgeConfig {
   }
   if ($value.strategy_id -cnotmatch '^[a-z0-9]+(?:[_-][a-z0-9]+)*$') { throw 'BRIDGE_SCOPE_REJECTED' }
   if ($operational) {
-    foreach ($key in @('expected_chartbook_path','expected_strategy_module_path','expected_telemetry_module_path')) {
+    foreach ($key in @('expected_chartbook_path','expected_strategy_module_path','expected_telemetry_module_path','source_preflight_status_path')) {
       if (-not [IO.Path]::IsPathRooted([string]$value.$key) -or ([string]$value.$key).StartsWith('\\')) { throw 'LOCAL_PATH_REQUIRED' }
     }
     if ($value.namespace -cne 'OPERATIONAL' -or $value.instance_id.StartsWith('test-') -or $value.instance_id -cnotmatch '^[A-Za-z0-9_.:-]+$') { throw 'BRIDGE_SCOPE_REJECTED' }

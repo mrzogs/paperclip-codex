@@ -15,7 +15,7 @@ const OPERATIONAL_FIELDS = [
   'freshness_seconds', 'expected_chartbook_path', 'expected_chart_number',
   'expected_bar_period_seconds', 'expected_strategy_module_path',
   'expected_strategy_module_sha256', 'expected_telemetry_module_path',
-  'expected_telemetry_module_sha256',
+  'expected_telemetry_module_sha256', 'source_preflight_status_path',
 ];
 
 function fail(code) {
@@ -30,7 +30,7 @@ function readConfig(filename) {
   if (Object.keys(value).sort().join('\n') !== required.sort().join('\n')) fail('CONFIG_FIELDS_REJECTED');
   if (![TEST_CONFIG_SCHEMA, OPERATIONAL_CONFIG_SCHEMA].includes(value.schema_version) || value.base_url !== 'http://127.0.0.1:3102') fail('CONFIG_SCOPE_REJECTED');
   const pathFields = ['workflow_db', 'telemetry_db', 'handoff_path', 'expected_sierra_exe', 'state_file'];
-  if (operational) pathFields.push('expected_chartbook_path', 'expected_strategy_module_path', 'expected_telemetry_module_path');
+  if (operational) pathFields.push('expected_chartbook_path', 'expected_strategy_module_path', 'expected_telemetry_module_path', 'source_preflight_status_path');
   for (const key of pathFields) {
     if (!path.isAbsolute(value[key]) || String(value[key]).startsWith('\\\\')) fail('LOCAL_PATH_REQUIRED');
   }
@@ -70,6 +70,51 @@ function runCount(db, table, runId, extra = '') {
   return Number(db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE run_id=? ${extra}`).get(runId).n);
 }
 
+function readSourcePreflight(config) {
+  if (!fs.existsSync(config.source_preflight_status_path)) return { verified: false, reason: 'SOURCE_PREFLIGHT_STATUS_MISSING' };
+  const stat = fs.statSync(config.source_preflight_status_path);
+  const ageMs = Date.now() - stat.mtimeMs;
+  if (ageMs < -5000 || ageMs > config.freshness_seconds * 1000) {
+    return { verified: false, reason: 'SOURCE_PREFLIGHT_STATUS_STALE', status_mtime_utc: stat.mtime.toISOString() };
+  }
+  const values = Object.create(null);
+  for (const line of fs.readFileSync(config.source_preflight_status_path, 'utf8').split(/\r?\n/)) {
+    if (!line) continue;
+    const separator = line.indexOf('=');
+    if (separator < 1) fail('SOURCE_PREFLIGHT_STATUS_MALFORMED');
+    const key = line.slice(0, separator);
+    if (Object.hasOwn(values, key)) fail('SOURCE_PREFLIGHT_STATUS_MALFORMED');
+    values[key] = line.slice(separator + 1);
+  }
+  const symbol = String(values.symbol || '').replace(/\[M\]$/, '');
+  const detail = String(values.detail || '');
+  const verified = Boolean(values.commandId)
+    && values.action === 'prepare_contract'
+    && values.status === 'contract_prepared'
+    && Number(values.chartNumber) === config.expected_chart_number
+    && symbol === config.expected_symbol
+    && values.isReplayRunning === 'false'
+    && Number(values.replayStatus) === 0
+    && Number(values.secondsPerBar) === config.expected_bar_period_seconds
+    && detail.includes(`requested_symbol=${config.expected_symbol}`)
+    && detail.includes(`requested_intraday_bar_seconds=${config.expected_bar_period_seconds}`)
+    && detail.includes('historical_open_chart_result=1')
+    && detail.includes('historical_recalculate_chart_result=1')
+    && detail.includes('intraday_open_chart_result=1')
+    && detail.includes('intraday_recalculate_chart_result=1')
+    && detail.includes('session_read_result=1');
+  return {
+    verified,
+    reason: verified ? null : 'SOURCE_PREFLIGHT_STATUS_NOT_VERIFIED',
+    command_id: values.commandId || null,
+    symbol: values.symbol || null,
+    chart_number: Number.isFinite(Number(values.chartNumber)) ? Number(values.chartNumber) : null,
+    seconds_per_bar: Number.isFinite(Number(values.secondsPerBar)) ? Number(values.secondsPerBar) : null,
+    replay_running: values.isReplayRunning === 'true',
+    status_mtime_utc: stat.mtime.toISOString(),
+  };
+}
+
 function discoverRun(config) {
   const db = new DatabaseSync(config.workflow_db, { readOnly: true, timeout: 2000 });
   try {
@@ -103,16 +148,17 @@ function telemetry(config, expectedRunId) {
     const observedExe = path.normalize(instance?.sierra_exe_path || '').toLowerCase();
     const observedSymbol = String(instrument?.symbol || '').replace(/\[M\]$/, '');
     const operational = config.schema_version === OPERATIONAL_CONFIG_SCHEMA;
+    const sourcePreflight = operational ? readSourcePreflight(config) : null;
     const schemaFloor = operational ? config.minimum_schema_version : 7;
     const accountFresh = !operational || (Number.isFinite(asUtcMillis(account?.snapshot_utc)) && Date.now() - asUtcMillis(account.snapshot_utc) <= config.freshness_seconds * 1000 && asUtcMillis(account.snapshot_utc) <= Date.now() + 5000);
-    const preflightVerified = schemaVersion >= schemaFloor
+    const staticBindingVerified = schemaVersion >= schemaFloor
       && logger?.message?.startsWith(`logger_started version=${config.expected_telemetry_version}`)
       && account?.trade_account === config.account_alias
       && Number(account?.is_simulated) === 1
       && instance?.instance_role === 'replay'
-      && observedExe === expectedExe
-      && observedSymbol === config.expected_symbol
-      && accountFresh;
+      && observedExe === expectedExe;
+    const preflightVerified = staticBindingVerified
+      && (!operational ? observedSymbol === config.expected_symbol && accountFresh : sourcePreflight.verified);
     const replayVerified = Boolean(replay)
       && replay.strategy_id === config.strategy_id
       && replay.run_id === expectedRunId
@@ -125,6 +171,8 @@ function telemetry(config, expectedRunId) {
     return {
       verified,
       preflight_verified: preflightVerified,
+      static_binding_verified: staticBindingVerified,
+      source_preflight: sourcePreflight,
       run_verified: verified,
       reason: verified ? null : !operational ? 'TELEMETRY_BINDING_NOT_VERIFIED' : !preflightVerified ? 'TELEMETRY_PREFLIGHT_NOT_VERIFIED' : 'AWAITING_MATCHING_REPLAY_RUN',
       source_schema_version: `sierra-telemetry-sqlite/${schemaVersion}`,
