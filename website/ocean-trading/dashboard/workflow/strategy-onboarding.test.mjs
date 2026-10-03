@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { activateStrategyOnboarding, deactivateStrategyOnboarding, loadStrategyOnboarding, ONBOARDING_STRATEGY_ID, pauseStrategyOnboarding, probeReplayTwoRuntime, readOnboardingActivationEvents, readOnboardingRegistration, readReplayCampaign, readStrategyOnboardingEvents, recordStrategyOnboarding, registerStrategyOnboarding } from './strategy-onboarding.mjs';
+import { activateStrategyOnboarding, deactivateStrategyOnboarding, loadStrategyOnboarding, ONBOARDING_STRATEGY_ID, pauseStrategyOnboarding, probeReplayTwoRuntime, readAutonomousImprovementProgram, readOnboardingActivationEvents, readOnboardingRegistration, readReplayCampaign, readStrategyOnboardingEvents, recordStrategyOnboarding, registerStrategyOnboarding } from './strategy-onboarding.mjs';
 import { ROUTES, WorkflowBackend } from './backend.mjs';
 import { readOnboardingBrainOutbox } from './onboarding-brain-sync.mjs';
 import { WorkflowStore } from './store.mjs';
@@ -57,6 +57,47 @@ test('projects a validated isolated Replay campaign without granting Live author
     assert.equal(failed.state, 'ATTENTION_REQUIRED');
     assert.equal(failed.status, 'FAILED_ACCOUNT_INTEGRITY_RETRY_PENDING');
     assert.match(failed.next_action, /v229/);
+  } finally { fs.rmSync(root, { recursive:true, force:true }); }
+});
+
+test('projects the autonomous improvement program only when every safety boundary is closed', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ocean-autonomous-program-'));
+  const programPath = path.join(root, 'autonomous-continuous-improvement-program.json');
+  const value = {
+    schema_version:'cicd-vwap-autonomous-continuous-improvement-program/v1', strategy_id:ONBOARDING_STRATEGY_ID,
+    program_id:'autonomous-test', status:'ACTIVE_IMPLEMENTATION', priority:'CRITICAL',
+    authorization:{ live_real:'PROHIBITED', real_order_routing:'PROHIBITED' },
+    fixed_boundaries:{ live_real_enabled:false, automatic_approval_enabled:false, production_version:null },
+    pipeline:[{ id:'P01', name:'Identity', status:'PROVEN', acceptance:'Exact identity evidence.' }],
+    acceptance_gates:{ total:1, complete:1 }, known_blockers:[], next_action:'Run the end-to-end non-live proof.',
+  };
+  try {
+    fs.writeFileSync(programPath, JSON.stringify(value));
+    const result = readAutonomousImprovementProgram(root);
+    assert.equal(result.state, 'AVAILABLE');
+    assert.equal(result.live_real, 'DISABLED');
+    assert.equal(result.automatic_approval, 'DISABLED');
+    assert.equal(result.pipeline[0].status, 'PROVEN');
+    value.fixed_boundaries.automatic_approval_enabled = true;
+    fs.writeFileSync(programPath, JSON.stringify(value));
+    const rejected = readAutonomousImprovementProgram(root);
+    assert.equal(rejected.state, 'ATTENTION_REQUIRED');
+    assert.match(rejected.reason, /AUTONOMOUS_PROGRAM_AUTO_APPROVAL_INVALID/);
+  } finally { fs.rmSync(root, { recursive:true, force:true }); }
+});
+
+test('prefers the deployed patrading controller status over legacy connector status', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ocean-replay-status-'));
+  try {
+    const preferred = path.join(root, 'connector-control', 'patrading-tp');
+    const legacy = path.join(root, 'connector-control');
+    fs.mkdirSync(preferred, { recursive:true });
+    fs.writeFileSync(path.join(legacy, 'replay-status.json'), JSON.stringify({ chartNumber:1, isReplayRunning:true }));
+    fs.writeFileSync(path.join(preferred, 'replay-status.json'), JSON.stringify({ chartNumber:1, isReplayRunning:false }));
+    const result = probeReplayTwoRuntime({ executable:path.join(root, 'SierraChart_64.exe'), chartbook_path:path.join(root, 'test.Cht'), chart_id:1, account_alias:'Sim1', installation_root:root, now_ms:Date.now() });
+    assert.equal(result.chart_replay.state, 'NOT_RUNNING_VERIFIED');
+    assert.equal(result.chart_replay.started, false);
+    assert.equal(result.chart_replay.source, path.join(preferred, 'replay-status.json'));
   } finally { fs.rmSync(root, { recursive:true, force:true }); }
 });
 

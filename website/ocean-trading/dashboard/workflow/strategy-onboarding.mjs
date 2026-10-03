@@ -158,6 +158,43 @@ export function readPriorityProgram(root = DEFAULT_ONBOARDING_ROOT, strategyId =
   }
 }
 
+export function readAutonomousImprovementProgram(root = DEFAULT_ONBOARDING_ROOT, strategyId = ONBOARDING_STRATEGY_ID) {
+  const programPath = path.join(root, 'autonomous-continuous-improvement-program.json');
+  try {
+    const content = fs.readFileSync(programPath);
+    const value = JSON.parse(content.toString('utf8'));
+    requireThat(value.schema_version === 'cicd-vwap-autonomous-continuous-improvement-program/v1', 422, 'AUTONOMOUS_PROGRAM_SCHEMA_INVALID');
+    requireThat(value.strategy_id === strategyId, 422, 'AUTONOMOUS_PROGRAM_STRATEGY_MISMATCH');
+    requireThat(value.authorization?.live_real === 'PROHIBITED', 422, 'AUTONOMOUS_PROGRAM_LIVE_REAL_INVALID');
+    requireThat(value.authorization?.real_order_routing === 'PROHIBITED', 422, 'AUTONOMOUS_PROGRAM_REAL_ROUTING_INVALID');
+    requireThat(value.fixed_boundaries?.live_real_enabled === false, 422, 'AUTONOMOUS_PROGRAM_LIVE_BOUNDARY_INVALID');
+    requireThat(value.fixed_boundaries?.automatic_approval_enabled === false, 422, 'AUTONOMOUS_PROGRAM_AUTO_APPROVAL_INVALID');
+    requireThat(value.fixed_boundaries?.production_version === null, 422, 'AUTONOMOUS_PROGRAM_PRODUCTION_VERSION_INVALID');
+    const pipeline = Array.isArray(value.pipeline) ? value.pipeline.map(item => ({
+      id:String(item.id || 'UNKNOWN'), name:String(item.name || 'Unnamed phase'), status:String(item.status || 'UNKNOWN'),
+      acceptance:String(item.acceptance || 'No acceptance condition recorded.'),
+    })) : [];
+    const blockers = Array.isArray(value.known_blockers) ? value.known_blockers.map(item => ({
+      id:String(item.id || 'UNKNOWN'), status:String(item.status || 'UNKNOWN'),
+      blocker:String(item.blocker || 'No blocker description recorded.'), resolution:String(item.resolution || 'No resolution recorded.'),
+    })) : [];
+    return {
+      state:'AVAILABLE', program_id:value.program_id, status:String(value.status || 'UNKNOWN'), priority:value.priority || null,
+      pipeline, acceptance_gates:value.acceptance_gates || null, controller:value.controller || null,
+      blockers, owners:value.owners || {}, brain_evidence:value.brain_evidence || null,
+      next_action:String(value.next_action || 'Review the continuous-improvement program.'),
+      path:programPath, sha256:fileDigest(content), observed_at_utc:fs.statSync(programPath).mtime.toISOString(),
+      live_real:'DISABLED', automatic_approval:'DISABLED', production_version:null,
+    };
+  } catch (error) {
+    return {
+      state:error?.code === 'ENOENT' ? 'NOT_CONFIGURED' : 'ATTENTION_REQUIRED', status:'UNKNOWN', pipeline:[], blockers:[],
+      next_action:error?.code === 'ENOENT' ? 'Configure the autonomous continuous-improvement program.' : 'Repair the autonomous program safety contract before continuing.',
+      path:programPath, reason:error?.code || error?.message || 'AUTONOMOUS_PROGRAM_INVALID', live_real:'DISABLED', automatic_approval:'DISABLED', production_version:null,
+    };
+  }
+}
+
 function questionnaireDefaults(questionnaire, records) {
   const profile = records.profile || {};
   const instance = records.instance || {};
@@ -290,8 +327,14 @@ export function probeReplayTwoRuntime({ executable, chartbook_path: chartbookPat
   }
 
   let chartReplay = base.chart_replay;
-  const statusPath = path.join(installationRoot, 'connector-control', 'replay-status.json');
+  const statusPaths = [
+    path.join(installationRoot, 'connector-control', 'patrading-tp', 'replay-status.json'),
+    path.join(installationRoot, 'connector-control', 'ocean-replay-controller', 'replay-status.json'),
+    path.join(installationRoot, 'connector-control', 'replay-status.json'),
+  ];
+  const statusPath = statusPaths.find(candidate => fs.existsSync(candidate));
   try {
+    if (!statusPath) throw Object.assign(new Error('Replay status missing'), { code:'ENOENT' });
     const stat = fs.statSync(statusPath);
     const status = JSON.parse(fs.readFileSync(statusPath, 'utf8'));
     const observedAt = stat.mtime.toISOString();
@@ -395,6 +438,7 @@ export function loadStrategyOnboarding({ root = DEFAULT_ONBOARDING_ROOT, events 
   const latestActive = activationEnvironments.find(item => item.state === 'ACTIVATED_NOT_STARTED') || null;
   const replayCampaign = readReplayCampaign(campaignStatePath, strategyId);
   const priorityProgram = readPriorityProgram(root, strategyId);
+  const autonomousImprovement = readAutonomousImprovementProgram(root, strategyId);
 
   return {
     strategy_id: strategyId, strategy_name: registry?.strategy_name || profile?.strategy_name || setup?.strategy_name || 'Strategy onboarding',
@@ -414,7 +458,7 @@ export function loadStrategyOnboarding({ root = DEFAULT_ONBOARDING_ROOT, events 
     registration: { state: registration ? (registrationComplete ? 'REGISTERED' : 'BRAIN_SYNC_PENDING') : questionnaireBrainComplete ? 'READY' : 'NOT_READY', can_register: questionnaireBrainComplete && !registration, receipt: registration ? { id: registration.id, package_hash: registration.package_hash, created_at_utc: registration.created_at_utc, brain_sync: registrationBrain } : null },
     activation: { state: latestActive ? latestActive.state : 'INACTIVE', environments: activationEnvironments, actual_source_started: replayRuntime.chart_replay.started === true, automated_ordering: false, live_real: false },
     replay_runtime: replayRuntime,
-    continuous_delivery: { priority_program: priorityProgram, replay_campaign: replayCampaign },
+    continuous_delivery: { priority_program: priorityProgram, autonomous_improvement: autonomousImprovement, replay_campaign: replayCampaign },
     source: { status: sourceStatus, label: 'Ocean strategy and Sierra source records', fingerprint, last_verified_at_utc: setup?.last_verified_at || remediation?.verified_through || null, files: sources.map(({ filename, state, reason, sha256, modified_at_utc }) => ({ filename, state, reason, sha256, modified_at_utc })) },
     read_only: false, source_read_only: true, workflow_writable: true,
     safety: { affects_trading_controls: false, execution_authority: false, registration_automatic: false, activation_does_not_start_source: true },
