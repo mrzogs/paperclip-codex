@@ -966,12 +966,12 @@ async function scan() {
       lastScanAtUtc: new Date().toISOString(),
       error: null,
     });
+    await monitorVwapContinuousImprovement(changed ? "file_change_scan_before_rebuild" : "periodic_scan");
     if (changed) {
       await rebuild(scanCount === 1 ? "startup_reconcile" : "file_change");
       lastSignature = signature;
     }
     await notifyVwapPaperSim1Events(changed ? "file_change_scan_after_rebuild" : "periodic_scan");
-    await monitorVwapContinuousImprovement(changed ? "file_change_scan_after_rebuild" : "periodic_scan");
   } catch (error) {
     writeState({
       running: true,

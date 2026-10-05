@@ -4,6 +4,7 @@
   "strategy_id": "cicd-vwap-pull-back-strategy",
   "strategy_name": "VWAP Pullback",
   "baseline_existing_trades_on_first_run": true,
+  "source_read_timeout_ms": 15000,
   "critical_quality_flags": ["code_hash_missing", "config_hash_missing", "context_hash_missing", "dataset_identity_missing", "dataset_missing", "dataset_role_missing", "strategy_hash_missing", "vol_state_missing"],
   "sources": [
     {

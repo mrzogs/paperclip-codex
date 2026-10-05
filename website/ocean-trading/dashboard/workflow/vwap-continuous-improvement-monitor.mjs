@@ -1,12 +1,14 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { detectRecurringVwapFailures, VWAP_STRATEGY_ID } from './vwap-continuous-improvement.mjs';
 
 export const VWAP_MONITOR_SCHEMA = 'ocean-vwap-continuous-improvement-monitor-state/v1';
 const REQUIRED_CAUSAL_FIELDS = ['setup_id','session_name','side','regime_label','vwap_reclaim_state'];
 const LEARNING_ROLES = new Set(['DISCOVERY','PAPER','PAPER_ELIGIBLE']);
+const SQLITE_READER = path.join(path.dirname(fileURLToPath(import.meta.url)),'vwap-sqlite-reader.mjs');
 const nowUtc = () => new Date().toISOString();
 const digest = value => 'sha256:' + crypto.createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex');
 
@@ -24,9 +26,6 @@ function sqliteSignatures(filePath) {
     const stat=fs.statSync(candidate);
     return [{path:candidate,size:stat.size,mtime_ms:suffix==='-shm'?0:Math.round(stat.mtimeMs)}];
   });
-}
-function objectExists(db,name) {
-  return db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name=? AND type IN ('table','view')").get(name).n>0;
 }
 function utc(value) {
   if(value===null||value===undefined||value==='')return null;
@@ -72,12 +71,10 @@ export function loadVwapContinuousImprovementConfig(configFile) {
 
 export function readVwapLearningRows(source,config) {
   if(!fs.existsSync(source.database_path))throw new Error('VWAP_SOURCE_DATABASE_MISSING:'+source.id);
-  const db=new DatabaseSync(source.database_path,{readOnly:true});
-  try {
-    db.exec('PRAGMA query_only=ON');
-    const object=objectExists(db,'ocean_trade_causal_v1')?'ocean_trade_causal_v1':'trades';
-    return db.prepare('SELECT * FROM '+object+" WHERE strategy_id=? AND lower(status)='closed' ORDER BY trade_id").all(config.strategy_id).map(row=>normalize(row,source,config));
-  } finally { db.close(); }
+  const result=spawnSync(process.execPath,[SQLITE_READER,source.database_path,config.strategy_id],{encoding:'utf8',timeout:Number(config.source_read_timeout_ms||15000),maxBuffer:64*1024*1024,windowsHide:true});
+  if(result.error)throw new Error('VWAP_SOURCE_READ_FAILED:'+source.id+':'+(result.error.code||result.error.message));
+  if(result.status!==0)throw new Error('VWAP_SOURCE_READ_FAILED:'+source.id+':'+String(result.stderr||'UNKNOWN').trim().slice(-500));
+  return JSON.parse(result.stdout||'[]').map(row=>normalize(row,source,config));
 }
 
 function publicDetector(result) {
@@ -110,15 +107,17 @@ export async function dispatchVwapImprovementEvent(config,event) {
   const title='[VWAP CI] '+event.kind+' '+event.event_id;
   const listed=await requestJson(base+'/companies/'+trigger.company_id+'/issues?limit=100',{},timeout);
   let issue=(Array.isArray(listed)?listed:listed?.items||[]).find(item=>item.title===title);
-  const degraded=event.kind==='MONITOR_DEGRADED';
+  const degraded=event.kind==='MONITOR_DEGRADED',transportTest=event.transport_test===true;
   if(!issue)issue=await requestJson(base+'/companies/'+trigger.company_id+'/issues',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
-    title,description:(degraded
+    title,description:(transportTest
+      ? ['End-to-end transport test from the Ocean Trading website monitor.','','Event: '+event.event_id,'Purpose: prove issue creation, coordinator assignment, and wakeup delivery.','','No strategy, Sierra, approval, promotion, Paper, or Live action is authorized by this test. Close this issue after acknowledging receipt.']
+      : degraded
       ? ['Ocean Trading website could not interrogate the bound VWAP telemetry database after repeated attempts.','','Event: '+event.event_id,'Failure: '+event.error,'Consecutive failures: '+event.consecutive_failures,'',event.next_action]
       : ['Ocean Trading website detected new eligible VWAP evidence and ran the frozen deterministic detector.','','Event: '+event.event_id,'Analysis: '+event.analysis_hash,'New trades: '+event.new_trade_ids.length,'Patterns: '+event.investigation_queue.length,'',event.next_action])
       .concat(['','Safety: no automatic approval, production_version remains null, LIVE_REAL and real-order routing are prohibited.']).join('\n'),
     priority:'high',status:'todo',assigneeAgentId:trigger.agent_id})},timeout);
   const wakeup=await requestJson(base+'/agents/'+trigger.agent_id+'/wakeup?companyId='+trigger.company_id,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
-    source:'automation',triggerDetail:'event_driven',reason:'vwap_continuous_improvement_evidence',
+    source:'automation',triggerDetail:'system',reason:transportTest?'vwap_continuous_improvement_transport_test':'vwap_continuous_improvement_evidence',
     payload:{issueId:issue.id,eventId:event.event_id,analysisHash:event.analysis_hash,origin:'ocean-trading-website-monitor'},idempotencyKey:event.event_id})},timeout);
   return {triggered:true,issue_id:issue.id,issue_identifier:issue.identifier||null,wakeup_id:wakeup?.id||null,target_agent_id:trigger.agent_id};
 }
@@ -127,12 +126,18 @@ export async function scanVwapContinuousImprovement({config,stateFile,reason='pe
   if(!config?.enabled)return {enabled:false,skipped:true,reason:'disabled'};
   const previous=readJson(stateFile,{})||{},checkedAt=nowUtc();
   const signatures=config.sources.flatMap(source=>sqliteSignatures(source.database_path)),signature=digest(signatures);
-  if(!force&&previous.database_signature===signature){
+  if(!force&&previous.status==='HEALTHY'&&previous.database_signature===signature){
     const unchanged={...previous,last_checked_at_utc:checkedAt,last_check_reason:reason,skipped_unchanged:true};
     writeJson(stateFile,unchanged);return unchanged;
   }
   try {
-    const sources=config.sources.map(source=>({source,rows:readVwapLearningRows(source,config)})),rows=sources.flatMap(item=>item.rows);
+    writeJson(stateFile,{...previous,schema_version:VWAP_MONITOR_SCHEMA,strategy_id:config.strategy_id,enabled:true,status:'SCANNING',last_checked_at_utc:checkedAt,last_check_reason:reason,current_phase:'READING_SOURCES',current_source_id:null,safety:config.safety});
+    const sources=[];
+    for(const source of config.sources){
+      writeJson(stateFile,{...readJson(stateFile,{}),current_source_id:source.id});
+      sources.push({source,rows:readVwapLearningRows(source,config)});
+    }
+    const rows=sources.flatMap(item=>item.rows);
     const ids=new Set(rows.map(row=>row.trade_id)),prior=new Set(previous.observed_trade_ids||[]),newIds=[...ids].filter(id=>!prior.has(id)).sort();
     const first=!previous.initialized_at_utc,baseline=first&&config.baseline_existing_trades_on_first_run!==false;
     const detector=publicDetector(detectRecurringVwapFailures(rows,{strategyId:config.strategy_id}));
@@ -148,6 +153,7 @@ export async function scanVwapContinuousImprovement({config,stateFile,reason='pe
       sources:sources.map(item=>({id:item.source.id,environment:item.source.environment,account:item.source.account,database_path:item.source.database_path,observed_trade_count:item.rows.length,eligible_trade_count:item.rows.filter(eligible).length,latest_trade_id:item.rows.at(-1)?.trade_id||null})),
       observed_trade_count:rows.length,eligible_trade_count:rows.filter(eligible).length,new_trade_count:baseline?0:newIds.length,last_observed_new_trade_ids:baseline?[]:newIds,
       observed_trade_ids:[...ids].sort(),detector,disposition:detector.disposition,next_action:detector.next_action||detector.sufficiency.blockers.map(item=>item.code).join(', '),baseline_applied:baseline,
+      current_phase:null,current_source_id:null,
       last_trigger_receipt:receipt||previous.last_trigger_receipt||null,last_triggered_analysis_hash:lastHash,consecutive_failures:0,last_error:null,
       recent_events:[...(previous.recent_events||[]),{at_utc:checkedAt,reason,disposition:detector.disposition,new_trade_count:newIds.length,database_query:true,trigger:receipt}].slice(-25),safety:config.safety};
     writeJson(stateFile,state);return state;
@@ -162,6 +168,7 @@ export async function scanVwapContinuousImprovement({config,stateFile,reason='pe
     }
     const state={...previous,schema_version:VWAP_MONITOR_SCHEMA,strategy_id:config.strategy_id,enabled:true,status:'DEGRADED',last_checked_at_utc:checkedAt,last_check_reason:reason,skipped_unchanged:false,
       consecutive_failures:consecutiveFailures,last_error:errorText,last_failure_trigger_receipt:failureReceipt,last_triggered_failure_event_id:lastFailureId,last_dispatch_error:dispatchError,
+      current_phase:null,current_source_id:null,
       recent_events:[...(previous.recent_events||[]),{at_utc:checkedAt,reason,database_query:true,error:errorText,trigger:failureReceipt,dispatch_error:dispatchError}].slice(-25),safety:config.safety};
     writeJson(stateFile,state);return state;
   }

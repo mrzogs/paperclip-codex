@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { loadVwapContinuousImprovementConfig, scanVwapContinuousImprovement } from './vwap-continuous-improvement-monitor.mjs';
+import { dispatchVwapImprovementEvent, loadVwapContinuousImprovementConfig, scanVwapContinuousImprovement } from './vwap-continuous-improvement-monitor.mjs';
 
 function fixture() {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'ocean-vwap-monitor-')),dbFile=path.join(root,'telemetry.sqlite'),stateFile=path.join(root,'state.json');
@@ -72,4 +72,17 @@ test('repeated database failure wakes the coordinator once',async()=>{
   const third=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch});
   const fourth=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch});
   assert.equal(third.status,'DEGRADED');assert.equal(third.consecutive_failures,3);assert.equal(calls,1);assert.equal(events[0].kind,'MONITOR_DEGRADED');assert.equal(fourth.consecutive_failures,4);assert.equal(calls,1);
+});
+test('a degraded monitor retries unchanged databases and recovers',async()=>{
+  const f=fixture();insertRows(f.dbFile,1,5);
+  const healthy=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async()=>({triggered:false})});
+  fs.writeFileSync(f.stateFile,JSON.stringify({...healthy,status:'DEGRADED',consecutive_failures:1,last_error:'transient lock'}));
+  const recovered=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:false,dispatch:async()=>({triggered:false})});
+  assert.equal(recovered.status,'HEALTHY');assert.equal(recovered.skipped_unchanged,false);assert.equal(recovered.consecutive_failures,0);assert.equal(recovered.database_query_count,healthy.database_query_count+1);
+});
+test('transport test reaches the normal issue and wakeup path without authorizing strategy action',async()=>{
+  const f=fixture(),requests=[],server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{requests.push({url:req.url,method:req.method,body:body?JSON.parse(body):null});res.setHeader('content-type','application/json');if(req.method==='GET')res.end('[]');else if(req.url.includes('/issues'))res.end(JSON.stringify({id:'issue-test',identifier:'OCEA-E2E'}));else res.end(JSON.stringify({id:'wake-test'}));});});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));f.config.trigger.api_base_url='http://127.0.0.1:'+server.address().port+'/api';
+  const receipt=await dispatchVwapImprovementEvent(f.config,{kind:'TRANSPORT_TEST',event_id:'vwap-ci-e2e-fixture',analysis_hash:'sha256:test',transport_test:true,new_trade_ids:[],investigation_queue:[],next_action:'none'});await new Promise(resolve=>server.close(resolve));
+  assert.equal(receipt.triggered,true);assert.match(requests[1].body.description,/No strategy, Sierra, approval, promotion, Paper, or Live action is authorized/);assert.equal(requests[2].body.triggerDetail,'system');assert.equal(requests[2].body.reason,'vwap_continuous_improvement_transport_test');
 });
