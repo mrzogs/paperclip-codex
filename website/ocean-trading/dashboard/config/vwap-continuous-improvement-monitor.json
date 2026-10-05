@@ -1,0 +1,44 @@
+{
+  "schema_version": "ocean-vwap-continuous-improvement-monitor/v1",
+  "enabled": true,
+  "strategy_id": "cicd-vwap-pull-back-strategy",
+  "strategy_name": "VWAP Pullback",
+  "baseline_existing_trades_on_first_run": true,
+  "critical_quality_flags": ["code_hash_missing", "config_hash_missing", "context_hash_missing", "dataset_identity_missing", "dataset_missing", "dataset_role_missing", "strategy_hash_missing", "vol_state_missing"],
+  "sources": [
+    {
+      "id": "replay-two-v013",
+      "environment": "REPLAY",
+      "account": "Sim1",
+      "database_path": "D:\\Trading\\CICD\\runtime\\cicd-vwap-pull-back-strategy\\ReplayTwo-v013\\test-cicd-vwap-pull-back-replay-two-v013\\TradeTelemetry_test-cicd-vwap-pull-back-replay-two-v013.sqlite",
+      "run_assignments": {
+        "cicd-vwap-discovery-20260101-20260301-v011": "DISCOVERY",
+        "test-cicd-vwap-discovery-extension-20260901-20260914-v012-u26": "DISCOVERY",
+        "test-cicd-vwap-discovery-extension-20260914-20261001-v012-z26": "DISCOVERY"
+      }
+    },
+    {
+      "id": "paper-sim1",
+      "environment": "PAPER",
+      "account": "Sim1",
+      "database_path": "D:\\Trading\\CICD\\runtime\\cicd-vwap-pull-back-strategy\\PaperTrading\\PaperTrading_CICD_VWAP_Pullback\\TradeTelemetry_PaperTrading_CICD_VWAP_Pullback.sqlite",
+      "require_explicit_dataset_role": true
+    }
+  ],
+  "trigger": {
+    "enabled": true,
+    "api_base_url": "http://127.0.0.1:3100/api",
+    "company_id": "49d243c6-0dda-4adb-878c-2ef8ed0be6ac",
+    "agent_id": "1bf2573c-4f43-4cbf-b9db-16429271ce4b",
+    "agent_name": "Mara Vale - Quant Lab Coordinator",
+    "failure_threshold": 3,
+    "timeout_ms": 15000
+  },
+  "safety": {
+    "production_version": null,
+    "automatic_approval_enabled": false,
+    "brain_normal_ingestion": "OFF",
+    "live_real_enabled": false,
+    "real_order_routing": "PROHIBITED"
+  }
+}

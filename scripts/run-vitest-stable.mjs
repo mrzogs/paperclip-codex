@@ -254,10 +254,16 @@ function runVitest(args, label) {
   };
   mkdirSync(env.PAPERCLIP_HOME, { recursive: true });
   mkdirSync(env.TMPDIR, { recursive: true });
-  const result = spawnSync("pnpm", ["exec", "vitest", "run", ...args], {
+  const packageManagerCli = process.env.npm_execpath;
+  const command = packageManagerCli ? process.execPath : "pnpm";
+  const commandArgs = packageManagerCli
+    ? [packageManagerCli, "exec", "vitest", "run", ...args]
+    : ["exec", "vitest", "run", ...args];
+  const result = spawnSync(command, commandArgs, {
     cwd: repoRoot,
     env,
     stdio: "inherit",
+    shell: !packageManagerCli && process.platform === "win32",
   });
   if (result.error) {
     console.error(`[test:run] Failed to start Vitest: ${result.error.message}`);

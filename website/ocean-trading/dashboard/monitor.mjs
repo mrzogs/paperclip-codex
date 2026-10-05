@@ -7,6 +7,10 @@ import {
   loadVwapPaperSim1EmailConfig,
   scanVwapPaperSim1EmailEvents,
 } from "./vwap-paper-sim1-email-monitor.mjs";
+import {
+  loadVwapContinuousImprovementConfig,
+  scanVwapContinuousImprovement,
+} from "./workflow/vwap-continuous-improvement-monitor.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, "data");
@@ -18,6 +22,8 @@ const LAST_CLOSED_TRADE_EMAIL_REQUEST_FILE = path.join(DATA_DIR, "last-closed-tr
 const CLOSED_TRADE_EMAIL_CONFIG_FILE = path.join(__dirname, "config", "closed-trade-email-alerts.json");
 const VWAP_PAPER_SIM1_EMAIL_CONFIG_FILE = path.join(__dirname, "config", "vwap-paper-sim1-email-alerts.json");
 const VWAP_PAPER_SIM1_EMAIL_STATE_FILE = path.join(DATA_DIR, "vwap-paper-sim1-email-state.json");
+const VWAP_IMPROVEMENT_CONFIG_FILE = path.join(__dirname, "config", "vwap-continuous-improvement-monitor.json");
+const VWAP_IMPROVEMENT_STATE_FILE = path.join(DATA_DIR, "vwap-continuous-improvement-monitor-state.json");
 const DASHBOARD_DATA_FILE = path.join(__dirname, "dashboard-data.json");
 const BUILD_SCRIPT = path.join(__dirname, "build-manifest.mjs");
 const DTC_SNAPSHOT_SCRIPT = path.join(__dirname, "dtc-snapshot.mjs");
@@ -752,6 +758,40 @@ async function notifyVwapPaperSim1Events(reason) {
   }
 }
 
+async function monitorVwapContinuousImprovement(reason) {
+  try {
+    const config = loadVwapContinuousImprovementConfig(VWAP_IMPROVEMENT_CONFIG_FILE);
+    const result = await scanVwapContinuousImprovement({
+      config,
+      stateFile: VWAP_IMPROVEMENT_STATE_FILE,
+      reason,
+    });
+    writeState({
+      vwapImprovementMonitorStateFile: VWAP_IMPROVEMENT_STATE_FILE,
+      vwapImprovementMonitorStatus: result.status || "UNKNOWN",
+      vwapImprovementDisposition: result.disposition || "UNKNOWN",
+      vwapImprovementLastDatabaseInterrogationAtUtc: result.last_database_interrogation_at_utc || null,
+      vwapImprovementObservedTradeCount: result.observed_trade_count || 0,
+      vwapImprovementEligibleTradeCount: result.eligible_trade_count || 0,
+      vwapImprovementNewTradeCount: result.new_trade_count || 0,
+      vwapImprovementLastTriggerReceipt: result.last_trigger_receipt || null,
+      vwapImprovementCodexPollingRequired: false,
+    });
+    return result;
+  } catch (error) {
+    writeState({
+      vwapImprovementMonitorStateFile: VWAP_IMPROVEMENT_STATE_FILE,
+      vwapImprovementMonitorStatus: "DEGRADED",
+      vwapImprovementMonitorError: String(error?.message || error),
+      vwapImprovementCodexPollingRequired: false,
+    }, createMonitorEvent("error", "vwap-improvement-monitor-error", "VWAP improvement database monitor failed", {
+      reason,
+      error: String(error?.message || error),
+    }));
+    return { status: "DEGRADED", error: String(error?.message || error) };
+  }
+}
+
 function isTradeLog(name) {
   return /^TradeActivityLog_\d{4}-\d{2}-\d{2}_UTC\..+\.data$/i.test(name);
 }
@@ -931,6 +971,7 @@ async function scan() {
       lastSignature = signature;
     }
     await notifyVwapPaperSim1Events(changed ? "file_change_scan_after_rebuild" : "periodic_scan");
+    await monitorVwapContinuousImprovement(changed ? "file_change_scan_after_rebuild" : "periodic_scan");
   } catch (error) {
     writeState({
       running: true,
@@ -962,6 +1003,7 @@ export {
   handoffClosedTradeEmail,
   notifyNewClosedTrades,
   notifyVwapPaperSim1Events,
+  monitorVwapContinuousImprovement,
   queueClosedTradeEmailViaConnector,
 };
 

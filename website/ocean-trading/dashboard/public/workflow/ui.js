@@ -251,6 +251,7 @@ function strategyOnboardingPage(data) {
   const delivery = onboarding.continuous_delivery || {};
   const program = delivery.priority_program || { state:'NOT_CONFIGURED', status:'UNKNOWN', workstreams:[] };
   const improvement = delivery.autonomous_improvement || { state:'NOT_CONFIGURED', status:'UNKNOWN', pipeline:[], blockers:[], next_action:null };
+  const eventMonitor = delivery.event_monitor || { status:'NOT_STARTED', disposition:'UNKNOWN', sources:[], observed_trade_count:0, eligible_trade_count:0, new_trade_count:0 };
   const improvementActive = improvement.state === 'AVAILABLE';
   const campaign = delivery.replay_campaign || { state:'NOT_CONFIGURED', status:'NOT_STARTED', completed_windows:[], failed_windows:[], next_action:'Ocean is preparing the sealed Replay campaign.' };
   const registration = onboarding.registration;
@@ -356,6 +357,10 @@ function strategyOnboardingPage(data) {
   const workstreamRows = (program.workstreams || []).map(item => [esc(item.id), esc(item.name), badge(item.status), esc(item.owner), esc(item.next_action || 'No separate action recorded')]);
   const pipelineRows = (improvement.pipeline || []).map(item => [esc(item.id), esc(item.name), badge(item.status), esc(item.acceptance)]);
   const blockerRows = (improvement.blockers || []).map(item => [esc(item.id), badge(item.status), esc(item.blocker), esc(item.resolution)]);
+  const eventMonitorSources = (eventMonitor.sources || []).map(item => [
+    esc(item.id), esc(item.environment), esc(item.account), String(item.observed_trade_count || 0),
+    String(item.eligible_trade_count || 0), '<code>'+esc(item.database_path || 'Not recorded')+'</code>',
+  ]);
   const campaignBody = facts([
     ['Foundation program', badge(program.status)], ['Improvement program', badge(improvement.status)], ['Replay campaign', badge(campaign.status)], ['Campaign source', badge(campaign.state)],
     ['Current window', esc(campaign.current_window_id || 'None')], ['Completed windows', String(campaign.completed_count || 0)],
@@ -364,7 +369,14 @@ function strategyOnboardingPage(data) {
     ['Promotion', esc(program.current_acceptance_assessment?.promotion_disposition || 'Not recorded')], ['Last observed', esc(date(campaign.observed_at_utc))],
     ['Improvement gates', improvement.acceptance_gates ? `${esc(improvement.acceptance_gates.complete)} / ${esc(improvement.acceptance_gates.total)} proven` : 'Not recorded'],
     ['Controller', esc(improvement.controller?.canonical_version || 'Not recorded')], ['Automatic approval', badge(improvement.automatic_approval || 'DISABLED')],
-  ]) + (pipelineRows.length ? table(['Phase','Capability','State','Acceptance evidence required'], pipelineRows) : empty('The autonomous improvement program record is not available.'))
+    ['Event monitor', badge(eventMonitor.status || 'NOT_STARTED')], ['Detector disposition', badge(eventMonitor.disposition || 'UNKNOWN')],
+    ['Database queries', String(eventMonitor.database_query_count || 0)], ['Last database interrogation', esc(date(eventMonitor.last_database_interrogation_at_utc))],
+    ['Observed VWAP trades', String(eventMonitor.observed_trade_count || 0)], ['Eligible causal trades', String(eventMonitor.eligible_trade_count || 0)],
+    ['New trades in last query', String(eventMonitor.new_trade_count || 0)], ['Codex polling', badge('NOT_REQUIRED')],
+  ]) + '<h3>Event-driven evidence monitor</h3><p class="section-note">The local website monitor checks the bound Replay Two and Paper Sim1 SQLite ledgers. It stores NO_CHANGE and insufficient-evidence results locally, and wakes the Ocean coordinator only for a new actionable INVESTIGATE result.</p>'
+    + (eventMonitorSources.length ? table(['Source','Environment','Account','Observed','Eligible','SQLite database'], eventMonitorSources) : empty('The event-driven evidence monitor has not completed its first database query.'))
+    + (eventMonitor.last_error ? '<p class="form-error">'+esc(eventMonitor.last_error)+'</p>' : '')
+    + (pipelineRows.length ? table(['Phase','Capability','State','Acceptance evidence required'], pipelineRows) : empty('The autonomous improvement program record is not available.'))
     + (blockerRows.length ? `<h3>Known blockers and resolutions</h3>${table(['ID','State','Blocker','Resolution'], blockerRows)}` : '')
     + (workstreamRows.length ? `<h3>Operational foundation</h3>${table(['Lane','Workstream','State','Owner','Exact next action'], workstreamRows)}` : '');
   return heading(onboarding.strategy_name, 'Strategy setup and testing', headingActions)

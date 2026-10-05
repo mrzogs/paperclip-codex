@@ -8,6 +8,7 @@ import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import { applyReplayClearsToSession, clearReplayAccount } from "./replay-session-scope.mjs";
 import { workflowFromEnvironment } from "./workflow/backend.mjs";
 import { installWebsiteControl } from "./workflow/process-control.mjs";
+import { readVwapContinuousImprovementState } from "./workflow/vwap-continuous-improvement-monitor.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,6 +18,7 @@ const UPLOAD_DIR = path.join(__dirname, "uploads");
 const SQLITE_FILE = process.env.OCEAN_WEBSITE_DB || "D:\\OceanTradingData\\website\\ocean-trading-website.sqlite";
 const SQLITE_QUERY_SCRIPT = path.join(__dirname, "query-sqlite.py");
 const MONITOR_STATE_FILE = path.join(__dirname, "data", "monitor-state.json");
+const VWAP_IMPROVEMENT_STATE_FILE = path.join(__dirname, "data", "vwap-continuous-improvement-monitor-state.json");
 const REPLAY_MONITOR_STATE_FILE = path.join(__dirname, "data", "replay-monitor-state.json");
 const REPLAY_MONITOR_CLEARS_FILE = path.join(__dirname, "data", "replay-monitor-clears.json");
 const MONITOR_SCRIPT = path.join(__dirname, "monitor.mjs");
@@ -3734,6 +3736,15 @@ const server = http.createServer((req, res) => {
   if (req.url === "/api/monitor/status") {
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify(monitorState()));
+    return;
+  }
+
+  if (req.url === "/api/vwap-improvement-monitor/status") {
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({
+      ...readVwapContinuousImprovementState(VWAP_IMPROVEMENT_STATE_FILE),
+      website_monitor: monitorState(),
+    }));
     return;
   }
 

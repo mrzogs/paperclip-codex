@@ -2,14 +2,18 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { exactKeys, id, objectHash, requireThat } from './common.mjs';
 import { enqueueOnboardingBrain } from './onboarding-brain-sync.mjs';
+import { readVwapContinuousImprovementState } from './vwap-continuous-improvement-monitor.mjs';
 
 export const ONBOARDING_STRATEGY_ID = 'cicd-vwap-pull-back-strategy';
 export const DEFAULT_ONBOARDING_ROOT = process.env.OCEAN_STRATEGY_ONBOARDING_ROOT
   || 'C:\\Users\\wayne\\OneDrive\\Documents\\Brady - Optimization\\onboarding';
 export const DEFAULT_REPLAY_CAMPAIGN_STATE = process.env.OCEAN_VWAP_REPLAY_CAMPAIGN_STATE
   || 'D:\\OceanTradingData\\website\\workflow\\cicd-vwap-pull-back-strategy\\replay-campaign-state.json';
+export const DEFAULT_VWAP_IMPROVEMENT_MONITOR_STATE = process.env.OCEAN_VWAP_IMPROVEMENT_MONITOR_STATE
+  || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'vwap-continuous-improvement-monitor-state.json');
 
 const SOURCES = [
   ['registry', 'strategy-registry.json'],
@@ -355,7 +359,7 @@ export function probeReplayTwoRuntime({ executable, chartbook_path: chartbookPat
   return structuredClone(value);
 }
 
-export function loadStrategyOnboarding({ root = DEFAULT_ONBOARDING_ROOT, events = [], brainOutbox = [], registration = null, activationEvents = [], runtimeProbe = probeReplayTwoRuntime, campaignStatePath = DEFAULT_REPLAY_CAMPAIGN_STATE } = {}) {
+export function loadStrategyOnboarding({ root = DEFAULT_ONBOARDING_ROOT, events = [], brainOutbox = [], registration = null, activationEvents = [], runtimeProbe = probeReplayTwoRuntime, campaignStatePath = DEFAULT_REPLAY_CAMPAIGN_STATE, improvementMonitorStatePath = DEFAULT_VWAP_IMPROVEMENT_MONITOR_STATE } = {}) {
   const strategyId = readOnboardingStrategyId(root);
   const sources = SOURCES.map(([key, filename]) => readSource(root, key, filename, strategyId));
   const records = Object.fromEntries(sources.map(source => [source.key, source.value]));
@@ -439,6 +443,7 @@ export function loadStrategyOnboarding({ root = DEFAULT_ONBOARDING_ROOT, events 
   const replayCampaign = readReplayCampaign(campaignStatePath, strategyId);
   const priorityProgram = readPriorityProgram(root, strategyId);
   const autonomousImprovement = readAutonomousImprovementProgram(root, strategyId);
+  const eventMonitor = readVwapContinuousImprovementState(improvementMonitorStatePath);
 
   return {
     strategy_id: strategyId, strategy_name: registry?.strategy_name || profile?.strategy_name || setup?.strategy_name || 'Strategy onboarding',
@@ -458,7 +463,7 @@ export function loadStrategyOnboarding({ root = DEFAULT_ONBOARDING_ROOT, events 
     registration: { state: registration ? (registrationComplete ? 'REGISTERED' : 'BRAIN_SYNC_PENDING') : questionnaireBrainComplete ? 'READY' : 'NOT_READY', can_register: questionnaireBrainComplete && !registration, receipt: registration ? { id: registration.id, package_hash: registration.package_hash, created_at_utc: registration.created_at_utc, brain_sync: registrationBrain } : null },
     activation: { state: latestActive ? latestActive.state : 'INACTIVE', environments: activationEnvironments, actual_source_started: replayRuntime.chart_replay.started === true, automated_ordering: false, live_real: false },
     replay_runtime: replayRuntime,
-    continuous_delivery: { priority_program: priorityProgram, autonomous_improvement: autonomousImprovement, replay_campaign: replayCampaign },
+    continuous_delivery: { priority_program: priorityProgram, autonomous_improvement: autonomousImprovement, replay_campaign: replayCampaign, event_monitor: eventMonitor },
     source: { status: sourceStatus, label: 'Ocean strategy and Sierra source records', fingerprint, last_verified_at_utc: setup?.last_verified_at || remediation?.verified_through || null, files: sources.map(({ filename, state, reason, sha256, modified_at_utc }) => ({ filename, state, reason, sha256, modified_at_utc })) },
     read_only: false, source_read_only: true, workflow_writable: true,
     safety: { affects_trading_controls: false, execution_authority: false, registration_automatic: false, activation_does_not_start_source: true },
