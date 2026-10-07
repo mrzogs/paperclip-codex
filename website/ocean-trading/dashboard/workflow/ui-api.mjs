@@ -50,7 +50,11 @@ export function readWorkflowView(backend, actor, route) {
   const strategyName = (value) => parse(backend.one('ow_strategies', value)).strategy_name;
   const operationalReleases = () => new OperationalPreparation(backend).list(actor).items;
   const caseRow = (value) => ({ ...backend.readCase(actor, value.id), strategy_name: strategyName(value.strategy_id), priority: value.stage === 'ROLLBACK_REVIEW' ? 'URGENT_REVIEW' : null });
-  const runRow = (value) => ({ ...backend.readRun(actor, value.id), strategy_name: strategyName(value.strategy_id) });
+  const runRow = (value) => ({
+    ...backend.readRun(actor, value.id),
+    strategy_name: strategyName(value.strategy_id),
+    learning: backend.operationalLearning?.statusForRun(value.id) || null,
+  });
   const artifactRow = (value) => ({ artifact_id: value.id, case_id: value.case_id, kind: value.kind, producer_id: value.producer_id, recipient_id: value.recipient_id, candidate_hash: value.candidate_hash, dependency_ids: JSON.parse(value.dependencies_json), manifest: JSON.parse(value.manifest_json) });
   const approvalRow = (value) => {
     backend.verifySnapshot(value);
