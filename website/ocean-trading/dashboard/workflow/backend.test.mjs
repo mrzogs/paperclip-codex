@@ -243,17 +243,36 @@ await check("GOV-08: transactional outbox survives restart, expired leases, dupl
 await check("GOV-08 operational recipient claims and acknowledges through the operational route", async () => {
   const a = await app({ operational_strategy:true });
   try {
-    const baseline = a.backend().db.prepare("SELECT baseline_hash FROM ow_strategies WHERE id=?").get(STRATEGY).baseline_hash;
+    const strategy = a.backend().db.prepare("SELECT baseline_hash,revision FROM ow_strategies WHERE id=?").get(STRATEGY);
+    const baseline = strategy.baseline_hash;
     a.backend().db.prepare("INSERT INTO ow_instances(id,strategy_id,payload_json) VALUES(?,?,?)").run(OPERATIONAL_INSTANCE,STRATEGY,JSON.stringify({execution_instance_id:OPERATIONAL_INSTANCE,strategy_id:STRATEGY}));
     a.backend().db.prepare("INSERT INTO ow_runs(id,strategy_id,instance_id,revision,state,context_json) VALUES(?,?,?,?,?,?)").run("operational-run",STRATEGY,OPERATIONAL_INSTANCE,1,"COMPLETED",JSON.stringify({run_id:"operational-run",strategy_id:STRATEGY,execution_instance_id:OPERATIONAL_INSTANCE}));
     a.backend().db.prepare("INSERT INTO ow_cases(id,strategy_id,instance_id,run_id,revision,stage,work_status,baseline_hash,candidate_hash,owner_id,waiting_on,payload_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
-      .run("operational-case",STRATEGY,OPERATIONAL_INSTANCE,"operational-run",1,"RESEARCH","READY",baseline,null,"ocean-operational-brain","Stage prerequisites",JSON.stringify({registry_revision:a.registry.revision}));
-    a.backend().event("operational-case", "artifact.write", { id:"ocean-operational-brain", role:"BRAIN", namespace:"OPERATIONAL" }, { artifact_id:"operational-recommendation" }, "cicd-vwap-pull-back-strategy:strategy:replay-two");
+      .run("operational-case",STRATEGY,OPERATIONAL_INSTANCE,"operational-run",1,"RESEARCH","READY",baseline,null,"ocean-operational-brain","Stage prerequisites",JSON.stringify({registry_revision:strategy.revision}));
+    const content = JSON.stringify({ title:"Operational recommendation", authority:{ automatic_strategy_change:false } });
+    a.backend().writeArtifact({
+      id:"ocean-operational-brain", role:"BRAIN", namespace:"OPERATIONAL", scopes:["read","artifact.write"],
+      strategyIds:[STRATEGY], instanceIds:[OPERATIONAL_INSTANCE],
+    }, {
+      artifact_id:"test-operational-recommendation", case_id:"operational-case", run_id:"operational-run",
+      recipient_id:"cicd-vwap-pull-back-strategy:strategy:replay-two", kind:"RECOMMENDATION",
+      media_type:"application/json", content, content_encoding:"utf8", content_hash:digest(content),
+      candidate_hash:null, dependency_ids:[],
+    });
+    a.backend().event("operational-case", "operational.learning.continuation", {
+      id:"ocean-operational-brain", role:"BRAIN", namespace:"OPERATIONAL",
+    }, { artifact_id:"test-operational-recommendation" }, "cicd-vwap-pull-back-strategy:strategy:replay-two");
     const data = { strategy_id:STRATEGY, instance_id:OPERATIONAL_INSTANCE };
     assert.equal((await a.fetchJson("outbox/claim", { role:"STRATEGY", data })).status, 403);
     const claimed = await a.post("operational/v1/outbox/claim", data, { role:"STRATEGY" });
     assert.equal(claimed.items.length, 1);
     const item = claimed.items[0];
+    const artifact = await a.fetchJson("operational/v1/artifacts/test-operational-recommendation", { role:"STRATEGY" });
+    assert.equal(artifact.status, 200);
+    assert.match(artifact.value.preview_text, /Operational recommendation/);
+    const caseReadback = await a.fetchJson("operational/v1/cases/operational-case", { role:"STRATEGY" });
+    assert.equal(caseReadback.status, 200);
+    assert.equal(caseReadback.value.pending_sync, 1);
     const acknowledged = await a.post("operational/v1/outbox/ack", {
       outbox_id:item.outbox_id, lease_id:item.lease_id, payload_hash:item.payload_hash,
     }, { role:"STRATEGY" });
