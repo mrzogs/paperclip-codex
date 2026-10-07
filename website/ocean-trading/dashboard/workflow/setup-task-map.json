@@ -12,7 +12,7 @@
   "diagnostic_only": ["S23", "S23.1", "S24", "S26.1"],
   "scoped_foundations": {"S23.2": "MACHINE_FOUNDATION"},
   "source_sha256": "dc269a4098c1de64b4e47c30e291bed07f67e031d46b7f3854345cb69ca8056f",
-  "pack_version": "13.3-S31.6-amendment",
+  "pack_version": "13.3-S51.4-forward+S31.6-amendment",
   "order": "historical IDs retained; S24.1 and S25.1 passing inputs, S26.1 diagnostic, then explicit sequence.json order",
   "tasks": [
     {
