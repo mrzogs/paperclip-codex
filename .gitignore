@@ -64,3 +64,5 @@ tests/release-smoke/playwright-report/
 .superpowers/
 .claude/worktrees/
 .herenow
+__pycache__/
+*.py[cod]
