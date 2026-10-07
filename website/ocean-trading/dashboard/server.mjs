@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import { applyReplayClearsToSession, clearReplayAccount } from "./replay-session-scope.mjs";
+import { shouldWebsiteScheduleManifestRebuild } from "./manifest-refresh-policy.mjs";
 import { workflowFromEnvironment } from "./workflow/backend.mjs";
 import { installWebsiteControl } from "./workflow/process-control.mjs";
 import { reconcileOperationalReplayRunSettings } from "./workflow/operational-run-readiness.mjs";
@@ -363,7 +364,11 @@ function startManifestFreshnessPoll() {
       const manifestMtime = fileMtimeMs(manifestPath);
       const projectTelemetryChanged = sqliteInputFiles(VWAP_PROJECT_PAPER_SQLITE_FILE)
         .some((file) => fileMtimeMs(file) > manifestMtime + 1);
-      if (!fs.existsSync(manifestPath) || projectTelemetryChanged) void scheduleManifestRebuild();
+      if (shouldWebsiteScheduleManifestRebuild({
+        manifestExists: fs.existsSync(manifestPath),
+        inputChanged: projectTelemetryChanged,
+        monitorRunning: monitorState().running,
+      })) void scheduleManifestRebuild();
     } catch (error) {
       console.error(`Manifest freshness check failed: ${error?.message || error}`);
     }
