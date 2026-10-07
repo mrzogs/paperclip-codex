@@ -832,6 +832,17 @@ export class WorkflowBackend {
         else if(/^workflow-events\/[A-Za-z0-9_.:-]+$/.test(local) && request.method==='GET')result=this.operational.workflowEventRead(actor,local.slice(16));
         else if(/^trade-events\/[A-Za-z0-9_.:-]+$/.test(local) && request.method==='GET')result=this.operational.tradeEventRead(actor,local.slice(13));
         else if(/^brain-results\/[A-Za-z0-9_.:-]+$/.test(local) && request.method==='GET')result=this.operationalResults.read(actor,local.slice(14));
+        else if(/^cases\/[A-Za-z0-9_.:-]+$/.test(local) && request.method==='GET')result=this.readCase(actor,local.slice(6));
+        else if(/^artifacts\/[A-Za-z0-9_.:-]+(?:\/download)?$/.test(local) && request.method==='GET') {
+          const artifactId=local.split('/')[1];const artifact=this.download(actor,artifactId);
+          if(local.endsWith('/download')) {
+            response.setHeader('Content-Type','application/octet-stream');
+            response.setHeader('Content-Security-Policy',"sandbox; default-src 'none'");
+            response.setHeader('Content-Disposition',`attachment; filename="${artifactId}.txt"`);
+            response.end(artifact.content);return true;
+          }
+          result={manifest:artifact.manifest,preview_text:artifact.preview_text};
+        }
         else if(local==='dataset-manifests' && request.method==='POST')result=this.operational.manifest(actor,await jsonBody(request));
         else if(local==='release-requests' && request.method==='GET')result=new OperationalPreparation(this).list(actor);
         else if(local==='paper-forward/options' && request.method==='GET')result=new PaperForwardPreparation(this).options(actor);
