@@ -1009,6 +1009,29 @@
           "job_id"
         ]
       },
+      "recipient_delivery": [
+        {
+          "method": "POST",
+          "path": "/outbox/claim",
+          "role": "STRATEGY",
+          "scope": "delivery",
+          "fields": ["strategy_id", "instance_id"]
+        },
+        {
+          "method": "POST",
+          "path": "/outbox/ack",
+          "role": "STRATEGY",
+          "scope": "delivery",
+          "fields": ["outbox_id", "lease_id", "payload_hash"]
+        },
+        {
+          "method": "POST",
+          "path": "/outbox/fail",
+          "role": "STRATEGY",
+          "scope": "delivery",
+          "fields": ["outbox_id", "lease_id", "payload_hash", "error"]
+        }
+      ],
       "shared_schemas": {
         "workflow_event": "2.1.0 workflow-event",
         "run_completion": "2.1.0 run-completion",

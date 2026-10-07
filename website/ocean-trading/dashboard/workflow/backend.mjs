@@ -842,6 +842,7 @@ export class WorkflowBackend {
         else if(local==='trade-events' && request.method==='POST')result=this.operational.tradeEvent(actor,await jsonBody(request));
         else if(local==='brain-results/register' && request.method==='POST')result=this.operationalResults.register(actor,await jsonBody(request));
         else if(local==='brain-results/callback' && request.method==='POST')result=this.operationalResults.callback(actor,await jsonBody(request));
+        else if(['outbox/claim','outbox/ack','outbox/fail'].includes(local) && request.method==='POST')result=this.mutate(local.replace('/','.'),actor,await jsonBody(request));
         else if(local==='run/end' && request.method==='POST')result=this.runs.perform('end',actor,await jsonBody(request));
         else if(['run/claim','run/renew','run/activate','run/reconcile','run/pin','run/progress','run/evidence','run/finish'].includes(local) && request.method==='POST')result=this.runs.perform(local.slice(4),actor,await jsonBody(request));
         else throw new WorkflowError(404,'UNKNOWN_OPERATIONAL_ROUTE');
