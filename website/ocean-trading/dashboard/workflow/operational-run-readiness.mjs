@@ -16,7 +16,14 @@ export function reconcileOperationalReplayRunSettings(backend, configFile) {
   const storedInstance = backend.db.prepare('SELECT payload_json FROM ow_instances WHERE id=?').get(config.instance_id);
   requireThat(storedInstance && objectHash(parse(storedInstance)) === objectHash(binding.instance), 503, 'OPERATIONAL_INSTANCE_BINDING_CONFLICT');
   requireThat(fs.existsSync(config.expected_chartbook_path) && fs.statSync(config.expected_chartbook_path).isFile(), 503, 'OPERATIONAL_CHARTBOOK_REQUIRED');
-  requireThat(digest(fs.readFileSync(config.expected_chartbook_path)) === config.expected_chartbook_sha256, 503, 'OPERATIONAL_CHARTBOOK_HASH_CONFLICT');
+  // Sierra persists mutable chart/runtime state into .Cht files. Keep the
+  // original fingerprint as provenance, but pin executable behavior to the
+  // verified strategy and telemetry modules plus live source preflight.
+  const observedChartbookHash = digest(fs.readFileSync(config.expected_chartbook_path));
+  requireThat(fs.existsSync(config.expected_strategy_module_path) && fs.statSync(config.expected_strategy_module_path).isFile(), 503, 'OPERATIONAL_STRATEGY_MODULE_REQUIRED');
+  requireThat(digest(fs.readFileSync(config.expected_strategy_module_path)) === config.expected_strategy_module_sha256, 503, 'OPERATIONAL_STRATEGY_MODULE_HASH_CONFLICT');
+  requireThat(fs.existsSync(config.expected_telemetry_module_path) && fs.statSync(config.expected_telemetry_module_path).isFile(), 503, 'OPERATIONAL_TELEMETRY_MODULE_REQUIRED');
+  requireThat(digest(fs.readFileSync(config.expected_telemetry_module_path)) === config.expected_telemetry_module_sha256, 503, 'OPERATIONAL_TELEMETRY_MODULE_HASH_CONFLICT');
   const settings = {
     instance_id: config.instance_id,
     chart_settings_hash: config.expected_chartbook_sha256,
@@ -27,8 +34,8 @@ export function reconcileOperationalReplayRunSettings(backend, configFile) {
   const existing = backend.db.prepare('SELECT payload_json FROM ow_run_settings WHERE id=?').get(config.instance_id);
   if (existing) {
     requireThat(objectHash(parse(existing)) === objectHash(settings), 503, 'OPERATIONAL_RUN_SETTINGS_CONFLICT');
-    return { status:'READY', instance_id:config.instance_id, chart_settings_hash:settings.chart_settings_hash, idempotent:true };
+    return { status:'READY', instance_id:config.instance_id, chart_settings_hash:settings.chart_settings_hash, observed_chartbook_sha256:observedChartbookHash, chartbook_matches_initial_fingerprint:observedChartbookHash===config.expected_chartbook_sha256, idempotent:true };
   }
   backend.runs.perform('settings', human, settings);
-  return { status:'READY', instance_id:config.instance_id, chart_settings_hash:settings.chart_settings_hash, idempotent:false };
+  return { status:'READY', instance_id:config.instance_id, chart_settings_hash:settings.chart_settings_hash, observed_chartbook_sha256:observedChartbookHash, chartbook_matches_initial_fingerprint:observedChartbookHash===config.expected_chartbook_sha256, idempotent:false };
 }

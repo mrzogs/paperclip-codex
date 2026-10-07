@@ -10,8 +10,12 @@ import { reconcileOperationalReplayRunSettings } from './operational-run-readine
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ocean-run-readiness-'));
   const chartbook = path.join(root, 'Replay.Cht');
+  const strategyModule = path.join(root, 'strategy.dll');
+  const telemetryModule = path.join(root, 'telemetry.dll');
   const dbFile = path.join(root, 'workflow.sqlite');
   fs.writeFileSync(chartbook, 'verified chart settings');
+  fs.writeFileSync(strategyModule, 'verified strategy module');
+  fs.writeFileSync(telemetryModule, 'verified telemetry module');
   const instance = { execution_instance_id:'operational-replay', strategy_id:'strategy', source_installation_id:'sierra', chartbook_id:'chartbook', chart_id:'1', source_study_instance_id:'study', telemetry_producer_id:'telemetry', version_binding:'v1', config_hash:`sha256:${'1'.repeat(64)}`, account_alias:'Sim1', capabilities:['REPLAY'], status:'DRAFT', lease_run_id:null };
   const binding = { instance, strategy_id:'strategy', state:'VERIFIED_FACTS_ONLY', binding_hash:`sha256:${'2'.repeat(64)}` };
   const config = {
@@ -23,9 +27,9 @@ function fixture() {
     namespace:'OPERATIONAL', factual_binding_hash:binding.binding_hash, minimum_schema_version:13, freshness_seconds:120,
     expected_chartbook_path:chartbook, expected_chart_number:1, expected_chartbook_sha256:digest(fs.readFileSync(chartbook)),
     time_basis:'UTC source records', session_calendar_revision:'calendar-v1', fill_model_version:'Sierra native replay',
-    expected_bar_period_seconds:300, expected_strategy_module_path:path.join(root,'strategy.dll'),
-    expected_strategy_module_sha256:`sha256:${'3'.repeat(64)}`, expected_telemetry_module_path:path.join(root,'telemetry.dll'),
-    expected_telemetry_module_sha256:`sha256:${'4'.repeat(64)}`, source_preflight_status_path:path.join(root,'status.txt'),
+    expected_bar_period_seconds:300, expected_strategy_module_path:strategyModule,
+    expected_strategy_module_sha256:digest(fs.readFileSync(strategyModule)), expected_telemetry_module_path:telemetryModule,
+    expected_telemetry_module_sha256:digest(fs.readFileSync(telemetryModule)), source_preflight_status_path:path.join(root,'status.txt'),
   };
   const configFile = path.join(root, 'bridge.json');
   fs.writeFileSync(configFile, JSON.stringify(config));
@@ -43,10 +47,21 @@ test('registers verified operational Replay settings once and reuses them', t =>
   assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM ow_run_settings').get().n,1);
 });
 
-test('fails closed when the physical chartbook changes', t => {
+test('accepts Sierra chartbook persistence while preserving the initial provenance fingerprint', t => {
   const f=fixture();t.after(()=>{f.db.close();fs.rmSync(f.root,{recursive:true,force:true});});
+  assert.equal(reconcileOperationalReplayRunSettings(f.backend,f.configFile).chartbook_matches_initial_fingerprint,true);
   fs.writeFileSync(f.chartbook,'changed chart settings');
-  assert.throws(()=>reconcileOperationalReplayRunSettings(f.backend,f.configFile),/OPERATIONAL_CHARTBOOK_HASH_CONFLICT/);
+  const result=reconcileOperationalReplayRunSettings(f.backend,f.configFile);
+  assert.equal(result.idempotent,true);
+  assert.equal(result.chartbook_matches_initial_fingerprint,false);
+  assert.equal(result.chart_settings_hash,f.config.expected_chartbook_sha256);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM ow_run_settings').get().n,1);
+});
+
+test('fails closed when a pinned strategy module changes', t => {
+  const f=fixture();t.after(()=>{f.db.close();fs.rmSync(f.root,{recursive:true,force:true});});
+  fs.writeFileSync(f.config.expected_strategy_module_path,'changed strategy module');
+  assert.throws(()=>reconcileOperationalReplayRunSettings(f.backend,f.configFile),/OPERATIONAL_STRATEGY_MODULE_HASH_CONFLICT/);
   assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM ow_run_settings').get().n,0);
 });
 
