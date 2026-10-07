@@ -175,6 +175,12 @@ test('sufficient cumulative causal evidence produces a bounded review proposal w
   const content=JSON.parse(proposal.content);
   assert.equal(content.cumulative_evidence.trades,60);
   assert.equal(content.cumulative_evidence.net_profit_loss,500);
+  assert.equal(content.schema_version,'ocean-evidence-bound-learning-proposal/v2');
+  assert.equal(content.cumulative_evidence.independent_sessions_verified,false);
+  assert.match(content.cumulative_evidence.accounting_basis,/simulated.*not an independent broker/);
+  assert.match(content.cumulative_evidence.fee_provenance,/not independently verified/);
+  assert.match(content.legacy_segment_field_semantics,/not demonstrated repeatability/);
+  assert.ok(content.interpretation.some(value=>value.includes('lookahead')));
   assert.equal(content.strongest_repeatable_segments[0].value,'LONG');
   assert.equal(content.weakest_repeatable_segments[0].value,'SHORT');
   assert.equal(content.excluded_context[0].use,'CONTEXT_ONLY_NOT_ELIGIBLE_FOR_AGGREGATE');

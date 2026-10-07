@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { digest, objectHash, requireThat } from './common.mjs';
 
-export const RESEARCH_VERSION = 'ocean-cumulative-research/v2';
+// Versioned job/result IDs append v3 without claiming or rewriting v2 history.
+export const RESEARCH_VERSION = 'ocean-cumulative-research/v3';
 const unknown = value => !value || /^(unknown|none|null|n\/a)$/i.test(String(value).trim());
 const round = value => Math.round(value * 100) / 100;
 const authority = Object.freeze({ automatic_strategy_change:false, candidate_approved:false, paper_authorized:false, live_authorized:false });
@@ -18,11 +19,26 @@ function totals(rows) {
   };
 }
 
-// Exploratory exclusion tests use only entry-time fields, never an observed exit.
-// Cross-period agreement is a proposal screen, not out-of-sample validation.
+function historicalCoverage(ranges) {
+  if(!Array.isArray(ranges) || !ranges.length)return null;
+  const intervals=ranges.map(range=>({start:Date.parse(range.start_utc),end:Date.parse(range.end_utc)}));
+  if(intervals.some(range=>!Number.isFinite(range.start) || !Number.isFinite(range.end) || range.start>=range.end))return null;
+  intervals.sort((a,b)=>a.start-b.start || a.end-b.end);
+  const merged=[];
+  for(const range of intervals) {
+    const previous=merged.at(-1);
+    if(previous && range.start<=previous.end)previous.end=Math.max(previous.end,range.end);
+    else merged.push({...range});
+  }
+  return merged.map(range=>({start_utc:new Date(range.start).toISOString(),end_utc:new Date(range.end).toISOString()}));
+}
+
+// Only recorded entry direction can enter the exploratory proposal screen.
+// Signal labels have no independently proven pre-entry availability timestamp.
 export function evaluateResearch(bundle, rows) {
-  const eligibleIds = bundle.cohort.eligible_runs.map(run=>run.run_id).sort();
-  requireThat(rows.every(row=>eligibleIds.includes(row.run_id)),409,'RESEARCH_FOREIGN_EVIDENCE');
+  const sourceIds = bundle.cohort.eligible_runs.map(run=>run.run_id).sort();
+  requireThat(new Set(sourceIds).size===sourceIds.length,409,'RESEARCH_DUPLICATE_RUN');
+  requireThat(rows.every(row=>sourceIds.includes(row.run_id)),409,'RESEARCH_FOREIGN_EVIDENCE');
   const keys = rows.map(row=>`${row.run_id}:${row.trade_id}`);
   requireThat(new Set(keys).size===keys.length,409,'RESEARCH_DUPLICATE_TRADE');
   requireThat(rows.length===bundle.cohort.aggregate.observed_sample_count,409,'RESEARCH_SAMPLE_COUNT_CONFLICT');
@@ -32,19 +48,40 @@ export function evaluateResearch(bundle, rows) {
     && Number(row.total_commission)>=0
     && Math.abs(Number(row.gross_currency_value)-Number(row.total_commission)-Number(row.net_profit_loss))<0.001),
   409,'RESEARCH_FEE_RECONCILIATION_FAILED');
-  const perRun = eligibleIds.map(run_id=>({run_id,...totals(rows.filter(row=>row.run_id===run_id))}));
+
+  // Coverage only counts proposal-support periods. The verified upstream cohort
+  // retains distinct code/config/profile evidence and all of its recorded trades.
+  const eligibleIds=sourceIds;
+  const coverageByRun=eligibleIds.map(run_id=>{
+    const coverage=historicalCoverage(bundle.research_coverage?.[run_id]);
+    return {run_id,coverage,period_id:coverage?objectHash(coverage):null};
+  });
+  const periodIds=new Set(coverageByRun.map(run=>run.period_id).filter(Boolean));
+  const coverageProven=coverageByRun.every(run=>run.coverage!==null);
+  const perRun = coverageByRun.map(run=>({run_id:run.run_id,historical_period_id:run.period_id,
+    ...totals(rows.filter(row=>row.run_id===run.run_id))}));
   const experiments = [];
-  const dimensions = ['direction','session_name','regime_label'];
-  for(const dimension of dimensions) {
+  const observations = [];
+  for(const dimension of ['direction','session_name','regime_label']) {
     for(const value of new Set(rows.map(row=>row[dimension]).filter(value=>!unknown(value)))) {
       const selected=rows.filter(row=>row[dimension]===value);
-      const periods=perRun.map(run=>{
+      const runs=perRun.map(run=>{
         const group=selected.filter(row=>row.run_id===run.run_id);
-        return {run_id:run.run_id,...totals(group),observed_exclusion_delta:round(-totals(group).net_profit_loss)};
+        return {run_id:run.run_id,historical_period_id:run.historical_period_id,
+          ...totals(group),observed_exclusion_delta:round(-totals(group).net_profit_loss)};
       });
-      const supported=periods.length>=3 && periods.every(period=>period.trades>=10 && period.observed_exclusion_delta>0);
-      experiments.push({dimension,value,periods,observed_exclusion_delta:round(-totals(selected).net_profit_loss),
-        supported,reason:supported?'REPEATED_EXPLORATORY_LOSS_REGION':'INSUFFICIENT_OR_INCONSISTENT_CROSS_PERIOD_EVIDENCE'});
+      const proposalEligible=dimension==='direction';
+      const supported=proposalEligible && coverageProven && periodIds.size>=3
+        && runs.every(run=>run.trades>=10 && run.observed_exclusion_delta>0);
+      const breakdown={dimension,value,runs,observed_exclusion_delta:round(-totals(selected).net_profit_loss),
+        proposal_eligible:proposalEligible,lookahead_safe:proposalEligible,
+        availability_basis:proposalEligible?'RECORDED_ENTRY_DIRECTION':'PRE_ENTRY_LABEL_AVAILABILITY_NOT_INDEPENDENTLY_PROVEN',
+        supported,reason:!proposalEligible?'OBSERVATIONAL_LABEL_ONLY_NOT_LOOKAHEAD_SAFE'
+          :!coverageProven?'HISTORICAL_COVERAGE_NOT_PROVEN'
+          :supported?'REPEATED_EXPLORATORY_DIRECTION_LOSS':'INSUFFICIENT_OR_INCONSISTENT_HISTORICAL_COVERAGE_EVIDENCE'};
+      if(proposalEligible)experiments.push(breakdown);
+      else observations.push({...breakdown,label_basis:dimension==='session_name'
+        ?'RECORDED_SIGNAL_SESSION_LABEL_NOT_EXECUTION_SESSION':'RECORDED_REGIME_LABEL_NOT_PROVEN_AVAILABLE_AT_ENTRY'});
     }
   }
   const proposals=experiments.filter(item=>item.supported);
@@ -53,24 +90,37 @@ export function evaluateResearch(bundle, rows) {
     outcome:proposals.length?'EXPLORATORY_PROPOSAL':'NO_SUPPORTED_CHANGE',
     eligible_run_ids:eligibleIds,
     evidence_hash:objectHash(rows), cohort_hash:objectHash(bundle.cohort),
-    accounting_basis:'Executed closed-trade gross currency minus recorded commissions; wins use net P/L > 0.',
+    accounting_basis:'Recorded simulated execution gross P&L, logger-recorded fees and net (gross minus fees); wins use recorded net P&L > 0.',
+    fee_provenance:{basis:'OBSERVED_CURRENT_LOGGER_SCHEDULE',source_field:'total_commission',
+      historical_broker_fee_schedule_independently_verified:false,
+      note:'Fees are observed from the current simulation logger, not independently verified historical broker fees.'},
     aggregate:totals(rows), per_run:perRun,
     missing_exit_attribution:rows.filter(row=>unknown(row.exit_causality)).length,
-    observed_dates:new Set(rows.map(row=>Math.trunc(Number(row.entry_datetime)))).size,
-    experiments, proposals,
+    observed_sierra_date_count:new Set(rows.map(row=>Math.trunc(Number(row.entry_datetime)))).size,
+    date_count_basis:'Unique floored Sierra decimal entry dates; not sessions or independent periods.',
+    historical_periods:{basis:'DECLARED_REQUESTED_COVERAGE',counting_policy:'UNIQUE_COVERAGE_FOR_PROPOSAL_SUPPORT_ONLY',
+      accounting_runs_retained:true,distinct_coverage_count:periodIds.size,
+      statistical_independence_verified:false,
+      missing_coverage_run_ids:coverageByRun.filter(run=>run.coverage===null).map(run=>run.run_id),
+      runs:coverageByRun.map(run=>({run_id:run.run_id,historical_period_id:run.period_id,requested_coverage:run.coverage}))},
+    experiments, observational_breakdowns:observations, proposals,
     excluded_evidence:bundle.excluded_evidence,
     candidate_validation:{status:'NOT_DUE',candidate_hash:null,tests:['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'],
       reason:'Baseline discovery is not candidate validation; no frozen candidate or independent holdout was tested.'},
     limitations:[
       'Lifecycle model reports are not executed-trade accounting and are not blended into these totals.',
+      'P&L is recorded simulated execution, not verified historical broker execution; current logger fees are not an independently verified historical broker schedule.',
+      'Signal session_name and regime_label are observational, not lookahead-safe filters: their pre-entry availability is not independently proven.',
+      'A signal session label is not the execution session; an Asia signal label can accompany a London 08:00 entry.',
       'Unknown exit labels are missing attribution, not a profitable entry condition.',
       'Volatility quantile labels have run-specific thresholds and cannot define a cross-period numeric rule.',
-      'Observed dates and threshold sufficiency do not establish statistical independence or a probability of success.',
+      'Sierra decimal date counts, upstream session counts and distinct declared coverage do not prove sessions, independent periods, statistical independence or a probability of success.',
+      'Repeated exact coverage counts once for direction-proposal period support only; distinct upstream configurations and all qualified trades remain in accounting. Overlapping or distinct coverage is not proven independent.',
       'Exploratory exclusion deltas are in-sample and do not establish candidate performance.',
     ],
     next_action:proposals.length
-      ?'Review the exploratory proposal before freezing a separate candidate; test it on independent evidence. No trading change has been made.'
-      :'Keep the current baseline. No repeatable entry-time change is supported across every qualified period; collect new non-live evidence. No approval is pending.',
+      ?'Review the exploratory direction proposal before freezing a separate candidate; test it on independent evidence. No actual candidate exists and no trading change has been made.'
+      :'Keep the current baseline. No supported direction filter was found across every qualified historical coverage; collect new non-live evidence. No actual candidate exists. No approval is pending.',
     authority,
   };
   return result;
@@ -79,6 +129,11 @@ export function evaluateResearch(bundle, rows) {
 export class OperationalResearch {
   constructor(backend) { this.backend=backend;this.db=backend.db;this.running=false;this.stopped=false; }
   stop() {this.stopped=true;}
+  historicalCompletion(caseId,artifactId=null) {
+    return this.db.prepare(`SELECT * FROM ow_research_jobs WHERE case_id=? AND state='COMPLETED'
+      AND result_artifact_id IS NOT NULL AND (? IS NULL OR artifact_id=?) ORDER BY rowid DESC LIMIT 1`)
+      .get(caseId,artifactId,artifactId);
+  }
   enqueue(caseId,artifactId) {
     const row=this.backend.one('ow_cases',caseId);
     requireThat(JSON.parse(row.payload_json).origin==='OPERATIONAL_LEARNING',409,'RESEARCH_OPERATIONAL_CASE_REQUIRED');
@@ -87,6 +142,14 @@ export class OperationalResearch {
     requireThat(content.schema_version==='ocean-operational-learning-recommendation/v1'
       && Object.keys(authority).every(key=>content.authority?.[key]===false),409,'RESEARCH_AUTHORITY_BOUNDARY');
     const hash=JSON.parse(artifact.manifest_json).content_hash;
+    // Completed cases are historical snapshots, never automatic version backfill.
+    // Re-ACK keeps its completed job ID even if a newer trigger has superseded it.
+    if(row.work_status==='COMPLETED') {
+      const historical=this.historicalCompletion(caseId,artifactId);
+      requireThat(historical,409,'RESEARCH_COMPLETED_CASE_NO_BACKFILL');
+      requireThat(historical.artifact_hash===hash,409,'RESEARCH_INPUT_HASH_CONFLICT');
+      return historical;
+    }
     const id=`research-${digest(`${caseId}:${artifactId}:${RESEARCH_VERSION}`).slice(-24)}`;
     const existing=this.db.prepare('SELECT * FROM ow_research_jobs WHERE id=?').get(id);
     if(existing) { requireThat(existing.artifact_hash===hash,409,'RESEARCH_INPUT_HASH_CONFLICT');return existing; }
@@ -99,13 +162,21 @@ export class OperationalResearch {
   reconcile() {
     for(const row of this.db.prepare(`SELECT c.id,a.id artifact_id FROM ow_cases c JOIN ow_artifacts a ON a.case_id=c.id
       WHERE json_extract(c.payload_json,'$.origin')='OPERATIONAL_LEARNING' AND a.kind='RECOMMENDATION'
-      AND c.stage='RESEARCH' AND c.work_status NOT IN ('PAUSED','CANCELLED')`).all()) {
+      AND c.stage='RESEARCH' AND c.work_status NOT IN ('PAUSED','CANCELLED','COMPLETED')`).all()) {
       this.backend.store.transaction(()=>this.enqueue(row.id,row.artifact_id));
     }
   }
   statusForCase(caseId) {
-    const job=this.db.prepare('SELECT * FROM ow_research_jobs WHERE case_id=? ORDER BY rowid DESC LIMIT 1').get(caseId);
+    let job=this.db.prepare('SELECT * FROM ow_research_jobs WHERE case_id=? ORDER BY rowid DESC LIMIT 1').get(caseId);
     if(!job)return null;
+    const completedCase=this.backend.one('ow_cases',caseId).work_status==='COMPLETED';
+    const skipped=[];
+    if(completedCase && job.state!=='COMPLETED') {
+      skipped.push({job_id:job.id,analysis_version:job.analysis_version,state:job.state,input_hash:job.input_hash,
+        reason:'COMPLETED_HISTORICAL_CASE_VERSION_BACKFILL'});
+      const historical=this.historicalCompletion(caseId);
+      if(historical)job=historical;
+    }
     const artifact=job.result_artifact_id?this.backend.one('ow_artifacts',job.result_artifact_id):null;
     if(artifact)requireThat(digest(Buffer.from(artifact.content))===job.result_hash
       && JSON.parse(artifact.manifest_json).content_hash===job.result_hash,409,'RESEARCH_RESULT_HASH_CONFLICT');
@@ -114,14 +185,23 @@ export class OperationalResearch {
       result_artifact_id:job.result_artifact_id,result_hash:job.result_hash,last_error:job.last_error,
       input_hash:job.input_hash,
       completed_at_utc:job.completed_at_utc,report,
-      next_action:report?.next_action || (job.state==='RETRY'?'Ocean will retry Research automatically; no human approval is pending.':'Ocean Research is queued and will resume after a website restart.')};
+      historical:job.state==='COMPLETED' && (job.analysis_version!==RESEARCH_VERSION || skipped.length>0),
+      version_backfill_skipped:completedCase && (job.analysis_version!==RESEARCH_VERSION || skipped.length>0),
+      skipped_version_backfill_jobs:skipped,
+      next_action:completedCase && job.state==='COMPLETED' && (job.analysis_version!==RESEARCH_VERSION || skipped.length>0)
+        ?'Historical Research is completed and preserved. Completed cases are not version backfilled; new evidence cases use v3. No current version backfill is queued for this case and no candidate or approval is created.'
+        :completedCase && job.state!=='COMPLETED'
+          ?'This completed case has a retained historical queue entry but no completed Research report. Version backfill will not run; the entry is not current pending work and no completion is claimed.'
+        :report?.next_action || (job.state==='RETRY'?'Ocean will retry Research automatically; no human approval is pending.':'Ocean Research is queued and will resume after a website restart.')};
   }
   claim() {
     return this.backend.store.transaction(()=>{
       const job=this.db.prepare(`SELECT j.* FROM ow_research_jobs j JOIN ow_cases c ON c.id=j.case_id
         WHERE j.analysis_version=? AND ((j.state IN ('PENDING','RETRY') AND j.next_attempt_ms<=?)
-        OR (j.state='RUNNING' AND j.lease_until_ms<=?)) AND c.stage='RESEARCH' AND c.work_status NOT IN ('PAUSED','CANCELLED')
+        OR (j.state='RUNNING' AND j.lease_until_ms<=?)) AND c.stage='RESEARCH' AND c.work_status NOT IN ('PAUSED','CANCELLED','COMPLETED')
         ORDER BY j.rowid LIMIT 1`).get(RESEARCH_VERSION,Date.now(),Date.now());
+      // Schema 11 has no SKIPPED state. Completed-case backfills and any frozen
+      // inputs stay untouched and unclaimed across restarts; fresh cases use v3.
       if(!job)return null;
       const lease=randomUUID();
       this.db.prepare("UPDATE ow_research_jobs SET state='RUNNING',attempts=attempts+1,lease_id=?,lease_until_ms=? WHERE id=?")
@@ -135,7 +215,10 @@ export class OperationalResearch {
     const artifact=this.backend.artifactFor(row,job.artifact_id,'RECOMMENDATION');
     requireThat(digest(Buffer.from(artifact.content))===job.artifact_hash,409,'RESEARCH_INPUT_HASH_CONFLICT');
     const run=this.backend.one('ow_runs',row.run_id);
-    const bundle=this.backend.operationalLearning.cohort(run);
+    const source=this.backend.operationalLearning.cohort(run);
+    const bundle={...source,research_coverage:Object.fromEntries(source.cohort.eligible_runs.map(item=>[item.run_id,
+      this.backend.operationalLearning.classification(this.backend.one('ow_runs',item.run_id))
+        .summary?.completion?.requested_coverage || []]))};
     const database=new DatabaseSync(this.backend.operationalLearning.telemetryDb,{readOnly:true,timeout:2000});
     try {
       const rows=bundle.cohort.eligible_runs.flatMap(run=>database.prepare(`SELECT trade_id,run_id,entry_datetime,direction,

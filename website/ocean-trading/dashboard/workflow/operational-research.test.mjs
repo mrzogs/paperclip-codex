@@ -4,8 +4,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { WorkflowStore } from './store.mjs';
-import { digest, objectHash } from './common.mjs';
-import { OperationalResearch, evaluateResearch } from './operational-research.mjs';
+import { digest, objectHash, WorkflowError } from './common.mjs';
+import { OperationalLearning } from './operational-learning.mjs';
+import { RESEARCH_VERSION, OperationalResearch, evaluateResearch } from './operational-research.mjs';
 
 function sample() {
   const rows=['a','b','c'].flatMap((run_id,index)=>Array.from({length:20},(_,i)=>({
@@ -13,12 +14,17 @@ function sample() {
     session_name:'US',regime_label:'known',gross_currency_value:i<10?20:-10,total_commission:1,
     net_profit_loss:i<10?19:-11,exit_causality:i%2?'stop':'unknown',
   })));
-  const bundle={cohort:{eligible_runs:['a','b','c'].map(run_id=>({run_id})),aggregate:{observed_sample_count:60}},
-    excluded_evidence:[{run_id:'protected-holdout',exclusion_reason:'PROTECTED'}]};
+  const bundle={cohort:{eligible_runs:['a','b','c'].map((run_id,index)=>({run_id,observed_sample_count:20,
+    independent_session_count:1,as_of_utc:`2026-10-07T0${index+1}:00:00Z`,context_hash:digest(`config-${run_id}`)})),
+    aggregate:{observed_sample_count:60,eligible_run_count:3,independent_session_count:3,
+      minimum_sample_count:60,minimum_independent_session_count:3,confidence:100,uncertainty:0,evidence_status:'SUFFICIENT'}},
+    excluded_evidence:[{run_id:'protected-holdout',exclusion_reason:'PROTECTED'}],
+    research_coverage:Object.fromEntries(['a','b','c'].map((run_id,index)=>[run_id,
+      [{start_utc:`2025-0${index+1}-01T00:00:00Z`,end_utc:`2025-0${index+2}-01T00:00:00Z`}]]))};
   return {rows,bundle};
 }
 
-test('isolated real evaluator reconciles fees and screens only entry-time proposals',()=>{
+test('v3 evaluator reconciles recorded simulation fees and screens only entry direction',()=>{
   const {rows,bundle}=sample();const result=evaluateResearch(bundle,rows);
   assert.deepEqual(result.aggregate,{trades:60,gross_profit_loss:300,fees:60,net_profit_loss:240,
     wins:30,losses:30,flat:0,gross_wins:30,fee_flipped_wins:0});
@@ -26,7 +32,106 @@ test('isolated real evaluator reconciles fees and screens only entry-time propos
   assert.equal(result.proposals.length,1);assert.equal(result.proposals[0].dimension,'direction');
   assert.equal(result.proposals[0].value,'short');assert.equal(result.missing_exit_attribution,30);
   assert.equal(result.candidate_validation.status,'NOT_DUE');assert.equal(result.authority.live_authorized,false);
-  assert.ok(result.experiments.every(value=>value.dimension!=='exit_causality'));
+  assert.equal(result.schema_version,'ocean-cumulative-research/v3');
+  assert.ok(result.experiments.every(value=>value.dimension==='direction' && value.proposal_eligible && value.lookahead_safe));
+  assert.ok(result.observational_breakdowns.every(value=>!value.proposal_eligible && !value.lookahead_safe && !value.supported));
+  assert.deepEqual(result.authority,{automatic_strategy_change:false,candidate_approved:false,paper_authorized:false,live_authorized:false});
+});
+
+test('losing session and regime groups never become proposals, even when all directions also lose',()=>{
+  const {rows,bundle}=sample();
+  for(const row of rows) {row.gross_currency_value=-10;row.net_profit_loss=-11;}
+  const result=evaluateResearch(bundle,rows);
+  assert.deepEqual(result.proposals.map(item=>[item.dimension,item.value]),[['direction','long'],['direction','short']]);
+  assert.ok(result.observational_breakdowns.every(item=>item.observed_exclusion_delta>0 && !item.supported && !item.proposal_eligible));
+  assert.ok(result.observational_breakdowns.every(item=>item.reason==='OBSERVATIONAL_LABEL_ONLY_NOT_LOOKAHEAD_SAFE'));
+});
+
+test('signal session labels remain observational despite profitable-looking exclusions or claimed availability',()=>{
+  const {rows,bundle}=sample();
+  for(const [index,row] of rows.entries()) {
+    const loss=index%20<5 || (index%20>=10 && index%20<15);
+    row.session_name=loss?'Asia':'London';row.regime_label=loss?'high-vol':'low-vol';
+    row.gross_currency_value=loss?-10:20;row.net_profit_loss=loss?-11:19;
+    // Synthetic audit regression: signal label Asia, recorded execution London 08:00.
+    row.execution_session='London';row.execution_time_label='08:00';row.session_available_before_entry=true;
+    row.entry_datetime=Math.trunc(row.entry_datetime)+8/24;
+  }
+  rows[0].trade_id=905;
+  const result=evaluateResearch(bundle,rows);
+  const asia=result.observational_breakdowns.find(item=>item.dimension==='session_name' && item.value==='Asia');
+  assert.ok(asia.runs.every(run=>run.trades===10 && run.observed_exclusion_delta>0));
+  assert.equal(asia.label_basis,'RECORDED_SIGNAL_SESSION_LABEL_NOT_EXECUTION_SESSION');
+  assert.equal(asia.availability_basis,'PRE_ENTRY_LABEL_AVAILABILITY_NOT_INDEPENDENTLY_PROVEN');
+  assert.equal(asia.lookahead_safe,false);assert.equal(asia.supported,false);
+  assert.equal(result.outcome,'NO_SUPPORTED_CHANGE');assert.deepEqual(result.proposals,[]);
+  assert.equal(result.candidate_validation.candidate_hash,null);
+  assert.match(result.next_action,/No supported direction filter.*No actual candidate exists/);
+  assert.ok(result.limitations.some(value=>/Asia signal label.*London 08:00/.test(value)));
+});
+
+test('period labels distinguish declared coverage and Sierra decimal dates from independent sessions',()=>{
+  const {rows,bundle}=sample();
+  for(const [index,row] of rows.entries())row.entry_datetime=45000+(index%20)/24;
+  const result=evaluateResearch(bundle,rows);
+  assert.equal(result.observed_sierra_date_count,1);
+  assert.equal(result.observed_dates,undefined);assert.equal(result.independent_observed_dates,undefined);
+  assert.match(result.date_count_basis,/Sierra decimal.*not sessions or independent periods/);
+  assert.equal(result.historical_periods.basis,'DECLARED_REQUESTED_COVERAGE');
+  assert.equal(result.historical_periods.distinct_coverage_count,3);
+  assert.equal(result.historical_periods.statistical_independence_verified,false);
+  assert.ok(result.limitations.some(value=>/upstream session counts.*do not prove sessions/.test(value)));
+});
+
+test('different configurations with repeated coverage retain all accounting but supply only one support period',()=>{
+  const {rows,bundle}=sample();const before=objectHash({rows,bundle});
+  bundle.research_coverage.b=[
+    {start_utc:'2025-01-16T00:00:00Z',end_utc:'2025-02-01T00:00:00Z'},
+    {start_utc:'2025-01-01T00:00:00Z',end_utc:'2025-01-16T00:00:00Z'},
+  ];
+  const inputHash=objectHash({rows,bundle});
+  const result=evaluateResearch(bundle,rows);
+  assert.notEqual(bundle.cohort.eligible_runs[0].context_hash,bundle.cohort.eligible_runs[1].context_hash);
+  assert.deepEqual(result.eligible_run_ids,['a','b','c']);
+  assert.equal(result.aggregate.trades,60);assert.equal(result.aggregate.net_profit_loss,240);
+  assert.deepEqual(result.per_run.map(run=>run.trades),[20,20,20]);
+  assert.equal(result.historical_periods.distinct_coverage_count,2);
+  assert.equal(result.historical_periods.runs[0].historical_period_id,result.historical_periods.runs[1].historical_period_id);
+  assert.equal(result.historical_periods.accounting_runs_retained,true);
+  assert.deepEqual(result.excluded_evidence,bundle.excluded_evidence,'no invented wire exclusion codes');
+  assert.equal(result.cohort_hash,objectHash(bundle.cohort));assert.equal(result.evidence_hash,objectHash(rows));
+  assert.equal(result.outcome,'NO_SUPPORTED_CHANGE');assert.deepEqual(result.proposals,[]);
+  assert.equal(objectHash({rows,bundle}),inputHash,'evaluator does not rewrite source evidence');
+  assert.notEqual(inputHash,before,'fixture actually supplied repeated historical coverage');
+});
+
+test('later completion does not replace a qualified distinct configuration with the same coverage',()=>{
+  const {rows,bundle}=sample();
+  bundle.research_coverage.b=bundle.research_coverage.a;
+  bundle.cohort.eligible_runs[0].as_of_utc='2026-10-07T04:00:00Z';
+  const result=evaluateResearch(bundle,rows);
+  assert.deepEqual(result.eligible_run_ids,['a','b','c']);
+  assert.equal(result.aggregate.trades,60);assert.equal(result.historical_periods.distinct_coverage_count,2);
+  assert.equal(result.outcome,'NO_SUPPORTED_CHANGE');
+});
+
+test('unproven historical coverage cannot supply a direction proposal period',()=>{
+  const {rows,bundle}=sample();delete bundle.research_coverage.b;
+  const result=evaluateResearch(bundle,rows);
+  assert.equal(result.aggregate.trades,60);
+  assert.equal(result.outcome,'NO_SUPPORTED_CHANGE');
+  assert.deepEqual(result.historical_periods.missing_coverage_run_ids,['b']);
+  assert.ok(result.experiments.every(item=>!item.supported && item.reason==='HISTORICAL_COVERAGE_NOT_PROVEN'));
+});
+
+test('fee provenance is current logger observation, not verified historical broker fees',()=>{
+  const {rows,bundle}=sample();const result=evaluateResearch(bundle,rows);
+  assert.match(result.accounting_basis,/Recorded simulated execution gross P&L.*logger-recorded fees and net/);
+  assert.deepEqual(result.fee_provenance,{basis:'OBSERVED_CURRENT_LOGGER_SCHEDULE',source_field:'total_commission',
+    historical_broker_fee_schedule_independently_verified:false,
+    note:'Fees are observed from the current simulation logger, not independently verified historical broker fees.'});
+  assert.equal(result.aggregate.gross_profit_loss-result.aggregate.fees,result.aggregate.net_profit_loss);
+  assert.ok(result.limitations.some(value=>/not verified historical broker execution/.test(value)));
 });
 
 test('mixed periods finish Research with no supported change rather than inventing a candidate',()=>{
@@ -68,10 +173,63 @@ function queueFixture() {
   db.prepare('INSERT INTO ow_artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?,?)')
     .run('a','s','r','case','brain','strategy','RECOMMENDATION',null,hash,'[]',JSON.stringify({content_hash:digest(content)}),Buffer.from(content));
   const backend={db,store,one:(table,id)=>backend.db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id),
-    artifactFor:(_,id)=>backend.one('ow_artifacts',id),event(){},operationalLearning:{enabled:true}};
+    artifactFor:(_,id)=>backend.one('ow_artifacts',id),event(){},
+    operationalLearning:{enabled:true,cohort:run=>({cohort:{eligible_runs:[{run_id:run.id}]}})},
+    writeArtifact(_actor,data) {
+      backend.db.prepare('INSERT INTO ow_artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(data.artifact_id,'s',data.run_id,
+        data.case_id,'brain',data.recipient_id,data.kind,null,hash,JSON.stringify(data.dependency_ids),
+        JSON.stringify({content_hash:data.content_hash}),Buffer.from(data.content));
+    }};
   let worker=new OperationalResearch(backend);
-  return {backend,get worker(){return worker;},restart(){store.close();store=new WorkflowStore(file);backend.store=store;backend.db=store.db;worker=new OperationalResearch(backend);},
+  return {backend,file,get worker(){return worker;},restart(){store.close();store=new WorkflowStore(file);backend.store=store;backend.db=store.db;worker=new OperationalResearch(backend);},
     close(){store.close();fs.rmSync(root,{recursive:true,force:true});}};
+}
+
+function historicalFixture() {
+  const f=queueFixture();
+  const version='ocean-cumulative-research/v2';
+  const id=`research-${digest(`case:a:${version}`).slice(-24)}`;
+  const artifactId=`test-research-result-${id.slice('research-'.length)}`;
+  const report=JSON.stringify({schema_version:version,outcome:'NO_SUPPORTED_CHANGE',next_action:'Original v2 report instruction.'});
+  const input=JSON.stringify({result:JSON.parse(report),evidence:{historical:true}});
+  const request=JSON.stringify({correlation:{job_id:id},historical:true});
+  f.backend.writeArtifact(null,{artifact_id:artifactId,case_id:'case',run_id:'r',recipient_id:'strategy',kind:'OUTCOME',
+    content:report,content_hash:digest(report),dependency_ids:['a']});
+  f.backend.db.prepare(`INSERT INTO ow_research_jobs(id,case_id,artifact_id,artifact_hash,analysis_version,state,
+    next_attempt_ms,created_at_utc,input_json,input_hash,brain_request_json,brain_request_hash,result_artifact_id,result_hash)
+    VALUES(?,?,?,?,?,'COMPLETED',?,?,?,?,?,?,?,?)`).run(id,'case','a',JSON.parse(f.backend.one('ow_artifacts','a').manifest_json).content_hash,
+      version,0,'2026-10-07T00:00:00Z',input,digest(input),request,digest(request),artifactId,digest(report));
+  f.backend.db.prepare("UPDATE ow_cases SET work_status='COMPLETED' WHERE id='case'").run();
+  // Use the REAL learner cohort/evidenceIdentity supersession algorithm. Only
+  // classification/summary providers are isolated fixtures; no live telemetry/API.
+  const learner=new OperationalLearning(f.backend,{enabled:true});
+  const coverage=[{start_utc:'2025-01-01T00:00:00Z',end_utc:'2025-02-01T00:00:00Z'}];
+  learner.classification=()=>({eligible:true,reasons:[],context:{strategy_version:'1',strategy_code_hash:digest('code'),
+    strategy_config_hash:digest('config'),strategy_profile_id:'p',strategy_profile_version:'1',execution_instance_id:'i',
+    source_installation_id:'replay',expected_environment:'REPLAY',evidence_purpose:'HISTORICAL_BUILD',
+    dataset_partition:'DISCOVERY',learner_permission:'HISTORICAL_DISCOVERY'},summary:{completion:{requested_coverage:coverage}}});
+  learner.evidencePolicy=()=>({minimum_sample_count:10,minimum_independent_session_count:1});
+  learner.runSummary=run=>({summary:{run_id:run.id,observed_sample_count:20,independent_session_count:1,
+    source_record_ids:[run.id]},metrics:{},telemetry:{}});
+  f.backend.operationalLearning=learner;
+  const original=f.backend.one('ow_research_jobs',id);
+  const originalArtifact=f.backend.one('ow_artifacts',artifactId);
+  return {...f,legacyId:id,original,originalArtifact,
+    get worker(){return f.worker;},
+    restart(){f.restart();learner.db=f.backend.db;},
+    supersede() {
+      f.backend.db.prepare('INSERT INTO ow_runs VALUES(?,?,?,1,?,?)').run('U25','s','i','COMPLETED','{}');
+      f.backend.db.prepare("INSERT INTO ow_cases VALUES(?,?,?,?,1,'RESEARCH','READY',?,NULL,'brain',NULL,?)")
+        .run('case-u25','s','i','U25',digest('baseline'),JSON.stringify({origin:'OPERATIONAL_LEARNING'}));
+      const content=Buffer.from(f.backend.one('ow_artifacts','a').content).toString('utf8');
+      f.backend.writeArtifact(null,{artifact_id:'a-u25',case_id:'case-u25',run_id:'U25',recipient_id:'strategy',kind:'RECOMMENDATION',
+        content,content_hash:digest(content),dependency_ids:[]});
+    },
+    assertPreserved() {
+      assert.deepEqual(f.backend.one('ow_research_jobs',id),original);
+      assert.deepEqual(f.backend.one('ow_artifacts',artifactId),originalArtifact);
+      assert.equal(f.backend.one('ow_cases','case').work_status,'COMPLETED');
+    }};
 }
 
 test('real SQLite queue commits before delivery and enqueues idempotently across restart',()=>{
@@ -80,6 +238,129 @@ test('real SQLite queue commits before delivery and enqueues idempotently across
     f.restart();const again=f.worker.enqueue('case','a');assert.equal(first.id,again.id);
     assert.equal(f.backend.db.prepare('SELECT COUNT(*) n FROM ow_research_jobs').get().n,1);
     assert.equal(again.state,'PENDING');
+  }finally{f.close();}
+});
+
+test('v3 jobs and results append without claiming, relabelling or rewriting v2 history',()=>{
+  for(const state of ['PENDING','COMPLETED']) {
+    const f=queueFixture();try {
+      const version='ocean-cumulative-research/v2';
+      const legacyId=`research-${digest(`case:a:${version}`).slice(-24)}`;
+      const legacyArtifact=`test-research-result-${legacyId.slice('research-'.length)}`;
+      const legacyReport=JSON.stringify({schema_version:version,outcome:'EXPLORATORY_PROPOSAL',observed_dates:3});
+      f.backend.writeArtifact(null,{artifact_id:legacyArtifact,case_id:'case',run_id:'r',recipient_id:'strategy',kind:'OUTCOME',
+        content:legacyReport,content_hash:digest(legacyReport),dependency_ids:['a']});
+      const sourceHash=JSON.parse(f.backend.one('ow_artifacts','a').manifest_json).content_hash;
+      f.backend.db.prepare(`INSERT INTO ow_research_jobs(id,case_id,artifact_id,artifact_hash,analysis_version,state,
+        next_attempt_ms,created_at_utc,input_json,input_hash,result_artifact_id,result_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(legacyId,'case','a',sourceHash,
+          version,state,0,'2026-10-07T00:00:00Z',legacyReport,digest(legacyReport),
+          state==='COMPLETED'?legacyArtifact:null,state==='COMPLETED'?digest(legacyReport):null);
+      const original=f.backend.one('ow_research_jobs',legacyId);
+      const originalArtifact=f.backend.one('ow_artifacts',legacyArtifact);
+      const appended=f.worker.enqueue('case','a');
+      assert.equal(appended.analysis_version,RESEARCH_VERSION);assert.notEqual(appended.id,legacyId);
+      const job=f.worker.claim();assert.equal(job.id,appended.id);assert.equal(job.analysis_version,'ocean-cumulative-research/v3');
+      const {rows,bundle}=sample();const status=f.worker.complete(job,evaluateResearch(bundle,rows),{id:'brain'},'strategy');
+      assert.equal(status.report.schema_version,RESEARCH_VERSION);assert.notEqual(status.result_artifact_id,legacyArtifact);
+      f.restart();
+      assert.deepEqual(f.backend.one('ow_research_jobs',legacyId),original);
+      assert.deepEqual(f.backend.one('ow_artifacts',legacyArtifact),originalArtifact);
+      assert.equal(f.worker.enqueue('case','a').id,appended.id);
+      assert.equal(f.backend.db.prepare('SELECT COUNT(*) n FROM ow_research_jobs').get().n,2);
+      assert.equal(f.worker.claim(),null,'v3 worker never claims the remaining v2 job');
+    }finally{f.close();}
+  }
+});
+
+test('real cohort supersession skips completed U version backfill and re-ACK retains the historical v2 job',()=>{
+  const f=historicalFixture();try {
+    f.supersede();
+    assert.throws(()=>f.backend.operationalLearning.cohort(f.backend.one('ow_runs','r')),
+      error=>error.code==='TRIGGER_RUN_NOT_IN_ELIGIBLE_COHORT');
+    for(let i=0;i<3;i++) {
+      f.worker.reconcile();
+      assert.equal(f.worker.enqueue('case','a').id,f.legacyId,'re-ACK uses the already completed historical job');
+    }
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_research_jobs WHERE case_id='case'").get().n,1);
+    const status=f.worker.statusForCase('case');
+    assert.equal(status.state,'COMPLETED');assert.equal(status.analysis_version,'ocean-cumulative-research/v2');
+    assert.equal(status.historical,true);assert.equal(status.current_trigger_eligible,undefined);assert.equal(status.version_backfill_skipped,true);
+    assert.match(status.next_action,/Historical Research.*Completed cases are not version backfilled.*No current version backfill/);
+    const current=f.worker.claim();assert.equal(current.case_id,'case-u25');
+    assert.equal(current.analysis_version,RESEARCH_VERSION);assert.equal(f.worker.claim(),null);
+    f.restart();f.worker.reconcile();
+    assert.equal(f.worker.statusForCase('case').job_id,f.legacyId);
+    f.assertPreserved();
+  }finally{f.close();}
+});
+
+test('completed cases are not version backfilled even when their trigger still qualifies',()=>{
+  const f=historicalFixture();try {
+    assert.equal(f.backend.operationalLearning.cohort(f.backend.one('ow_runs','r')).cohort.eligible_runs[0].run_id,'r');
+    f.worker.reconcile();assert.equal(f.worker.enqueue('case','a').id,f.legacyId);
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_research_jobs WHERE case_id='case'").get().n,1);
+    assert.equal(f.worker.claim(),null);f.assertPreserved();
+  }finally{f.close();}
+});
+
+function seedVersionBackfill(f,state='PENDING',snapshot=null) {
+  // Isolated fixture reproduces a pre-fix backfill record, not a runtime DB repair.
+  const id=`research-${digest(`case:a:${RESEARCH_VERSION}`).slice(-24)}`;
+  const input=snapshot?JSON.stringify(snapshot):null;
+  f.backend.db.prepare(`INSERT INTO ow_research_jobs(id,case_id,artifact_id,artifact_hash,analysis_version,state,
+    attempts,next_attempt_ms,created_at_utc,input_json,input_hash,last_error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(id,'case','a',f.original.artifact_hash,RESEARCH_VERSION,state,state==='RETRY'?3:0,0,'2026-10-07T01:00:00Z',
+      input,input?digest(input):null,state==='RETRY'?'TRIGGER_RUN_NOT_IN_ELIGIBLE_COHORT':null);
+  return f.backend.one('ow_research_jobs',id);
+}
+
+test('uncaptured pending/retry backfills never retry or hide the completed historical report across restart',()=>{
+  for(const state of ['PENDING','RETRY']) {
+  const f=historicalFixture();try {
+    const pending=seedVersionBackfill(f,state);
+    assert.equal(pending.input_json,null);
+    f.supersede();f.worker.reconcile();
+    assert.equal(f.worker.claim().case_id,'case-u25','historical backfill does not starve the current U25 job');
+    for(let i=0;i<3;i++) {assert.equal(f.worker.claim(),null);f.worker.reconcile();}
+    f.restart();assert.equal(f.worker.claim(),null);
+    assert.deepEqual(f.backend.one('ow_research_jobs',pending.id),pending,'no attempts, retries, state change or input rewrite');
+    const status=f.worker.statusForCase('case');
+    assert.equal(status.job_id,f.legacyId);assert.equal(status.state,'COMPLETED');assert.equal(status.last_error,null);
+    assert.deepEqual(status.skipped_version_backfill_jobs,[{job_id:pending.id,analysis_version:RESEARCH_VERSION,state,input_hash:null,
+      reason:'COMPLETED_HISTORICAL_CASE_VERSION_BACKFILL'}]);
+    assert.equal(status.version_backfill_skipped,true);f.assertPreserved();
+  }finally{f.close();}
+  }
+});
+
+test('completed-case backfill with frozen input remains immutable history, unclaimed and never rebased',()=>{
+  const f=historicalFixture();try {
+    const {rows,bundle}=sample();
+    const captured={result:evaluateResearch(bundle,rows),evidence:{bundle:{cohort:bundle.cohort,excluded_evidence:bundle.excluded_evidence},
+      row:{...f.backend.one('ow_cases','case')},context:{},completion_hash:digest('completion'),recipient:'strategy'}};
+    const original=seedVersionBackfill(f,'PENDING',captured);
+    f.supersede();f.restart();
+    assert.equal(f.worker.claim(),null,'captured input does not reopen a completed case');
+    f.worker.evidence=()=>{throw Error('must not rebase captured history onto U25');};
+    assert.deepEqual(f.worker.capture(original),captured);
+    const status=f.worker.statusForCase('case');
+    assert.equal(status.state,'COMPLETED');assert.equal(status.analysis_version,'ocean-cumulative-research/v2');
+    assert.equal(status.skipped_version_backfill_jobs[0].input_hash,original.input_hash);
+    assert.deepEqual(f.backend.one('ow_research_jobs',original.id),original);
+    assert.equal(f.backend.one('ow_research_jobs',original.id).input_json,original.input_json);
+    assert.equal(f.backend.one('ow_research_jobs',original.id).input_hash,original.input_hash);
+    assert.equal(status.current_trigger_eligible,undefined);f.assertPreserved();
+  }finally{f.close();}
+});
+
+test('completed historical status/re-ACK/reconciliation do not require live cohort revalidation',()=>{
+  const f=historicalFixture();try {
+    f.backend.operationalLearning.cohort=()=>{throw new WorkflowError(503,'TELEMETRY_UNAVAILABLE');};
+    f.worker.reconcile();assert.equal(f.worker.enqueue('case','a').id,f.legacyId);
+    assert.equal(f.worker.statusForCase('case').state,'COMPLETED');
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_research_jobs WHERE case_id='case'").get().n,1);
+    f.assertPreserved();
   }finally{f.close();}
 });
 
@@ -127,6 +408,65 @@ test('captured Research input is immutable and reused after restart without rere
   }finally{f.close();}
 });
 
+test('v3 snapshot preserves upstream cohort/exclusions/aggregates while period support stays internal',()=>{
+  const f=queueFixture();try {
+    const {rows,bundle}=sample();
+    bundle.research_coverage.b=bundle.research_coverage.a;
+    f.worker.evidence=()=>({rows,bundle,row:{strategy_id:'s'},context:{run_id:'r'},completion_hash:digest('completion'),recipient:'strategy'});
+    f.worker.enqueue('case','a');const captured=f.worker.capture(f.worker.claim());
+    assert.deepEqual(captured.evidence.bundle.cohort.eligible_runs.map(run=>run.run_id),captured.result.eligible_run_ids);
+    assert.equal(captured.evidence.bundle.cohort.aggregate.observed_sample_count,captured.result.aggregate.trades);
+    assert.deepEqual(captured.evidence.bundle.cohort,bundle.cohort,'no upstream retally or invented fields');
+    assert.equal(captured.evidence.bundle.cohort.aggregate.eligible_run_count,3);
+    assert.equal(captured.evidence.bundle.cohort.aggregate.confidence,100);
+    assert.equal(captured.evidence.bundle.cohort.aggregate.uncertainty,0);
+    assert.equal(captured.evidence.bundle.cohort.aggregate.evidence_status,'SUFFICIENT');
+    assert.ok(captured.evidence.bundle.cohort.eligible_runs.every(run=>run.requested_coverage===undefined),'no extra upstream wire fields');
+    assert.equal(objectHash(captured.evidence.bundle.cohort),captured.result.cohort_hash);
+    assert.deepEqual(captured.evidence.bundle.excluded_evidence,captured.result.excluded_evidence);
+    assert.deepEqual(captured.result.excluded_evidence,bundle.excluded_evidence);
+    assert.equal(captured.evidence.bundle.research_coverage,undefined,'coverage is report-only provenance');
+    assert.equal(captured.result.aggregate.trades,60);assert.equal(captured.result.historical_periods.distinct_coverage_count,2);
+    assert.equal(captured.result.outcome,'NO_SUPPORTED_CHANGE');
+  }finally{f.close();}
+});
+
+test('real read-only extraction binds internal completion coverage without changing the qualified wire cohort',()=>{
+  const f=queueFixture();try {
+    const {rows,bundle}=sample();
+    bundle.cohort.eligible_runs[0].run_id='r';
+    for(const row of rows)if(row.run_id==='a')row.run_id='r';
+    bundle.research_coverage.r=bundle.research_coverage.a;delete bundle.research_coverage.a;
+    bundle.research_coverage.b=bundle.research_coverage.r;
+    for(const run_id of ['b','c'])f.backend.db.prepare('INSERT INTO ow_runs VALUES(?,?,?,1,?,?)').run(run_id,'s','i','COMPLETED','{}');
+    f.backend.db.exec(`CREATE TABLE ocean_trade_causal_v2(trade_id INTEGER,run_id TEXT,entry_datetime REAL,direction TEXT,
+      gross_currency_value REAL,total_commission REAL,net_profit_loss REAL,exit_causality TEXT,session_name TEXT,regime_label TEXT,status TEXT)`);
+    const insert=f.backend.db.prepare('INSERT INTO ocean_trade_causal_v2 VALUES(?,?,?,?,?,?,?,?,?,?,?)');
+    f.backend.store.transaction(()=>{
+      for(const row of rows)insert.run(row.trade_id,row.run_id,row.entry_datetime,row.direction,row.gross_currency_value,
+        row.total_commission,row.net_profit_loss,row.exit_causality,row.session_name,row.regime_label,'closed');
+    });
+    const classifications=[];
+    f.backend.baseline=()=>{}; // Isolated backend fixture, not a deployed policy probe.
+    f.backend.operationalLearning={enabled:true,telemetryDb:f.file,cohort:()=>bundle,
+      classification(run) {
+        classifications.push(run.id);
+        return {summary:{completion:{requested_coverage:bundle.research_coverage[run.id]}}};
+      }};
+    f.worker.enqueue('case','a');const captured=f.worker.capture(f.worker.claim());
+    assert.deepEqual(classifications,['r','b','c','r']);
+    assert.deepEqual(captured.result.eligible_run_ids,['b','c','r'],'all qualified configurations retained');
+    assert.equal(captured.result.aggregate.trades,60);assert.equal(captured.result.outcome,'NO_SUPPORTED_CHANGE');
+    assert.equal(captured.result.historical_periods.distinct_coverage_count,2);
+    assert.deepEqual(captured.evidence.bundle.cohort,bundle.cohort);
+    assert.deepEqual(captured.evidence.bundle.excluded_evidence,bundle.excluded_evidence);
+    assert.equal(captured.evidence.row.run_id,'r');
+    assert.ok(captured.evidence.bundle.cohort.eligible_runs.some(run=>run.run_id===captured.evidence.row.run_id));
+    assert.equal(objectHash(captured.evidence.bundle.cohort),captured.result.cohort_hash);
+    assert.ok(captured.result.historical_periods.runs.every(run=>run.requested_coverage.length===1));
+  }finally{f.close();}
+});
+
 test('mock Brain crash-after-write resumes the exact persisted request and rejects invalid responses',async()=>{
   const f=queueFixture();try {
     const {rows,bundle}=sample();bundle.policy={project:'project',strategy_name:'Strategy'};
@@ -153,6 +493,8 @@ test('mock Brain crash-after-write resumes the exact persisted request and rejec
     assert.equal(objectHash(calls[0]),objectHash(calls[1]));
     assert.ok(calls[0].proposed_recommendation.content.length<=50000);
     assert.equal(calls[0].excluded_evidence[0].diagnostic.length,60000);
+    assert.deepEqual(calls[0].cohort,bundle.cohort,'protected wire cohort is unchanged');
+    assert.deepEqual(calls[0].excluded_evidence,bundle.excluded_evidence,'only upstream exclusions enter the wire request');
     assert.throws(()=>f.backend.db.prepare("UPDATE ow_research_jobs SET brain_request_json='{}'").run(),/immutable Research request/);
     f.backend.operationalLearning.call=async()=>({content:'{}'});
     await assert.rejects(f.worker.recordInBrain(resumed,evidence,result),/RESEARCH_BRAIN_RESPONSE_INVALID/);

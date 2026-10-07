@@ -422,7 +422,7 @@ function runPage(data) {
   ])) : '') + facts([
     ['Strategy', link('strategies', context.strategy_id, data.strategy_name)], ['Instance', esc(context.execution_instance_id)], ['Purpose', esc(human(context.evidence_purpose))],
     ['Declared environment', esc(context.expected_environment)], ['Observed environment', esc(observed.environment)], ['Source quality', badge(observed.quality)], ['Observation time', esc(date(observed.observed_at_utc))], ['Strategy version', esc(context.strategy_version)], ['Dataset scope', `${esc(context.dataset_manifest_id)} / revision ${esc(context.dataset_manifest_revision)}`], ['Scored interval', data.manager?.plan?.selection?.interval ? `${esc(data.manager.plan.selection.interval.start_utc)} to ${esc(data.manager.plan.selection.interval.end_utc)}` : 'Not recorded'],
-    ['Persisted event receipts', esc(data.receipt_counts ? data.receipt_counts.workflow + data.receipt_counts.trades : incoming.length)], ['Persisted analysis callbacks', esc(data.receipt_counts?.analysis_complete ?? incoming.filter(event => event.payload.analysis_complete === true).length)], ['Learner permission', esc(context.learner_permission)],
+    ['Persisted service-event receipts', esc(data.receipt_counts ? data.receipt_counts.workflow + data.receipt_counts.trades : incoming.length)], ['Persisted analysis callbacks', esc(data.receipt_counts?.analysis_complete ?? incoming.filter(event => event.payload.analysis_complete === true).length)], ['Learner permission', esc(context.learner_permission)],
   ]) + (observed.environment !== 'UNKNOWN' && context.expected_environment !== observed.environment ? `<p class='form-error'>Observed source does not match the declared environment.</p>` : '') + section('Learning loop',learningBody) + section('Pinned run context', `<pre>${esc(JSON.stringify(context, null, 2))}</pre>`) + section('Completion and coverage', completion ? `<pre>${esc(JSON.stringify(completion, null, 2))}</pre>` : empty('No completion receipt recorded.')) + section('Run history', timeline(data.events));
 }
 function caseProgress(data) {
@@ -443,8 +443,9 @@ function researchPanel(research) {
     ['Result',research.result_artifact_id?link('artifacts',research.result_artifact_id,'View full Research report'):'Pending'],
   ]) + (report?facts([
     ['Qualified history',`${report.eligible_run_ids.length} runs / ${report.aggregate.trades} closed trades`],
-    ['Executed gross P/L',esc(report.aggregate.gross_profit_loss)],['Recorded fees',esc(report.aggregate.fees)],
-    ['Executed net P/L',esc(report.aggregate.net_profit_loss)],['Net wins / losses / flat',`${report.aggregate.wins} / ${report.aggregate.losses} / ${report.aggregate.flat}`],
+    ['Simulated execution gross P/L',esc(report.aggregate.gross_profit_loss)],['Recorded fees',esc(report.aggregate.fees)],
+    ['Simulated execution net P/L',esc(report.aggregate.net_profit_loss)],['Net wins / losses / flat',`${report.aggregate.wins} / ${report.aggregate.losses} / ${report.aggregate.flat}`],
+    ['Accounting basis',esc(report.accounting_basis)],
     ['Missing exit attribution',esc(report.missing_exit_attribution)],
     ['Candidate validation',badge(report.candidate_validation.status)],
     ['Research Brain record',esc(report.brain_record?.record_id || 'Not recorded')],

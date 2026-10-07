@@ -118,6 +118,8 @@ function causalSummary(rows) {
   return {
     trades: rows.length,
     independent_sessions: new Set(rows.map(row => Math.trunc(Number(row.entry_datetime))).filter(Number.isFinite)).size,
+    session_count_basis: 'Distinct Sierra decimal entry dates; legacy field, not verified independent exchange sessions.',
+    independent_sessions_verified: false,
     trade_ids: rows.map(row => String(row.trade_id)),
     groups: [...groups.values()].map(group => ({
       ...group.dimensions,
@@ -207,7 +209,7 @@ export function cumulativeLearningProposal(bundle) {
     };
   });
   const content = {
-    schema_version: 'ocean-evidence-bound-learning-proposal/v1',
+    schema_version: 'ocean-evidence-bound-learning-proposal/v2',
     strategy_id: bundle.policy.project,
     eligible_run_ids: eligible.map(value => value.run_id).sort(),
     cumulative_evidence: {
@@ -218,16 +220,23 @@ export function cumulativeLearningProposal(bundle) {
       win_rate_percent: rounded(100 * wins / trades, 1),
       net_profit_loss: rounded(netProfitLoss),
       independent_sessions: bundle.cohort.aggregate.independent_session_count,
+      session_count_basis: 'Legacy policy count of observed calendar dates; statistical independence is not verified.',
+      independent_sessions_verified: false,
       minimum_segment_trades: minimumSegmentTrades,
+      accounting_basis: 'Recorded simulated closed-trade gross minus recorded commissions; not an independent broker ledger.',
+      fee_provenance: 'Recorded logger fees; historical broker rates were not independently verified.',
     },
     strongest_repeatable_segments: byPerformance.slice(-3).reverse(),
     weakest_repeatable_segments: byPerformance.slice(0, 3),
+    legacy_segment_field_semantics: 'The repeatable_segments field names are retained for compatibility only. Values are descriptive in-sample observations, not demonstrated repeatability or candidate rules.',
     excluded_context: contextOnly,
     interpretation: [
       'Segment statistics are descriptive evidence for investigation, not production rules.',
       'Excluded evidence is retained as context but does not contribute to eligible aggregate confidence.',
       'Any strategy or configuration change requires a separate candidate and governed evaluation.',
       'Unknown labels are missing attribution; exit outcomes are not entry-time selection rules.',
+      'Signal session and regime labels are observational; complete causal flags do not prove pre-entry availability or freedom from lookahead.',
+      'Policy sufficiency is a discovery threshold, not verified statistical independence or out-of-sample confidence.',
     ],
     authority: {
       automatic_strategy_change: false,
