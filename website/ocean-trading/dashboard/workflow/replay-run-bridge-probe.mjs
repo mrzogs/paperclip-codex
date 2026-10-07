@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
+import { sealedHash } from './common.mjs';
 
 const TEST_CONFIG_SCHEMA = 'ocean-replay-run-bridge/v3';
 const OPERATIONAL_CONFIG_SCHEMA = 'ocean-replay-run-bridge/v4';
@@ -80,7 +81,7 @@ function runCount(db, table, runId, extra = '') {
   return Number(db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE run_id=? ${extra}`).get(runId).n);
 }
 
-function readSourcePreflight(config) {
+function readSourcePreflight(config, lifecycleBindingVerified) {
   if (!fs.existsSync(config.source_preflight_status_path)) return { verified: false, reason: 'SOURCE_PREFLIGHT_STATUS_MISSING' };
   const stat = fs.statSync(config.source_preflight_status_path);
   const ageMs = Date.now() - stat.mtimeMs;
@@ -98,14 +99,15 @@ function readSourcePreflight(config) {
   }
   const symbol = String(values.symbol || '').replace(/\[M\]$/, '');
   const detail = String(values.detail || '');
-  const verified = Boolean(values.commandId)
-    && values.action === 'prepare_contract'
-    && values.status === 'contract_prepared'
+  const chartVerified = Boolean(values.commandId)
     && Number(values.chartNumber) === config.expected_chart_number
     && symbol === config.expected_symbol
+    && Number(values.secondsPerBar) === config.expected_bar_period_seconds;
+  const prepared = chartVerified
+    && values.action === 'prepare_contract'
+    && values.status === 'contract_prepared'
     && values.isReplayRunning === 'false'
     && Number(values.replayStatus) === 0
-    && Number(values.secondsPerBar) === config.expected_bar_period_seconds
     && detail.includes(`requested_symbol=${config.expected_symbol}`)
     && detail.includes(`requested_intraday_bar_seconds=${config.expected_bar_period_seconds}`)
     && detail.includes('historical_open_chart_result=1')
@@ -113,9 +115,20 @@ function readSourcePreflight(config) {
     && detail.includes('intraday_open_chart_result=1')
     && detail.includes('intraday_recalculate_chart_result=1')
     && detail.includes('session_read_result=1');
+  // Routine producer polls replace the preparation receipt; they are proof only
+  // when current telemetry independently binds the exact released managed run.
+  const running = values.isReplayRunning === 'true' && values.replayStatus === '1';
+  const inactive = values.isReplayRunning === 'false' && values.replayStatus === '0';
+  const lifecycleStatus = chartVerified
+    && values.action === 'status' && values.status === 'status'
+    && Number(values.chartDataType) === 2
+    && detail === 'VWAP replay hook active.'
+    && (running || inactive);
+  const verified = prepared || (lifecycleStatus && lifecycleBindingVerified === true);
   return {
     verified,
-    reason: verified ? null : 'SOURCE_PREFLIGHT_STATUS_NOT_VERIFIED',
+    reason: verified ? null : lifecycleStatus ? 'SOURCE_PREFLIGHT_STATUS_NOT_CORRELATED' : 'SOURCE_PREFLIGHT_STATUS_NOT_VERIFIED',
+    verification_basis: !verified ? null : prepared ? 'CONTRACT_PREPARED' : running ? 'CORRELATED_RUNNING_STATUS' : 'CORRELATED_INACTIVE_STATUS',
     command_id: values.commandId || null,
     symbol: values.symbol || null,
     chart_number: Number.isFinite(Number(values.chartNumber)) ? Number(values.chartNumber) : null,
@@ -143,7 +156,53 @@ function discoverRun(config) {
   }
 }
 
-function telemetry(config, expectedRunId) {
+function managedReplayVerified(config, run, telemetryDb) {
+  if (!run?.release_context_hash || run.id.startsWith('test-')) return false;
+  if (!telemetryDb.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='replay_run_context'").get()) return false;
+  const managed = telemetryDb.prepare('SELECT * FROM replay_run_context WHERE run_id=?').get(run.id);
+  if (!managed) return false;
+  const db = new DatabaseSync(config.workflow_db, { readOnly: true, timeout: 2000 });
+  try {
+    db.exec('PRAGMA query_only=ON; PRAGMA busy_timeout=2000;');
+    const row = db.prepare(`
+      SELECT r.context_json, p.payload_json, release.context_hash AS release_hash
+      FROM ow_runs r JOIN ow_run_plans p ON p.id=r.id
+      JOIN ow_operational_releases release ON release.run_id=r.id
+      WHERE r.id=? AND r.strategy_id=? AND r.instance_id=? AND r.state IN ('READY','ACTIVE','COMPLETING')
+    `).get(run.id, config.strategy_id, config.instance_id);
+    if (!row) return false;
+    let context, plan;
+    try { context = JSON.parse(row.context_json); plan = JSON.parse(row.payload_json); } catch { return false; }
+    if (!context || !plan || !/^sha256:[a-f0-9]{64}$/.test(context.context_hash)
+      || sealedHash(context, 'context_hash') !== context.context_hash
+      || context.context_hash !== run.release_context_hash || context.context_hash !== row.release_hash
+      || context.run_id !== run.id || context.strategy_id !== config.strategy_id
+      || context.execution_instance_id !== config.instance_id || context.expected_environment !== 'REPLAY'
+      || sealedHash(plan, 'plan_hash') !== plan.plan_hash || plan.context_hash !== context.context_hash
+      || plan.selection?.strategy_id !== config.strategy_id || plan.selection?.instance_id !== config.instance_id
+      || plan.operational_review?.context?.context_hash !== context.context_hash
+      || sealedHash(plan.operational_review.context, 'context_hash') !== context.context_hash
+      || plan.operational_review?.factual_binding_hash !== config.factual_binding_hash) return false;
+    if (!Number.isInteger(context.dataset_manifest_revision) || context.dataset_manifest_revision < 1
+      || ![context.dataset_manifest_id, context.dataset_partition, context.strategy_profile_id, context.strategy_profile_version].every(value => typeof value === 'string' && value.trim())
+      || ![context.strategy_code_hash, context.strategy_config_hash].every(value => /^sha256:[a-f0-9]{64}$/.test(value))
+      || (context.candidate_id != null && context.candidate_id !== config.managed_candidate_id)) return false;
+    return managed.context_hash === context.context_hash
+      && managed.candidate_id === config.managed_candidate_id
+      && managed.dataset_id === `${context.dataset_manifest_id}:${context.dataset_manifest_revision}`
+      && managed.dataset_role === context.dataset_partition
+      && ['strategy_profile_id', 'strategy_profile_version', 'strategy_code_hash', 'strategy_config_hash'].every(key => managed[key] === context[key])
+      && managed.session_name === config.expected_session_name
+      && managed.session_timezone === config.expected_session_timezone;
+  } finally { db.close(); }
+}
+
+function freshTimestamp(value, seconds) {
+  const ageMs = Date.now() - asUtcMillis(value);
+  return Number.isFinite(ageMs) && ageMs >= -5000 && ageMs <= seconds * 1000;
+}
+
+function telemetry(config, run) {
   if (!fs.existsSync(config.telemetry_db)) return { verified: false, reason: 'TELEMETRY_DB_MISSING' };
   const db = new DatabaseSync(config.telemetry_db, { readOnly: true, timeout: 2000 });
   try {
@@ -158,25 +217,33 @@ function telemetry(config, expectedRunId) {
     const observedExe = path.normalize(instance?.sierra_exe_path || '').toLowerCase();
     const observedSymbol = String(instrument?.symbol || '').replace(/\[M\]$/, '');
     const operational = config.schema_version === OPERATIONAL_CONFIG_SCHEMA;
-    const sourcePreflight = operational ? readSourcePreflight(config) : null;
     const schemaFloor = operational ? config.minimum_schema_version : 7;
-    const accountFresh = !operational || (Number.isFinite(asUtcMillis(account?.snapshot_utc)) && Date.now() - asUtcMillis(account.snapshot_utc) <= config.freshness_seconds * 1000 && asUtcMillis(account.snapshot_utc) <= Date.now() + 5000);
+    const accountFresh = !operational || freshTimestamp(account?.snapshot_utc, config.freshness_seconds);
+    const loggerStart = `logger_started version=${config.expected_telemetry_version}`;
     const staticBindingVerified = schemaVersion >= schemaFloor
-      && logger?.message?.startsWith(`logger_started version=${config.expected_telemetry_version}`)
+      && (logger?.message === loggerStart || logger?.message?.startsWith(`${loggerStart} `))
       && account?.trade_account === config.account_alias
       && Number(account?.is_simulated) === 1
       && instance?.instance_role === 'replay'
       && observedExe === expectedExe;
-    const preflightVerified = staticBindingVerified
-      && (!operational ? observedSymbol === config.expected_symbol && accountFresh : sourcePreflight.verified);
     const replayVerified = Boolean(replay)
       && replay.strategy_id === config.strategy_id
-      && replay.run_id === expectedRunId
+      && replay.run_id === run?.id
       && replay.strategy_version === config.expected_strategy_version
       && replay.instance_role === 'replay'
       && (!operational || (path.normalize(replay.chartbook || '').toLowerCase() === path.normalize(config.expected_chartbook_path).toLowerCase()
         && Number(replay.chart_number) === config.expected_chart_number
-        && String(replay.bar_period || '').includes(`seconds=${config.expected_bar_period_seconds}`)));
+        && String(replay.bar_period || '').split(';').includes(`seconds=${config.expected_bar_period_seconds}`)));
+    const lifecycleBindingVerified = operational && staticBindingVerified && replayVerified && accountFresh
+      && freshTimestamp(instance?.last_seen_utc, config.freshness_seconds)
+      && Boolean(instance?.instance_id) && replay.instance_id === instance.instance_id
+      && account.instance_id === instance.instance_id && instrument?.instance_id === instance.instance_id
+      && instrument.trade_account === config.account_alias && observedSymbol === config.expected_symbol
+      && Number(instrument.chart_number) === config.expected_chart_number
+      && managedReplayVerified(config, run, db);
+    const sourcePreflight = operational ? readSourcePreflight(config, lifecycleBindingVerified) : null;
+    const preflightVerified = staticBindingVerified
+      && (!operational ? observedSymbol === config.expected_symbol && accountFresh : sourcePreflight.verified);
     const verified = preflightVerified && replayVerified;
     return {
       verified,
@@ -214,7 +281,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       schema_version: config.schema_version,
       observed_at_utc: new Date().toISOString(),
       run,
-      telemetry: telemetry(config, run?.id || null),
+      telemetry: telemetry(config, run),
     }));
   } catch (error) {
     console.error(JSON.stringify({ status: 'BLOCKED', error: /^[A-Z0-9_]+$/.test(error.message) ? error.message : 'PROBE_FAILED' }));
