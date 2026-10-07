@@ -427,7 +427,6 @@ for (const [name, sql] of [
   ['different instrument chart', 'UPDATE instrument_snapshot SET chart_number=2'],
   ['stale account', "UPDATE account_snapshot SET snapshot_utc='2026-01-01 00:00:00'"],
   ['future account', "UPDATE account_snapshot SET snapshot_utc='2099-01-01 00:00:00'"],
-  ['stale instance', "UPDATE sierra_instance SET last_seen_utc='2026-01-01 00:00:00'"],
   ['wrong executable', "UPDATE sierra_instance SET sierra_exe_path='other.exe'"],
   ['wrong telemetry version', "UPDATE logger_health SET message='logger_started version=v0.5.30'"],
   ['version prefix collision', "UPDATE logger_health SET message='logger_started version=v0.5.310'"],
@@ -462,6 +461,16 @@ for (const [name, mutate] of [
     assert.equal(readProbe(fixture).telemetry.verified, false);
   });
 }
+
+test('v4 probe uses current committed account evidence, not the instance configuration timestamp, as liveness', t => {
+  const fixture = createManagedStatusFixture(t);
+  updateDatabase(fixture.telemetryDb, "UPDATE sierra_instance SET last_seen_utc='2026-01-01 00:00:00'");
+  const result = readProbe(fixture);
+  assert.equal(result.telemetry.verified, true);
+  assert.equal(result.telemetry.source_preflight.verified, true);
+  updateDatabase(fixture.telemetryDb, "UPDATE account_snapshot SET snapshot_utc='2026-01-01 00:00:00'");
+  assert.equal(readProbe(fixture).telemetry.verified, false);
+});
 
 for (const [name, delta] of [['stale', -10 * 60 * 1000], ['future', 60 * 1000]]) {
   test(`v4 probe rejects ${name} lifecycle status despite a matching released managed run`, t => {

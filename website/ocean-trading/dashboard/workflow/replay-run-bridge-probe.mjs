@@ -234,8 +234,8 @@ function telemetry(config, run) {
       && (!operational || (path.normalize(replay.chartbook || '').toLowerCase() === path.normalize(config.expected_chartbook_path).toLowerCase()
         && Number(replay.chart_number) === config.expected_chart_number
         && String(replay.bar_period || '').split(';').includes(`seconds=${config.expected_bar_period_seconds}`)));
+    // last_seen_utc records logger configuration, not callback liveness.
     const lifecycleBindingVerified = operational && staticBindingVerified && replayVerified && accountFresh
-      && freshTimestamp(instance?.last_seen_utc, config.freshness_seconds)
       && Boolean(instance?.instance_id) && replay.instance_id === instance.instance_id
       && account.instance_id === instance.instance_id && instrument?.instance_id === instance.instance_id
       && instrument.trade_account === config.account_alias && observedSymbol === config.expected_symbol
