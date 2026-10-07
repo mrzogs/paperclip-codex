@@ -8,6 +8,7 @@ import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import { applyReplayClearsToSession, clearReplayAccount } from "./replay-session-scope.mjs";
 import { workflowFromEnvironment } from "./workflow/backend.mjs";
 import { installWebsiteControl } from "./workflow/process-control.mjs";
+import { reconcileOperationalReplayRunSettings } from "./workflow/operational-run-readiness.mjs";
 import { readVwapContinuousImprovementState } from "./workflow/vwap-continuous-improvement-monitor.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -99,7 +100,17 @@ function scheduleWorkflowStartupRetry() {
 
 function initializeWorkflowBackend() {
   try {
-    workflowBackend = workflowFromEnvironment(process.env, PYTHON_EXE);
+    const candidate = workflowFromEnvironment(process.env, PYTHON_EXE);
+    if (candidate && process.env.OCEAN_OPERATIONAL_LEARNING_PHYSICAL_BINDING_FILE) {
+      try {
+        const reconciliation = reconcileOperationalReplayRunSettings(candidate, process.env.OCEAN_OPERATIONAL_LEARNING_PHYSICAL_BINDING_FILE);
+        console.log(`Ocean operational Replay settings ${reconciliation.idempotent ? "verified" : "registered"}.`);
+      } catch (error) {
+        candidate.close();
+        throw error;
+      }
+    }
+    workflowBackend = candidate;
     workflowStartupFailed = false;
     workflowEnrollmentRequired = false;
     workflowRetryAttempt = 0;

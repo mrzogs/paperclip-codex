@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { fileURLToPath } from 'node:url';
 
 const TEST_CONFIG_SCHEMA = 'ocean-replay-run-bridge/v3';
 const OPERATIONAL_CONFIG_SCHEMA = 'ocean-replay-run-bridge/v4';
@@ -13,6 +14,8 @@ const BASE_FIELDS = [
 const OPERATIONAL_FIELDS = [
   ...BASE_FIELDS, 'namespace', 'factual_binding_hash', 'minimum_schema_version',
   'freshness_seconds', 'expected_chartbook_path', 'expected_chart_number',
+  'expected_chartbook_sha256', 'time_basis', 'session_calendar_revision',
+  'fill_model_version',
   'expected_bar_period_seconds', 'expected_strategy_module_path',
   'expected_strategy_module_sha256', 'expected_telemetry_module_path',
   'expected_telemetry_module_sha256', 'source_preflight_status_path',
@@ -22,7 +25,7 @@ function fail(code) {
   throw new Error(code);
 }
 
-function readConfig(filename) {
+export function readReplayBridgeConfig(filename) {
   if (!path.isAbsolute(filename) || !fs.statSync(filename).isFile()) fail('CONFIG_FILE_REQUIRED');
   const value = JSON.parse(fs.readFileSync(filename, 'utf8'));
   const operational = value.schema_version === OPERATIONAL_CONFIG_SCHEMA;
@@ -42,8 +45,11 @@ function readConfig(filename) {
     if (!Number.isInteger(value.freshness_seconds) || value.freshness_seconds < 30 || value.freshness_seconds > 300) fail('FRESHNESS_WINDOW_REJECTED');
     if (!Number.isInteger(value.expected_chart_number) || value.expected_chart_number < 1) fail('CHART_NUMBER_REJECTED');
     if (!Number.isInteger(value.expected_bar_period_seconds) || value.expected_bar_period_seconds !== 300) fail('BAR_PERIOD_REJECTED');
-    for (const key of ['expected_strategy_module_sha256', 'expected_telemetry_module_sha256']) {
+    for (const key of ['expected_chartbook_sha256', 'expected_strategy_module_sha256', 'expected_telemetry_module_sha256']) {
       if (!/^sha256:[a-f0-9]{64}$/.test(value[key])) fail('MODULE_HASH_REJECTED');
+    }
+    for (const key of ['time_basis', 'session_calendar_revision', 'fill_model_version']) {
+      if (typeof value[key] !== 'string' || !value[key].trim() || value[key].length > 500) fail('RUN_SETTINGS_REJECTED');
     }
   } else if (!/^test-[A-Za-z0-9_.:-]+$/.test(value.instance_id)) fail('IDENTITY_SCOPE_REJECTED');
   if ((!operational && value.identity_id !== `${value.instance_id}-telemetry`) || !/^[A-Za-z0-9_.:-]+$/.test(value.identity_id) || !/^OCEAN_[A-Z0-9_]+_TOKEN$/.test(value.credential_ref)) fail('TELEMETRY_IDENTITY_REJECTED');
@@ -196,16 +202,18 @@ function telemetry(config, expectedRunId) {
   }
 }
 
-try {
-  const config = readConfig(process.argv[2]);
-  const run = discoverRun(config);
-  console.log(JSON.stringify({
-    schema_version: config.schema_version,
-    observed_at_utc: new Date().toISOString(),
-    run,
-    telemetry: telemetry(config, run?.id || null),
-  }));
-} catch (error) {
-  console.error(JSON.stringify({ status: 'BLOCKED', error: /^[A-Z0-9_]+$/.test(error.message) ? error.message : 'PROBE_FAILED' }));
-  process.exitCode = 2;
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    const config = readReplayBridgeConfig(process.argv[2]);
+    const run = discoverRun(config);
+    console.log(JSON.stringify({
+      schema_version: config.schema_version,
+      observed_at_utc: new Date().toISOString(),
+      run,
+      telemetry: telemetry(config, run?.id || null),
+    }));
+  } catch (error) {
+    console.error(JSON.stringify({ status: 'BLOCKED', error: /^[A-Z0-9_]+$/.test(error.message) ? error.message : 'PROBE_FAILED' }));
+    process.exitCode = 2;
+  }
 }
