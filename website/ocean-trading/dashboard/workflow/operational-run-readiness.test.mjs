@@ -32,7 +32,7 @@ function fixture() {
   const db = new DatabaseSync(dbFile);
   db.exec('CREATE TABLE ow_instances(id TEXT PRIMARY KEY,strategy_id TEXT,payload_json TEXT); CREATE TABLE ow_run_settings(id TEXT PRIMARY KEY,payload_json TEXT);');
   db.prepare('INSERT INTO ow_instances VALUES(?,?,?)').run(instance.execution_instance_id,instance.strategy_id,JSON.stringify(instance));
-  const backend = { config:{ db_file:dbFile, operational_factual_bindings:[binding] }, db, runs:{ perform(action,actor,data){ assert.equal(action,'settings'); assert.equal(actor.id,'wayne-ocean-ui'); db.prepare('INSERT INTO ow_run_settings VALUES(?,?)').run(data.instance_id,JSON.stringify(data)); } } };
+  const backend = { config:{ db_file:dbFile, operational_factual_bindings:[binding] }, db, runs:{ perform(action,actor,data){ assert.equal(action,'settings'); assert.equal(actor.id,'wayne-ocean-ui'); assert.equal(actor.namespace,'OPERATIONAL'); db.prepare('INSERT INTO ow_run_settings VALUES(?,?)').run(data.instance_id,JSON.stringify(data)); } } };
   return {root,chartbook,configFile,config,backend,db};
 }
 
