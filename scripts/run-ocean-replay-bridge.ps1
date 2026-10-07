@@ -140,8 +140,11 @@ function Test-OperationalPhysicalBinding($BridgeConfig) {
     $expectedPath = [IO.Path]::GetFullPath($modulePath)
     if (-not ($modulePaths | Where-Object { $_ -ceq $expectedPath })) { throw 'EXPECTED_MODULE_NOT_LOADED' }
   }
-  $chartbookName = [IO.Path]::GetFileNameWithoutExtension([string]$BridgeConfig.expected_chartbook_path)
-  if ([string]$process.MainWindowTitle -cnotlike ('*' + $chartbookName + '*')) { throw 'EXPECTED_CHARTBOOK_NOT_OPEN' }
+  # Sierra's main-window title is mutable and commonly shows the active chart
+  # rather than the chartbook name. Exact process/module binding is verified
+  # here; chart number, symbol, bar period and stopped Replay state are proved
+  # by the fresh strategy-owned source preflight before release.
+  if (-not $process.Responding) { throw 'EXPECTED_SIERRA_PROCESS_NOT_RESPONDING' }
 }
 
 function Invoke-BoundedNode([string]$Script, [string[]]$Arguments, [int]$TimeoutMilliseconds, [string]$FailureCode) {

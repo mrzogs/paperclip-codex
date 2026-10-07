@@ -44,7 +44,8 @@ if (-not $source.Contains("status='AWAITING_HUMAN_RELEASE'") -or
 }
 if (-not $source.Contains('Test-OperationalPhysicalBinding') -or
     -not $source.Contains('EXPECTED_MODULE_NOT_LOADED') -or
-    -not $source.Contains('EXPECTED_CHARTBOOK_NOT_OPEN')) {
+    -not $source.Contains('EXPECTED_SIERRA_PROCESS_NOT_RESPONDING') -or
+    $source.Contains('EXPECTED_CHARTBOOK_NOT_OPEN')) {
   throw 'OPERATIONAL_PHYSICAL_BINDING_REQUIRED'
 }
 if (-not $source.Contains('$process.StandardOutput.ReadToEndAsync()') -or
