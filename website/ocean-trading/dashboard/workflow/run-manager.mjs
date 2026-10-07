@@ -70,12 +70,12 @@ export class RunManager {
   constructor(backend) {this.b=backend;this.db=backend.db;this.leaseMs=30000;}
   human(actor) {requireThat(actor.role==='HUMAN',403,'WAYNE_BROWSER_ONLY');}
   managed(runId) {return this.db.prepare('SELECT * FROM ow_run_plans WHERE id=?').get(runId);}
-  register(table,key,strategy,payload) {
-    id(key,true);
+  register(table,key,strategy,payload,{testOnly=true}={}) {
+    id(key,testOnly);
     requireThat(!this.db.prepare(`SELECT id FROM ${table} WHERE id=?`).get(key),409,'IMMUTABLE_REGISTRATION_CONFLICT');
     if(strategy)this.db.prepare(`INSERT INTO ${table} VALUES(?,?,?)`).run(key,strategy,JSON.stringify(payload));
     else this.db.prepare(`INSERT INTO ${table} VALUES(?,?)`).run(key,JSON.stringify(payload));
-    return {id:key,namespace:'TEST',operational_action_allowed:false};
+    return {id:key,namespace:testOnly?'TEST':'OPERATIONAL',operational_action_allowed:false};
   }
   namespace(actor,plan=null) {
     return actor.namespace==='OPERATIONAL' || plan?.operational_review ? 'OPERATIONAL' : 'TEST';
@@ -104,7 +104,7 @@ export class RunManager {
     if(action==='settings') {
       exactKeys(data,['instance_id','chart_settings_hash','time_basis','session_calendar_revision','fill_model_version']);
       this.b.one('ow_instances',data.instance_id);hash(data.chart_settings_hash);for(const key of ['time_basis','session_calendar_revision','fill_model_version'])bounded(data[key]);
-      return this.register('ow_run_settings',data.instance_id,null,data);
+      return this.register('ow_run_settings',data.instance_id,null,data,{testOnly:actor.namespace!=='OPERATIONAL'});
     }
     if(action==='permission') {
       exactKeys(data,['permission_id','strategy_id','manifest_key','manifest_hash','purposes','expires_at_utc','prior_exposure','test_only']);

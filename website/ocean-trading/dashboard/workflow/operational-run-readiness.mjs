@@ -3,7 +3,7 @@ import path from 'node:path';
 import { digest, objectHash, requireThat } from './common.mjs';
 import { readReplayBridgeConfig } from './replay-run-bridge-probe.mjs';
 
-const human = { id:'wayne-ocean-ui', role:'HUMAN', namespace:'TEST', scopes:[], strategyIds:[], instanceIds:[] };
+const human = { id:'wayne-ocean-ui', role:'HUMAN', namespace:'OPERATIONAL', scopes:[], strategyIds:[], instanceIds:[] };
 const parse = row => JSON.parse(row.payload_json);
 
 export function reconcileOperationalReplayRunSettings(backend, configFile) {
