@@ -15,7 +15,8 @@ const OPERATIONAL_FIELDS = [
   ...BASE_FIELDS, 'namespace', 'factual_binding_hash', 'minimum_schema_version',
   'freshness_seconds', 'expected_chartbook_path', 'expected_chart_number',
   'expected_chartbook_sha256', 'time_basis', 'session_calendar_revision',
-  'fill_model_version',
+  'fill_model_version', 'managed_candidate_id', 'expected_session_name',
+  'expected_session_timezone',
   'expected_bar_period_seconds', 'expected_strategy_module_path',
   'expected_strategy_module_sha256', 'expected_telemetry_module_path',
   'expected_telemetry_module_sha256', 'source_preflight_status_path',
@@ -51,6 +52,9 @@ export function readReplayBridgeConfig(filename) {
     for (const key of ['time_basis', 'session_calendar_revision', 'fill_model_version']) {
       if (typeof value[key] !== 'string' || !value[key].trim() || value[key].length > 500) fail('RUN_SETTINGS_REJECTED');
     }
+    if (!/^[A-Za-z0-9_.:-]{1,200}$/.test(value.managed_candidate_id)) fail('MANAGED_CANDIDATE_REJECTED');
+    if (!/^[A-Za-z0-9_. -]{1,100}$/.test(value.expected_session_name)
+      || !/^[A-Za-z0-9_./+-]{1,100}$/.test(value.expected_session_timezone)) fail('SESSION_IDENTITY_REJECTED');
   } else if (!/^test-[A-Za-z0-9_.:-]+$/.test(value.instance_id)) fail('IDENTITY_SCOPE_REJECTED');
   if ((!operational && value.identity_id !== `${value.instance_id}-telemetry`) || !/^[A-Za-z0-9_.:-]+$/.test(value.identity_id) || !/^OCEAN_[A-Z0-9_]+_TOKEN$/.test(value.credential_ref)) fail('TELEMETRY_IDENTITY_REJECTED');
   if (!/^MNQ[A-Z][0-9]{2}_FUT_CME$/.test(value.expected_symbol) || !/^v[0-9]+\.[0-9]+\.[0-9]+$/.test(value.expected_strategy_version)) fail('PHYSICAL_BINDING_REJECTED');

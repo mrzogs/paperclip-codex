@@ -27,6 +27,7 @@ function fixture() {
     namespace:'OPERATIONAL', factual_binding_hash:binding.binding_hash, minimum_schema_version:13, freshness_seconds:120,
     expected_chartbook_path:chartbook, expected_chart_number:1, expected_chartbook_sha256:digest(fs.readFileSync(chartbook)),
     time_basis:'UTC source records', session_calendar_revision:'calendar-v1', fill_model_version:'Sierra native replay',
+    managed_candidate_id:'v1.0.0-managed-lineage', expected_session_name:'All', expected_session_timezone:'Europe/London',
     expected_bar_period_seconds:300, expected_strategy_module_path:strategyModule,
     expected_strategy_module_sha256:digest(fs.readFileSync(strategyModule)), expected_telemetry_module_path:telemetryModule,
     expected_telemetry_module_sha256:digest(fs.readFileSync(telemetryModule)), source_preflight_status_path:path.join(root,'status.txt'),
