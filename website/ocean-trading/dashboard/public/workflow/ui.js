@@ -437,12 +437,13 @@ function researchPanel(research) {
   if(!research)return '';
   const report=research.report;
   return section('Research evaluation',facts([
-    ['Job',esc(research.job_id)],['Status',badge(research.state)],
+    ['Job',esc(research.job_id)],['Status',badge(research.effective_state || research.state)],
+    ['Provenance',esc(research.qualification_warning || (research.qualified_for_new_support ? 'Currently qualified for new support' : 'Not qualified for new support'))],
     ['Outcome',report?badge(report.outcome):'Not recorded'],
     ['Next action',esc(research.next_action)],['Attempts',esc(research.attempts)],
     ['Result',research.result_artifact_id?link('artifacts',research.result_artifact_id,'View full Research report'):'Pending'],
   ]) + (report?facts([
-    ['Qualified history',`${report.eligible_run_ids.length} runs / ${report.aggregate.trades} closed trades`],
+    [research.historical || !research.qualified_for_new_support ? 'Preserved report history (not current qualified support)' : 'Currently qualified history',`${report.eligible_run_ids?.length || 0} runs / ${report.aggregate?.trades || 0} closed trades`],
     ['Simulated execution gross P/L',esc(report.aggregate.gross_profit_loss)],['Recorded fees',esc(report.aggregate.fees)],
     ['Simulated execution net P/L',esc(report.aggregate.net_profit_loss)],['Net wins / losses / flat',`${report.aggregate.wins} / ${report.aggregate.losses} / ${report.aggregate.flat}`],
     ['Accounting basis',esc(report.accounting_basis)],

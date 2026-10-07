@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import { PROVENANCE_ACTION } from './operational-learning.mjs';
 import { digest, objectHash, requireThat } from './common.mjs';
 
-// Versioned job/result IDs append v3 without claiming or rewriting v2 history.
-export const RESEARCH_VERSION = 'ocean-cumulative-research/v3';
+// New physical/raw provenance gates apply only to new jobs, never relabel history.
+export const RESEARCH_VERSION = 'ocean-cumulative-research/v4';
 const unknown = value => !value || /^(unknown|none|null|n\/a)$/i.test(String(value).trim());
 const round = value => Math.round(value * 100) / 100;
 const authority = Object.freeze({ automatic_strategy_change:false, candidate_approved:false, paper_authorized:false, live_authorized:false });
@@ -166,6 +167,24 @@ export class OperationalResearch {
       this.backend.store.transaction(()=>this.enqueue(row.id,row.artifact_id));
     }
   }
+  qualification(job) {
+    try {
+      const row=this.backend.one('ow_cases',job.case_id);
+      const ids=[row.run_id];
+      if(job.input_json && job.analysis_version===RESEARCH_VERSION) {
+        requireThat(digest(job.input_json)===job.input_hash,409,'RESEARCH_SNAPSHOT_HASH_CONFLICT');
+        const snapshot=JSON.parse(job.input_json);
+        ids.push(...snapshot.result.eligible_run_ids);
+      }
+      const excluded=[...new Set(ids)].flatMap(id=>{
+        const value=this.backend.operationalLearning.classification(this.backend.one('ow_runs',id));
+        return value.eligible?[]:[{run_id:id,reasons:value.reasons}];
+      });
+      return {verified:excluded.length===0,excluded_runs:excluded};
+    }catch(error) {
+      return {verified:false,excluded_runs:[],reason:String(error.code || error.message || 'RESEARCH_PROVENANCE_PROOF_REQUIRED').slice(0,300)};
+    }
+  }
   statusForCase(caseId) {
     let job=this.db.prepare('SELECT * FROM ow_research_jobs WHERE case_id=? ORDER BY rowid DESC LIMIT 1').get(caseId);
     if(!job)return null;
@@ -181,27 +200,38 @@ export class OperationalResearch {
     if(artifact)requireThat(digest(Buffer.from(artifact.content))===job.result_hash
       && JSON.parse(artifact.manifest_json).content_hash===job.result_hash,409,'RESEARCH_RESULT_HASH_CONFLICT');
     const report=artifact?JSON.parse(Buffer.from(artifact.content).toString('utf8')):null;
+    const currentQualification=this.qualification(job);
+    const historical=job.state==='COMPLETED' && (job.analysis_version!==RESEARCH_VERSION || skipped.length>0);
     return {job_id:job.id,state:job.state,attempts:job.attempts,analysis_version:job.analysis_version,
       result_artifact_id:job.result_artifact_id,result_hash:job.result_hash,last_error:job.last_error,
       input_hash:job.input_hash,
       completed_at_utc:job.completed_at_utc,report,
-      historical:job.state==='COMPLETED' && (job.analysis_version!==RESEARCH_VERSION || skipped.length>0),
+      historical,
+      current_qualification:currentQualification,
+      qualified_for_new_support:!historical && currentQualification.verified,
+      effective_state:!currentQualification.verified && job.state!=='COMPLETED'?'BLOCKED_PROVENANCE':job.state,
+      qualification_warning:historical
+        ?'Preserved historical report: its original qualified-history label is not current physical/raw provenance proof. It cannot support new proposals without current qualification.'
+        :!currentQualification.verified?PROVENANCE_ACTION:null,
       version_backfill_skipped:completedCase && (job.analysis_version!==RESEARCH_VERSION || skipped.length>0),
       skipped_version_backfill_jobs:skipped,
       next_action:completedCase && job.state==='COMPLETED' && (job.analysis_version!==RESEARCH_VERSION || skipped.length>0)
-        ?'Historical Research is completed and preserved. Completed cases are not version backfilled; new evidence cases use v3. No current version backfill is queued for this case and no candidate or approval is created.'
+        ?`Historical Research is completed and preserved. Completed cases are not version backfilled; new evidence cases use v4. No current version backfill is queued for this case and no candidate or approval is created. ${PROVENANCE_ACTION}`
         :completedCase && job.state!=='COMPLETED'
           ?'This completed case has a retained historical queue entry but no completed Research report. Version backfill will not run; the entry is not current pending work and no completion is claimed.'
+        :!currentQualification.verified?PROVENANCE_ACTION
         :report?.next_action || (job.state==='RETRY'?'Ocean will retry Research automatically; no human approval is pending.':'Ocean Research is queued and will resume after a website restart.')};
   }
   claim() {
     return this.backend.store.transaction(()=>{
-      const job=this.db.prepare(`SELECT j.* FROM ow_research_jobs j JOIN ow_cases c ON c.id=j.case_id
+      const jobs=this.db.prepare(`SELECT j.* FROM ow_research_jobs j JOIN ow_cases c ON c.id=j.case_id
         WHERE j.analysis_version=? AND ((j.state IN ('PENDING','RETRY') AND j.next_attempt_ms<=?)
         OR (j.state='RUNNING' AND j.lease_until_ms<=?)) AND c.stage='RESEARCH' AND c.work_status NOT IN ('PAUSED','CANCELLED','COMPLETED')
-        ORDER BY j.rowid LIMIT 1`).get(RESEARCH_VERSION,Date.now(),Date.now());
+        ORDER BY j.rowid`).all(RESEARCH_VERSION,Date.now(),Date.now());
       // Schema 11 has no SKIPPED state. Completed-case backfills and any frozen
-      // inputs stay untouched and unclaimed across restarts; fresh cases use v3.
+      // inputs stay untouched and unclaimed across restarts; fresh cases use v4.
+      // Ineligible evidence is owner-action work, not a repeatedly leased RETRY.
+      const job=jobs.find(value=>this.qualification(value).verified);
       if(!job)return null;
       const lease=randomUUID();
       this.db.prepare("UPDATE ow_research_jobs SET state='RUNNING',attempts=attempts+1,lease_id=?,lease_until_ms=? WHERE id=?")
@@ -229,7 +259,8 @@ export class OperationalResearch {
     } finally {database.close();}
   }
   capture(job) {
-    const current=this.db.prepare('SELECT input_json,input_hash FROM ow_research_jobs WHERE id=?').get(job.id);
+    const current=this.db.prepare('SELECT * FROM ow_research_jobs WHERE id=?').get(job.id);
+    if(current.analysis_version===RESEARCH_VERSION)requireThat(this.qualification(current).verified,409,'RESEARCH_CURRENT_PROVENANCE_REQUIRED');
     if(current.input_json) {
       requireThat(digest(current.input_json)===current.input_hash,409,'RESEARCH_SNAPSHOT_HASH_CONFLICT');
       return JSON.parse(current.input_json);
@@ -283,6 +314,7 @@ export class OperationalResearch {
         WHERE id=? AND state='RUNNING' AND lease_id=? AND brain_request_json IS NULL`).run(content,digest(content),job.id,job.lease_id);
       requireThat(updated.changes===1,409,'RESEARCH_REQUEST_LEASE_CONFLICT');
     }
+    requireThat(this.qualification(this.backend.one('ow_research_jobs',job.id)).verified,409,'RESEARCH_CURRENT_PROVENANCE_REQUIRED');
     const response=await learner.call(learner.path,token,input);
     const ids=[...result.eligible_run_ids,...evidence.bundle.excluded_evidence.map(run=>run.run_id)];
     let stored=null;
@@ -299,6 +331,7 @@ export class OperationalResearch {
   complete(job,result,actor,recipient) {
     return this.backend.store.transaction(()=>{
       const current=this.db.prepare('SELECT * FROM ow_research_jobs WHERE id=?').get(job.id);
+      requireThat(this.qualification(current).verified,409,'RESEARCH_CURRENT_PROVENANCE_REQUIRED');
       requireThat(current.state==='RUNNING' && current.lease_id===job.lease_id && current.lease_until_ms>Date.now(),409,'RESEARCH_LEASE_EXPIRED');
       const report={...result,job_id:job.id,case_id:job.case_id,source_recommendation_id:job.artifact_id,
         source_recommendation_hash:job.artifact_hash,completed_at_utc:new Date().toISOString()};

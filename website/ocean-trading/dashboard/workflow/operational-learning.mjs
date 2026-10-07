@@ -30,6 +30,51 @@ const fileHash = filename => `sha256:${createHash('sha256').update(fs.readFileSy
 const safeError = error => String(error?.code || error?.message || 'OPERATIONAL_LEARNING_FAILED')
   .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]').slice(0, 500);
 
+const canonicalDllHash = value => typeof value === 'string' && /^(?:sha256:)?[a-fA-F0-9]{64}$/.test(value)
+  ? `sha256:${value.replace(/^sha256:/, '').toLowerCase()}` : null;
+export const PROVENANCE_ACTION = 'Operational replay provenance owner: prove the historical recorded run and closed-trade DLL identity and raw STTL2 agreement, or collect a fresh managed replay with the approved binding. Do not rewrite historical telemetry or reports.';
+
+// Identity-only, fail-closed port of sttl::causal::ParseTextTag in telemetry's
+// src/sierra_trade_telemetry/include/causal_observability.hpp (STTL2 contract),
+// audited header sha256 ba2251d2a08e8650e19868055d06b0321ea0f78abe8c17b035d11958847f3e84.
+// Decode field boundaries before comparison; merged/rewritten columns are not raw proof.
+export function parseSttl2Identity(text) {
+  if (typeof text !== 'string') return null;
+  const marker = '|STTL2|';
+  const offset = text.indexOf(marker);
+  if (offset < 0) return null;
+  const envelope = text.slice(offset + marker.length);
+  if (!envelope || Buffer.byteLength(envelope) > 2048) return null;
+  const known = new Set(('setup reason session tz regime vol_state vol vol_unit vwap_dist vwap_reclaim qty_src risk_src risk_pts risk_cur stop target profile profile_v code_hash config_hash context_hash candidate dataset dataset_role dq setup_family setup_instance run_id strategy_id strategy_v continuation_state exhaustion_state exhaustion_score quality_scaler_distance_atr price_change_60m price_change_120m vwap_slope_60m atr_change_60m_pct feature_src').split(' '));
+  const fields = {};
+  for (const pair of envelope.split(';')) {
+    const equals = pair.indexOf('=');
+    if (equals <= 0) return null;
+    const key = pair.slice(0, equals);
+    if (!known.has(key) || Object.hasOwn(fields, key)) return null;
+    let value;
+    try { value = decodeURIComponent(pair.slice(equals + 1)); } catch { return null; }
+    if (Buffer.byteLength(value) > 256 || /[\x00-\x1f\x7f]/.test(value)) return null;
+    fields[key] = value;
+    if (Object.keys(fields).length > 48) return null;
+  }
+  for (const key of ['code_hash', 'config_hash', 'context_hash']) {
+    if (fields[key] && !canonicalDllHash(fields[key])) return null;
+  }
+  return fields;
+}
+
+function rawProfileBinding(raw, lineage) {
+  // The explicit physical-to-logical profile exception in telemetry's
+  // IsApprovedLogicalProfileBinding; never infer a mapping from version suffix alone.
+  return lineage.strategy_id === 'cicd-vwap-pull-back-strategy'
+    && lineage.strategy_profile_id === 'cicd-vwap-pull-back-strategy.profile-v0.1.0-source-bound'
+    && lineage.strategy_profile_version === 'v0.1.3'
+    && raw.profile === 'nasdaq_v0449_hmm_risk1000_qty5_control'
+    && raw.strategy_v === `${lineage.strategy_version}-managed-lineage-candidate`
+    && raw.profile_v === raw.strategy_v;
+}
+
 function brainHttpDetail(value) {
   const detail = value?.detail;
   const messages = Array.isArray(detail)
@@ -360,10 +405,7 @@ export class OperationalLearning {
     return actorFrom(identity);
   }
 
-  physicalStrategyBinding(run, context, plan, lineage) {
-    if (lineage.strategy_version === context.strategy_version) {
-      return { verified: true, kind: 'LOGICAL_VERSION_EXACT', strategy_version: lineage.strategy_version };
-    }
+  physicalStrategyBinding(run, context, plan, lineage, database, expectedAccount) {
     if (!this.physicalBindingFile || !fs.existsSync(this.physicalBindingFile)) {
       return { verified: false, reason: 'PHYSICAL_STRATEGY_BINDING_REQUIRED' };
     }
@@ -371,21 +413,131 @@ export class OperationalLearning {
     try { binding = JSON.parse(fs.readFileSync(this.physicalBindingFile, 'utf8')); }
     catch { return { verified: false, reason: 'PHYSICAL_STRATEGY_BINDING_INVALID' }; }
     const factualBindingHash = plan?.operational_review?.factual_binding_hash;
+    const approvedHash = canonicalDllHash(binding.expected_strategy_module_sha256);
     const verified = binding.schema_version === 'ocean-replay-run-bridge/v4'
       && binding.strategy_id === run.strategy_id
       && binding.instance_id === run.instance_id
       && binding.expected_strategy_version === lineage.strategy_version
-      && typeof factualBindingHash === 'string'
+      && binding.managed_candidate_id === lineage.candidate_id && !!lineage.candidate_id
+      && binding.expected_session_name === lineage.session_name && !!lineage.session_name
+      && binding.expected_session_timezone === lineage.session_timezone && !!lineage.session_timezone
+      && /^sha256:[a-f0-9]{64}$/.test(factualBindingHash || '')
       && binding.factual_binding_hash === factualBindingHash;
-    return verified
-      ? {
-          verified: true,
-          kind: 'APPROVED_LOGICAL_TO_PHYSICAL',
-          logical_strategy_version: context.strategy_version,
-          physical_strategy_version: lineage.strategy_version,
-          factual_binding_hash: factualBindingHash,
+    if (!verified) return { verified: false, reason: 'PHYSICAL_STRATEGY_BINDING_CONFLICT' };
+    if (!approvedHash || !path.isAbsolute(binding.expected_strategy_module_path || '')) {
+      return { verified: false, reason: 'APPROVED_STRATEGY_MODULE_BINDING_REQUIRED' };
+    }
+    let currentHash;
+    try { currentHash = fileHash(binding.expected_strategy_module_path); } catch {}
+    if (currentHash !== approvedHash) {
+      return { verified: false, reason: 'APPROVED_STRATEGY_MODULE_HASH_CONFLICT' };
+    }
+    try {
+      const recordedRuns = database.prepare('SELECT run_id,instance_id,strategy_id,strategy_version,dll_hash FROM replay_runs WHERE run_id=?').all(run.id);
+      const trades = database.prepare('SELECT trade_id,instance_id,trade_account,strategy_id,strategy_version,dll_hash FROM trades WHERE run_id=? AND lower(status)=\'closed\' ORDER BY trade_id').all(run.id);
+      const recordedRun = recordedRuns[0];
+      // Ocean's logical instance ID is not Sierra's recorded instance ID. Use
+      // the same exact physical instance/executable join as the replay bridge.
+      const instances = database.prepare('SELECT instance_id,instance_role,sierra_exe_path FROM sierra_instance WHERE instance_id=?').all(recordedRun?.instance_id || '');
+      const instance = instances[0];
+      if (recordedRuns.length !== 1 || !recordedRun.instance_id || instances.length !== 1
+        || instance.instance_role !== 'replay' || !path.isAbsolute(binding.expected_sierra_exe || '')
+        || path.normalize(instance.sierra_exe_path || '').toLowerCase() !== path.normalize(binding.expected_sierra_exe).toLowerCase()
+        || recordedRun.strategy_id !== run.strategy_id || recordedRun.strategy_version !== lineage.strategy_version
+        || trades.length !== Number(lineage.closed_trade_count)
+        || trades.some(trade => trade.instance_id !== recordedRun.instance_id || trade.trade_account !== expectedAccount
+          || trade.strategy_id !== run.strategy_id
+          || ![lineage.strategy_version, `${lineage.strategy_version}-managed-lineage-candidate`].includes(trade.strategy_version))) {
+        return { verified: false, reason: 'RECORDED_STRATEGY_PROVENANCE_SCOPE_CONFLICT' };
+      }
+      if (!canonicalDllHash(recordedRun.dll_hash) || trades.some(trade => !canonicalDllHash(trade.dll_hash))) {
+        return { verified: false, reason: 'RECORDED_STRATEGY_DLL_PROVENANCE_REQUIRED' };
+      }
+      const hashes = [...new Set(trades.map(trade => canonicalDllHash(trade.dll_hash)))];
+      const consistent = canonicalDllHash(recordedRun.dll_hash) === approvedHash
+        && hashes.every(hash => hash === approvedHash);
+      return {
+        verified: consistent,
+        ...(consistent ? {} : { reason: 'RECORDED_STRATEGY_DLL_PROVENANCE_CONFLICT' }),
+        kind: lineage.strategy_version === context.strategy_version ? 'LOGICAL_VERSION_EXACT' : 'APPROVED_LOGICAL_TO_PHYSICAL',
+        logical_strategy_version: context.strategy_version, physical_strategy_version: lineage.strategy_version,
+        factual_binding_hash: factualBindingHash, approved_module_sha256: approvedHash,
+        logical_instance_id: run.instance_id, recorded_sierra_instance_id: recordedRun.instance_id,
+        recorded_run_dll_sha256: canonicalDllHash(recordedRun.dll_hash), recorded_trade_dll_sha256: hashes,
+        closed_trade_count: trades.length,
+        proof_basis: 'APPROVED_CURRENT_MODULE_AND_RECORDED_RUN_AND_CLOSED_TRADE_METADATA_AGREE',
+        independent_historical_execution_attestation: false,
+      };
+    } catch {
+      return { verified: false, reason: 'RECORDED_STRATEGY_DLL_PROVENANCE_REQUIRED' };
+    }
+  }
+
+  rawIdentityQualification(database, run, lineage, causalRows) {
+    try {
+      const rows = database.prepare(`SELECT t.trade_id,t.instance_id,t.trade_account,t.symbol,t.text_tag,
+        c.run_id,c.instance_id causal_instance_id,c.trade_account causal_account,c.symbol causal_symbol,
+        c.strategy_id,c.strategy_version,c.strategy_profile_id,c.strategy_profile_version,
+        c.strategy_code_hash,c.strategy_config_hash,c.context_hash,c.candidate_id,c.dataset_id,c.dataset_role,
+        c.session_name,c.session_timezone,c.raw_text_tag
+        FROM trades t LEFT JOIN trade_causal_context c ON c.trade_id=t.trade_id
+        WHERE t.run_id=? AND lower(t.status)='closed' ORDER BY t.trade_id`).all(run.id);
+      if (rows.length !== Number(lineage.closed_trade_count)
+        || objectHash(rows.map(row => row.trade_id)) !== objectHash(causalRows.map(row => row.trade_id))) {
+        return { verified: false, reason: 'RAW_STTL2_IDENTITY_COVERAGE_CONFLICT' };
+      }
+      const discrepancies = [];
+      const mappedProfileTrades = [];
+      for (const row of rows) {
+        const raw = parseSttl2Identity(row.raw_text_tag);
+        const fields = [];
+        if (!raw) fields.push('raw_sttl2_missing_or_invalid');
+        else {
+          const profileMapped = rawProfileBinding(raw, lineage);
+          if (profileMapped) mappedProfileTrades.push(row.trade_id);
+          const expected = { run_id: run.id, strategy_id: run.strategy_id,
+            code_hash: lineage.strategy_code_hash, config_hash: lineage.strategy_config_hash,
+            context_hash: lineage.context_hash, candidate: lineage.candidate_id,
+            dataset: lineage.dataset_id, dataset_role: lineage.dataset_role };
+          for (const [key, value] of Object.entries(expected)) {
+            if (!value || !raw[key] || raw[key] !== value) fields.push(key);
+          }
+          // Telemetry's explicit All-session managed context permits per-signal
+          // session labels; those labels still must agree with the joined raw row.
+          if (!raw.session || !lineage.session_name
+            || (lineage.session_name !== 'All' && raw.session !== lineage.session_name)
+            || raw.session !== row.session_name) fields.push('session');
+          if (!raw.tz || raw.tz !== lineage.session_timezone || raw.tz !== row.session_timezone) fields.push('tz');
+          if (raw.dq && criticalCausalQualityFlags(raw.dq).length) fields.push('raw_quality_flags');
+          if (!profileMapped) {
+            if (raw.strategy_v !== lineage.strategy_version) fields.push('strategy_v');
+            if (raw.profile !== lineage.strategy_profile_id) fields.push('profile');
+            if (raw.profile_v !== lineage.strategy_profile_version) fields.push('profile_v');
+          }
+          const stored = { run_id: row.run_id, strategy_id: row.strategy_id, strategy_v: row.strategy_version,
+            code_hash: row.strategy_code_hash, config_hash: row.strategy_config_hash, context_hash: row.context_hash,
+            candidate: row.candidate_id, dataset: row.dataset_id, dataset_role: row.dataset_role };
+          for (const [key, value] of Object.entries(stored)) {
+            if (!value || raw[key] !== value) fields.push(`stored_${key}`);
+          }
+          const storedProfileMatches = row.strategy_profile_id === raw.profile && row.strategy_profile_version === raw.profile_v;
+          const storedLogicalMapping = profileMapped && row.strategy_profile_id === lineage.strategy_profile_id
+            && row.strategy_profile_version === lineage.strategy_profile_version;
+          if (!storedProfileMatches && !storedLogicalMapping) fields.push('stored_profile');
         }
-      : { verified: false, reason: 'PHYSICAL_STRATEGY_BINDING_CONFLICT' };
+        if (row.causal_instance_id !== row.instance_id || row.causal_account !== row.trade_account
+          || row.causal_symbol !== row.symbol) fields.push('stored_trade_join');
+        if (!row.text_tag || row.text_tag !== row.raw_text_tag) fields.push('original_tag_copy');
+        if (fields.length) discrepancies.push({ trade_id: row.trade_id, fields });
+      }
+      return { verified: discrepancies.length === 0,
+        ...(discrepancies.length ? { reason: 'RAW_STTL2_IDENTITY_CONFLICT' } : {}),
+        contract: 'STTL2_PARSE_TEXT_TAG_IDENTITY_AND_TRADE_ID_JOIN', closed_trade_count: rows.length, discrepancies,
+        approved_profile_mapping: { rule: 'TELEMETRY_IS_APPROVED_LOGICAL_PROFILE_BINDING', trade_ids: mappedProfileTrades },
+        session_rule: lineage.session_name === 'All' ? 'MANAGED_ALL_WITH_EXACT_RAW_STORED_SIGNAL_SESSION' : 'EXACT_MANAGED_RAW_STORED_SESSION' };
+    } catch {
+      return { verified: false, reason: 'RAW_STTL2_IDENTITY_PROOF_REQUIRED' };
+    }
   }
 
   attemptReceiptQualification(database, runId, lineage) {
@@ -428,7 +580,7 @@ export class OperationalLearning {
   }
 
   telemetryQualification(run, context, plan, summary) {
-    if (!this.telemetryRequired) return { verified: true, bypassed: true };
+    if (!this.telemetryRequired) return { verified: true, bypassed: true, proof_basis: 'EXPLICIT_MOCK_ONLY' };
     if (!this.telemetryDb || !this.completionRoot) return { verified: false, reasons: ['TELEMETRY_QUALIFICATION_CONFIG_REQUIRED'] };
     if (!fs.existsSync(this.telemetryDb)) return { verified: false, reasons: ['TELEMETRY_DATABASE_REQUIRED'] };
     const receiptFile = path.join(this.completionRoot, `${run.id}-completion.json`);
@@ -458,14 +610,14 @@ export class OperationalLearning {
     let database;
     try {
       database = new DatabaseSync(this.telemetryDb, { readOnly: true, timeout: 2000 });
-      database.exec('PRAGMA query_only=ON; PRAGMA busy_timeout=2000;');
+      database.exec('PRAGMA query_only=ON; PRAGMA busy_timeout=2000; BEGIN;');
       const schema = Number(database.prepare('SELECT COALESCE(MAX(version),0) version FROM schema_version').get().version);
       if (schema < 13) return { verified: false, reasons: ['TELEMETRY_SCHEMA_13_REQUIRED'], schema_version: schema };
       const rows = database.prepare('SELECT * FROM ocean_run_lineage_v1 WHERE run_id=?').all(run.id);
       if (rows.length !== 1) return { verified: false, reasons: ['EXACT_TELEMETRY_RUN_LINEAGE_REQUIRED'], schema_version: schema };
       const lineage = rows[0];
       const reasons = [];
-      const physicalBinding = this.physicalStrategyBinding(run, context, plan, lineage);
+      const physicalBinding = this.physicalStrategyBinding(run, context, plan, lineage, database, expectedSimulationAccount);
       const expectedDatasetId = `${context.dataset_manifest_id}:${context.dataset_manifest_revision}`;
       if (lineage.strategy_id !== run.strategy_id
         || !lineage.strategy_version
@@ -494,6 +646,8 @@ export class OperationalLearning {
         continuation_state,exhaustion_state,exhaustion_score,quality_scaler_distance_atr,price_change_60m,
         price_change_120m,vwap_slope_60m,atr_change_60m_pct,mfe_points,mae_points
         FROM ocean_trade_causal_v2 WHERE run_id=? AND lower(status)='closed' ORDER BY trade_id`).all(run.id);
+      const rawIdentity = this.rawIdentityQualification(database, run, lineage, causalRows);
+      if (!rawIdentity.verified) reasons.push(rawIdentity.reason);
       if (causalRows.some(row => row.context_status !== 'complete'
         || criticalCausalQualityFlags(row.quality_flags).length > 0)) reasons.push('TELEMETRY_CAUSAL_ROWS_NOT_CLEAN');
       if (causalRows.some(row => ['net_profit_loss','gross_currency_value','total_commission'].some(field =>
@@ -505,10 +659,12 @@ export class OperationalLearning {
         verified: reasons.length === 0,
         reasons,
         schema_version: schema,
-        contract: 'telemetry-causal-export/v3',
+        contract: 'telemetry-causal-export/v4',
         telemetry_qualification_status: lineage.telemetry_qualification_status,
         attempt_qualification: attemptQualification,
         physical_strategy_binding: physicalBinding,
+        raw_identity_qualification: rawIdentity,
+        ...(!physicalBinding.verified || !rawIdentity.verified ? { required_action: PROVENANCE_ACTION } : {}),
         completion_binding: {
           run_id: run.id,
           receipt_sha256: fileHash(receiptFile),
@@ -748,10 +904,12 @@ export class OperationalLearning {
     return {
       stage,
       loop_stage: stage === 'COMPLETE' && details?.conclusion_type === 'RECOMMENDATION'
-        ? research?.state === 'COMPLETED' ? 'COMPLETE' : research?.state || 'PENDING_RESEARCH' : stage,
+        ? research?.state === 'COMPLETED' ? 'COMPLETE' : research?.effective_state || research?.state || 'PENDING_RESEARCH' : stage,
       research,
       eligible: classification.eligible,
       reasons: classification.reasons,
+      current_provenance_qualified: classification.telemetry.verified && !classification.telemetry.bypassed,
+      qualification_warning: classification.telemetry.required_action || null,
       result_id: stored?.result?.result_id || latest?.result?.result_id || null,
       brain_record_id: details?.record_id || null,
       conclusion_type: details?.conclusion_type || null,
@@ -760,7 +918,7 @@ export class OperationalLearning {
       registry_record_sha256: currentFingerprint || details?.registry_record_sha256 || null,
       continuation_case_id: details?.continuation?.case_id || null,
       continuation_artifact_id: details?.continuation?.artifact_id || null,
-      next_action: research?.next_action || details?.continuation?.next_action || details?.next_action || null,
+      next_action: classification.telemetry.required_action || research?.next_action || details?.continuation?.next_action || details?.next_action || null,
       last_error: this.retry.get(`${runId}:${currentFingerprint || 'unbound'}`)?.error || null,
     };
   }

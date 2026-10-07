@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { digest, objectHash } from './common.mjs';
-import { OperationalLearning, cumulativeLearningProposal, criticalCausalQualityFlags } from './operational-learning.mjs';
+import { OperationalLearning, cumulativeLearningProposal, criticalCausalQualityFlags, parseSttl2Identity } from './operational-learning.mjs';
 
 const strategyId = 'cicd-vwap-pull-back-strategy';
 const instanceId = 'cicd-vwap-pull-back-strategy:replay-two:chart1';
@@ -88,6 +88,7 @@ function fixture() {
     const content=JSON.stringify({registry_reconciliation_id:input.registry_reconciliation_id,registry_record_sha256:input.registry_record_sha256,conclusion:{type:'NO_CHANGE',reasons:['no change required']},finding:'Cumulative evidence reviewed; no automatic strategy change.'});
     return {ok:true,status:200,json:async()=>({schema_version:'ocean-operational-learning-result/v1',record_id:'reasoning-verified-learning',relative_path:'reasoning/verified-learning.md',content,content_sha256:digest(content),conclusion_type:'NO_CHANGE',source_record_ids:[...input.cohort.eligible_runs,...input.excluded_evidence].map(run=>run.run_id),correlation:input.correlation})};
   };
+  // Explicit mock-only provider for Brain/queue tests, never physical provenance evidence.
   const learner=new OperationalLearning(backend,{enabled:true,strategy_id:strategyId,token_file:tokenFile,fetch,interval_ms:60000,telemetry_required:false});
   return {root,db,backend,learner,requests,events,continuations,registry,prior,trigger,addRun,close(){learner.stop();db.close();fs.rmSync(root,{recursive:true,force:true});}};
 }
@@ -311,7 +312,20 @@ test('Brain HTTP validation errors retain only actionable location and message',
   }finally{f.close();}
 });
 
-test('learning requires exact Telemetry v3 lineage and physical completion binding',()=>{
+test('STTL2 identity parser follows bounded decoded fields and fails closed on ambiguous input',()=>{
+  const hash=digest('context');
+  const raw=`Strategy |STTL2|run_id=run%3Bwith%3Dequals;dataset=manifest%3A3;context_hash=${encodeURIComponent(hash)};session=London+literal`;
+  assert.deepEqual(parseSttl2Identity(raw),{run_id:'run;with=equals',dataset:'manifest:3',context_hash:hash,session:'London+literal'});
+  for(const tag of [null,'Strategy |STTL1|run_id=r','Strategy |STTL2|',
+    'Strategy |STTL2|run_id=a;run_id=b','Strategy |STTL2|run_id=%zz',
+    'Strategy |STTL2|run_id=%0A','Strategy |STTL2|bogus=x',
+    'Strategy |STTL2|run_id=a;context_hash=bad','Strategy |STTL2|run_id',
+    `Strategy |STTL2|run_id=${'a'.repeat(257)}`,`Strategy |STTL2|run_id=${'a'.repeat(2049)}`]) {
+    assert.equal(parseSttl2Identity(tag),null,`must reject ${String(tag).slice(0,80)}`);
+  }
+});
+
+test('learning requires recorded DLL and raw STTL2 proof for both logical and mapped binding',()=>{
   const f=fixture();
   const telemetryFile=path.join(f.root,'telemetry.sqlite');
   const completionRoot=path.join(f.root,'evidence');
@@ -346,13 +360,23 @@ test('learning requires exact Telemetry v3 lineage and physical completion bindi
         run_id TEXT,attempt_id INTEGER,trade_count INTEGER,closed_trade_count INTEGER,fill_count INTEGER,
         receipt_kind TEXT,data_quality_flags TEXT
       );
+      ALTER TABLE ocean_run_lineage_v1 ADD COLUMN candidate_id TEXT;
+      ALTER TABLE ocean_run_lineage_v1 ADD COLUMN session_name TEXT DEFAULT 'All';
+      ALTER TABLE ocean_run_lineage_v1 ADD COLUMN session_timezone TEXT DEFAULT 'Europe/London';
+      CREATE TABLE replay_runs(run_id TEXT,instance_id TEXT,strategy_id TEXT,strategy_version TEXT,dll_hash TEXT);
+      CREATE TABLE sierra_instance(instance_id TEXT,instance_role TEXT,sierra_exe_path TEXT);
+      CREATE TABLE trades(trade_id INTEGER,run_id TEXT,instance_id TEXT,trade_account TEXT,symbol TEXT,strategy_id TEXT,strategy_version TEXT,dll_hash TEXT,status TEXT,text_tag TEXT);
+      CREATE TABLE trade_causal_context(trade_id INTEGER,run_id TEXT,instance_id TEXT,trade_account TEXT,symbol TEXT,
+        strategy_id TEXT,strategy_version TEXT,strategy_profile_id TEXT,strategy_profile_version TEXT,
+        strategy_code_hash TEXT,strategy_config_hash TEXT,context_hash TEXT,candidate_id TEXT,dataset_id TEXT,dataset_role TEXT,raw_text_tag TEXT,
+        session_name TEXT DEFAULT 'London',session_timezone TEXT DEFAULT 'Europe/London');
     `);
     const run=f.db.prepare('SELECT * FROM ow_runs WHERE id=?').get(f.trigger);
     const context=JSON.parse(run.context_json);
-    telemetry.prepare('INSERT INTO ocean_run_lineage_v1 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(
+    telemetry.prepare('INSERT INTO ocean_run_lineage_v1 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(
       f.trigger,strategyId,context.strategy_version,context.context_hash,`${context.dataset_manifest_id}:${context.dataset_manifest_revision}`,context.dataset_partition,
       context.strategy_profile_id,context.strategy_profile_version,context.strategy_code_hash,context.strategy_config_hash,'closed','complete',0,2,2,0,1,1,1,
-      'TELEMETRY_COMPLETE_COVERAGE_UNVERIFIED','2025-11-01T00:00:00Z','2025-11-01T00:00:00Z');
+      'TELEMETRY_COMPLETE_COVERAGE_UNVERIFIED','2025-11-01T00:00:00Z','2025-11-01T00:00:00Z','candidate','All','Europe/London');
     telemetry.prepare('INSERT INTO ocean_trade_causal_v2 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(
       1,'45931.5',f.trigger,'LONG','closed',125,'target','complete','pre_entry_features_missing|pre_entry_continuation_exhaustion_missing', 'vwap_pullback_long','London','trend','normal',
       2.5,5,'continuation','not_exhausted',0.5,1.25,12.5,20,0.75,-4.5,10,-3,126,1);
@@ -365,33 +389,152 @@ test('learning requires exact Telemetry v3 lineage and physical completion bindi
     f.learner.telemetryRequired=true;
     f.learner.telemetryDb=telemetryFile;
     f.learner.completionRoot=completionRoot;
+    assert.ok(f.learner.classification(run).reasons.includes('PHYSICAL_STRATEGY_BINDING_REQUIRED'),'logical exact cannot bypass physical proof');
+    const moduleFile=path.join(f.root,'approved-strategy.dll');
+    fs.writeFileSync(moduleFile,'explicit mock strategy module');
+    const moduleHash=digest(fs.readFileSync(moduleFile));
+    const physicalBindingFile=path.join(f.root,'replay-run-bridge.json');
+    const writeBinding=version=>fs.writeFileSync(physicalBindingFile,JSON.stringify({
+      schema_version:'ocean-replay-run-bridge/v4',strategy_id:strategyId,instance_id:instanceId,
+      expected_strategy_version:version,factual_binding_hash:digest('factual-binding'),
+      expected_strategy_module_path:moduleFile,expected_strategy_module_sha256:moduleHash,
+      expected_sierra_exe:path.join(f.root,'SierraChart_64.exe'),
+      managed_candidate_id:'candidate',expected_session_name:'All',expected_session_timezone:'Europe/London',
+    }));
+    writeBinding(context.strategy_version);
+    f.learner.physicalBindingFile=physicalBindingFile;
+    const rawFields={setup_family:'vwap_pullback_long',setup_instance:'mock-setup',run_id:f.trigger,strategy_id:strategyId,
+      strategy_v:context.strategy_version,profile:context.strategy_profile_id,profile_v:context.strategy_profile_version,
+      code_hash:context.strategy_code_hash,config_hash:context.strategy_config_hash,context_hash:context.context_hash,
+      candidate:'candidate',dataset:`${context.dataset_manifest_id}:${context.dataset_manifest_revision}`,dataset_role:context.dataset_partition,
+      session:'London',tz:'Europe/London'};
+    const encodeTag=fields=>`Mock strategy |STTL2|${Object.entries(fields).map(([key,value])=>`${key}=${encodeURIComponent(value)}`).join(';')}`;
+    const tag=encodeTag(rawFields);
+    telemetry.prepare('INSERT INTO replay_runs VALUES(?,?,?,?,?)').run(f.trigger,instanceId,strategyId,context.strategy_version,moduleHash.slice(7).toUpperCase());
+    telemetry.prepare('INSERT INTO sierra_instance VALUES(?,?,?)').run(instanceId,'replay',path.join(f.root,'SierraChart_64.exe'));
+    telemetry.prepare('INSERT INTO trades VALUES(?,?,?,?,?,?,?,?,?,?)').run(1,f.trigger,instanceId,'Sim1','NQ',strategyId,context.strategy_version,moduleHash,'closed',tag);
+    telemetry.prepare('INSERT INTO trade_causal_context VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(1,f.trigger,instanceId,'Sim1','NQ',
+      strategyId,context.strategy_version,context.strategy_profile_id,context.strategy_profile_version,
+      context.strategy_code_hash,context.strategy_config_hash,context.context_hash,'candidate',rawFields.dataset,context.dataset_partition,tag,'London','Europe/London');
     const accepted=f.learner.classification(run);
     assert.equal(accepted.eligible,true,accepted.reasons.join(','));
-    assert.equal(accepted.telemetry.contract,'telemetry-causal-export/v3');
+    assert.equal(accepted.telemetry.contract,'telemetry-causal-export/v4');
+    assert.equal(accepted.telemetry.physical_strategy_binding.kind,'LOGICAL_VERSION_EXACT');
+    assert.equal(accepted.telemetry.raw_identity_qualification.verified,true);
+    assert.equal(accepted.telemetry.physical_strategy_binding.independent_historical_execution_attestation,false);
+    const physicalInstance='mock-sierra-recorded-instance';
+    telemetry.prepare('UPDATE replay_runs SET instance_id=?').run(physicalInstance);
+    telemetry.prepare('UPDATE trades SET instance_id=?').run(physicalInstance);
+    telemetry.prepare('UPDATE trade_causal_context SET instance_id=?').run(physicalInstance);
+    telemetry.prepare('UPDATE sierra_instance SET instance_id=?').run(physicalInstance);
+    assert.equal(f.learner.classification(run).eligible,true,'logical Ocean and recorded Sierra IDs need not be equal');
+    telemetry.prepare('UPDATE trades SET instance_id=?').run('wrong-sierra-instance');
+    assert.ok(f.learner.classification(run).reasons.includes('RECORDED_STRATEGY_PROVENANCE_SCOPE_CONFLICT'));
+    telemetry.prepare('UPDATE replay_runs SET instance_id=?').run(instanceId);
+    telemetry.prepare('UPDATE trades SET instance_id=?').run(instanceId);
+    telemetry.prepare('UPDATE trade_causal_context SET instance_id=?').run(instanceId);
+    telemetry.prepare('UPDATE sierra_instance SET instance_id=?').run(instanceId);
+    fs.writeFileSync(moduleFile,'changed mock strategy module');
+    assert.ok(f.learner.classification(run).reasons.includes('APPROVED_STRATEGY_MODULE_HASH_CONFLICT'));
+    fs.writeFileSync(moduleFile,'explicit mock strategy module');
     assert.equal(accepted.telemetry.causal_summary.groups[0].setup_family,'vwap_pullback_long');
     assert.equal(accepted.telemetry.causal_summary.groups[0].averages.net_profit_loss,125);
     assert.match(accepted.telemetry.completion_binding.receipt_sha256,/^sha256:[a-f0-9]{64}$/);
-    const physicalBindingFile=path.join(f.root,'replay-run-bridge.json');
-    fs.writeFileSync(physicalBindingFile,JSON.stringify({
-      schema_version:'ocean-replay-run-bridge/v4',strategy_id:strategyId,instance_id:instanceId,
-      expected_strategy_version:'v0.6.237',factual_binding_hash:digest('factual-binding'),
-    }));
-    f.learner.physicalBindingFile=physicalBindingFile;
+    for(const [table,field,value,reason] of [
+      ['replay_runs','dll_hash',null,'RECORDED_STRATEGY_DLL_PROVENANCE_REQUIRED'],
+      ['trades','dll_hash','not-a-hash','RECORDED_STRATEGY_DLL_PROVENANCE_REQUIRED'],
+      ['replay_runs','dll_hash',digest('generic DLL'),'RECORDED_STRATEGY_DLL_PROVENANCE_CONFLICT'],
+      ['trades','dll_hash',digest('generic DLL'),'RECORDED_STRATEGY_DLL_PROVENANCE_CONFLICT'],
+      ['trades','trade_account','Sim2','RECORDED_STRATEGY_PROVENANCE_SCOPE_CONFLICT'],
+    ]) {
+      telemetry.prepare(`UPDATE ${table} SET ${field}=?`).run(value);
+      const rejected=f.learner.classification(run);
+      assert.ok(rejected.reasons.includes(reason),rejected.reasons.join(','));
+      assert.equal(rejected.telemetry.causal_summary.trades,1,'excluded context keeps executed accounting');
+      assert.match(rejected.telemetry.required_action,/provenance owner/);
+      telemetry.prepare(`UPDATE ${table} SET ${field}=?`).run(field==='dll_hash'?moduleHash:'Sim1');
+    }
+    for(const [key,value] of [['context_hash',digest('October context')],['dataset','manifest:2'],['run_id','other-run'],['code_hash',digest('other-code')],['profile','other-profile'],['session','Asia'],['tz','UTC'],['candidate','other-candidate'],['config_hash',digest('other-config')]]) {
+      telemetry.prepare('UPDATE trade_causal_context SET raw_text_tag=?').run(encodeTag({...rawFields,[key]:value}));
+      const rejected=f.learner.classification(run);
+      assert.ok(rejected.reasons.includes('RAW_STTL2_IDENTITY_CONFLICT'));
+      assert.ok(rejected.telemetry.raw_identity_qualification.discrepancies[0].fields.includes(key));
+      assert.equal(rejected.telemetry.causal_summary.trades,1);
+    }
+    telemetry.prepare('UPDATE trade_causal_context SET raw_text_tag=?').run(tag);
+    telemetry.prepare('UPDATE trade_causal_context SET raw_text_tag=NULL').run();
+    assert.ok(f.learner.classification(run).reasons.includes('RAW_STTL2_IDENTITY_CONFLICT'));
+    telemetry.prepare('UPDATE trade_causal_context SET raw_text_tag=?').run(tag);
+    // Retain a bad historical run as context, without contributing to support.
+    const badId=f.addRun({id:'bad-old-metadata',pnl:[125]});
+    const badContext=JSON.parse(f.db.prepare('SELECT context_json FROM ow_runs WHERE id=?').get(badId).context_json);
+    telemetry.prepare(`INSERT INTO ocean_run_lineage_v1 SELECT ?,strategy_id,strategy_version,?,dataset_id,dataset_role,
+      strategy_profile_id,strategy_profile_version,strategy_code_hash,strategy_config_hash,run_lifecycle_status,run_context_status,
+      open_trade_count,attempt_count,attempt_receipt_count,partial_receipt_count,closed_trade_count,causal_row_count,
+      complete_causal_row_count,telemetry_qualification_status,created_utc,updated_utc,candidate_id,session_name,session_timezone FROM ocean_run_lineage_v1 WHERE run_id=?`).run(badId,badContext.context_hash,f.trigger);
+    telemetry.prepare(`INSERT INTO ocean_trade_causal_v2 SELECT 2,entry_datetime,?,direction,status,net_profit_loss,exit_causality,
+      context_status,quality_flags,setup_family,session_name,regime_label,volatility_label,vwap_distance_points,initial_risk_points,
+      continuation_state,exhaustion_state,exhaustion_score,quality_scaler_distance_atr,price_change_60m,price_change_120m,
+      vwap_slope_60m,atr_change_60m_pct,mfe_points,mae_points,gross_currency_value,total_commission FROM ocean_trade_causal_v2 WHERE run_id=?`).run(badId,f.trigger);
+    telemetry.prepare('INSERT INTO replay_runs VALUES(?,?,?,?,?)').run(badId,instanceId,strategyId,context.strategy_version,digest('generic DLL'));
+    const badTag=encodeTag({...rawFields,run_id:badId,context_hash:digest('October context'),dataset:'manifest:2'});
+    telemetry.prepare('INSERT INTO trades VALUES(?,?,?,?,?,?,?,?,?,?)').run(2,badId,instanceId,'Sim1','NQ',strategyId,context.strategy_version,digest('generic DLL'),'closed',badTag);
+    telemetry.prepare('INSERT INTO trade_causal_context VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(2,badId,instanceId,'Sim1','NQ',strategyId,
+      context.strategy_version,context.strategy_profile_id,context.strategy_profile_version,context.strategy_code_hash,
+      context.strategy_config_hash,badContext.context_hash,'candidate',rawFields.dataset,context.dataset_partition,
+      badTag,'London','Europe/London');
+    const badReceipt=JSON.parse(fs.readFileSync(path.join(completionRoot,`${f.trigger}-completion.json`),'utf8'));
+    fs.writeFileSync(path.join(completionRoot,`${badId}-completion.json`),JSON.stringify({...badReceipt,run_id:badId}));
+    const bundle=f.learner.cohort(run);
+    assert.deepEqual(bundle.cohort.eligible_runs.map(item=>item.run_id),[f.trigger]);
+    assert.equal(bundle.cohort.aggregate.observed_sample_count,1);
+    const excluded=bundle.excluded_evidence.find(item=>item.run_id===badId);
+    assert.equal(excluded.observed_sample_count,1);
+    assert.match(excluded.exclusion_reason,/RECORDED_STRATEGY_DLL_PROVENANCE_CONFLICT.*RAW_STTL2_IDENTITY_CONFLICT/);
+    assert.equal(bundle.diagnostics.find(item=>item.run_id===badId).telemetry.causal_summary.trades,1);
+    // The following mapping/attempt regressions operate only on the trigger fixture.
+    telemetry.prepare('DELETE FROM ocean_run_lineage_v1 WHERE run_id=?').run(badId);
+    telemetry.prepare('DELETE FROM ocean_trade_causal_v2 WHERE run_id=?').run(badId);
+    telemetry.prepare('DELETE FROM replay_runs WHERE run_id=?').run(badId);
+    telemetry.prepare('DELETE FROM trades WHERE run_id=?').run(badId);
+    telemetry.prepare('DELETE FROM trade_causal_context WHERE run_id=?').run(badId);
+    writeBinding('v0.6.237');
     telemetry.prepare("UPDATE ocean_run_lineage_v1 SET strategy_version='v0.6.237'").run();
+    telemetry.prepare("UPDATE replay_runs SET strategy_version='v0.6.237'").run();
+    telemetry.prepare("UPDATE trades SET strategy_version='v0.6.237'").run();
+    telemetry.prepare("UPDATE trade_causal_context SET strategy_version='v0.6.237',raw_text_tag=?").run(encodeTag({...rawFields,strategy_v:'v0.6.237'}));
+    telemetry.prepare('UPDATE trades SET text_tag=?').run(encodeTag({...rawFields,strategy_v:'v0.6.237'}));
     const mapped=f.learner.classification(run);
     assert.equal(mapped.eligible,true,mapped.reasons.join(','));
     assert.equal(mapped.telemetry.physical_strategy_binding.kind,'APPROVED_LOGICAL_TO_PHYSICAL');
-    fs.writeFileSync(physicalBindingFile,JSON.stringify({
-      schema_version:'ocean-replay-run-bridge/v4',strategy_id:strategyId,instance_id:instanceId,
-      expected_strategy_version:'v0.6.238',factual_binding_hash:digest('factual-binding'),
-    }));
+    telemetry.prepare('UPDATE trades SET dll_hash=?').run(digest('generic DLL'));
+    assert.ok(f.learner.classification(run).reasons.includes('RECORDED_STRATEGY_DLL_PROVENANCE_CONFLICT'),'mapped branch also requires recorded DLL proof');
+    telemetry.prepare('UPDATE trades SET dll_hash=?').run(moduleHash);
+    writeBinding('v0.6.238');
     const mappingRejected=f.learner.classification(run);
     assert.equal(mappingRejected.eligible,false);
     assert.ok(mappingRejected.reasons.includes('PHYSICAL_STRATEGY_BINDING_CONFLICT'));
-    fs.writeFileSync(physicalBindingFile,JSON.stringify({
-      schema_version:'ocean-replay-run-bridge/v4',strategy_id:strategyId,instance_id:instanceId,
-      expected_strategy_version:'v0.6.237',factual_binding_hash:digest('factual-binding'),
-    }));
+    writeBinding('v0.6.237');
+    const logicalProfile='cicd-vwap-pull-back-strategy.profile-v0.1.0-source-bound';
+    const physicalProfile='nasdaq_v0449_hmm_risk1000_qty5_control';
+    const physicalVersion='v0.6.237-managed-lineage-candidate';
+    const profileRun={...run,context_json:JSON.stringify({...context,strategy_profile_id:logicalProfile,strategy_profile_version:'v0.1.3'})};
+    telemetry.prepare('UPDATE ocean_run_lineage_v1 SET strategy_profile_id=?,strategy_profile_version=?').run(logicalProfile,'v0.1.3');
+    const physicalTag=encodeTag({...rawFields,strategy_v:physicalVersion,profile:physicalProfile,profile_v:physicalVersion});
+    telemetry.prepare('UPDATE trades SET strategy_version=?,text_tag=?').run(physicalVersion,physicalTag);
+    telemetry.prepare('UPDATE trade_causal_context SET strategy_version=?,strategy_profile_id=?,strategy_profile_version=?,raw_text_tag=?')
+      .run(physicalVersion,physicalProfile,physicalVersion,physicalTag);
+    const approvedProfile=f.learner.classification(profileRun);
+    assert.equal(approvedProfile.eligible,true,approvedProfile.reasons.join(','));
+    telemetry.prepare('UPDATE trade_causal_context SET strategy_profile_id=?,strategy_profile_version=?').run(logicalProfile,'v0.1.3');
+    assert.equal(f.learner.classification(profileRun).eligible,true,'explicit approved logical normalization is also accepted');
+    telemetry.prepare('UPDATE trade_causal_context SET raw_text_tag=?').run(encodeTag({...rawFields,strategy_v:physicalVersion,profile:'unapproved-physical-profile',profile_v:physicalVersion}));
+    assert.ok(f.learner.classification(profileRun).reasons.includes('RAW_STTL2_IDENTITY_CONFLICT'),'suffix alone is not an approved profile mapping');
+    telemetry.prepare('UPDATE ocean_run_lineage_v1 SET strategy_profile_id=?,strategy_profile_version=?').run(context.strategy_profile_id,context.strategy_profile_version);
+    const mappedTag=encodeTag({...rawFields,strategy_v:'v0.6.237'});
+    telemetry.prepare('UPDATE trades SET strategy_version=?,text_tag=?').run('v0.6.237',mappedTag);
+    telemetry.prepare('UPDATE trade_causal_context SET strategy_version=?,strategy_profile_id=?,strategy_profile_version=?,raw_text_tag=?')
+      .run('v0.6.237',context.strategy_profile_id,context.strategy_profile_version,mappedTag);
     telemetry.prepare("UPDATE ocean_trade_causal_v2 SET quality_flags='strategy_version_mismatch'").run();
     const criticalFlagRejected=f.learner.classification(run);
     assert.equal(criticalFlagRejected.eligible,false);

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import vm from 'node:vm';
 import { WorkflowStore } from './store.mjs';
 import { digest, objectHash, WorkflowError } from './common.mjs';
 import { OperationalLearning } from './operational-learning.mjs';
@@ -24,7 +25,7 @@ function sample() {
   return {rows,bundle};
 }
 
-test('v3 evaluator reconciles recorded simulation fees and screens only entry direction',()=>{
+test('v4 evaluator reconciles recorded simulation fees and screens only entry direction',()=>{
   const {rows,bundle}=sample();const result=evaluateResearch(bundle,rows);
   assert.deepEqual(result.aggregate,{trades:60,gross_profit_loss:300,fees:60,net_profit_loss:240,
     wins:30,losses:30,flat:0,gross_wins:30,fee_flipped_wins:0});
@@ -32,7 +33,7 @@ test('v3 evaluator reconciles recorded simulation fees and screens only entry di
   assert.equal(result.proposals.length,1);assert.equal(result.proposals[0].dimension,'direction');
   assert.equal(result.proposals[0].value,'short');assert.equal(result.missing_exit_attribution,30);
   assert.equal(result.candidate_validation.status,'NOT_DUE');assert.equal(result.authority.live_authorized,false);
-  assert.equal(result.schema_version,'ocean-cumulative-research/v3');
+  assert.equal(result.schema_version,RESEARCH_VERSION);
   assert.ok(result.experiments.every(value=>value.dimension==='direction' && value.proposal_eligible && value.lookahead_safe));
   assert.ok(result.observational_breakdowns.every(value=>!value.proposal_eligible && !value.lookahead_safe && !value.supported));
   assert.deepEqual(result.authority,{automatic_strategy_change:false,candidate_approved:false,paper_authorized:false,live_authorized:false});
@@ -174,7 +175,8 @@ function queueFixture() {
     .run('a','s','r','case','brain','strategy','RECOMMENDATION',null,hash,'[]',JSON.stringify({content_hash:digest(content)}),Buffer.from(content));
   const backend={db,store,one:(table,id)=>backend.db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id),
     artifactFor:(_,id)=>backend.one('ow_artifacts',id),event(){},
-    operationalLearning:{enabled:true,cohort:run=>({cohort:{eligible_runs:[{run_id:run.id}]}})},
+    // Explicit mock-only qualification; these queue fixtures do not prove physical execution.
+    operationalLearning:{enabled:true,classification:()=>({eligible:true,reasons:[],telemetry:{bypassed:true,proof_basis:'EXPLICIT_MOCK_ONLY'}}),cohort:run=>({cohort:{eligible_runs:[{run_id:run.id}]}})},
     writeArtifact(_actor,data) {
       backend.db.prepare('INSERT INTO ow_artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(data.artifact_id,'s',data.run_id,
         data.case_id,'brain',data.recipient_id,data.kind,null,hash,JSON.stringify(data.dependency_ids),
@@ -185,9 +187,8 @@ function queueFixture() {
     close(){store.close();fs.rmSync(root,{recursive:true,force:true});}};
 }
 
-function historicalFixture() {
+function historicalFixture(version='ocean-cumulative-research/v2') {
   const f=queueFixture();
-  const version='ocean-cumulative-research/v2';
   const id=`research-${digest(`case:a:${version}`).slice(-24)}`;
   const artifactId=`test-research-result-${id.slice('research-'.length)}`;
   const report=JSON.stringify({schema_version:version,outcome:'NO_SUPPORTED_CHANGE',next_action:'Original v2 report instruction.'});
@@ -241,7 +242,7 @@ test('real SQLite queue commits before delivery and enqueues idempotently across
   }finally{f.close();}
 });
 
-test('v3 jobs and results append without claiming, relabelling or rewriting v2 history',()=>{
+test('v4 jobs and results append without claiming, relabelling or rewriting v2 history',()=>{
   for(const state of ['PENDING','COMPLETED']) {
     const f=queueFixture();try {
       const version='ocean-cumulative-research/v2';
@@ -260,7 +261,7 @@ test('v3 jobs and results append without claiming, relabelling or rewriting v2 h
       const originalArtifact=f.backend.one('ow_artifacts',legacyArtifact);
       const appended=f.worker.enqueue('case','a');
       assert.equal(appended.analysis_version,RESEARCH_VERSION);assert.notEqual(appended.id,legacyId);
-      const job=f.worker.claim();assert.equal(job.id,appended.id);assert.equal(job.analysis_version,'ocean-cumulative-research/v3');
+      const job=f.worker.claim();assert.equal(job.id,appended.id);assert.equal(job.analysis_version,RESEARCH_VERSION);
       const {rows,bundle}=sample();const status=f.worker.complete(job,evaluateResearch(bundle,rows),{id:'brain'},'strategy');
       assert.equal(status.report.schema_version,RESEARCH_VERSION);assert.notEqual(status.result_artifact_id,legacyArtifact);
       f.restart();
@@ -268,7 +269,7 @@ test('v3 jobs and results append without claiming, relabelling or rewriting v2 h
       assert.deepEqual(f.backend.one('ow_artifacts',legacyArtifact),originalArtifact);
       assert.equal(f.worker.enqueue('case','a').id,appended.id);
       assert.equal(f.backend.db.prepare('SELECT COUNT(*) n FROM ow_research_jobs').get().n,2);
-      assert.equal(f.worker.claim(),null,'v3 worker never claims the remaining v2 job');
+      assert.equal(f.worker.claim(),null,'v4 worker never claims the remaining v2 job');
     }finally{f.close();}
   }
 });
@@ -385,6 +386,82 @@ test('a real persisted retry resumes automatically without a human decision',()=
   }finally{f.close();}
 });
 
+test('provenance exclusions never consume retry attempts or starve qualified fresh cases across restart',async()=>{
+  for(const state of ['PENDING','RETRY','RUNNING']) {
+    const f=queueFixture();try {
+      const blocked=f.worker.enqueue('case','a');
+      f.backend.db.prepare('UPDATE ow_research_jobs SET state=?,next_attempt_ms=0,lease_until_ms=0 WHERE id=?').run(state,blocked.id);
+      const original=f.backend.one('ow_research_jobs',blocked.id);
+      const classify=run=>({eligible:run?.id==='fresh',reasons:run?.id==='fresh'?[]:['RECORDED_STRATEGY_DLL_PROVENANCE_CONFLICT'],telemetry:{proof_basis:'EXPLICIT_MOCK_ONLY'}});
+      f.backend.operationalLearning.classification=classify;
+      f.backend.db.prepare('INSERT INTO ow_runs VALUES(?,?,?,1,?,?)').run('fresh','s','i','COMPLETED','{}');
+      f.backend.db.prepare("INSERT INTO ow_cases VALUES(?,?,?,?,1,'RESEARCH','READY',?,NULL,'brain',NULL,?)")
+        .run('fresh-case','s','i','fresh',digest('baseline'),JSON.stringify({origin:'OPERATIONAL_LEARNING'}));
+      const content=Buffer.from(f.backend.one('ow_artifacts','a').content).toString('utf8');
+      f.backend.writeArtifact(null,{artifact_id:'fresh-a',case_id:'fresh-case',run_id:'fresh',recipient_id:'strategy',kind:'RECOMMENDATION',
+        content,content_hash:digest(content),dependency_ids:[]});
+      f.worker.enqueue('fresh-case','fresh-a');
+      assert.equal(f.worker.claim().case_id,'fresh-case','blocked first row cannot starve fresh proof');
+      for(let i=0;i<3;i++)await f.worker.flushOnce();
+      f.restart();
+      assert.equal(f.worker.claim(),null);
+      assert.deepEqual(f.backend.one('ow_research_jobs',blocked.id),original,'no RETRY loop, leases or state rewrites');
+      const status=f.worker.statusForCase('case');
+      assert.equal(status.state,state);assert.equal(status.effective_state,'BLOCKED_PROVENANCE');
+      assert.equal(status.qualified_for_new_support,false);
+      assert.match(status.next_action,/provenance owner.*fresh managed replay/);
+    }finally{f.close();}
+  }
+});
+
+test('frozen v4 support is blocked when any included run loses provenance, without mutating its snapshot',()=>{
+  const f=queueFixture();try {
+    const {rows,bundle}=sample();
+    f.worker.evidence=()=>({rows,bundle,row:{strategy_id:'s'},context:{run_id:'r'},completion_hash:digest('completion'),recipient:'strategy'});
+    f.worker.enqueue('case','a');const job=f.worker.claim();f.worker.capture(job);
+    f.backend.db.prepare('UPDATE ow_research_jobs SET lease_until_ms=0 WHERE id=?').run(job.id);
+    const original=f.backend.one('ow_research_jobs',job.id);
+    f.backend.operationalLearning.classification=run=>({eligible:run?.id==='r',reasons:['RAW_STTL2_IDENTITY_CONFLICT']});
+    f.restart();
+    assert.equal(f.worker.claim(),null);
+    assert.deepEqual(f.backend.one('ow_research_jobs',job.id),original);
+    assert.equal(f.worker.statusForCase('case').effective_state,'BLOCKED_PROVENANCE');
+    assert.throws(()=>f.worker.capture(original),/RESEARCH_CURRENT_PROVENANCE_REQUIRED/);
+    assert.throws(()=>f.worker.complete(job,JSON.parse(original.input_json).result,{id:'brain'},'strategy'),/RESEARCH_CURRENT_PROVENANCE_REQUIRED/);
+  }finally{f.close();}
+});
+
+test('completed v2/v3 reports retain bytes and show current provenance warnings rather than qualified support',()=>{
+  for(const version of ['ocean-cumulative-research/v2','ocean-cumulative-research/v3']) {
+    const f=historicalFixture(version);try {
+      f.backend.operationalLearning.classification=()=>({eligible:false,reasons:['RECORDED_STRATEGY_DLL_PROVENANCE_CONFLICT','RAW_STTL2_IDENTITY_CONFLICT']});
+      f.worker.reconcile();
+      const status=f.worker.statusForCase('case');
+      assert.equal(status.state,'COMPLETED');assert.equal(status.historical,true);
+      assert.equal(status.qualified_for_new_support,false);assert.equal(status.current_qualification.verified,false);
+      assert.match(status.qualification_warning,/Preserved historical report.*not current physical\/raw provenance proof/);
+      assert.equal(f.worker.claim(),null);f.assertPreserved();
+    }finally{f.close();}
+  }
+});
+
+test('Research UI preserves completed status while distinguishing historical support and current provenance blocks',()=>{
+  const source=fs.readFileSync(new URL('../public/workflow/ui.js',import.meta.url),'utf8');
+  const panelSource=source.slice(source.indexOf('function researchPanel('),source.indexOf('function casePage('));
+  const panel=vm.runInNewContext(`${panelSource}; researchPanel`,{
+    section:(title,body)=>`${title}\n${body}`,facts:rows=>rows.map(([name,value])=>`${name}: ${value}`).join('\n'),
+    esc:String,badge:String,link:(_type,id)=>id,human:String,
+  });
+  const {rows,bundle}=sample();const report=evaluateResearch(bundle,rows);
+  const historical=panel({job_id:'old',state:'COMPLETED',effective_state:'COMPLETED',historical:true,qualified_for_new_support:false,
+    qualification_warning:'Historical physical provenance not verified',report,attempts:0});
+  assert.match(historical,/Status: COMPLETED/);assert.match(historical,/Preserved report history \(not current qualified support\)/);
+  assert.doesNotMatch(historical,/Currently qualified history/);
+  const blocked=panel({job_id:'new',state:'RETRY',effective_state:'BLOCKED_PROVENANCE',qualified_for_new_support:false,qualification_warning:'Provenance owner action required'});
+  assert.match(blocked,/Status: BLOCKED_PROVENANCE/);assert.match(blocked,/Provenance owner action required/);
+  assert.match(panel({job_id:'fresh',state:'COMPLETED',qualified_for_new_support:true,report}),/Currently qualified history/);
+});
+
 test('queue mutation rolls back with its caller transaction; unapproved authority is rejected',()=>{
   const f=queueFixture();try {
     assert.throws(()=>f.backend.store.transaction(()=>{f.worker.enqueue('case','a');throw Error('crash before ACK');}));
@@ -408,7 +485,7 @@ test('captured Research input is immutable and reused after restart without rere
   }finally{f.close();}
 });
 
-test('v3 snapshot preserves upstream cohort/exclusions/aggregates while period support stays internal',()=>{
+test('v4 snapshot preserves upstream cohort/exclusions/aggregates while period support stays internal',()=>{
   const f=queueFixture();try {
     const {rows,bundle}=sample();
     bundle.research_coverage.b=bundle.research_coverage.a;
@@ -451,10 +528,10 @@ test('real read-only extraction binds internal completion coverage without chang
     f.backend.operationalLearning={enabled:true,telemetryDb:f.file,cohort:()=>bundle,
       classification(run) {
         classifications.push(run.id);
-        return {summary:{completion:{requested_coverage:bundle.research_coverage[run.id]}}};
+        return {eligible:true,reasons:[],telemetry:{bypassed:true,proof_basis:'EXPLICIT_MOCK_ONLY'},summary:{completion:{requested_coverage:bundle.research_coverage[run.id]}}};
       }};
     f.worker.enqueue('case','a');const captured=f.worker.capture(f.worker.claim());
-    assert.deepEqual(classifications,['r','b','c','r']);
+    assert.deepEqual(classifications,['r','r','r','b','c','r']);
     assert.deepEqual(captured.result.eligible_run_ids,['b','c','r'],'all qualified configurations retained');
     assert.equal(captured.result.aggregate.trades,60);assert.equal(captured.result.outcome,'NO_SUPPORTED_CHANGE');
     assert.equal(captured.result.historical_periods.distinct_coverage_count,2);
@@ -474,7 +551,7 @@ test('mock Brain crash-after-write resumes the exact persisted request and rejec
     const evidence={bundle,row:{strategy_id:'s',run_id:'r'},context:{strategy_version:'1'},completion_hash:digest('completion')};
     const result=evaluateResearch(bundle,rows);const calls=[];
     const registry={record_sha256:digest('registry'),reconciliation_id:'registry-1'};
-    f.backend.operationalLearning={enabled:true,path:'/protected-learning',token:()=> 'isolated-test-token',verifyIdentity:async()=>{},
+    f.backend.operationalLearning={enabled:true,classification:()=>({eligible:true,reasons:[],telemetry:{bypassed:true,proof_basis:'EXPLICIT_MOCK_ONLY'}}),path:'/protected-learning',token:()=> 'isolated-test-token',verifyIdentity:async()=>{},
       registry:async()=>registry,call:async(_path,_token,input)=>{calls.push(input);throw Error('connection lost after remote write');}};
     f.worker.enqueue('case','a');const job=f.worker.claim();
     await assert.rejects(f.worker.recordInBrain(job,evidence,result),/connection lost/);
