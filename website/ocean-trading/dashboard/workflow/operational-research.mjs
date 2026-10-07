@@ -180,6 +180,19 @@ export class OperationalResearch {
         const value=this.backend.operationalLearning.classification(this.backend.one('ow_runs',id));
         return value.eligible?[]:[{run_id:id,reasons:value.reasons}];
       });
+      // Uncaptured work must still belong to the cohort it would capture. Frozen
+      // input and completed history keep their original membership semantics.
+      if(!excluded.length && !job.input_json && job.state!=='COMPLETED'
+        && row.work_status!=='COMPLETED' && job.analysis_version===RESEARCH_VERSION) {
+        try {
+          const source=this.backend.operationalLearning.cohort(this.backend.one('ow_runs',row.run_id));
+          requireThat(source.cohort.eligible_runs.some(run=>run.run_id===row.run_id),409,'TRIGGER_RUN_NOT_IN_ELIGIBLE_COHORT');
+        }catch(error) {
+          if(error.code!=='TRIGGER_RUN_NOT_IN_ELIGIBLE_COHORT')throw error;
+          return {verified:false,superseded:true,reason:error.code,
+            excluded_runs:[{run_id:row.run_id,reasons:[error.code]}]};
+        }
+      }
       return {verified:excluded.length===0,excluded_runs:excluded};
     }catch(error) {
       return {verified:false,excluded_runs:[],reason:String(error.code || error.message || 'RESEARCH_PROVENANCE_PROOF_REQUIRED').slice(0,300)};
@@ -201,21 +214,25 @@ export class OperationalResearch {
       && JSON.parse(artifact.manifest_json).content_hash===job.result_hash,409,'RESEARCH_RESULT_HASH_CONFLICT');
     const report=artifact?JSON.parse(Buffer.from(artifact.content).toString('utf8')):null;
     const currentQualification=this.qualification(job);
-    const historical=job.state==='COMPLETED' && (job.analysis_version!==RESEARCH_VERSION || skipped.length>0);
+    const superseded=currentQualification.superseded===true;
+    const historical=superseded || (job.state==='COMPLETED' && (job.analysis_version!==RESEARCH_VERSION || skipped.length>0));
+    const supersededAction='This uncaptured Research case is retained as superseded history: its trigger is outside the current exact-coverage cohort. No completion is claimed and automatic retry is not due. Continue Research on the current eligible case; recorded job state and historical artifacts remain unchanged.';
     return {job_id:job.id,state:job.state,attempts:job.attempts,analysis_version:job.analysis_version,
       result_artifact_id:job.result_artifact_id,result_hash:job.result_hash,last_error:job.last_error,
       input_hash:job.input_hash,
       completed_at_utc:job.completed_at_utc,report,
       historical,
+      superseded,
+      historical_reason:superseded?'UNCAPTURED_TRIGGER_SUPERSEDED_BY_LATEST_EXACT_COVERAGE':historical?'PRESERVED_COMPLETED_RESEARCH':null,
       current_qualification:currentQualification,
       qualified_for_new_support:!historical && currentQualification.verified,
-      effective_state:!currentQualification.verified && job.state!=='COMPLETED'?'BLOCKED_PROVENANCE':job.state,
-      qualification_warning:historical
+      effective_state:superseded?'HISTORICAL_SUPERSEDED':!currentQualification.verified && job.state!=='COMPLETED'?'BLOCKED_PROVENANCE':job.state,
+      qualification_warning:superseded?supersededAction:historical
         ?'Preserved historical report: its original qualified-history label is not current physical/raw provenance proof. It cannot support new proposals without current qualification.'
         :!currentQualification.verified?PROVENANCE_ACTION:null,
       version_backfill_skipped:completedCase && (job.analysis_version!==RESEARCH_VERSION || skipped.length>0),
       skipped_version_backfill_jobs:skipped,
-      next_action:completedCase && job.state==='COMPLETED' && (job.analysis_version!==RESEARCH_VERSION || skipped.length>0)
+      next_action:superseded?supersededAction:completedCase && job.state==='COMPLETED' && (job.analysis_version!==RESEARCH_VERSION || skipped.length>0)
         ?`Historical Research is completed and preserved. Completed cases are not version backfilled; new evidence cases use v4. No current version backfill is queued for this case and no candidate or approval is created. ${PROVENANCE_ACTION}`
         :completedCase && job.state!=='COMPLETED'
           ?'This completed case has a retained historical queue entry but no completed Research report. Version backfill will not run; the entry is not current pending work and no completion is claimed.'

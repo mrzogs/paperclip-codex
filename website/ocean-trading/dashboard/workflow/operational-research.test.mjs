@@ -187,6 +187,31 @@ function queueFixture() {
     close(){store.close();fs.rmSync(root,{recursive:true,force:true});}};
 }
 
+function installComparableCohort(f) {
+  // Use the REAL learner cohort/evidenceIdentity supersession algorithm. Only
+  // classification/summary providers are isolated fixtures; no live telemetry/API.
+  const learner=new OperationalLearning(f.backend,{enabled:true});
+  const coverage=[{start_utc:'2025-01-01T00:00:00Z',end_utc:'2025-02-01T00:00:00Z'}];
+  learner.classification=()=>({eligible:true,reasons:[],context:{strategy_version:'1',strategy_code_hash:digest('code'),
+    strategy_config_hash:digest('config'),strategy_profile_id:'p',strategy_profile_version:'1',execution_instance_id:'i',
+    source_installation_id:'replay',expected_environment:'REPLAY',evidence_purpose:'HISTORICAL_BUILD',
+    dataset_partition:'DISCOVERY',learner_permission:'HISTORICAL_DISCOVERY'},summary:{completion:{requested_coverage:coverage}}});
+  learner.evidencePolicy=()=>({minimum_sample_count:10,minimum_independent_session_count:1});
+  learner.runSummary=run=>({summary:{run_id:run.id,observed_sample_count:20,independent_session_count:1,
+    source_record_ids:[run.id]},metrics:{},telemetry:{}});
+  f.backend.operationalLearning=learner;
+  return learner;
+}
+
+function addNewerComparableCase(f) {
+  f.backend.db.prepare('INSERT INTO ow_runs VALUES(?,?,?,1,?,?)').run('U25','s','i','COMPLETED','{}');
+  f.backend.db.prepare("INSERT INTO ow_cases VALUES(?,?,?,?,1,'RESEARCH','READY',?,NULL,'brain',NULL,?)")
+    .run('case-u25','s','i','U25',digest('baseline'),JSON.stringify({origin:'OPERATIONAL_LEARNING'}));
+  const content=Buffer.from(f.backend.one('ow_artifacts','a').content).toString('utf8');
+  f.backend.writeArtifact(null,{artifact_id:'a-u25',case_id:'case-u25',run_id:'U25',recipient_id:'strategy',kind:'RECOMMENDATION',
+    content,content_hash:digest(content),dependency_ids:[]});
+}
+
 function historicalFixture(version='ocean-cumulative-research/v2') {
   const f=queueFixture();
   const id=`research-${digest(`case:a:${version}`).slice(-24)}`;
@@ -201,31 +226,13 @@ function historicalFixture(version='ocean-cumulative-research/v2') {
     VALUES(?,?,?,?,?,'COMPLETED',?,?,?,?,?,?,?,?)`).run(id,'case','a',JSON.parse(f.backend.one('ow_artifacts','a').manifest_json).content_hash,
       version,0,'2026-10-07T00:00:00Z',input,digest(input),request,digest(request),artifactId,digest(report));
   f.backend.db.prepare("UPDATE ow_cases SET work_status='COMPLETED' WHERE id='case'").run();
-  // Use the REAL learner cohort/evidenceIdentity supersession algorithm. Only
-  // classification/summary providers are isolated fixtures; no live telemetry/API.
-  const learner=new OperationalLearning(f.backend,{enabled:true});
-  const coverage=[{start_utc:'2025-01-01T00:00:00Z',end_utc:'2025-02-01T00:00:00Z'}];
-  learner.classification=()=>({eligible:true,reasons:[],context:{strategy_version:'1',strategy_code_hash:digest('code'),
-    strategy_config_hash:digest('config'),strategy_profile_id:'p',strategy_profile_version:'1',execution_instance_id:'i',
-    source_installation_id:'replay',expected_environment:'REPLAY',evidence_purpose:'HISTORICAL_BUILD',
-    dataset_partition:'DISCOVERY',learner_permission:'HISTORICAL_DISCOVERY'},summary:{completion:{requested_coverage:coverage}}});
-  learner.evidencePolicy=()=>({minimum_sample_count:10,minimum_independent_session_count:1});
-  learner.runSummary=run=>({summary:{run_id:run.id,observed_sample_count:20,independent_session_count:1,
-    source_record_ids:[run.id]},metrics:{},telemetry:{}});
-  f.backend.operationalLearning=learner;
+  const learner=installComparableCohort(f);
   const original=f.backend.one('ow_research_jobs',id);
   const originalArtifact=f.backend.one('ow_artifacts',artifactId);
   return {...f,legacyId:id,original,originalArtifact,
     get worker(){return f.worker;},
     restart(){f.restart();learner.db=f.backend.db;},
-    supersede() {
-      f.backend.db.prepare('INSERT INTO ow_runs VALUES(?,?,?,1,?,?)').run('U25','s','i','COMPLETED','{}');
-      f.backend.db.prepare("INSERT INTO ow_cases VALUES(?,?,?,?,1,'RESEARCH','READY',?,NULL,'brain',NULL,?)")
-        .run('case-u25','s','i','U25',digest('baseline'),JSON.stringify({origin:'OPERATIONAL_LEARNING'}));
-      const content=Buffer.from(f.backend.one('ow_artifacts','a').content).toString('utf8');
-      f.backend.writeArtifact(null,{artifact_id:'a-u25',case_id:'case-u25',run_id:'U25',recipient_id:'strategy',kind:'RECOMMENDATION',
-        content,content_hash:digest(content),dependency_ids:[]});
-    },
+    supersede(){addNewerComparableCase(f);},
     assertPreserved() {
       assert.deepEqual(f.backend.one('ow_research_jobs',id),original);
       assert.deepEqual(f.backend.one('ow_artifacts',artifactId),originalArtifact);
@@ -376,6 +383,73 @@ test('real queue survives a crash after claim and reclaims only the expired leas
   }finally{f.close();}
 });
 
+test('uncaptured unfinished superseded jobs remain derived history after two leases and restart',async()=>{
+  for(const state of ['PENDING','RETRY','RUNNING']) {
+    const f=queueFixture();try {
+      const learner=installComparableCohort(f);
+      const pending=f.worker.enqueue('case','a');
+      if(state!=='PENDING') {
+        const first=f.worker.claim();f.worker.fail(first,new Error('isolated transient failure'));
+        f.restart();learner.db=f.backend.db;
+        f.backend.db.prepare('UPDATE ow_research_jobs SET next_attempt_ms=0 WHERE id=?').run(pending.id);
+        const second=f.worker.claim();
+        assert.equal(second.attempts,2);assert.notEqual(second.lease_id,first.lease_id);
+        if(state==='RETRY')f.worker.fail(second,new Error('isolated transient failure'));
+        f.backend.db.prepare('UPDATE ow_research_jobs SET next_attempt_ms=0,lease_until_ms=0 WHERE id=?').run(pending.id);
+      }
+      const original=f.backend.one('ow_research_jobs',pending.id);
+      const originalCase=f.backend.one('ow_cases','case');
+      const originalArtifact=f.backend.one('ow_artifacts','a');
+      assert.equal(original.state,state);assert.equal(original.input_json,null);
+      addNewerComparableCase(f);f.worker.reconcile();
+      assert.equal(learner.classification(f.backend.one('ow_runs','r')).eligible,true,'individual provenance remains clean');
+      assert.throws(()=>learner.cohort(f.backend.one('ow_runs','r')),error=>error.code==='TRIGGER_RUN_NOT_IN_ELIGIBLE_COHORT');
+      assert.equal(f.worker.claim().case_id,'case-u25','superseded first row cannot starve the current case');
+      for(let i=0;i<3;i++)await f.worker.flushOnce();
+      f.restart();learner.db=f.backend.db;
+      assert.equal(f.worker.claim(),null);
+      const status=f.worker.statusForCase('case');
+      assert.equal(status.state,state);assert.equal(status.historical,true);assert.equal(status.superseded,true);
+      assert.equal(status.effective_state,'HISTORICAL_SUPERSEDED');assert.equal(status.qualified_for_new_support,false);
+      assert.equal(status.historical_reason,'UNCAPTURED_TRIGGER_SUPERSEDED_BY_LATEST_EXACT_COVERAGE');
+      assert.equal(status.current_qualification.reason,'TRIGGER_RUN_NOT_IN_ELIGIBLE_COHORT');
+      assert.match(status.next_action,/No completion is claimed and automatic retry is not due/);
+      f.worker.evidence=()=>{throw Error('superseded uncaptured source must never be read');};
+      assert.throws(()=>f.worker.capture(original),/RESEARCH_CURRENT_PROVENANCE_REQUIRED/);
+      assert.deepEqual(f.backend.one('ow_research_jobs',pending.id),original,'no third lease, RETRY update or snapshot mutation');
+      assert.deepEqual(f.backend.one('ow_cases','case'),originalCase,'historical status is derived, not a ledger-state mutation');
+      assert.deepEqual(f.backend.one('ow_artifacts','a'),originalArtifact);
+    }finally{f.close();}
+  }
+});
+
+test('frozen unfinished input retains its captured cohort after supersession across two leases and restart',()=>{
+  const f=queueFixture();try {
+    const learner=installComparableCohort(f);
+    const source=sample();
+    const rows=source.rows.filter(row=>row.run_id==='a').map(row=>({...row,run_id:'r'}));
+    const bundle={...source.bundle,cohort:{...source.bundle.cohort,eligible_runs:[{...source.bundle.cohort.eligible_runs[0],run_id:'r'}],
+      aggregate:{...source.bundle.cohort.aggregate,observed_sample_count:20,eligible_run_count:1}},
+      research_coverage:{r:source.bundle.research_coverage.a}};
+    f.worker.evidence=()=>({rows,bundle,row:f.backend.one('ow_cases','case'),context:{run_id:'r'},completion_hash:digest('completion'),recipient:'strategy'});
+    f.worker.enqueue('case','a');const first=f.worker.claim();const snapshot=f.worker.capture(first);
+    f.worker.fail(first,new Error('isolated transient failure'));
+    f.backend.db.prepare('UPDATE ow_research_jobs SET next_attempt_ms=0 WHERE id=?').run(first.id);
+    addNewerComparableCase(f);
+    const frozen=f.backend.one('ow_research_jobs',first.id);
+    assert.throws(()=>learner.cohort(f.backend.one('ow_runs','r')),error=>error.code==='TRIGGER_RUN_NOT_IN_ELIGIBLE_COHORT');
+    f.restart();learner.db=f.backend.db;
+    const second=f.worker.claim();assert.equal(second.id,first.id);assert.equal(second.attempts,2);
+    assert.notEqual(second.lease_id,first.lease_id);
+    f.worker.evidence=()=>{throw Error('frozen input must not be rebased');};
+    assert.deepEqual(f.worker.capture(second),snapshot);
+    const resumed=f.backend.one('ow_research_jobs',first.id);
+    assert.equal(resumed.input_json,frozen.input_json);assert.equal(resumed.input_hash,frozen.input_hash);
+    const status=f.worker.statusForCase('case');
+    assert.equal(status.superseded,false);assert.equal(status.historical,false);assert.equal(status.qualified_for_new_support,true);
+  }finally{f.close();}
+});
+
 test('a real persisted retry resumes automatically without a human decision',()=>{
   const f=queueFixture();try {
     f.worker.enqueue('case','a');const first=f.worker.claim();f.worker.fail(first,new Error('TELEMETRY_DATABASE_REQUIRED'));
@@ -459,6 +533,9 @@ test('Research UI preserves completed status while distinguishing historical sup
   assert.doesNotMatch(historical,/Currently qualified history/);
   const blocked=panel({job_id:'new',state:'RETRY',effective_state:'BLOCKED_PROVENANCE',qualified_for_new_support:false,qualification_warning:'Provenance owner action required'});
   assert.match(blocked,/Status: BLOCKED_PROVENANCE/);assert.match(blocked,/Provenance owner action required/);
+  const superseded=panel({job_id:'old-pending',state:'RETRY',effective_state:'HISTORICAL_SUPERSEDED',historical:true,
+    qualified_for_new_support:false,qualification_warning:'Uncaptured case is retained as superseded history; automatic retry is not due'});
+  assert.match(superseded,/Status: HISTORICAL_SUPERSEDED/);assert.match(superseded,/automatic retry is not due/);
   assert.match(panel({job_id:'fresh',state:'COMPLETED',qualified_for_new_support:true,report}),/Currently qualified history/);
 });
 
@@ -551,7 +628,7 @@ test('mock Brain crash-after-write resumes the exact persisted request and rejec
     const evidence={bundle,row:{strategy_id:'s',run_id:'r'},context:{strategy_version:'1'},completion_hash:digest('completion')};
     const result=evaluateResearch(bundle,rows);const calls=[];
     const registry={record_sha256:digest('registry'),reconciliation_id:'registry-1'};
-    f.backend.operationalLearning={enabled:true,classification:()=>({eligible:true,reasons:[],telemetry:{bypassed:true,proof_basis:'EXPLICIT_MOCK_ONLY'}}),path:'/protected-learning',token:()=> 'isolated-test-token',verifyIdentity:async()=>{},
+    f.backend.operationalLearning={enabled:true,cohort:run=>({cohort:{eligible_runs:[{run_id:run.id}]}}),classification:()=>({eligible:true,reasons:[],telemetry:{bypassed:true,proof_basis:'EXPLICIT_MOCK_ONLY'}}),path:'/protected-learning',token:()=> 'isolated-test-token',verifyIdentity:async()=>{},
       registry:async()=>registry,call:async(_path,_token,input)=>{calls.push(input);throw Error('connection lost after remote write');}};
     f.worker.enqueue('case','a');const job=f.worker.claim();
     await assert.rejects(f.worker.recordInBrain(job,evidence,result),/connection lost/);
