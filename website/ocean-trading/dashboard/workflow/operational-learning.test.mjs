@@ -149,7 +149,8 @@ test('a Brain recommendation creates one deterministic Research continuation',as
     assert.equal(trigger.conclusion_type,'RECOMMENDATION');
     assert.match(trigger.continuation_case_id,/^CASE-OPERATIONAL-/);
     assert.match(trigger.continuation_artifact_id,/^test-operational-learning-recommendation-/);
-    assert.match(trigger.next_action,/Research evaluation queued/);
+    assert.match(trigger.next_action,/persist and complete Research/);
+    assert.equal(trigger.loop_stage,'PENDING_RESEARCH');
     await f.learner.flushOnce();
     assert.equal(f.continuations.length,2,'completed continuation must remain idempotent');
   }finally{f.close();}
@@ -328,7 +329,8 @@ test('learning requires exact Telemetry v3 lineage and physical completion bindi
         context_status TEXT,quality_flags TEXT,setup_family TEXT,session_name TEXT,regime_label TEXT,
         volatility_label TEXT,vwap_distance_points REAL,initial_risk_points REAL,continuation_state TEXT,
         exhaustion_state TEXT,exhaustion_score REAL,quality_scaler_distance_atr REAL,price_change_60m REAL,
-        price_change_120m REAL,vwap_slope_60m REAL,atr_change_60m_pct REAL,mfe_points REAL,mae_points REAL
+        price_change_120m REAL,vwap_slope_60m REAL,atr_change_60m_pct REAL,mfe_points REAL,mae_points REAL,
+        gross_currency_value REAL,total_commission REAL
       );
       CREATE TABLE replay_run_attempts(
         attempt_id INTEGER PRIMARY KEY,run_id TEXT,attempt_number INTEGER,attempt_started_utc TEXT,attempt_ended_utc TEXT,
@@ -345,9 +347,9 @@ test('learning requires exact Telemetry v3 lineage and physical completion bindi
       f.trigger,strategyId,context.strategy_version,context.context_hash,`${context.dataset_manifest_id}:${context.dataset_manifest_revision}`,context.dataset_partition,
       context.strategy_profile_id,context.strategy_profile_version,context.strategy_code_hash,context.strategy_config_hash,'closed','complete',0,2,2,0,1,1,1,
       'TELEMETRY_COMPLETE_COVERAGE_UNVERIFIED','2025-11-01T00:00:00Z','2025-11-01T00:00:00Z');
-    telemetry.prepare('INSERT INTO ocean_trade_causal_v2 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(
+    telemetry.prepare('INSERT INTO ocean_trade_causal_v2 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(
       1,'45931.5',f.trigger,'LONG','closed',125,'target','complete','pre_entry_features_missing|pre_entry_continuation_exhaustion_missing', 'vwap_pullback_long','London','trend','normal',
-      2.5,5,'continuation','not_exhausted',0.5,1.25,12.5,20,0.75,-4.5,10,-3);
+      2.5,5,'continuation','not_exhausted',0.5,1.25,12.5,20,0.75,-4.5,10,-3,126,1);
     fs.writeFileSync(path.join(completionRoot,`${f.trigger}-completion.json`),JSON.stringify({
       schema_version:'ocean-replay-completion/v1',run_id:f.trigger,status:'COMPLETED',
       replay_start_utc:'2025-09-17T00:00:00Z',scored_start_utc:'2025-10-01T00:00:00Z',

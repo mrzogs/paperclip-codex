@@ -17,6 +17,7 @@ import { OperationalPreparation } from './operational-preparation.mjs';
 import { identityReadback } from './provider-lifecycle.mjs';
 import { OperationalResults } from './operational-results.mjs';
 import { OperationalLearning } from './operational-learning.mjs';
+import { OperationalResearch } from './operational-research.mjs';
 import { PaperForwardPreparation } from './paper-forward-preparation.mjs';
 import {
   activateStrategyOnboarding,
@@ -73,13 +74,14 @@ export class WorkflowBackend {
     this.onboardingBrain = new OnboardingBrainSync(this, config.onboarding_brain_sync || { enabled: false });
     this.onboardingBrain.start();
     this.operationalLearning = new OperationalLearning(this, config.operational_learning || { enabled: false });
+    this.operationalResearch = new OperationalResearch(this);
     this.operationalLearning.start();
     this.authFailureWindowMs = 5 * 60 * 1000;
     this.authFailureThreshold = 3;
     this.authFailureTotals = { 401: 0, 403: 0 };
     this.authFailureBuckets = new Map();
   }
-  close() { this.stopMaintenance?.(); this.operationalLearning?.stop(); this.onboardingBrain?.stop(); this.store.close(); }
+  close() { this.stopMaintenance?.(); this.operationalResearch?.stop(); this.operationalLearning?.stop(); this.onboardingBrain?.stop(); this.store.close(); }
   recordAuthFailure(status, code) {
     if (![401,403].includes(status)) return;
     const now=Date.now();const key=`${status}:${code}`;
@@ -502,13 +504,15 @@ export class WorkflowBackend {
         artifact_id: data.artifact_id,
         next_action: "Evaluate the evidence-bound hypothesis in Research; create no candidate unless a later governed decision authorizes it.",
       }, recipient.identity_id);
+      const research = this.operationalResearch.enqueue(data.case_id, data.artifact_id);
       return {
         case_id: data.case_id,
         artifact_id: data.artifact_id,
         recipient_id: recipient.identity_id,
         stage: "RESEARCH",
         work_status: "READY",
-        next_action: "Strategy Research evaluation queued",
+        research_job_id: research.id,
+        next_action: "Ocean Research job persisted; recommendation delivery is not Research completion.",
       };
     });
   }
@@ -743,17 +747,29 @@ export class WorkflowBackend {
     exactKeys(data, ["outbox_id", "lease_id", "payload_hash", "error"]);
     const box = this.one("ow_outbox", data.outbox_id); const row = this.one("ow_cases", box.entity_id);
     this.authorize(actor, "delivery", row.strategy_id, row.instance_id);
+    const operationalLearning = JSON.parse(row.payload_json).origin === 'OPERATIONAL_LEARNING';
+    let research = null;
+    if (operationalLearning && operation === 'outbox.ack') {
+      const payload = JSON.parse(box.payload_json);
+      requireThat(payload.action === 'operational.learning.continuation', 409, 'RESEARCH_DELIVERY_REQUIRED');
+      research = this.operationalResearch.enqueue(row.id, payload.payload.artifact_id);
+    }
+    if (operationalLearning && operation === 'outbox.ack' && actor.role !== 'HUMAN'
+      && box.recipient_id === actor.id && box.state === 'ACKNOWLEDGED' && box.payload_hash === data.payload_hash) {
+      return { outbox_id:box.id,state:'ACKNOWLEDGED',research_job_id:research.id,analysis_complete:false };
+    }
     requireThat(actor.role !== "HUMAN" && box.recipient_id === actor.id && box.state === "LEASED" && box.lease_id === data.lease_id && box.lease_until_ms > Date.now() && box.payload_hash === data.payload_hash, 409, "STALE_OR_FOREIGN_DELIVERY_LEASE");
     const failed = operation === "outbox.fail";
     if (failed) requireThat(typeof data.error === "string" && data.error.length > 0 && data.error.length <= 200, 422, "BOUNDED_ERROR_REQUIRED");
     const state = failed ? box.attempts >= 5 ? "DEAD_LETTER" : "FAILED" : "ACKNOWLEDGED";
     this.db.prepare("UPDATE ow_outbox SET state=?,next_attempt_ms=?,lease_id=NULL,lease_until_ms=NULL,last_error=? WHERE id=?").run(state, Date.now() + (failed ? Math.min(60_000, 1000 * 2 ** box.attempts) : 0), failed ? data.error : null, box.id);
     this.event(row.id, operation, actor, { outbox_id: box.id, state });
-    return { outbox_id: box.id, state, analysis_complete: false };
+    return { outbox_id: box.id, state, ...(research ? {research_job_id:research.id} : {}), analysis_complete: false };
   }
   readCase(actor, caseId) {
     const row = this.caseFor(actor, caseId, "read");
-    return { case_id: row.id, strategy_id: row.strategy_id, execution_instance_id: row.instance_id, run_id: row.run_id, stage: row.stage, work_status: row.work_status, revision: row.revision, baseline_hash: row.baseline_hash, candidate_hash: row.candidate_hash, owner_id: row.owner_id, waiting_on: row.waiting_on, next_action: row.waiting_on || `Complete ${row.stage} prerequisites; propose a revision-checked transition`, namespace: "TEST", pending_sync: this.db.prepare("SELECT COUNT(*) AS n FROM ow_outbox WHERE entity_id=? AND state<>'ACKNOWLEDGED'").get(row.id).n, handoffs: this.db.prepare("SELECT id,recipient_id,state,revision FROM ow_handoffs WHERE case_id=?").all(row.id), tasks: this.db.prepare("SELECT kind,status,artifact_id,required FROM ow_tasks WHERE case_id=? ORDER BY kind").all(row.id), approvals: this.db.prepare("SELECT id,gate,state,snapshot_hash,expires_at_utc FROM ow_approval_requests WHERE case_id=? ORDER BY rowid").all(row.id), blockers: this.db.prepare("SELECT id,owner_id,action,state FROM ow_blockers WHERE case_id=?").all(row.id) };
+    const research = this.operationalResearch.statusForCase(row.id);
+    return { case_id: row.id, strategy_id: row.strategy_id, execution_instance_id: row.instance_id, run_id: row.run_id, stage: row.stage, work_status: row.work_status, revision: row.revision, baseline_hash: row.baseline_hash, candidate_hash: row.candidate_hash, owner_id: row.owner_id, waiting_on: row.waiting_on, next_action: research?.next_action || row.waiting_on || `Complete ${row.stage} prerequisites; propose a revision-checked transition`, research, namespace: JSON.parse(row.payload_json).origin === 'OPERATIONAL_LEARNING' ? 'OPERATIONAL' : "TEST", pending_sync: this.db.prepare("SELECT COUNT(*) AS n FROM ow_outbox WHERE entity_id=? AND state<>'ACKNOWLEDGED'").get(row.id).n, handoffs: this.db.prepare("SELECT id,recipient_id,state,revision FROM ow_handoffs WHERE case_id=?").all(row.id), tasks: this.db.prepare("SELECT kind,status,artifact_id,required FROM ow_tasks WHERE case_id=? ORDER BY kind").all(row.id), approvals: this.db.prepare("SELECT id,gate,state,snapshot_hash,expires_at_utc FROM ow_approval_requests WHERE case_id=? ORDER BY rowid").all(row.id), blockers: this.db.prepare("SELECT id,owner_id,action,state FROM ow_blockers WHERE case_id=?").all(row.id) };
   }
   readDecision(actor, decisionId) {
     const decision = this.one("ow_decisions", decisionId); const row = this.caseFor(actor, decision.case_id, "read"); const binding = JSON.parse(decision.binding_json);
@@ -766,7 +782,12 @@ export class WorkflowBackend {
   readRun(actor, runId) {
     const run = this.one("ow_runs", runId); this.authorize(actor, "read", run.strategy_id, run.instance_id);
     const manager=this.runs.managed(run.id) ? this.runs.read(actor,run.id) : null;
-    return { context: JSON.parse(run.context_json), state: run.state, revision: run.revision, namespace: manager?.namespace || "TEST", reservation_is_actual_sierra_start: false, manager, events: this.db.prepare("SELECT payload_json FROM ow_events WHERE entity_id=? ORDER BY id DESC LIMIT 200").all(run.id).map((row) => JSON.parse(row.payload_json)) };
+    const receiptCounts={
+      workflow:this.db.prepare('SELECT COUNT(*) n FROM ow_operational_receipts WHERE run_id=?').get(run.id).n,
+      trades:this.db.prepare('SELECT COUNT(*) n FROM ow_operational_trade_events WHERE run_id=?').get(run.id).n,
+      analysis_complete:this.db.prepare(`SELECT COUNT(*) n FROM ow_operational_brain_callbacks c JOIN ow_operational_brain_results r ON r.id=c.result_id WHERE r.run_id=? AND json_extract(c.payload_json,'$.status')='COMPLETED'`).get(run.id).n,
+    };
+    return { context: JSON.parse(run.context_json), state: run.state, revision: run.revision, namespace: manager?.namespace || "TEST", reservation_is_actual_sierra_start: false, manager, receipt_counts:receiptCounts, events: this.db.prepare("SELECT payload_json FROM ow_events WHERE entity_id=? ORDER BY id DESC LIMIT 200").all(run.id).map((row) => JSON.parse(row.payload_json)) };
   }
   readStrategyEntity(actor, table, entityId) {
     const row = this.one(table, entityId);
@@ -894,7 +915,7 @@ export class WorkflowBackend {
         if (route === "run-manager/options") response.end(JSON.stringify(this.runs.options(actor)));
         else if (/^run-manager\/context\/[A-Za-z0-9_.:-]+$/.test(route)) response.end(JSON.stringify(this.runs.read(actor,route.split('/')[2])));
         else if (route.startsWith("view/")) response.end(JSON.stringify(readWorkflowView(this, actor, route)));
-        else if (route === "status") response.end(JSON.stringify({ api_version: API_VERSION, contract_release: RELEASE, namespace: "TEST", brain_submission: "OFF", live_real: "DISABLED", dispatch_worker: "OFF", auth: "REQUIRED", schema_version: 10, identity: { id: actor.id, role: actor.role, scopes: actor.scopes, strategy_ids: actor.strategyIds, instance_ids: actor.instanceIds }, ...this.auth.readiness(), test_communication:this.testCommunication.readiness(actor), onboarding_brain_sync:this.onboardingBrain.status(), operational_learning:this.operationalLearning.status(), maintenance:this.maintenanceHealth || {state:'NOT_INSTALLED_ISOLATED'} }));
+        else if (route === "status") response.end(JSON.stringify({ api_version: API_VERSION, contract_release: RELEASE, namespace: "TEST", brain_submission: "OFF", live_real: "DISABLED", dispatch_worker: "OFF", auth: "REQUIRED", schema_version: 11, identity: { id: actor.id, role: actor.role, scopes: actor.scopes, strategy_ids: actor.strategyIds, instance_ids: actor.instanceIds }, ...this.auth.readiness(), test_communication:this.testCommunication.readiness(actor), onboarding_brain_sync:this.onboardingBrain.status(), operational_learning:this.operationalLearning.status(), maintenance:this.maintenanceHealth || {state:'NOT_INSTALLED_ISOLATED'} }));
         else if (route === 'setup-receipts') {
           requireThat(actor.role === 'HUMAN',403,'WAYNE_BROWSER_ONLY');
           response.end(JSON.stringify({ items: orderedSetup(this.db.prepare('SELECT * FROM ow_setup_receipts').all()), order: 'declared setup-task-map sequence; literal amendment IDs; historical statuses preserved' }));

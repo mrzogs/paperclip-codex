@@ -248,8 +248,8 @@ await check("GOV-08 operational recipient claims and acknowledges through the op
     a.backend().db.prepare("INSERT INTO ow_instances(id,strategy_id,payload_json) VALUES(?,?,?)").run(OPERATIONAL_INSTANCE,STRATEGY,JSON.stringify({execution_instance_id:OPERATIONAL_INSTANCE,strategy_id:STRATEGY}));
     a.backend().db.prepare("INSERT INTO ow_runs(id,strategy_id,instance_id,revision,state,context_json) VALUES(?,?,?,?,?,?)").run("operational-run",STRATEGY,OPERATIONAL_INSTANCE,1,"COMPLETED",JSON.stringify({run_id:"operational-run",strategy_id:STRATEGY,execution_instance_id:OPERATIONAL_INSTANCE}));
     a.backend().db.prepare("INSERT INTO ow_cases(id,strategy_id,instance_id,run_id,revision,stage,work_status,baseline_hash,candidate_hash,owner_id,waiting_on,payload_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
-      .run("operational-case",STRATEGY,OPERATIONAL_INSTANCE,"operational-run",1,"RESEARCH","READY",baseline,null,"ocean-operational-brain","Stage prerequisites",JSON.stringify({registry_revision:strategy.revision}));
-    const content = JSON.stringify({ title:"Operational recommendation", authority:{ automatic_strategy_change:false } });
+      .run("operational-case",STRATEGY,OPERATIONAL_INSTANCE,"operational-run",1,"RESEARCH","READY",baseline,null,"ocean-operational-brain","Stage prerequisites",JSON.stringify({registry_revision:strategy.revision,origin:'OPERATIONAL_LEARNING'}));
+    const content = JSON.stringify({ schema_version:'ocean-operational-learning-recommendation/v1',title:"Operational recommendation", authority:{ automatic_strategy_change:false,candidate_approved:false,paper_authorized:false,live_authorized:false } });
     a.backend().writeArtifact({
       id:"ocean-operational-brain", role:"BRAIN", namespace:"OPERATIONAL", scopes:["read","artifact.write"],
       strategyIds:[STRATEGY], instanceIds:[OPERATIONAL_INSTANCE],
@@ -277,6 +277,11 @@ await check("GOV-08 operational recipient claims and acknowledges through the op
       outbox_id:item.outbox_id, lease_id:item.lease_id, payload_hash:item.payload_hash,
     }, { role:"STRATEGY" });
     assert.equal(acknowledged.state, "ACKNOWLEDGED");
+    assert.match(acknowledged.research_job_id,/^research-/);
+    assert.equal(a.backend().db.prepare("SELECT COUNT(*) n FROM ow_research_jobs").get().n,1);
+    assert.equal(acknowledged.analysis_complete,false);
+    const ackAgain=await a.post('operational/v1/outbox/ack',{outbox_id:item.outbox_id,lease_id:item.lease_id,payload_hash:item.payload_hash},{role:'STRATEGY'});
+    assert.equal(ackAgain.research_job_id,acknowledged.research_job_id);
     assert.equal(a.backend().db.prepare("SELECT COUNT(*) AS n FROM ow_outbox WHERE state='ACKNOWLEDGED'").get().n, 1);
   } finally { await a.close(); }
 });

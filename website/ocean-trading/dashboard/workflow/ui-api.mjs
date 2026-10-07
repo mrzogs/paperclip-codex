@@ -94,7 +94,7 @@ export function readWorkflowView(backend, actor, route) {
       action_required: pending.filter(row => row.actionable).length + releaseRequests.filter(row => row.actionable).length,
       pending_gates: pending.length + releaseRequests.filter(row => row.state === 'PENDING').length,
       urgent_reviews: db.prepare("SELECT COUNT(*) AS n FROM ow_cases WHERE stage='ROLLBACK_REVIEW' AND work_status<>'CANCELLED'").get().n,
-      active_cases: db.prepare("SELECT COUNT(*) AS n FROM ow_cases WHERE stage<>'CLOSED' AND work_status NOT IN ('CANCELLED','BLOCKED','FAILED','PAUSED')").get().n,
+      active_cases: db.prepare("SELECT COUNT(*) AS n FROM ow_cases WHERE stage<>'CLOSED' AND work_status NOT IN ('COMPLETED','CANCELLED','BLOCKED','FAILED','PAUSED')").get().n,
       blocked_cases: db.prepare("SELECT COUNT(*) AS n FROM ow_cases WHERE work_status IN ('BLOCKED','FAILED')").get().n,
       active_runs: db.prepare("SELECT COUNT(*) AS n FROM ow_runs WHERE state IN ('READY','ACTIVE','COMPLETING')").get().n,
       pending_sync: db.prepare("SELECT COUNT(*) AS n FROM ow_outbox WHERE state<>'ACKNOWLEDGED'").get().n,

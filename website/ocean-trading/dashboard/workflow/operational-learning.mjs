@@ -180,7 +180,8 @@ export function cumulativeLearningProposal(bundle) {
   if (!trades) return null;
   const minimumSegmentTrades = Math.max(5, Math.ceil(trades * 0.05));
   const comparable = [...segments.values()]
-    .filter(value => value.trades >= minimumSegmentTrades)
+    .filter(value => value.trades >= minimumSegmentTrades && !/^(unknown|none|null|n\/a)$/i.test(value.value)
+      && value.dimension !== 'exit_causality')
     .map(value => ({
       ...value,
       net_profit_loss: rounded(value.net_profit_loss),
@@ -226,6 +227,7 @@ export function cumulativeLearningProposal(bundle) {
       'Segment statistics are descriptive evidence for investigation, not production rules.',
       'Excluded evidence is retained as context but does not contribute to eligible aggregate confidence.',
       'Any strategy or configuration change requires a separate candidate and governed evaluation.',
+      'Unknown labels are missing attribution; exit outcomes are not entry-time selection rules.',
     ],
     authority: {
       automatic_strategy_change: false,
@@ -478,13 +480,18 @@ export class OperationalLearning {
       const acceptedQualification = lineage.telemetry_qualification_status === 'TELEMETRY_COMPLETE_COVERAGE_UNVERIFIED'
         || (lineage.telemetry_qualification_status === 'RUN_RECEIPT_PARTIAL' && attemptQualification.verified);
       if (!acceptedQualification) reasons.push(lineage.telemetry_qualification_status || 'TELEMETRY_QUALIFICATION_FAILED');
-      const causalRows = database.prepare(`SELECT trade_id,entry_datetime,direction,net_profit_loss,exit_causality,context_status,quality_flags,
+      const causalRows = database.prepare(`SELECT trade_id,entry_datetime,direction,net_profit_loss,gross_currency_value,total_commission,exit_causality,context_status,quality_flags,
         setup_family,session_name,regime_label,volatility_label,vwap_distance_points,initial_risk_points,
         continuation_state,exhaustion_state,exhaustion_score,quality_scaler_distance_atr,price_change_60m,
         price_change_120m,vwap_slope_60m,atr_change_60m_pct,mfe_points,mae_points
         FROM ocean_trade_causal_v2 WHERE run_id=? AND lower(status)='closed' ORDER BY trade_id`).all(run.id);
       if (causalRows.some(row => row.context_status !== 'complete'
         || criticalCausalQualityFlags(row.quality_flags).length > 0)) reasons.push('TELEMETRY_CAUSAL_ROWS_NOT_CLEAN');
+      if (causalRows.some(row => ['net_profit_loss','gross_currency_value','total_commission'].some(field =>
+        row[field] == null || !Number.isFinite(Number(row[field]))) || Number(row.total_commission)<0
+        || Math.abs(Number(row.gross_currency_value)-Number(row.total_commission)-Number(row.net_profit_loss))>0.001)) {
+        reasons.push('TELEMETRY_ACCOUNTING_NOT_RECONCILED');
+      }
       return {
         verified: reasons.length === 0,
         reasons,
@@ -615,9 +622,6 @@ export class OperationalLearning {
       source_installation_id: context.source_installation_id,
       expected_environment: context.expected_environment,
       evidence_purpose: context.evidence_purpose,
-      dataset_manifest_id: context.dataset_manifest_id,
-      dataset_manifest_revision: context.dataset_manifest_revision,
-      dataset_manifest_hash: context.dataset_manifest_hash,
       dataset_partition: context.dataset_partition,
       learner_permission: context.learner_permission,
       requested_coverage: requestedCoverage,
@@ -730,8 +734,13 @@ export class OperationalLearning {
         : stored?.result ? 'BRAIN_RECORDED'
           : classification.eligible && latest?.result && currentFingerprint ? 'PENDING_REANALYSIS'
             : classification.eligible ? 'PENDING' : 'NOT_DUE';
+    const research = details?.continuation?.case_id
+      ? this.backend.operationalResearch?.statusForCase(details.continuation.case_id) || null : null;
     return {
       stage,
+      loop_stage: stage === 'COMPLETE' && details?.conclusion_type === 'RECOMMENDATION'
+        ? research?.state === 'COMPLETED' ? 'COMPLETE' : research?.state || 'PENDING_RESEARCH' : stage,
+      research,
       eligible: classification.eligible,
       reasons: classification.reasons,
       result_id: stored?.result?.result_id || latest?.result?.result_id || null,
@@ -742,7 +751,7 @@ export class OperationalLearning {
       registry_record_sha256: currentFingerprint || details?.registry_record_sha256 || null,
       continuation_case_id: details?.continuation?.case_id || null,
       continuation_artifact_id: details?.continuation?.artifact_id || null,
-      next_action: details?.continuation?.next_action || details?.next_action || null,
+      next_action: research?.next_action || details?.continuation?.next_action || details?.next_action || null,
       last_error: this.retry.get(`${runId}:${currentFingerprint || 'unbound'}`)?.error || null,
     };
   }
@@ -852,7 +861,7 @@ export class OperationalLearning {
       const continuation = recommendation ? {
         case_id: caseIdFor(run.id, registry.record_sha256),
         artifact_id: artifactIdFor(run.id, registry.record_sha256),
-        next_action: 'Strategy Research evaluation queued; no candidate or trading permission was created.',
+        next_action: 'Recommendation is recorded; Ocean must persist and complete Research before the learning loop is complete.',
       } : null;
       storedDetails = {
         schema_version: RESPONSE_VERSION,
@@ -931,6 +940,7 @@ export class OperationalLearning {
         try { await this.process(run, token, registry); }
         catch (error) { this.fail(run, error); break; }
       }
+      await this.backend.operationalResearch?.flushOnce();
       return this.status();
     } finally { this.running = false; }
   }
