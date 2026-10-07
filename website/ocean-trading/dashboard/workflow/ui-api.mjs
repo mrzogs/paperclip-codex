@@ -50,7 +50,11 @@ export function readWorkflowView(backend, actor, route) {
   const strategyName = (value) => parse(backend.one('ow_strategies', value)).strategy_name;
   const operationalReleases = () => new OperationalPreparation(backend).list(actor).items;
   const caseRow = (value) => ({ ...backend.readCase(actor, value.id), strategy_name: strategyName(value.strategy_id), priority: value.stage === 'ROLLBACK_REVIEW' ? 'URGENT_REVIEW' : null });
-  const runRow = (value) => ({ ...backend.readRun(actor, value.id), strategy_name: strategyName(value.strategy_id) });
+  const runRow = (value) => ({
+    ...backend.readRun(actor, value.id),
+    strategy_name: strategyName(value.strategy_id),
+    learning: backend.operationalLearning?.statusForRun(value.id) || null,
+  });
   const artifactRow = (value) => ({ artifact_id: value.id, case_id: value.case_id, kind: value.kind, producer_id: value.producer_id, recipient_id: value.recipient_id, candidate_hash: value.candidate_hash, dependency_ids: JSON.parse(value.dependencies_json), manifest: JSON.parse(value.manifest_json) });
   const approvalRow = (value) => {
     backend.verifySnapshot(value);
@@ -79,6 +83,7 @@ export function readWorkflowView(backend, actor, route) {
       registration: readOnboardingRegistration(db, strategyId),
       activationEvents: readOnboardingActivationEvents(db, strategyId),
       runtimeProbe: backend.config.strategy_onboarding_runtime_probe,
+      improvementMonitorStatePath: backend.config.strategy_improvement_monitor_state,
     });
   };
   const mergeOnboarding = (row, value) => row && value.strategy_id === row.strategy_id ? { ...value, onboarding: row } : value;

@@ -16,6 +16,7 @@ import { OperationalTransition, OPERATIONAL_PREFIX, operationalPolicy } from './
 import { OperationalPreparation } from './operational-preparation.mjs';
 import { identityReadback } from './provider-lifecycle.mjs';
 import { OperationalResults } from './operational-results.mjs';
+import { OperationalLearning } from './operational-learning.mjs';
 import { PaperForwardPreparation } from './paper-forward-preparation.mjs';
 import {
   activateStrategyOnboarding,
@@ -41,7 +42,7 @@ export const ROUTES = {
   "onboarding/activate": "onboarding.activate", "onboarding/pause": "onboarding.pause",
   "onboarding/deactivate": "onboarding.deactivate", "onboarding/emergency-stop": "onboarding.emergency-stop",
 };
-for (const action of ["version","settings","permission","preview","prepare","preset","end","claim","renew","activate","pin","progress","evidence","finish"]) {
+for (const action of ["version","settings","permission","preview","prepare","preset","end","claim","renew","activate","reconcile","pin","progress","evidence","finish"]) {
   ROUTES[`run-manager/${action}`] = `run-manager.${action}`;
   if (["version","settings","permission","preview","prepare","preset","end"].includes(action)) HUMAN_OPERATIONS.add(`run-manager.${action}`);
 }
@@ -71,12 +72,14 @@ export class WorkflowBackend {
     catch (error) { this.store.close(); throw error; }
     this.onboardingBrain = new OnboardingBrainSync(this, config.onboarding_brain_sync || { enabled: false });
     this.onboardingBrain.start();
+    this.operationalLearning = new OperationalLearning(this, config.operational_learning || { enabled: false });
+    this.operationalLearning.start();
     this.authFailureWindowMs = 5 * 60 * 1000;
     this.authFailureThreshold = 3;
     this.authFailureTotals = { 401: 0, 403: 0 };
     this.authFailureBuckets = new Map();
   }
-  close() { this.stopMaintenance?.(); this.onboardingBrain?.stop(); this.store.close(); }
+  close() { this.stopMaintenance?.(); this.operationalLearning?.stop(); this.onboardingBrain?.stop(); this.store.close(); }
   recordAuthFailure(status, code) {
     if (![401,403].includes(status)) return;
     const now=Date.now();const key=`${status}:${code}`;
@@ -411,6 +414,104 @@ export class WorkflowBackend {
       default: throw new WorkflowError(404, "UNKNOWN_OPERATION");
     }
   }
+  createOperationalLearningContinuation(actor, data) {
+    exactKeys(data, ["case_id", "artifact_id", "run_id", "context_hash", "result_id", "brain_record_id", "registry_reconciliation_id", "registry_record_sha256", "recommendation"]);
+    id(data.case_id); id(data.artifact_id);
+    requireThat(actor.role === "BRAIN" && actor.namespace === "OPERATIONAL", 403, "OPERATIONAL_BRAIN_ONLY");
+    requireThat(data.recommendation && typeof data.recommendation.title === "string" && typeof data.recommendation.content === "string", 422, "LEARNING_RECOMMENDATION_REQUIRED");
+    const run = this.one("ow_runs", data.run_id);
+    const context = JSON.parse(run.context_json);
+    requireThat(context.context_hash === data.context_hash, 409, "RUN_CONTEXT_HASH_CONFLICT");
+    this.authorize(actor, "artifact.write", run.strategy_id, run.instance_id);
+    const strategy = this.one("ow_strategies", run.strategy_id);
+    const recipient = this.config.identities.find((entry) => entry.role === "STRATEGY"
+      && entry.strategy_ids?.includes(run.strategy_id)
+      && entry.instance_ids?.includes(run.instance_id));
+    requireThat(recipient, 503, "OPERATIONAL_LEARNING_STRATEGY_RECIPIENT_MISSING");
+    const casePayload = {
+      registry_revision: strategy.revision,
+      origin: "OPERATIONAL_LEARNING",
+      result_id: data.result_id,
+      brain_record_id: data.brain_record_id,
+      registry_reconciliation_id: data.registry_reconciliation_id,
+      registry_record_sha256: data.registry_record_sha256,
+      automatic_strategy_change: false,
+      candidate_approved: false,
+      paper_authorized: false,
+      live_authorized: false,
+    };
+    return this.store.transaction(() => {
+      const existingCase = this.db.prepare("SELECT * FROM ow_cases WHERE id=?").get(data.case_id);
+      if (existingCase) {
+        requireThat(existingCase.run_id === run.id
+          && existingCase.strategy_id === run.strategy_id
+          && existingCase.instance_id === run.instance_id
+          && existingCase.baseline_hash === strategy.baseline_hash
+          && objectHash(JSON.parse(existingCase.payload_json)) === objectHash(casePayload), 409, "LEARNING_CONTINUATION_CASE_CONFLICT");
+      } else {
+        this.db.prepare("INSERT INTO ow_cases VALUES(?,?,?,?,1,'RESEARCH','READY',?,NULL,?,NULL,?)")
+          .run(data.case_id, run.strategy_id, run.instance_id, run.id, strategy.baseline_hash, actor.id, JSON.stringify(casePayload));
+        this.event(data.case_id, "operational.learning.case", actor, {
+          run_id: run.id,
+          result_id: data.result_id,
+          brain_record_id: data.brain_record_id,
+          registry_reconciliation_id: data.registry_reconciliation_id,
+          automatic_strategy_change: false,
+        });
+      }
+      const artifactContent = JSON.stringify({
+        schema_version: "ocean-operational-learning-recommendation/v1",
+        title: data.recommendation.title,
+        content: data.recommendation.content,
+        run_id: run.id,
+        result_id: data.result_id,
+        brain_record_id: data.brain_record_id,
+        registry_reconciliation_id: data.registry_reconciliation_id,
+        registry_record_sha256: data.registry_record_sha256,
+        authority: {
+          automatic_strategy_change: false,
+          candidate_approved: false,
+          paper_authorized: false,
+          live_authorized: false,
+        },
+      });
+      const existingArtifact = this.db.prepare("SELECT * FROM ow_artifacts WHERE id=?").get(data.artifact_id);
+      if (existingArtifact) {
+        requireThat(existingArtifact.case_id === data.case_id
+          && digest(Buffer.from(existingArtifact.content)) === digest(artifactContent), 409, "LEARNING_CONTINUATION_ARTIFACT_CONFLICT");
+      } else {
+        this.writeArtifact(actor, {
+          artifact_id: data.artifact_id,
+          case_id: data.case_id,
+          run_id: run.id,
+          recipient_id: recipient.identity_id,
+          kind: "RECOMMENDATION",
+          media_type: "application/json",
+          content: artifactContent,
+          content_encoding: "utf8",
+          content_hash: digest(artifactContent),
+          candidate_hash: null,
+          dependency_ids: [],
+        });
+      }
+      const alreadyQueued = this.db.prepare("SELECT 1 FROM ow_events WHERE entity_id=? AND action='operational.learning.continuation' AND json_extract(payload_json,'$.payload.result_id')=?")
+        .get(data.case_id, data.result_id);
+      if (!alreadyQueued) this.event(data.case_id, "operational.learning.continuation", actor, {
+        run_id: run.id,
+        result_id: data.result_id,
+        artifact_id: data.artifact_id,
+        next_action: "Evaluate the evidence-bound hypothesis in Research; create no candidate unless a later governed decision authorizes it.",
+      }, recipient.identity_id);
+      return {
+        case_id: data.case_id,
+        artifact_id: data.artifact_id,
+        recipient_id: recipient.identity_id,
+        stage: "RESEARCH",
+        work_status: "READY",
+        next_action: "Strategy Research evaluation queued",
+      };
+    });
+  }
   writeArtifact(actor, data) {
     exactKeys(data, ["artifact_id", "case_id", "run_id", "recipient_id", "kind", "media_type", "content", "content_encoding", "content_hash", "candidate_hash", "dependency_ids"]);
     id(data.artifact_id, true); id(data.recipient_id);
@@ -742,7 +843,7 @@ export class WorkflowBackend {
         else if(local==='brain-results/register' && request.method==='POST')result=this.operationalResults.register(actor,await jsonBody(request));
         else if(local==='brain-results/callback' && request.method==='POST')result=this.operationalResults.callback(actor,await jsonBody(request));
         else if(local==='run/end' && request.method==='POST')result=this.runs.perform('end',actor,await jsonBody(request));
-        else if(['run/claim','run/renew','run/activate','run/pin','run/progress','run/evidence','run/finish'].includes(local) && request.method==='POST')result=this.runs.perform(local.slice(4),actor,await jsonBody(request));
+        else if(['run/claim','run/renew','run/activate','run/reconcile','run/pin','run/progress','run/evidence','run/finish'].includes(local) && request.method==='POST')result=this.runs.perform(local.slice(4),actor,await jsonBody(request));
         else throw new WorkflowError(404,'UNKNOWN_OPERATIONAL_ROUTE');
         response.end(JSON.stringify(result));return true;
       }
@@ -781,7 +882,7 @@ export class WorkflowBackend {
         if (route === "run-manager/options") response.end(JSON.stringify(this.runs.options(actor)));
         else if (/^run-manager\/context\/[A-Za-z0-9_.:-]+$/.test(route)) response.end(JSON.stringify(this.runs.read(actor,route.split('/')[2])));
         else if (route.startsWith("view/")) response.end(JSON.stringify(readWorkflowView(this, actor, route)));
-        else if (route === "status") response.end(JSON.stringify({ api_version: API_VERSION, contract_release: RELEASE, namespace: "TEST", brain_submission: "OFF", live_real: "DISABLED", dispatch_worker: "OFF", auth: "REQUIRED", schema_version: 10, identity: { id: actor.id, role: actor.role, scopes: actor.scopes, strategy_ids: actor.strategyIds, instance_ids: actor.instanceIds }, ...this.auth.readiness(), test_communication:this.testCommunication.readiness(actor), onboarding_brain_sync:this.onboardingBrain.status(), maintenance:this.maintenanceHealth || {state:'NOT_INSTALLED_ISOLATED'} }));
+        else if (route === "status") response.end(JSON.stringify({ api_version: API_VERSION, contract_release: RELEASE, namespace: "TEST", brain_submission: "OFF", live_real: "DISABLED", dispatch_worker: "OFF", auth: "REQUIRED", schema_version: 10, identity: { id: actor.id, role: actor.role, scopes: actor.scopes, strategy_ids: actor.strategyIds, instance_ids: actor.instanceIds }, ...this.auth.readiness(), test_communication:this.testCommunication.readiness(actor), onboarding_brain_sync:this.onboardingBrain.status(), operational_learning:this.operationalLearning.status(), maintenance:this.maintenanceHealth || {state:'NOT_INSTALLED_ISOLATED'} }));
         else if (route === 'setup-receipts') {
           requireThat(actor.role === 'HUMAN',403,'WAYNE_BROWSER_ONLY');
           response.end(JSON.stringify({ items: orderedSetup(this.db.prepare('SELECT * FROM ow_setup_receipts').all()), order: 'declared setup-task-map sequence; literal amendment IDs; historical statuses preserved' }));
@@ -871,7 +972,19 @@ export function workflowFromEnvironment(environment, python) {
     token_file: environment.OCEAN_ONBOARDING_BRAIN_TOKEN_FILE || 'D:\\Paperclip-codex\\workspaces\\hermes-brain-console\\secrets\\clients\\ocean-website-development.token',
     interval_ms: Number(environment.OCEAN_ONBOARDING_BRAIN_INTERVAL_MS || 5000),
   };
-  const backend=new WorkflowBackend({ ...config, python_executable: config.python_executable || python, onboarding_brain_sync: onboardingBrainSync }, resolvedEnvironment);
+  const operationalLearning = {
+    enabled: environment.OCEAN_OPERATIONAL_LEARNING_ENABLED === '1',
+    api: environment.OCEAN_OPERATIONAL_LEARNING_BRAIN_API || 'http://127.0.0.1:4001',
+    path: environment.OCEAN_OPERATIONAL_LEARNING_BRAIN_PATH || '/trading/learning/operational',
+    strategy_id: environment.OCEAN_OPERATIONAL_LEARNING_STRATEGY_ID || null,
+    token_file: environment.OCEAN_OPERATIONAL_LEARNING_BRAIN_TOKEN_FILE || null,
+    interval_ms: Number(environment.OCEAN_OPERATIONAL_LEARNING_INTERVAL_MS || 5000),
+    telemetry_required: environment.OCEAN_OPERATIONAL_LEARNING_TELEMETRY_REQUIRED !== '0',
+    telemetry_db: environment.OCEAN_OPERATIONAL_LEARNING_TELEMETRY_DB || null,
+    completion_root: environment.OCEAN_OPERATIONAL_LEARNING_COMPLETION_ROOT || null,
+    physical_binding_file: environment.OCEAN_OPERATIONAL_LEARNING_PHYSICAL_BINDING_FILE || null,
+  };
+  const backend=new WorkflowBackend({ ...config, python_executable: config.python_executable || python, onboarding_brain_sync: onboardingBrainSync, operational_learning: operationalLearning }, resolvedEnvironment);
   if(environment.OCEAN_WORKFLOW_CONFIG.endsWith('.dpapi'))attachMaintenance(backend,environment.OCEAN_WORKFLOW_CONFIG);
   return backend;
 }

@@ -381,6 +381,43 @@ await check("GOV-01 GOV-03 CFG-02 CFG-04: unresolved/reference-forged credential
   } finally { await a.close(); }
 });
 
+await check("operational learning continuation is deterministic, restart-safe and non-authorising", async () => {
+  const a = await app();
+  try {
+    const actor={id:'ocean-operational-brain',role:'BRAIN',namespace:'OPERATIONAL',audience:'Ocean workflow operational v1',scopes:['read','artifact.write','event.write'],strategyIds:[STRATEGY],instanceIds:[INSTANCE]};
+    const data={
+      case_id:'CASE-OPERATIONAL-ABCDEF0123456789-0001',
+      artifact_id:'test-operational-learning-recommendation-abcdef0123456789',
+      run_id:a.run.context.run_id,
+      context_hash:a.run.context.context_hash,
+      result_id:`sha256:${'7'.repeat(64)}`,
+      brain_record_id:'OPERATIONAL-LEARNING-RESULT-ABCDEF0123456789',
+      registry_reconciliation_id:'registry-reconciliation-20261007100000-aaaaaaaa',
+      registry_record_sha256:`sha256:${'8'.repeat(64)}`,
+      recommendation:{title:'Investigate one bounded Research hypothesis',content:'No candidate, Paper, Live, or automatic strategy authority is granted.'},
+    };
+    const first=a.backend().createOperationalLearningContinuation(actor,data);
+    assert.equal(first.stage,'RESEARCH');
+    assert.equal(first.work_status,'READY');
+    assert.equal(a.backend().db.prepare('SELECT COUNT(*) n FROM ow_cases WHERE id=?').get(data.case_id).n,1);
+    assert.equal(a.backend().db.prepare('SELECT COUNT(*) n FROM ow_artifacts WHERE id=?').get(data.artifact_id).n,1);
+    assert.equal(a.backend().db.prepare("SELECT COUNT(*) n FROM ow_outbox WHERE entity_id=? AND state='PENDING'").get(data.case_id).n,1);
+    const row=a.backend().db.prepare('SELECT stage,work_status,candidate_hash,payload_json FROM ow_cases WHERE id=?').get(data.case_id);
+    const payload=JSON.parse(row.payload_json);
+    assert.equal(row.candidate_hash,null);
+    assert.equal(payload.automatic_strategy_change,false);
+    assert.equal(payload.candidate_approved,false);
+    assert.equal(payload.paper_authorized,false);
+    assert.equal(payload.live_authorized,false);
+    a.backend().createOperationalLearningContinuation(actor,data);
+    a.restart();
+    a.backend().createOperationalLearningContinuation(actor,data);
+    assert.equal(a.backend().db.prepare('SELECT COUNT(*) n FROM ow_cases WHERE id=?').get(data.case_id).n,1);
+    assert.equal(a.backend().db.prepare('SELECT COUNT(*) n FROM ow_artifacts WHERE id=?').get(data.artifact_id).n,1);
+    assert.equal(a.backend().db.prepare("SELECT COUNT(*) n FROM ow_outbox WHERE entity_id=?").get(data.case_id).n,1);
+  } finally { await a.close(); }
+});
+
 await check("workflow SQLite contention is bounded, retryable and diagnosable", async () => {
   const a = await app();
   const originalOptions = a.backend().runs.options;

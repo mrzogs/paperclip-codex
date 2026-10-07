@@ -1,6 +1,7 @@
 import { renderIcons } from './icons.js';
 import { openRunWizard } from './run-wizard.js?v=contract-aware-history-20261001-1';
 import { ONBOARDING_HELP } from './onboarding-help.js?v=simple-onboarding-20260930-1';
+import { buildReprocessRunId } from './reprocess-identity.js?v=repeat-safe-20261006-1';
 
 const content = document.querySelector('#content');
 const modal = document.querySelector('#modal');
@@ -251,6 +252,7 @@ function strategyOnboardingPage(data) {
   const delivery = onboarding.continuous_delivery || {};
   const program = delivery.priority_program || { state:'NOT_CONFIGURED', status:'UNKNOWN', workstreams:[] };
   const improvement = delivery.autonomous_improvement || { state:'NOT_CONFIGURED', status:'UNKNOWN', pipeline:[], blockers:[], next_action:null };
+  const eventMonitor = delivery.event_monitor || { status:'NOT_STARTED', disposition:'UNKNOWN', sources:[], observed_trade_count:0, eligible_trade_count:0, new_trade_count:0 };
   const improvementActive = improvement.state === 'AVAILABLE';
   const campaign = delivery.replay_campaign || { state:'NOT_CONFIGURED', status:'NOT_STARTED', completed_windows:[], failed_windows:[], next_action:'Ocean is preparing the sealed Replay campaign.' };
   const registration = onboarding.registration;
@@ -356,6 +358,10 @@ function strategyOnboardingPage(data) {
   const workstreamRows = (program.workstreams || []).map(item => [esc(item.id), esc(item.name), badge(item.status), esc(item.owner), esc(item.next_action || 'No separate action recorded')]);
   const pipelineRows = (improvement.pipeline || []).map(item => [esc(item.id), esc(item.name), badge(item.status), esc(item.acceptance)]);
   const blockerRows = (improvement.blockers || []).map(item => [esc(item.id), badge(item.status), esc(item.blocker), esc(item.resolution)]);
+  const eventMonitorSources = (eventMonitor.sources || []).map(item => [
+    esc(item.id), esc(item.environment), esc(item.account), String(item.observed_trade_count || 0),
+    String(item.eligible_trade_count || 0), '<code>'+esc(item.database_path || 'Not recorded')+'</code>',
+  ]);
   const campaignBody = facts([
     ['Foundation program', badge(program.status)], ['Improvement program', badge(improvement.status)], ['Replay campaign', badge(campaign.status)], ['Campaign source', badge(campaign.state)],
     ['Current window', esc(campaign.current_window_id || 'None')], ['Completed windows', String(campaign.completed_count || 0)],
@@ -364,7 +370,14 @@ function strategyOnboardingPage(data) {
     ['Promotion', esc(program.current_acceptance_assessment?.promotion_disposition || 'Not recorded')], ['Last observed', esc(date(campaign.observed_at_utc))],
     ['Improvement gates', improvement.acceptance_gates ? `${esc(improvement.acceptance_gates.complete)} / ${esc(improvement.acceptance_gates.total)} proven` : 'Not recorded'],
     ['Controller', esc(improvement.controller?.canonical_version || 'Not recorded')], ['Automatic approval', badge(improvement.automatic_approval || 'DISABLED')],
-  ]) + (pipelineRows.length ? table(['Phase','Capability','State','Acceptance evidence required'], pipelineRows) : empty('The autonomous improvement program record is not available.'))
+    ['Event monitor', badge(eventMonitor.status || 'NOT_STARTED')], ['Detector disposition', badge(eventMonitor.disposition || 'UNKNOWN')],
+    ['Database queries', String(eventMonitor.database_query_count || 0)], ['Last database interrogation', esc(date(eventMonitor.last_database_interrogation_at_utc))],
+    ['Observed VWAP trades', String(eventMonitor.observed_trade_count || 0)], ['Eligible causal trades', String(eventMonitor.eligible_trade_count || 0)],
+    ['New trades in last query', String(eventMonitor.new_trade_count || 0)], ['Codex polling', badge('NOT_REQUIRED')],
+  ]) + '<h3>Event-driven evidence monitor</h3><p class="section-note">The local website monitor checks the bound Replay Two and Paper Sim1 SQLite ledgers. It stores NO_CHANGE and insufficient-evidence results locally, and wakes the Ocean coordinator only for a new actionable INVESTIGATE result.</p>'
+    + (eventMonitorSources.length ? table(['Source','Environment','Account','Observed','Eligible','SQLite database'], eventMonitorSources) : empty('The event-driven evidence monitor has not completed its first database query.'))
+    + (eventMonitor.last_error ? '<p class="form-error">'+esc(eventMonitor.last_error)+'</p>' : '')
+    + (pipelineRows.length ? table(['Phase','Capability','State','Acceptance evidence required'], pipelineRows) : empty('The autonomous improvement program record is not available.'))
     + (blockerRows.length ? `<h3>Known blockers and resolutions</h3>${table(['ID','State','Blocker','Resolution'], blockerRows)}` : '')
     + (workstreamRows.length ? `<h3>Operational foundation</h3>${table(['Lane','Workstream','State','Owner','Exact next action'], workstreamRows)}` : '');
   return heading(onboarding.strategy_name, 'Strategy setup and testing', headingActions)
@@ -391,13 +404,25 @@ function runPage(data) {
   const canAbandonReprocess=data.manager?.namespace==='OPERATIONAL' && data.state==='READY' && data.manager.plan?.reprocess_of_run_id;
   const noNewCoverage=data.events.find(event=>event.action==='run-manager.no-new-coverage');
   const canConfirmNoNew=canReprocess && data.manager.plan?.reprocess_of_run_id && !noNewCoverage;
+  const learning=data.learning;
+  const evidenceReady=Boolean(data.manager?.completion_current && data.manager?.completion?.status==='COMPLETED');
+  const learningStages=learning ? [
+    ['1. Evidence captured', evidenceReady ? 'COMPLETE' : data.state==='COMPLETED' ? 'BLOCKED' : 'PENDING', evidenceReady ? `${data.manager.unique_canonical_count} unique trade record${data.manager.unique_canonical_count===1?'':'s'} plus covered no-trade intervals` : 'Waiting for a current completion receipt and fully drained coverage.'],
+    ['2. Evidence qualified', learning.eligible ? 'COMPLETE' : 'NOT_DUE', learning.eligible ? 'This operational run is eligible for cumulative strategy learning.' : (learning.reasons || []).map(human).join('; ') || 'This run is outside the learning policy.'],
+    ['3. Cumulative Brain analysis', ['BRAIN_RECORDED','COMPLETE'].includes(learning.stage) ? 'COMPLETE' : learning.last_error ? 'FAILED' : learning.stage, learning.brain_record_id ? `Obsidian Brain record ${learning.brain_record_id}` : learning.last_error ? human(learning.last_error) : 'Waiting for the Obsidian Brain to analyse this run with all eligible strategy evidence.'],
+    ['4. Result returned to Ocean', learning.stage==='COMPLETE' ? 'COMPLETE' : learning.stage==='FAILED' ? 'FAILED' : 'PENDING', learning.stage==='COMPLETE' ? `${human(learning.conclusion_type)} recorded; no strategy or trading permission was changed automatically.` : 'Waiting for the immutable Brain result and completion callback.'],
+    ['5. Learning continued', learning.conclusion_type==='RECOMMENDATION' ? (learning.continuation_case_id ? 'COMPLETE' : 'FAILED') : learning.stage==='COMPLETE' ? 'NOT_DUE' : 'PENDING', learning.continuation_case_id ? `Research case ${learning.continuation_case_id} and immutable recommendation artifact are ready.` : learning.stage==='COMPLETE' ? (learning.next_action || 'No governed strategy change was recommended.') : 'Waiting for a completed learning result.'],
+  ] : [];
+  const learningBody=learning ? table(['Stage','Status','Evidence'],learningStages.map(([label,status,detail])=>[esc(label),badge(status),esc(detail)]))
+    + facts([['Overall learning loop',badge(learning.stage)],['Conclusion',learning.conclusion_type?badge(learning.conclusion_type):'Not recorded'],['Brain record',learning.brain_record_id?esc(learning.brain_record_id):'Not recorded'],['Governance reconciliation',learning.registry_reconciliation_id?esc(learning.registry_reconciliation_id):'Not loaded'],['Research continuation',learning.continuation_case_id?link('cases',learning.continuation_case_id,learning.continuation_case_id):'Not required'],['Next action',esc(learning.next_action || 'Await the learning result')],['Automatic strategy change','Disabled']])
+    : empty('Learning status is not available for this run.');
   return heading(context.run_id, data.strategy_name, badge(data.state) + (data.manager && ['READY','ACTIVE'].includes(data.state) ? button('end-run','End run','', 'square') : '') + (canAbandonReprocess ? button('abandon-reprocess','Discard reservation','', 'x') : '') + (canConfirmNoNew ? button('confirm-no-new-coverage','Confirm no new coverage','', 'check') : '') + (canReprocess ? button('reprocess-history','Reprocess Existing History','', 'refresh-cw') : '')) + (noNewCoverage ? section('Historical build decision',facts([['Outcome',badge('NO_NEW_COVERAGE')],['Decision',esc(noNewCoverage.payload.decision_id)],['Decision hash',hash(noNewCoverage.payload.decision_hash)],['Coverage hash',hash(noNewCoverage.payload.coverage_hash)],['New run','No']])) : '') + (data.manager ? section('Run control',facts([
     ['Context',esc(human(data.manager.context_status))],['Last heartbeat',esc(date(data.manager.lease?.heartbeat_utc))],['Lease',data.manager.lease ? badge(data.manager.lease.expired?'EXPIRED':'CURRENT') : 'Awaiting telemetry'],['Unique evidence / processing',`${data.manager.unique_canonical_count} / ${data.manager.processing_count}`],['Open pins / pending events',`${data.manager.open_pins} / ${data.manager.progress?.pending_events ?? 'Unknown'}`],['Source / execution / processing coverage',data.manager.progress ? Object.entries(data.manager.progress.axes).map(([key,values])=>`${esc(human(key))}: ${values.length} observed intervals`).join('<br>') : 'Not observed'],['Completion receipt',data.manager.completion ? data.manager.completion_current?'Current':'New evidence needs review / new receipt':'Not recorded'],['Ingestion','Off / TEST only'],['Action required',data.manager.context_status!=='CURRENT'?esc(human(data.manager.context_status)):data.state==='READY'?'Await matching manual Sierra activity':data.state==='COMPLETING'?'Await telemetry drain and completion':'See observed progress'],
   ])) : '') + facts([
     ['Strategy', link('strategies', context.strategy_id, data.strategy_name)], ['Instance', esc(context.execution_instance_id)], ['Purpose', esc(human(context.evidence_purpose))],
     ['Declared environment', esc(context.expected_environment)], ['Observed environment', esc(observed.environment)], ['Source quality', badge(observed.quality)], ['Observation time', esc(date(observed.observed_at_utc))], ['Strategy version', esc(context.strategy_version)], ['Dataset scope', `${esc(context.dataset_manifest_id)} / revision ${esc(context.dataset_manifest_revision)}`], ['Scored interval', data.manager?.plan?.selection?.interval ? `${esc(data.manager.plan.selection.interval.start_utc)} to ${esc(data.manager.plan.selection.interval.end_utc)}` : 'Not recorded'],
     ['Event receipts in history', esc(incoming.length)], ['Analysis complete in history', esc(incoming.filter(event => event.payload.analysis_complete === true).length)], ['Learner permission', esc(context.learner_permission)],
-  ]) + (observed.environment !== 'UNKNOWN' && context.expected_environment !== observed.environment ? `<p class='form-error'>Observed source does not match the declared environment.</p>` : '') + section('Pinned run context', `<pre>${esc(JSON.stringify(context, null, 2))}</pre>`) + section('Completion and coverage', completion ? `<pre>${esc(JSON.stringify(completion, null, 2))}</pre>` : empty('No completion receipt recorded.')) + section('Run history', timeline(data.events));
+  ]) + (observed.environment !== 'UNKNOWN' && context.expected_environment !== observed.environment ? `<p class='form-error'>Observed source does not match the declared environment.</p>` : '') + section('Learning loop',learningBody) + section('Pinned run context', `<pre>${esc(JSON.stringify(context, null, 2))}</pre>`) + section('Completion and coverage', completion ? `<pre>${esc(JSON.stringify(completion, null, 2))}</pre>` : empty('No completion receipt recorded.')) + section('Run history', timeline(data.events));
 }
 function caseProgress(data) {
   const phases = [['Research', ['DISCOVERY','EVIDENCE','RESEARCH']], ['Human review', ['DEVELOPMENT_REVIEW','DEVELOPMENT_HANDOFF']], ['Development', ['CANDIDATE_DEVELOPMENT']], ['Historical tests', ['HISTORICAL_VALIDATION']], ['Evaluation', ['CANDIDATE_EVALUATION','SHADOW_REVIEW','SHADOW_HANDOFF']], ['Shadow forward', ['FORWARD_VALIDATION','FORWARD_EVALUATION']], ['Deployment review', ['DEPLOYMENT_REVIEW','DEPLOYMENT_HANDOFF','ROLLBACK_REVIEW','ROLLBACK_HANDOFF']], ['Observation', ['POST_DEPLOYMENT_VALIDATION']], ['Retrospective', ['RETROSPECTIVE','CLOSED']]];
@@ -686,7 +711,7 @@ async function act(action,element) {
     });
   }
   if(action==='reprocess-history'){
-    const data=state.data,context=data.context,manager=data.manager,runId=`reprocess-${context.run_id}-${crypto.randomUUID()}`,processingId=`processing-${crypto.randomUUID()}`;
+    const data=state.data,context=data.context,manager=data.manager,runId=buildReprocessRunId(context,manager),processingId=`processing-${crypto.randomUUID()}`;
     return openModal('Reprocess Existing History',facts([
       ['Original run',esc(context.run_id)],['Strategy',esc(context.strategy_id)],['Version',esc(context.strategy_version)],['Instance',esc(context.execution_instance_id)],['Dataset',`${esc(context.dataset_manifest_id)} / revision ${esc(context.dataset_manifest_revision)}`],['Interval',`${esc(manager.plan.selection.interval.start_utc)} to ${esc(manager.plan.selection.interval.end_utc)}`],['Code hash',hash(context.strategy_code_hash)],['Configuration hash',hash(context.strategy_config_hash)],['Canonical / processing counts',`${esc(manager.unique_canonical_count)} / ${esc(manager.processing_count)}`],['New processing ID',esc(processingId)],['Execution','READY only; Sierra is not started']
     ])+`<label class='check-line'><input id='reprocess-confirm' type='checkbox' required>I confirm the same governed interval, strategy, configuration and dataset for a new processing pass.</label><p class='subline'>The original run and canonical trade identity remain unchanged. Normal ingestion stays off and LIVE_REAL remains disabled.</p>`,'Create reprocess run',async form=>{
