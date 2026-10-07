@@ -3,7 +3,7 @@ import { PURPOSES, interval, intersect, subtract } from './run-manager.mjs';
 import { OperationalPreparation, RELEASE_SCOPES } from './operational-preparation.mjs';
 
 export const OPERATIONAL_PREFIX='operational/v1';
-export const DATASET_OWNER_TASKS=['S31.3','S31.4'];
+export const DATASET_OWNER_TASKS=['S31.3','S31.4','S31.5','S31.6'];
 export const operationalPolicy=(config={})=>({
   schema_version:'ocean-operational-transition/v1',shared_contract_release:'2.1.0',
   modes:Object.fromEntries(['REPLAY','PAPER_FORWARD'].map(mode=>[mode,{enabled:config.operational?.modes?.[mode]?.enabled===true}])),live_real:'DISABLED',
