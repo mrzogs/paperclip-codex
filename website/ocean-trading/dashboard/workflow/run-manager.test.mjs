@@ -13,7 +13,9 @@ const results=[];const apiExamples=new Map();let app;let browser;let activePage;
 const evidence=path.join(root,'artifacts/evidence');fs.mkdirSync(evidence,{recursive:true});
 const check=async(name,work)=>{const start=Date.now();try{await work();results.push({name,status:'PASS',type:'ACTUAL_ISOLATED_HTTP_SQLITE_SYNTHETIC_TEST_DATA',elapsed_ms:Date.now()-start});console.log(`PASS ${name}`);}catch(error){results.push({name,status:'FAILED',error:error.message});throw error;}};
 try {
-  app=await startUiTestHost({extraInstances:['test-s22-second','test-s22-code2'],fixtureOptions:{instanceOverrides:{0:{capabilities:['REPLAY','PAPER_FORWARD']},1:{version_binding:'test-candidate-1',capabilities:['REPLAY','PAPER_FORWARD']}},authorizedTests:['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT','VALIDATION','RESEARCH_EXPERIMENT']}});
+  app=await startUiTestHost({extraInstances:['test-s22-second','test-s22-code2'],fixtureOptions:{
+    instanceOverrides:{0:{capabilities:['REPLAY','PAPER_FORWARD']},1:{version_binding:'test-candidate-1',capabilities:['REPLAY','PAPER_FORWARD']}},
+    authorizedTests:['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT','VALIDATION','RESEARCH_EXPERIMENT']}});
   const f=app.fixture;const call=f.call;const rm=async(action,data,expected=200,role='HUMAN')=>{const response=await call(`run-manager/${action}`,{data,expected,role});if(expected===200)apiExamples.set(action,{operation:action,data,response});return response;};
   const first=f.registered[0];const second=f.registered[1];const getRun=runId=>call(`run-manager/context/${runId}`);
   const intervalA={start_utc:'2026-05-01T00:00:00.000Z',end_utc:'2026-05-02T00:00:00.000Z'};
