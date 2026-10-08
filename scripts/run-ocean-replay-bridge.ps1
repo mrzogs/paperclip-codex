@@ -343,6 +343,16 @@ function Get-LastBridgeFailure {
 }
 
 function Get-LastBridgeProjectionFailure {
+  if ([IO.File]::Exists([string]$Config.state_file)) {
+    try {
+      $state = [IO.File]::ReadAllText([string]$Config.state_file) | ConvertFrom-Json
+      if ($state.config_sha256 -ceq $script:ConfigHash -and
+          $state.health_projection_status -ceq 'UNAVAILABLE' -and
+          $state.last_projection_failure) {
+        return $state.last_projection_failure
+      }
+    } catch { }
+  }
   $candidates = @()
   foreach ($path in @((Get-BridgeHealthPath), [string]$Config.state_file)) {
     if (-not [IO.File]::Exists($path)) { continue }
