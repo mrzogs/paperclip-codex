@@ -2,7 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
-import { sealedHash } from './common.mjs';
+import { digest, sealedHash } from './common.mjs';
+import { decodeRunnerFields } from './operational-attempt-failure.mjs';
 
 const TEST_CONFIG_SCHEMA = 'ocean-replay-run-bridge/v3';
 const OPERATIONAL_CONFIG_SCHEMA = 'ocean-replay-run-bridge/v4';
@@ -81,15 +82,105 @@ function runCount(db, table, runId, extra = '') {
   return Number(db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE run_id=? ${extra}`).get(runId).n);
 }
 
-function readSourcePreflight(config, lifecycleBindingVerified) {
+function readCorrelatedRunningStart(config, run, db, replay, status, statusBytes) {
+  const rejected = reason => ({ verified: false, reason });
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='replay_run_attempts'").get()) return rejected('SOURCE_RUNNING_ATTEMPT_MISSING');
+  const attempt = latest(db, 'replay_run_attempts', 'attempt_id');
+  if (!Number.isSafeInteger(attempt?.attempt_id) || attempt.attempt_id < 1 || attempt.run_id !== run?.id
+    || attempt.attempt_ended_utc != null || attempt.stop_command_id != null
+    || attempt.start_command_id !== status.commandId) return rejected('SOURCE_RUNNING_ATTEMPT_CONFLICT');
+  const managed = db.prepare('SELECT * FROM replay_run_context WHERE run_id=?').get(run.id);
+  const commandPath = path.join(path.dirname(config.source_preflight_status_path), 'vwap-replay-command.txt');
+  // This is the existing managed runner's exact independent controller channel.
+  const controllerRoot = path.join(path.dirname(config.expected_sierra_exe), 'connector-control', 'patrading-tp');
+  const controllerPath = path.join(controllerRoot, 'replay-status.json');
+  const controllerCommandPath = path.join(controllerRoot, 'replay-command.json');
+  const norm = value => typeof value === 'string' && path.isAbsolute(value) ? path.resolve(value).toLowerCase() : null;
+  const read = filename => {
+    const before = fs.statSync(filename), bytes = fs.readFileSync(filename), after = fs.statSync(filename);
+    if (!before.isFile() || before.size > 32768 || before.size !== after.size || before.mtimeMs !== after.mtimeMs) fail('SOURCE_RUNNING_RECEIPT_CHANGED');
+    return { filename, bytes, modified: after.mtimeMs };
+  };
+  try {
+    const command = read(commandPath), controller = read(controllerPath), controllerCommand = read(controllerCommandPath);
+    const start = decodeRunnerFields(command.bytes);
+    const rawHash = value => String(value || '').replace(/^sha256:/, '').toLowerCase();
+    if (start.action !== 'start' || start.commandId !== attempt.start_command_id
+      || start.telemetryRunId !== run.id || start.telemetryStrategyId !== config.strategy_id
+      || start.telemetryStrategyVersion !== config.expected_strategy_version
+      || start.tradeAccount !== config.account_alias || start.expectedSymbol !== config.expected_symbol
+      || start.telemetryRunStartedUtc !== attempt.attempt_started_utc
+      || rawHash(start.telemetryDllSha256) !== rawHash(config.expected_strategy_module_sha256)
+      || rawHash(replay.dll_hash) !== rawHash(config.expected_strategy_module_sha256)
+      || start.telemetryContextHash !== run.release_context_hash
+      || start.telemetryCandidateId !== managed.candidate_id || start.telemetryDatasetId !== managed.dataset_id
+      || start.telemetryDatasetRole !== managed.dataset_role
+      || !['StrategyProfileId','StrategyProfileVersion','StrategyCodeHash','StrategyConfigHash','SessionName','SessionTimezone'].every(key => {
+        const field = key.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`).slice(1);
+        return start[`telemetry${key}`] === managed[field];
+      })
+      || (start.telemetrySessionObservationMode || null) !== (managed.session_observation_mode || null)) return rejected('SOURCE_RUNNING_START_CONTEXT_CONFLICT');
+    const parts = status.detail.split('; '), detail = Object.create(null);
+    if (!/^StartChartReplay(?:New)? result=[1-9][0-9]*$/.test(parts.shift())) return rejected('SOURCE_RUNNING_START_NOT_CONFIRMED');
+    for (const part of parts) {
+      const separator = part.indexOf('=');
+      if (separator < 1 || Object.hasOwn(detail, part.slice(0, separator))) return rejected('SOURCE_RUNNING_START_NOT_CONFIRMED');
+      detail[part.slice(0, separator)] = part.slice(separator + 1);
+    }
+    if (detail.transition_confirmed !== 'true' || status.controllerLifecycleActive !== 'true'
+      || !['startDateTime','endDateTime','tradeStartDateTime'].every(key => start[key] && detail[key] === start[key])
+      || (detail.effectiveReplayEndDateTime && detail.effectiveReplayEndDateTime !== start.endDateTime)) return rejected('SOURCE_RUNNING_START_NOT_CONFIRMED');
+    const chartTime = value => typeof value === 'string' && /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/.test(value);
+    if (!['startDateTime','endDateTime','tradeStartDateTime'].every(key => chartTime(start[key]))
+      || start.startDateTime >= start.endDateTime || start.tradeStartDateTime < start.startDateTime
+      || start.tradeStartDateTime >= start.endDateTime || !chartTime(detail.effectiveStartDateTime)
+      || detail.effectiveStartDateTime < start.startDateTime || detail.effectiveStartDateTime >= start.endDateTime) return rejected('SOURCE_RUNNING_START_NOT_CONFIRMED');
+    const startTime = asUtcMillis(start.telemetryRunStartedUtc);
+    const hookTime = fs.statSync(config.source_preflight_status_path).mtimeMs;
+    if (!Number.isFinite(startTime) || hookTime < startTime - 1000 || hookTime > Date.now() + 5000
+      || command.modified < startTime - 1000 || command.modified > hookTime + 1000) return rejected('SOURCE_RUNNING_START_TIME_CONFLICT');
+    const receipt = JSON.parse(controller.bytes.toString('utf8'));
+    const request = JSON.parse(controllerCommand.bytes.toString('utf8'));
+    if (!freshTimestamp(new Date(controller.modified).toISOString(), config.freshness_seconds)
+      || !freshTimestamp(new Date(controllerCommand.modified).toISOString(), config.freshness_seconds)) return rejected('SOURCE_RUNNING_CONTROLLER_STALE');
+    if (receipt.schema !== 'ocean-trading.sierra-replay-controller.status.v1'
+      || receipt.controllerVersion !== 'v0.2.1-cicd-vwap-time-basis'
+      || request.schema !== 'ocean-trading.sierra-replay-controller.command.v1'
+      || request.action !== 'status' || request.saveChartbook !== false
+      || typeof request.commandId !== 'string' || !/^oql-managed-status-[a-f0-9]{32}$/.test(request.commandId)
+      || receipt.commandId !== request.commandId || receipt.action !== 'status' || receipt.status !== 'status'
+      || receipt.error != null || receipt.isReplayRunning !== true || receipt.replayStatus !== 1 || receipt.chartReplayStatus !== 1
+      || receipt.chartNumber !== config.expected_chart_number || request.chartNumber !== config.expected_chart_number
+      || norm(receipt.chartbookPath) !== norm(config.expected_chartbook_path)
+      || norm(receipt.statusFilePath) !== norm(controllerPath)
+      || norm(receipt.instanceDataFolder) !== norm(path.join(path.dirname(config.expected_sierra_exe), 'Data'))
+      || norm(request.expectedInstanceDataFolder) !== norm(receipt.instanceDataFolder)
+      || controller.modified < controllerCommand.modified - 1000
+      || !chartTime(receipt.currentChartDateTime) || receipt.currentChartDateTime < start.startDateTime
+      || receipt.currentChartDateTime > start.endDateTime) return rejected('SOURCE_RUNNING_CONTROLLER_CONFLICT');
+    if (![command, controller, controllerCommand].every(file => fs.readFileSync(file.filename).equals(file.bytes))
+      || !fs.readFileSync(config.source_preflight_status_path).equals(statusBytes)) return rejected('SOURCE_RUNNING_RECEIPT_CHANGED');
+    const currentAttempt = latest(db, 'replay_run_attempts', 'attempt_id');
+    if (currentAttempt?.attempt_id !== attempt.attempt_id || currentAttempt.attempt_ended_utc != null
+      || currentAttempt.stop_command_id != null) return rejected('SOURCE_RUNNING_ATTEMPT_CONFLICT');
+    return { verified: true, reason: null, verification_basis: 'EXACT_START_ATTEMPT_AND_FRESH_CONTROLLER',
+      attempt_id: attempt.attempt_id, context_hash: run.release_context_hash,
+      start_command_sha256: digest(command.bytes), start_receipt_sha256: digest(statusBytes),
+      controller_command_sha256: digest(controllerCommand.bytes), controller_receipt_sha256: digest(controller.bytes),
+      controller_status_mtime_utc: new Date(controller.modified).toISOString() };
+  } catch (error) {
+    return rejected(/^[A-Z0-9_]+$/.test(error.code || error.message) ? error.code || error.message : 'SOURCE_RUNNING_RECEIPT_NOT_VERIFIED');
+  }
+}
+
+function readSourcePreflight(config, lifecycleBindingVerified, run, db, replay) {
   if (!fs.existsSync(config.source_preflight_status_path)) return { verified: false, reason: 'SOURCE_PREFLIGHT_STATUS_MISSING' };
   const stat = fs.statSync(config.source_preflight_status_path);
   const ageMs = Date.now() - stat.mtimeMs;
-  if (ageMs < -5000 || ageMs > config.freshness_seconds * 1000) {
-    return { verified: false, reason: 'SOURCE_PREFLIGHT_STATUS_STALE', status_mtime_utc: stat.mtime.toISOString() };
-  }
+  const fresh = ageMs >= -5000 && ageMs <= config.freshness_seconds * 1000;
   const values = Object.create(null);
-  for (const line of fs.readFileSync(config.source_preflight_status_path, 'utf8').split(/\r?\n/)) {
+  const statusBytes = fs.readFileSync(config.source_preflight_status_path);
+  for (const line of statusBytes.toString('utf8').split(/\r?\n/)) {
     if (!line) continue;
     const separator = line.indexOf('=');
     if (separator < 1) fail('SOURCE_PREFLIGHT_STATUS_MALFORMED');
@@ -124,11 +215,17 @@ function readSourcePreflight(config, lifecycleBindingVerified) {
     && Number(values.chartDataType) === 2
     && detail === 'VWAP replay hook active.'
     && (running || inactive);
-  const verified = prepared || (lifecycleStatus && lifecycleBindingVerified === true);
+  const runningStart = chartVerified && running && Number(values.chartDataType) === 2
+    && values.action === 'start' && values.status === 'running';
+  if (!fresh && !runningStart) return { verified: false, reason: 'SOURCE_PREFLIGHT_STATUS_STALE', status_mtime_utc: stat.mtime.toISOString() };
+  const startProof = runningStart && lifecycleBindingVerified === true
+    ? readCorrelatedRunningStart(config, run, db, replay, values, statusBytes) : null;
+  const verified = (fresh && (prepared || (lifecycleStatus && lifecycleBindingVerified === true))) || startProof?.verified === true;
   return {
     verified,
-    reason: verified ? null : lifecycleStatus ? 'SOURCE_PREFLIGHT_STATUS_NOT_CORRELATED' : 'SOURCE_PREFLIGHT_STATUS_NOT_VERIFIED',
-    verification_basis: !verified ? null : prepared ? 'CONTRACT_PREPARED' : running ? 'CORRELATED_RUNNING_STATUS' : 'CORRELATED_INACTIVE_STATUS',
+    reason: verified ? null : startProof?.reason || (lifecycleStatus || runningStart ? 'SOURCE_PREFLIGHT_STATUS_NOT_CORRELATED' : 'SOURCE_PREFLIGHT_STATUS_NOT_VERIFIED'),
+    verification_basis: !verified ? null : startProof?.verified ? startProof.verification_basis : prepared ? 'CONTRACT_PREPARED' : running ? 'CORRELATED_RUNNING_STATUS' : 'CORRELATED_INACTIVE_STATUS',
+    ...(startProof ? { managed_start_proof: startProof } : {}),
     command_id: values.commandId || null,
     symbol: values.symbol || null,
     chart_number: Number.isFinite(Number(values.chartNumber)) ? Number(values.chartNumber) : null,
@@ -241,7 +338,7 @@ function telemetry(config, run) {
       && instrument.trade_account === config.account_alias && observedSymbol === config.expected_symbol
       && Number(instrument.chart_number) === config.expected_chart_number
       && managedReplayVerified(config, run, db);
-    const sourcePreflight = operational ? readSourcePreflight(config, lifecycleBindingVerified) : null;
+    const sourcePreflight = operational ? readSourcePreflight(config, lifecycleBindingVerified, run, db, replay) : null;
     const preflightVerified = staticBindingVerified
       && (!operational ? observedSymbol === config.expected_symbol && accountFresh : sourcePreflight.verified);
     const verified = preflightVerified && replayVerified;
