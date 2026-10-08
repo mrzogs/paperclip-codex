@@ -508,9 +508,16 @@ function casePage(data) {
     ['Candidate testing',badge('NOT_DUE')],['Approval','Not due'],['Source Research',data.planning.source_case_id?link('cases',data.planning.source_case_id):'Proof required'],
     ['Frozen lineage',link('artifacts',data.planning.lineage_artifact_id)],
     ...(riskReview && data.planning.risk_review?[
-      ['Recorded disposition',esc(human(data.planning.risk_review.disposition))],
+      ['Observation classification',esc(human(data.planning.risk_review.disposition))],
       ['Recorded exposure',`${data.planning.risk_review.baseline_trades} baseline / ${data.planning.risk_review.excluded_trades} excluded / ${data.planning.risk_review.retained_trades} retained trades`],
       ['Evidence assessment',badge(data.planning.risk_review.evidence_status)],
+    ]:[]),
+    ...(riskReview && data.planning.risk_disposition?[
+      ['Review disposition',esc(human(data.planning.risk_disposition.disposition))],
+      ['Review notes',esc(data.planning.risk_disposition.review_notes)],
+      ['Reviewer',esc(data.planning.risk_disposition.reviewer_id)],
+      ['Immutable review artifact',link('artifacts',data.planning.risk_disposition.artifact_id)
+        + `<div class='subline'>${hash(data.planning.risk_disposition.content_hash)}</div>`],
     ]:[]),
     ...(data.planning.plan_work?[
       ['Plan work',badge(data.planning.plan_work.status)],

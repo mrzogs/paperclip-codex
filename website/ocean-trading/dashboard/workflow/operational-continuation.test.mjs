@@ -16,13 +16,14 @@ import { readWorkflowView } from './ui-api.mjs';
 import { digest, objectHash } from './common.mjs';
 import { consumePlanningOnce } from '../../../../scripts/consume-ocean-proposal-planning.mjs';
 
-function fixture({insufficient=false,noChange=false,partial=false,prospective=false,oneDirection=null,rowsPerRun=20}={}) {
+function fixture({insufficient=false,noChange=false,partial=false,prospective=false,oneDirection=null,rowsPerRun=20,
+  ownerScopes=['read','artifact.write','event.write']}={}) {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'ocean-planning-'));
   const filename=path.join(root,'workflow.sqlite');let store=new WorkflowStore(filename);
   const backend=Object.create(WorkflowBackend.prototype);
   const baseline=digest('baseline'),expiry=new Date(Date.now()+3600000).toISOString();
   const identity={identity_id:'brain',role:'BRAIN',namespace:'OPERATIONAL',strategy_ids:['s'],instance_ids:['i'],
-    scopes:['read','artifact.write','event.write'],expires_at_utc:expiry};
+    scopes:ownerScopes,expires_at_utc:expiry};
   const recipient={...identity,identity_id:'strategy',role:'STRATEGY'};
   const actor={id:'brain',role:'BRAIN',namespace:'OPERATIONAL',strategyIds:['s'],instanceIds:['i'],scopes:identity.scopes};
   const human={id:'wayne-ocean-ui',role:'HUMAN'};
@@ -414,13 +415,19 @@ function riskInput(f,caseId,message='risk-return',disposition='KEEP_BASELINE') {
     review_notes:'Reviewed the frozen zero-retained-exposure observation and its recorded child strata. No disable is authorized.'}};
 }
 
-test('real isolated HTTP risk-owner disposition closes only the risk task and replays byte-identically after restart',async()=>{
+// The second scope set is the read-only CICD OPERATIONAL catalog observation
+// from 2026-10-08; identity, session and qualification remain isolated fixtures.
+for(const [scopeLabel,ownerScopes] of [
+  ['minimum scopes',['read','artifact.write','event.write']],
+  ['configured CICD catalog scopes',['read','artifact.write','case.transition','approval.request','delivery','event.write']],
+])test(`real isolated HTTP risk-owner disposition closes only the risk task and replays byte-identically after restart (${scopeLabel})`,async()=>{
   const {createServer}=await import('node:http');
-  const f=fixture({prospective:true,oneDirection:'short'});let server;
+  const f=fixture({prospective:true,oneDirection:'short',ownerScopes});let server;
   try {
     const status=f.complete(),before=sealed(f),{child,artifact}=assertRiskReview(f,status);
     const pins=()=>Object.fromEntries(['ow_strategies','ow_profiles','ow_instances','ow_runs'].map(table=>[table,f.backend.db.prepare(`SELECT * FROM ${table} ORDER BY id`).all()]));
-    const originalPins=pins();let actor=f.actor;
+    const originalPins=pins();let actor=OperationalLearning.prototype.brainActor.call({backend:f.backend},'s','i');
+    assert.equal(actor.id,f.actor.id);assert.deepEqual(actor.scopes,ownerScopes);
     Object.assign(f.backend,{authFailureWindowMs:300000,authFailureThreshold:3,
       authFailureTotals:{401:0,403:0},authFailureBuckets:new Map()});
     // Authentication identity is an explicit fixture. Actual HTTP body parser,
@@ -826,6 +833,10 @@ test('isolated Chrome links the actual owned risk review, retains it across rest
     assert.match(body,/60 baseline \/ 60 excluded \/ 0 retained trades/);assert.match(body,/Required risk review/);
     assert.match(body,/no strategy disable, candidate development or test permission/);
     assert.doesNotMatch(body,/Await new qualified Research|Required planning work|Historical validation/);
+    const fact=label=>page.locator('dt').filter({hasText:new RegExp(`^${label}$`)}).locator('..').locator('dd');
+    assert.equal(await fact('Observation classification').innerText(),'Risk disable review required');
+    assert.equal(await fact('Review disposition').count(),0);
+    assert.equal(await fact('Recorded disposition').count(),0);
     assert.equal(await page.locator('#content [data-action]').count(),0);
     const output=process.env.OCEAN_RISK_REVIEW_UI_ARTIFACTS;fs.mkdirSync(output,{recursive:true});
     for(const [width,height,label] of [[1440,1000,'desktop'],[390,844,'mobile']]) {
@@ -840,10 +851,25 @@ test('isolated Chrome links the actual owned risk review, retains it across rest
     f.restart();f.worker.reconcile();await page.reload();await settled();
     assert.equal(await page.getByRole('heading',{name:'Risk review scope',exact:true}).count(),1);
     assert.match(await page.locator('#content').innerText(),/Owner brain: review/);
-    f.worker.continuations.recordRiskDisposition(f.actor,riskInput(f,child.id,'browser-fixture-return'));
+    const input=riskInput(f,child.id,'browser-fixture-return');
+    const returned=f.worker.continuations.recordRiskDisposition(f.actor,input);
+    f.restart();f.worker.reconcile();
     await page.reload();await settled();
     assert.match(await page.locator('#content').innerText(),/risk review recorded KEEP_BASELINE/);
+    assert.equal(await fact('Observation classification').innerText(),'Risk disable review required');
+    assert.equal(await fact('Review disposition').innerText(),'Keep baseline');
+    assert.equal(await fact('Review notes').innerText(),input.data.review_notes);
+    assert.equal(await fact('Reviewer').innerText(),f.actor.id);
+    assert.equal(await fact('Immutable review artifact').getByRole('link').getAttribute('href'),
+      `/improvement/artifacts/${returned.artifact_id}`);
+    assert.equal(await fact('Immutable review artifact').locator('code').innerText(),returned.content_hash);
+    assert.equal(await fact('Recorded disposition').count(),0);
     assert.equal(await page.locator('#content [data-action]').count(),0);
+    for(const [width,height,label] of [[1440,1000,'desktop'],[390,844,'mobile']]) {
+      await page.setViewportSize({width,height});
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+      await page.screenshot({path:path.join(output,`risk-review-completed-${label}.png`),fullPage:true,animations:'disabled'});
+    }
     await page.locator('dt').filter({hasText:'Source Research'}).locator('..').getByRole('link').click();await settled();
     assert.equal(new URL(page.url()).pathname,'/improvement/cases/source');
     assert.match(await page.locator('#content').innerText(),/Owned continuation work/);
