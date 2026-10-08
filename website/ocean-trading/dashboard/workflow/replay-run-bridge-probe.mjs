@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
-import { digest, sealedHash } from './common.mjs';
+import { digest, objectHash, sealedHash } from './common.mjs';
 import { decodeRunnerFields } from './operational-attempt-failure.mjs';
 
 const TEST_CONFIG_SCHEMA = 'ocean-replay-run-bridge/v3';
@@ -167,6 +167,11 @@ function readCorrelatedRunningStart(config, run, db, replay, status, statusBytes
       attempt_id: attempt.attempt_id, context_hash: run.release_context_hash,
       start_command_sha256: digest(command.bytes), start_receipt_sha256: digest(statusBytes),
       controller_command_sha256: digest(controllerCommand.bytes), controller_receipt_sha256: digest(controller.bytes),
+      controller_command_id: receipt.commandId,
+      current_chart_datetime: receipt.currentChartDateTime,
+      start_chart_datetime: start.startDateTime, trade_start_chart_datetime: start.tradeStartDateTime,
+      end_chart_datetime: start.endDateTime,
+      controller_command_mtime_utc: new Date(controllerCommand.modified).toISOString(),
       controller_status_mtime_utc: new Date(controller.modified).toISOString() };
   } catch (error) {
     return rejected(/^[A-Z0-9_]+$/.test(error.code || error.message) ? error.code || error.message : 'SOURCE_RUNNING_RECEIPT_NOT_VERIFIED');
@@ -368,6 +373,59 @@ function telemetry(config, run) {
   } finally {
     db.close();
   }
+}
+
+// Synchronous read-only view: reverify physical sources, never reuse the bridge
+// service lease or cached status file as current execution/completion authority.
+export function readCurrentReplayExecution(configFile, { run, plan, context, storedPlan=plan }) {
+  const rejected = reason => ({ status:'CURRENT_EXECUTION_UNVERIFIED',reason,
+    completed_coverage_granted:false,
+    next_action:'Verify fresh exact run/attempt/controller execution proof; the service heartbeat and historical activation are not current replay proof. No completed coverage is granted.' });
+  try {
+    const configBytes=fs.readFileSync(configFile),config=readReplayBridgeConfig(configFile);
+    if(config.schema_version!==OPERATIONAL_CONFIG_SCHEMA || !plan.operational_review
+      || !['READY','ACTIVE','COMPLETING'].includes(run.state) || context.expected_environment!=='REPLAY'
+      || run.id!==context.run_id || run.strategy_id!==config.strategy_id || run.instance_id!==config.instance_id
+      || context.strategy_id!==config.strategy_id || context.execution_instance_id!==config.instance_id
+      || context.strategy_version!==config.expected_strategy_version
+      || plan.symbol!==config.expected_symbol || plan.instance?.account_alias!==config.account_alias
+      || plan.instance?.execution_instance_id!==config.instance_id
+      || plan.operational_review.factual_binding_hash!==config.factual_binding_hash
+      || plan.context_hash!==context.context_hash || sealedHash(context,'context_hash')!==context.context_hash
+      || sealedHash(storedPlan,'plan_hash')!==storedPlan.plan_hash || plan.plan_hash!==storedPlan.plan_hash
+      || objectHash(plan.operational_review)!==objectHash(storedPlan.operational_review)) return rejected('CURRENT_EXECUTION_SCOPE_CONFLICT');
+    const source=telemetry(config,{...run,release_context_hash:context.context_hash});
+    const proof=source.source_preflight?.managed_start_proof;
+    if(!source.verified || !proof?.verified || proof.context_hash!==context.context_hash
+      || proof.verification_basis!=='EXACT_START_ATTEMPT_AND_FRESH_CONTROLLER')
+      return rejected(proof?.reason || source.source_preflight?.reason || source.reason || 'CURRENT_EXECUTION_EXACT_PROOF_REQUIRED');
+    const workflow=new DatabaseSync(config.workflow_db,{readOnly:true,timeout:2000});
+    try {
+      const row=workflow.prepare(`SELECT r.state,r.revision,r.context_json,p.payload_json,release.context_hash AS release_hash
+        FROM ow_runs r JOIN ow_run_plans p ON p.id=r.id JOIN ow_operational_releases release ON release.run_id=r.id WHERE r.id=?`).get(run.id);
+      if(!row || row.state!==run.state || row.revision!==run.revision || row.release_hash!==context.context_hash
+        || objectHash(JSON.parse(row.context_json))!==objectHash(context)
+        || objectHash(JSON.parse(row.payload_json))!==objectHash(storedPlan))return rejected('CURRENT_EXECUTION_WORKFLOW_CHANGED');
+    }finally{workflow.close();}
+    if(!fs.readFileSync(configFile).equals(configBytes))return rejected('CURRENT_EXECUTION_CONFIG_CHANGED');
+    const until=Math.min(...[proof.controller_status_mtime_utc,proof.controller_command_mtime_utc,source.account_snapshot_utc]
+      .map(value=>asUtcMillis(value)+config.freshness_seconds*1000));
+    if(!Number.isFinite(until) || until<=Date.now())return rejected('CURRENT_EXECUTION_PROOF_EXPIRED');
+    const phase=proof.current_chart_datetime>=proof.end_chart_datetime?'END_BOUNDARY_AWAITING_STOP'
+      :proof.current_chart_datetime<proof.trade_start_chart_datetime?'WARMUP':'SCORED_REPLAY';
+    return {status:'CURRENT_RUNNING_VERIFIED',run_id:run.id,context_hash:context.context_hash,
+      verification_basis:proof.verification_basis,phase,attempt_id:proof.attempt_id,
+      observed_at_utc:proof.controller_status_mtime_utc,valid_until_utc:new Date(until).toISOString(),
+      chart_time_basis:'NATIVE_CHART_DATETIME_NOT_ASSUMED_UTC',current_chart_datetime:proof.current_chart_datetime,
+      trade_start_chart_datetime:proof.trade_start_chart_datetime,end_chart_datetime:proof.end_chart_datetime,
+      controller_command_id:proof.controller_command_id,controller_receipt_sha256:proof.controller_receipt_sha256,
+      start_command_sha256:proof.start_command_sha256,start_receipt_sha256:proof.start_receipt_sha256,
+      completed_coverage_granted:false,
+      next_action:phase==='END_BOUNDARY_AWAITING_STOP'?'Exact replay reached the requested end; await independent physical stop and terminal drain/coverage reconciliation. Running is not completion.'
+        :run.state==='READY'?'Exact physical replay is running; await scoped Ocean activation. No completed coverage is granted.'
+        :phase==='WARMUP'?'Warmup is physically running for the exact attempt; await the native trade-start boundary. Scored and completed coverage are not yet proven.'
+        :'Scored replay is physically running for the exact attempt; await physical stop, drain and complete coverage verification. Running is not completed coverage.'};
+  }catch(error){return rejected(/^[A-Z0-9_]+$/.test(error.code || error.message)?error.code || error.message:'CURRENT_EXECUTION_SOURCE_READ_FAILED');}
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

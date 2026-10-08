@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { exactKeys, future, id, objectHash, requireThat, sealedHash } from './common.mjs';
 import { failureReadView, readBackendAttemptFailure, verifyFrozenFailureBoundary } from './operational-attempt-failure.mjs';
+import { readCurrentReplayExecution } from './replay-run-bridge-probe.mjs';
 
 export const RUN_API = 'ocean-run-manager/v1';
 export const PURPOSES = [
@@ -402,6 +403,13 @@ export class RunManager {
         const proof=this.terminalFailure(run.id) || (['READY','ACTIVE'].includes(run.state) && this.b.operationalLearning?.physicalBindingFile
           ?readBackendAttemptFailure(this.b,{run,plan,context}):null);
         if(proof)execution={...execution,...failureReadView(proof,plan.reprocess_of_run_id,run.state)};
+        else if(contextStatus==='CURRENT' && ['READY','ACTIVE','COMPLETING'].includes(run.state) && this.b.operationalLearning?.physicalBindingFile) {
+          execution={...execution,...readCurrentReplayExecution(this.b.operationalLearning.physicalBindingFile,
+            {run,plan,context,storedPlan:parse(this.managed(run.id))})};
+          // Recheck mutable governance after the independent source read.
+          try{this.current(plan);}catch(error){contextStatus=error.code || 'RECONCILIATION_REQUIRED';
+            execution={status:'CURRENT_EXECUTION_UNVERIFIED',reason:contextStatus,completed_coverage_granted:false};}
+        }
       }catch(error){execution={...execution,status:'FAILURE_RECONCILIATION_UNVERIFIED',reason:error.code || 'FAILURE_SOURCE_READ_FAILED',
         next_owner:'Scoped ReplayBridge telemetry producer',next_action:'Verify the exact current runner failure, terminal logger attempt and physical stop before reconciliation. No completed coverage is granted.'};}
     }
