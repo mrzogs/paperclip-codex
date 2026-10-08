@@ -186,4 +186,49 @@ try {
   [IO.Directory]::Delete($tempRoot)
 }
 
-Write-Output 'PASS: TEST/OPERATIONAL bridge gates and executable config snapshot, child consistency, active-lease fail-closed exit and restart regressions.'
+function Get-EvidencePlan([string]$RunId) {
+  Assert-BridgeTest ($RunId -ceq '--failure-only') 'FAILURE_DISCOVERY_MUST_BE_EXPLICIT'
+  return $script:FailurePlan
+}
+function Get-RunContext([string]$RunId) { return $script:FailureContext }
+function Invoke-Mutation([string]$Action, $Data) {
+  $script:FailureCalls += [pscustomobject]@{action=$Action;data=$Data}
+  if ($Action -ceq 'claim') { return [pscustomobject]@{lease_id='mock-new-failure-lease'} }
+  if ($Action -ceq 'end') {
+    Assert-BridgeTest ($Data.outcome -ceq 'FAILED' -and $Data.failure_proof_hash -ceq $script:FailurePlan.failure_proof_hash -and
+      $Data.lease_id -ceq 'mock-new-failure-lease') 'FAILED_END_MUST_BIND_REAL_PROOF_AND_LEASE'
+    $script:FailureContext.state='COMPLETING'; $script:FailureContext.revision=3
+  } elseif ($Action -ceq 'finish') { $script:FailureContext.state='FAILED'; $script:FailureContext.revision=4 }
+  return $script:FailureContext
+}
+function Write-State($State) { $script:FailureStates += $State }
+$script:Credential = [pscustomobject]@{identity_id='mock-telemetry'}
+$script:Namespace='OPERATIONAL'; $script:LeaseId=$null; $script:LeaseRunId=$null
+$script:FailureCalls=@(); $script:FailureStates=@()
+$script:FailurePlan=[pscustomobject]@{status='NO_TERMINAL_FAILURE'}
+Assert-BridgeTest (-not (Complete-VerifiedFailedAttempt)) 'NO_FAILURE_MUST_NOT_MUTATE'
+Assert-BridgeTest ($script:FailureCalls.Count -eq 0) 'NO_FAILURE_CREATED_MUTATIONS'
+$script:FailurePlan=[pscustomobject]@{status='TERMINAL_FAILURE_READY';run_id='mock-failed-run';failure_proof_hash=('sha256:' + ('d'*64))}
+$script:FailureContext=[pscustomobject]@{state='ACTIVE';revision=2;lease=$null;execution=[pscustomobject]@{next_action='Reserve fresh exact coverage; failed is not completed'}}
+Assert-BridgeTest (Complete-VerifiedFailedAttempt) 'VERIFIED_FAILURE_NOT_RECONCILED'
+Assert-BridgeTest (($script:FailureCalls.action -join ',') -ceq 'claim,renew,end,finish') 'FAILURE_ORDER_OR_FAKE_COVERAGE_MUTATION'
+Assert-BridgeTest ($script:FailureStates.Count -eq 1 -and $script:FailureStates[0].status -ceq 'FAILED_ATTEMPT_RECONCILED' -and
+  $script:FailureStates[0].physical_execution -ceq 'STOPPED' -and -not $script:FailureStates[0].full_requested_coverage_verified -and
+  $null -eq $script:LeaseId) 'FAILURE_STATUS_OR_LEASE_NOT_TRUTHFUL'
+
+# Restart after end: wait for the old bounded lease, then finish frozen proof
+# with a new lease, without end/progress replay or a new completed receipt.
+$script:FailureCalls=@(); $script:LeaseId=$null; $script:LeaseRunId=$null
+$script:FailureContext.state='COMPLETING'; $script:FailureContext.revision=3
+$script:FailureContext.lease=[pscustomobject]@{owner_id='mock-telemetry';expired=$false}
+Assert-BridgeThrows { Complete-VerifiedFailedAttempt } 'OWNER_LEASE_RECOVERY_WAIT'
+Assert-BridgeTest ($script:FailureCalls.Count -eq 0) 'RESTART_REUSED_HIDDEN_LEASE'
+$script:FailureContext.lease.expired=$true
+Assert-BridgeTest (Complete-VerifiedFailedAttempt) 'RESTART_FAILED_DRAIN_NOT_RECOVERED'
+Assert-BridgeTest (($script:FailureCalls.action -join ',') -ceq 'claim,renew,finish') 'RESTART_DUPLICATED_END_OR_COVERAGE'
+$script:FailureCalls=@(); $script:FailurePlan.status='NO_TERMINAL_FAILURE'
+Assert-BridgeTest (-not (Complete-VerifiedFailedAttempt) -and $script:FailureCalls.Count -eq 0) 'DUPLICATE_FAILURE_CREATED_NEW_WORK'
+$script:Namespace='TEST'; $script:FailurePlan.status='TERMINAL_FAILURE_READY'
+Assert-BridgeTest (-not (Complete-VerifiedFailedAttempt) -and $script:FailureCalls.Count -eq 0) 'TEST_FAILURE_PROMOTED_TO_OPERATIONAL'
+
+Write-Output 'PASS: TEST/OPERATIONAL bridge gates, config snapshot/restart and proof-bound failure discovery/drain/two-lease restart/duplicate/TEST regressions.'

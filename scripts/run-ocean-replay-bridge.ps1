@@ -257,6 +257,7 @@ function Invoke-BridgeCycle {
 }
 
 function Invoke-PinnedBridgeCycle {
+  if (Complete-VerifiedFailedAttempt) { return }
   Test-OperationalPhysicalBinding $Config
   $probe = Get-Probe
   if (-not $probe.run) {
@@ -368,6 +369,33 @@ function Invoke-PinnedBridgeCycle {
   }
   $safety = if ($script:Namespace -ceq 'OPERATIONAL') { 'OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED' } else { 'TEST_ONLY_SCOPED_REPLAY_EVIDENCE' }
   Write-State ([ordered]@{status='ACTIVE';run_id=$runId;run_state=$context.state;lease_id=$leaseId;telemetry=$probe.telemetry;reconciliation=$reconciliation;safety=$safety})
+}
+
+function Complete-VerifiedFailedAttempt {
+  if ($script:Namespace -cne 'OPERATIONAL') { return $false }
+  $failure = Get-EvidencePlan '--failure-only'
+  if ($failure.status -ceq 'NO_TERMINAL_FAILURE') { return $false }
+  if ($failure.status -cne 'TERMINAL_FAILURE_READY' -or $failure.failure_proof_hash -cnotmatch '^sha256:[a-f0-9]{64}$') { throw 'FAILURE_PROOF_NOT_READY' }
+  $runId = [string]$failure.run_id
+  $context = Get-RunContext $runId
+  if ($context.state -notin @('READY','ACTIVE','COMPLETING')) { throw 'FAILURE_RUN_STATE_REJECTED' }
+  if (-not $context.lease -or $context.lease.expired) {
+    $claimed = Invoke-Mutation 'claim' @{run_id=$runId;expected_revision=[int]$context.revision}
+    $script:LeaseId = [string]$claimed.lease_id; $script:LeaseRunId = $runId
+  } elseif ($context.lease.owner_id -cne $script:Credential.identity_id) { throw 'FOREIGN_OR_UNAVAILABLE_RUN_LEASE' }
+  elseif ($script:LeaseRunId -cne $runId -or -not $script:LeaseId) { throw 'OWNER_LEASE_RECOVERY_WAIT' }
+  $leaseId = $script:LeaseId
+  $context = Invoke-Mutation 'renew' @{run_id=$runId;lease_id=$leaseId}
+  if ($context.state -in @('READY','ACTIVE')) {
+    $context = Invoke-Mutation 'end' @{run_id=$runId;lease_id=$leaseId;expected_revision=[int]$context.revision;outcome='FAILED';failure_proof_hash=[string]$failure.failure_proof_hash}
+  }
+  if ($context.state -ceq 'COMPLETING') {
+    $context = Invoke-Mutation 'finish' @{run_id=$runId;lease_id=$leaseId;expected_revision=[int]$context.revision}
+  }
+  if ($context.state -cne 'FAILED') { throw 'FAILED_ATTEMPT_NOT_RECONCILED' }
+  $script:LeaseId = $null; $script:LeaseRunId = $null
+  Write-State ([ordered]@{status='FAILED_ATTEMPT_RECONCILED';run_id=$runId;run_state='FAILED';physical_execution='STOPPED';failure_proof_hash=$failure.failure_proof_hash;full_requested_coverage_verified=$false;next_action=$context.execution.next_action;safety='OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED'})
+  return $true
 }
 
 $Config = Read-BridgeConfig

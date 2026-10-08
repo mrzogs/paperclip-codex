@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { exactKeys, future, id, objectHash, requireThat, sealedHash } from './common.mjs';
+import { failureReadView, readBackendAttemptFailure, verifyFrozenFailureBoundary } from './operational-attempt-failure.mjs';
 
 export const RUN_API = 'ocean-run-manager/v1';
 export const PURPOSES = [
@@ -123,16 +124,42 @@ export class RunManager {
     }
     if(action==='prepare')return this.prepare(actor,data);
     if(action==='end') {
-      exactKeys(data,['run_id','expected_revision','outcome']);
-      const {run,plan}=this.load(actor,data.run_id,'read');this.b.expect(run,data.expected_revision);
+      exactKeys(data,['run_id','expected_revision','outcome','lease_id','failure_proof_hash']);
+      const {run,plan,context}=this.load(actor,data.run_id,'read');
+      let failureProof=null;
+      if(data.outcome==='FAILED' && actor.role!=='HUMAN') {
+        requireThat(actor.role==='TELEMETRY' && actor.namespace==='OPERATIONAL' && plan.operational_review
+          && plan.instance.telemetry_producer_id===actor.id,403,'OBSERVED_PRODUCER_REQUIRED');
+        this.b.authorize(actor,'event.write',run.strategy_id,run.instance_id);
+        const retained=this.terminalFailure(run.id);
+        if(retained && ['COMPLETING','FAILED'].includes(run.state)) {
+          requireThat(retained.proof_hash===data.failure_proof_hash,409,'IMMUTABLE_FAILURE_PROOF_CONFLICT');
+          return this.read(actor,run.id);
+        }
+        this.lease(actor,data,run);
+        failureProof=readBackendAttemptFailure(this.b,{run,plan,context});
+        requireThat(failureProof && failureProof.proof_hash===data.failure_proof_hash,409,'VERIFIED_FAILURE_PROOF_REQUIRED');
+        const summary=this.summary(run);
+        requireThat(summary.open_pins===0 && (summary.progress?.pending_events || 0)===0,409,'RUN_NOT_DRAINED');
+      }else requireThat(!data.failure_proof_hash && !data.lease_id,422,'FAILURE_FIELDS_NOT_ALLOWED');
+      this.b.expect(run,data.expected_revision);
       requireThat(['READY','ACTIVE'].includes(run.state) && ['COMPLETED','CANCELLED','FAILED'].includes(data.outcome),409,'RUN_END_REJECTED');
-      if(actor.role!=='HUMAN') {
+      if(actor.role!=='HUMAN' && !failureProof) {
         requireThat(isOperationalCompletionProducer(actor,plan,data.outcome),403,'WAYNE_BROWSER_ONLY');
         requireThat(isOperationalCompletionReady(run,plan,this.summary(run)),409,'OPERATIONAL_COMPLETION_NOT_READY');
       }
-      this.db.prepare("UPDATE ow_runs SET state='COMPLETING',revision=revision+1 WHERE id=?").run(run.id);
-      this.b.event(run.id,'run-manager.end',actor,{outcome:data.outcome});
-      return this.read(actor,run.id);
+      return this.b.store.transaction(()=>{
+        if(failureProof) {
+          const previous=this.summary(run).progress;
+          this.db.prepare('INSERT INTO ow_run_progress(run_id,payload_json) VALUES(?,?)').run(run.id,JSON.stringify({
+            axes:previous?.axes || Object.fromEntries(AXES.map(key=>[key,[]])),watermark:previous?.watermark || null,
+            pending_events:0,gaps:previous?.gaps || [],failures:[...new Set([...(previous?.failures || []),failureProof.failure_reason])],
+            observed_at_utc:new Date().toISOString()}));
+        }
+        this.db.prepare("UPDATE ow_runs SET state='COMPLETING',revision=revision+1 WHERE id=?").run(run.id);
+        this.b.event(run.id,'run-manager.end',actor,{outcome:data.outcome,...(failureProof?{failure_proof:failureProof}:{})});
+        return this.read(actor,run.id);
+      });
     }
     return this.telemetry(action,actor,data);
   }
@@ -259,6 +286,11 @@ export class RunManager {
     requireThat(plan.instance.telemetry_producer_id===actor.id,403,'WRONG_TELEMETRY_PRODUCER');
     const terminal=TERMINAL.includes(run.state);
     requireThat(!terminal || ['claim','renew','evidence','progress','finish'].includes(action),409,'RUN_TERMINAL');
+    if(action==='finish' && run.state==='FAILED' && this.terminalFailure(run.id)) {
+      const summary=this.summary(run,plan);
+      requireThat(summary.completion?.status==='FAILED' && summary.completion_current,409,'FAILED_RECEIPT_NOT_CURRENT');
+      return this.read(actor,run.id);
+    }
     if(action==='claim') {
       this.b.expect(run,data.expected_revision);if(run.state==='READY')this.current(plan);
       const old=this.db.prepare('SELECT * FROM ow_run_leases WHERE id=?').get(run.id);
@@ -307,6 +339,8 @@ export class RunManager {
     requireThat(summary.progress && summary.open_pins===0 && summary.progress.pending_events===0,409,'RUN_NOT_DRAINED');
     const ending=this.db.prepare("SELECT payload_json FROM ow_events WHERE entity_id=? AND action='run-manager.end' ORDER BY id DESC LIMIT 1").get(run.id);
     const status=terminal?run.state:parse(ending).payload.outcome;
+    const failureProof=this.terminalFailure(run.id);
+    if(failureProof)verifyFrozenFailureBoundary(this.b,failureProof);
     const observed=AXES.reduce((v,k)=>intersect(v,summary.progress.axes[k]),plan.scored_intervals);
     if(status==='COMPLETED') requireThat(!subtract(plan.scored_intervals,observed).length && !summary.progress.gaps.length && !summary.progress.failures.length && summary.unresolved_records===0 && summary.progress.watermark && Date.parse(summary.progress.watermark)>=Date.parse(plan.scored_intervals.at(-1).end_utc),409,'COVERAGE_INCOMPLETE');
     const start=this.db.prepare("SELECT created_at_utc FROM ow_events WHERE entity_id=? AND action IN ('run-manager.activate','operational.source-observed') ORDER BY id LIMIT 1").get(run.id);
@@ -314,9 +348,12 @@ export class RunManager {
     const closeTimes=this.db.prepare('SELECT payload_json FROM ow_evidence_revisions WHERE run_id=?').all(run.id).map(row=>parse(row).provenance.exit_time_utc);
     const completion={schema_version:'2.1.0',run_id:run.id,run_context_revision:context.revision,run_context_hash:context.context_hash,status,requested_coverage:plan.scored_intervals,observed_coverage:observed,watermark:summary.progress.watermark,unique_canonical_trade_count:summary.unique_canonical_count,processing_event_count:summary.processing_count,no_trade_interval_count:countNoTradeIntervals(observed,closeTimes,summary.unresolved_records),gaps:summary.progress.gaps,failures:summary.progress.failures.map(reason=>({code:'UNKNOWN',message:reason,retryable:false,quarantine_id:null})),dataset_manifest_hash:context.dataset_manifest_hash,started_at_utc:start?.created_at_utc||plan.created_at_utc,completed_at_utc:new Date().toISOString()};
     this.b.validate('run-completion',completion);
-    this.db.prepare('INSERT INTO ow_coverage_receipts(run_id,coverage_key,status,payload_json) VALUES(?,?,?,?)').run(run.id,plan.coverage_key,status,JSON.stringify({...completion,axes:summary.progress.axes,plan_hash:plan.plan_hash}));
-    this.db.prepare('UPDATE ow_runs SET state=?,revision=revision+1 WHERE id=?').run(status,run.id);this.db.prepare('DELETE FROM ow_run_leases WHERE id=?').run(run.id);
-    this.b.event(run.id,'run-manager.finish',actor,{completion});return this.read(actor,run.id);
+    const commit=()=>{
+      this.db.prepare('INSERT INTO ow_coverage_receipts(run_id,coverage_key,status,payload_json) VALUES(?,?,?,?)').run(run.id,plan.coverage_key,status,JSON.stringify({...completion,axes:summary.progress.axes,plan_hash:plan.plan_hash}));
+      this.db.prepare('UPDATE ow_runs SET state=?,revision=revision+1 WHERE id=?').run(status,run.id);this.db.prepare('DELETE FROM ow_run_leases WHERE id=?').run(run.id);
+      this.b.event(run.id,'run-manager.finish',actor,{completion});return this.read(actor,run.id);
+    };
+    return failureProof?this.b.store.transaction(commit):commit();
   }
   evidence(run,plan,context,data) {
     id(data.event_id);id(data.legacy_trade_id);id(data.trade_id);bounded(data.symbol);utc(data.entry_time_utc);utc(data.exit_time_utc);
@@ -348,11 +385,27 @@ export class RunManager {
     const current=!!completion && completion.processing_event_count===evidence.length && unresolved===0 && (!progress || parse(progress).observed_at_utc<=completion.completed_at_utc);
     return {progress:progress?parse(progress):null,open_pins:this.db.prepare("SELECT COUNT(*) AS n FROM ow_trade_pins WHERE run_id=? AND state='OPEN'").get(run.id).n,unique_canonical_count:new Set(evidence.map(r=>r.canonical_id).filter(Boolean)).size,unique_market_count:new Set(evidence.map(r=>r.market_id).filter(Boolean)).size,processing_count:evidence.length,unresolved_records:unresolved,completion,completion_current:current};
   }
+  terminalFailure(runId) {
+    const row=this.db.prepare("SELECT payload_json FROM ow_events WHERE entity_id=? AND action='run-manager.end' ORDER BY id DESC LIMIT 1").get(runId);
+    const proof=row && parse(row).payload?.failure_proof;
+    if(proof)requireThat(sealedHash(proof,'proof_hash')===proof.proof_hash,409,'IMMUTABLE_FAILURE_PROOF_CONFLICT');
+    return proof || null;
+  }
   read(actor,runId) {
     const {run,plan,context}=this.load(actor,runId);const lease=this.db.prepare('SELECT * FROM ow_run_leases WHERE id=?').get(runId);
     let contextStatus='CURRENT';try{this.current(plan);}catch(e){contextStatus=e.code||'RECONCILIATION_REQUIRED';}
     const namespace=this.namespace(actor,plan);
-    return {api_version:RUN_API,namespace,actual_ingestion:namespace==='OPERATIONAL'?'SCOPED_EVENT_ONLY':'OFF',run_id:run.id,state:run.state,revision:run.revision,context,plan,context_status:contextStatus,lease:lease?{owner_id:lease.owner_id,heartbeat_utc:lease.heartbeat_utc,expires_ms:lease.expires_ms,expired:lease.expires_ms<=Date.now()}:null,...this.summary(run,plan),reservation_is_actual_sierra_start:false};
+    let execution={status:'CURRENT_EXECUTION_UNVERIFIED',heartbeat_basis:'BRIDGE_SERVICE_LEASE_NOT_PHYSICAL_REPLAY',
+      source_observation_basis:'HISTORICAL_ACTIVATION_NOT_CURRENT_EXECUTION'};
+    if(namespace==='OPERATIONAL') {
+      try {
+        const proof=this.terminalFailure(run.id) || (['READY','ACTIVE'].includes(run.state) && this.b.operationalLearning?.physicalBindingFile
+          ?readBackendAttemptFailure(this.b,{run,plan,context}):null);
+        if(proof)execution={...execution,...failureReadView(proof,plan.reprocess_of_run_id,run.state)};
+      }catch(error){execution={...execution,status:'FAILURE_RECONCILIATION_UNVERIFIED',reason:error.code || 'FAILURE_SOURCE_READ_FAILED',
+        next_owner:'Scoped ReplayBridge telemetry producer',next_action:'Verify the exact current runner failure, terminal logger attempt and physical stop before reconciliation. No completed coverage is granted.'};}
+    }
+    return {api_version:RUN_API,namespace,actual_ingestion:namespace==='OPERATIONAL'?'SCOPED_EVENT_ONLY':'OFF',run_id:run.id,state:run.state,revision:run.revision,context,plan,context_status:contextStatus,execution,lease:lease?{owner_id:lease.owner_id,heartbeat_utc:lease.heartbeat_utc,expires_ms:lease.expires_ms,expired:lease.expires_ms<=Date.now()}:null,...this.summary(run,plan),reservation_is_actual_sierra_start:false};
   }
   runReadiness(strategy,versions,instances,settings,permissions) {
     const currentVersions=versions.filter(version=>version.strategy_id===strategy.strategy_id && !version.blocked);
