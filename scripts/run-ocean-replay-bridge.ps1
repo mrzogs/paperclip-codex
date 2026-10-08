@@ -4,6 +4,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Node callers may inherit another PowerShell engine's module search path.
+Import-Module -Name (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop
 Add-Type -AssemblyName System.Net.Http
 $Node = 'C:\Program Files\nodejs\node.exe'
 $RepositoryRoot = Split-Path -Parent $PSScriptRoot

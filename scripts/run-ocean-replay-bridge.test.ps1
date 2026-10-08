@@ -1,7 +1,11 @@
 $ErrorActionPreference = 'Stop'
+Import-Module -Name (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop
 
 $scriptPath = Join-Path $PSScriptRoot 'run-ocean-replay-bridge.ps1'
 $source = [IO.File]::ReadAllText($scriptPath)
+if (-not $source.Contains("Import-Module -Name (Join-Path `$PSHOME 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop")) {
+  throw 'OWN_ENGINE_UTILITY_MODULE_REQUIRED'
+}
 
 if ($source -cnotmatch 'run-manager/\(claim\|renew\|activate\|pin\|evidence\|progress\|end\|finish\)') {
   throw 'FINISH_ROUTE_NOT_ALLOWED'
