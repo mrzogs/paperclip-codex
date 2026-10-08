@@ -15,7 +15,7 @@ import { readWorkflowView } from './ui-api.mjs';
 import { digest, objectHash } from './common.mjs';
 import { consumePlanningOnce } from '../../../../scripts/consume-ocean-proposal-planning.mjs';
 
-function fixture({insufficient=false,noChange=false,partial=false,prospective=false}={}) {
+function fixture({insufficient=false,noChange=false,partial=false,prospective=false,oneDirection=null}={}) {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'ocean-planning-'));
   const filename=path.join(root,'workflow.sqlite');let store=new WorkflowStore(filename);
   const backend=Object.create(WorkflowBackend.prototype);
@@ -49,6 +49,7 @@ function fixture({insufficient=false,noChange=false,partial=false,prospective=fa
     gross_currency_value:i<10 || (noChange && index===1)?20:-10,total_commission:1,
     net_profit_loss:i<10 || (noChange && index===1)?19:-11,exit_causality:'unknown'})));
   if(partial)rows.find(row=>row.run_id==='r2' && row.direction==='long').direction='short';
+  if(oneDirection)for(const row of rows)Object.assign(row,{direction:oneDirection,gross_currency_value:-10,net_profit_loss:-11});
   const version=prospective?RESEARCH_VERSION:LEGACY_RESEARCH_VERSION;
   if(prospective) {
     bundle.research_coverage.r3[0].end_utc='2025-03-31T23:00:00Z';
@@ -125,6 +126,41 @@ test('supported completion atomically freezes an owned planning case/task and ex
     assert.deepEqual(JSON.parse(artifact.dependencies_json),[],'typed source links, not cross-case dependency bypass');
     assert.equal(status.report.candidate_validation.status,'NOT_DUE');assertNoAuthority(f);
     assert.throws(()=>f.backend.db.prepare("UPDATE ow_artifacts SET content='changed' WHERE id=?").run(artifact.id),/immutable workflow record/);
+  }finally{f.close();}
+});
+
+test('prospective all-one-direction losses create no entry-filter planning work or candidate authority',()=>{
+  const f=fixture({prospective:true,oneDirection:'short'});try {
+    const status=f.complete(),before=sealed(f);
+    assert.equal(status.report.outcome,'NO_SUPPORTED_CHANGE');assert.deepEqual(status.report.proposals,[]);
+    assert.equal(status.report.direction_exclusion_dispositions[0].disposition,'RISK_DISABLE_REVIEW_REQUIRED');
+    assert.equal(status.report.candidate_validation.status,'NOT_DUE');assert.equal(f.children().length,0);
+    f.restart();for(let i=0;i<3;i++)f.worker.reconcile();
+    assert.equal(f.children().length,0);assertSealed(f,before);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('old immutable zero-exposure proposal/report survives but cannot authorize a new planning draft',()=>{
+  const f=fixture({oneDirection:'short'});try {
+    // Explicit disposable mock of the pre-G21 continuation producer. It seals
+    // the old v4 report and lineage without invoking current planning guards.
+    const continuation=f.worker.continuations,items=continuation.items;
+    continuation.items=source=>[{kind:'PROPOSAL_PLANNING',task_kind:'PROPOSAL_PLAN_REVIEW',requirement:source.report.proposals[0]}];
+    f.complete();continuation.items=items;
+    const before=sealed(f),child=f.children()[0],payload=JSON.parse(child.payload_json);
+    const lineage=f.backend.one('ow_artifacts',payload.lineage_artifact_id);
+    const view=f.backend.readCase(f.human,child.id);
+    assert.equal(view.planning.qualified_for_planning,false);
+    assert.equal(view.planning.blocked_reason,'ZERO_RETAINED_EXPOSURE_STRATEGY_DISABLE');
+    assert.equal(view.planning.candidate_testing,'NOT_DUE');assert.equal(view.planning.approval_due,false);
+    assert.match(view.planning.next_action,/risk-disable|Risk-disable/);
+    const planner=continuation.plans;
+    assert.throws(()=>planner.read(f.actor,child.id),/ZERO_RETAINED_EXPOSURE_STRATEGY_DISABLE/);
+    assert.equal(planner.queue(f.actor).items[0].status,'BLOCKED');
+    assert.equal(planner.queue(f.actor).items[0].blocked_reason,'ZERO_RETAINED_EXPOSURE_STRATEGY_DISABLE');
+    f.restart();for(let i=0;i<3;i++)f.worker.reconcile();
+    assertSealed(f,before);assert.deepEqual(f.backend.one('ow_artifacts',lineage.id),lineage);
+    assert.deepEqual(f.backend.one('ow_cases',child.id),child);assertNoAuthority(f);
   }finally{f.close();}
 });
 

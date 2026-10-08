@@ -1,6 +1,6 @@
 import { digest, objectHash, requireThat } from './common.mjs';
 import { OperationalProposalPlan } from './operational-proposal-plan.mjs';
-import { REASSESSMENT_ORIGIN } from './operational-research-protocol.mjs';
+import { REASSESSMENT_ORIGIN, directionExclusionExposure, requireDirectionExclusionExposure } from './operational-research-protocol.mjs';
 
 export const CONTINUATION_ORIGIN = 'OPERATIONAL_RESEARCH_CONTINUATION';
 const VERSION = 'ocean-research-planning-continuation/v1';
@@ -80,12 +80,13 @@ export class OperationalContinuation {
         requirement:source.report.evidence_sufficiency}];
     }
     requireThat(source.report.proposals?.length>0,409,'CONTINUATION_SUPPORTED_PROPOSAL_REQUIRED');
-    const items=source.report.proposals.map(proposal=>{
+    const items=source.report.proposals.flatMap(proposal=>{
       requireThat(proposal.dimension==='direction' && proposal.supported===true && proposal.proposal_eligible===true
         && proposal.lookahead_safe===true && proposal.evidence_sufficient===true
         && source.report.experiments.some(item=>objectHash(item)===objectHash(proposal)),
       409,'CONTINUATION_SUPPORTED_PROPOSAL_REQUIRED');
-      return {kind:'PROPOSAL_PLANNING',task_kind:'PROPOSAL_PLAN_REVIEW',requirement:proposal};
+      if(directionExclusionExposure(source.report,proposal).disposition!=='ENTRY_FILTER_WITH_RETAINED_EXPOSURE')return [];
+      return [{kind:'PROPOSAL_PLANNING',task_kind:'PROPOSAL_PLAN_REVIEW',requirement:proposal}];
     });
     if(source.report.evidence_sufficiency.assessment_complete!==true)items.push({kind:'EVIDENCE_FOLLOW_UP',
       task_kind:'QUALIFIED_EVIDENCE_FOLLOW_UP',requirement:source.report.evidence_sufficiency});
@@ -222,6 +223,8 @@ export class OperationalContinuation {
       409,'CONTINUATION_LINEAGE_CONFLICT');
       const job=this.backend.one('ow_research_jobs',frozen.source.job_id);
       source=this.source(job);
+      if(payload.kind==='PROPOSAL_PLANNING' && source)
+        requireDirectionExclusionExposure(source.report,frozen.support.requirement);
       requireThat(source && objectHash(source.reference)===objectHash(frozen.source)
         && this.items(source).some(item=>objectHash({...source.binding,...item})===payload.support_hash),
       409,'CONTINUATION_SOURCE_LINEAGE_CONFLICT');
@@ -264,7 +267,9 @@ export class OperationalContinuation {
       progress,
       plan_work:planWork,
       evidence_remediation:evidenceRemediation,
-      next_action:reason?`Owner ${row.owner_id}: resolve ${reason} before this continuation can support current planning. Preserve its recorded disposition and frozen evidence; no approval or candidate execution is due.`
+      next_action:reason==='ZERO_RETAINED_EXPOSURE_STRATEGY_DISABLE'
+        ?`Owner ${row.owner_id}: retain this frozen proposal as risk-disable review context, not a profitable entry-filter candidate. Zero retained exposure cannot support new planning or execution. Preserve the original report and disposition; candidate testing is NOT_DUE and no disable or approval is authorized.`
+        :reason?`Owner ${row.owner_id}: resolve ${reason} before this continuation can support current planning. Preserve its recorded disposition and frozen evidence; no approval or candidate execution is due.`
         :row.work_status==='COMPLETED' && progress?.status==='REASSESSED'?progress.next_action
         :terminal.has(row.work_status)?`Planning is ${row.work_status.toLowerCase()}; owner ${row.owner_id} retains the recorded disposition. Restart does not reopen it. No candidate testing or approval is implied.`
         :evidenceRemediation?`Owner ${row.owner_id}: ${progress?.status==='STILL_INSUFFICIENT'?`new qualified Research ${progress.source.case_id} still reports evidence shortfalls. `:''}${evidenceRemediation.next_action} Insufficient evidence is not an evaluated no-change finding. Keep the baseline; no approval is due for unassessed directions.`

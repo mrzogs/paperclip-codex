@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { digest, exactKeys, id, noSecrets, objectHash, requireThat } from './common.mjs';
+import { requireDirectionExclusionExposure } from './operational-research-protocol.mjs';
 
 export const PLAN_VERSION='ocean-operational-proposal-plan/v2';
 const origin='OPERATIONAL_RESEARCH_CONTINUATION';
@@ -38,6 +39,7 @@ export class OperationalProposalPlan {
   }
   template(work){
     const {row,payload,frozen,source}=work,support=frozen.support;
+    const exposure=requireDirectionExclusionExposure(source.report,support.requirement);
     const capabilities=this.capabilities(work);
     const missing=capabilities.filter(item=>item.required_now && item.status!=='VERIFIED').map(item=>item.contract);
     return {schema_version:PLAN_VERSION,case_id:row.id,support_hash:payload.support_hash,
@@ -47,7 +49,7 @@ export class OperationalProposalPlan {
         'strategy_profile_version','strategy_code_hash','strategy_config_hash','registry_revision','registry_record_sha256']
         .map(key=>[key,support[key]])),
       proposed_change:{kind:'DIRECTION_EXCLUSION',dimension:'direction',value:support.requirement.value,
-        entry_time_only:true,source_proposal_hash:objectHash(support.requirement)},
+        entry_time_only:true,source_proposal_hash:objectHash(support.requirement),retained_exposure:exposure},
       protocol:{discovery_run_ids:support.runs.map(run=>run.run_id),screening_policy:support.screening_policy,
         prospective_sampling_protocol:support.protocol || null,
         approved_aggregate_evidence_policy:support.approved_evidence_eligibility?.policy || null,
@@ -92,9 +94,10 @@ export class OperationalProposalPlan {
       const payload=JSON.parse(row.payload_json);
       const lineage=JSON.parse(Buffer.from(this.b.artifactFor(row,payload.lineage_artifact_id,'RECOMMENDATION').content).toString('utf8'));
       const sourceRow=this.b.one('ow_cases',lineage.source.case_id);
-      const recipient=this.b.artifactFor(sourceRow,lineage.source.report_artifact_id,'OUTCOME').recipient_id;
+      const reportArtifact=this.b.artifactFor(sourceRow,lineage.source.report_artifact_id,'OUTCOME');
+      const recipient=reportArtifact.recipient_id,report=JSON.parse(Buffer.from(reportArtifact.content).toString('utf8'));
       requireThat(this.sourceOwnerCurrent(recipient,row),409,'PROPOSAL_CURRENT_SOURCE_OWNER_REQUIRED');
-      const current=this.template({row,payload,frozen:lineage,source:{recipient}});
+      const current=this.template({row,payload,frozen:lineage,source:{recipient,report}});
       currentHash=current.execution.capability_hash;
       const gaps=current.execution.capabilities.filter(item=>item.required_now && item.status!=='VERIFIED');
       capabilityAction=gaps.length?gaps.map(item=>`Owner ${item.owner_id}: ${item.action}`).join(' ')

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { evaluateResearch, evaluateResearchV4, RESEARCH_VERSION, LEGACY_RESEARCH_VERSION } from './operational-research.mjs';
-import { calendarBlocks, sessionEvidence } from './operational-research-protocol.mjs';
+import { calendarBlocks, sessionEvidence, directionExclusionExposure, requireDirectionExclusionExposure } from './operational-research-protocol.mjs';
 import { checkNativeSessionProof, nativeConfigurationHash, nativeDateLabel } from './operational-native-sessions.mjs';
 import { mockNativeProof } from './operational-native-sessions.test-fixtures.mjs';
 import { digest, objectHash } from './common.mjs';
@@ -38,6 +38,71 @@ test('v6 separates native aggregate eligibility, direction hypotheses, uncalibra
   assert.equal(result.approved_evidence_eligibility.policy.minimum_independent_sessions,20);
   assert.equal(result.protocol.statistical_independence_verified,false);assert.equal(result.candidate_validation.status,'NOT_DUE');
   assert.equal(objectHash({bundle,rows}),before);
+});
+
+for(const direction of ['long','short'])test(`excluding the only losing ${direction} direction is risk-disable context, not an entry-filter proposal`,()=>{
+  const {bundle,rows}=sample();
+  for(const row of rows)Object.assign(row,{direction,gross_currency_value:-10,net_profit_loss:-11});
+  const before=objectHash({bundle,rows}),result=evaluateResearch(bundle,rows),experiment=result.experiments[0];
+  assert.equal(result.outcome,'NO_SUPPORTED_CHANGE');assert.deepEqual(result.proposals,[]);
+  assert.equal(result.aggregate.trades,60);assert.equal(result.aggregate.net_profit_loss,-660);
+  assert.equal(result.approved_evidence_eligibility.status,'SUFFICIENT');
+  assert.equal(result.approved_evidence_eligibility.policy.minimum_comparable_trades,50);
+  assert.equal(result.approved_evidence_eligibility.policy.minimum_independent_sessions,20);
+  assert.equal(experiment.observed_exclusion_delta,660);assert.equal(experiment.hypothesis_generated,true);
+  assert.equal(experiment.supported,false);assert.equal(experiment.reason,'ZERO_RETAINED_EXPOSURE_STRATEGY_DISABLE');
+  assert.deepEqual(experiment.retained_exposure,{basis:'RECORDED_TRADE_COUNTS_NOT_EXECUTED_FILTER_PERFORMANCE',
+    baseline_trades:60,excluded_trades:60,retained_trades:0,disposition:'RISK_DISABLE_REVIEW_REQUIRED'});
+  assert.equal(result.hypotheses[0].qualification,'STRATEGY_DISABLE_OBSERVATION_ONLY');
+  assert.equal(result.direction_exclusion_dispositions[0].disposition,'RISK_DISABLE_REVIEW_REQUIRED');
+  assert.match(result.next_action,/zero retained exposure|Zero retained exposure/);
+  assert.doesNotMatch(result.next_action,/planning worker freezes this exact/);
+  assert.equal(result.candidate_validation.status,'NOT_DUE');assert.equal(result.candidate_validation.candidate_hash,null);
+  assert.ok(Object.values(result.authority).every(value=>value===false));
+  assert.equal(objectHash({bundle,rows}),before);
+});
+
+test('nonzero retained exposure preserves the existing exploratory proposal, not a tested performance claim',()=>{
+  const {bundle,rows}=sample(),before=objectHash({bundle,rows}),result=evaluateResearch(bundle,rows);
+  const proposal=result.proposals.find(item=>item.value==='short');
+  assert.equal(result.outcome,'EXPLORATORY_PROPOSAL');assert.equal(proposal.retained_exposure.retained_trades,30);
+  assert.equal(proposal.retained_exposure.disposition,'ENTRY_FILTER_WITH_RETAINED_EXPOSURE');
+  assert.equal(proposal.retained_exposure.basis,'RECORDED_TRADE_COUNTS_NOT_EXECUTED_FILTER_PERFORMANCE');
+  assert.equal(result.candidate_validation.status,'NOT_DUE');assert.equal(result.aggregate.trades,60);
+  assert.equal(objectHash({bundle,rows}),before);
+});
+
+test('zero retained exposure does not bypass the unchanged approved evidence floor',()=>{
+  const {bundle,rows}=sample();
+  for(const row of rows)Object.assign(row,{direction:'short',gross_currency_value:-10,net_profit_loss:-11});
+  bundle.approved_evidence_policy.status='NOT_APPROVED';
+  const result=evaluateResearch(bundle,rows);
+  assert.equal(result.outcome,'INSUFFICIENT_EVIDENCE');assert.deepEqual(result.proposals,[]);
+  assert.ok(result.approved_evidence_eligibility.reasons.includes('APPROVED_EVIDENCE_POLICY_PROOF_REQUIRED'));
+  assert.equal(result.direction_exclusion_dispositions[0].disposition,'RISK_DISABLE_REVIEW_REQUIRED');
+  assert.equal(result.candidate_validation.status,'NOT_DUE');
+});
+
+test('missing or inconsistent frozen exposure counts cannot authorize planning',()=>{
+  for(const [report,proposal] of [[{},{}],[{aggregate:{trades:60}},{runs:[{trades:61}]}],
+    [{aggregate:{trades:60}},{runs:[{trades:-1}]}],[{aggregate:{trades:60}},{runs:[{trades:'30'}]}],
+    [{aggregate:{trades:60}},{runs:[{trades:0}]}],[{aggregate:{trades:60}},{runs:{trades:30}}]]) {
+    const before=objectHash({report,proposal}),exposure=directionExclusionExposure(report,proposal);
+    assert.equal(exposure.disposition,'INSUFFICIENT_RETAINED_EXPOSURE_EVIDENCE');
+    assert.equal(exposure.retained_trades,null);
+    assert.throws(()=>requireDirectionExclusionExposure(report,proposal),/RETAINED_EXPOSURE_NOT_VERIFIED/);
+    assert.equal(objectHash({report,proposal}),before);
+  }
+});
+
+test('fee-driven single-direction losses still describe zero-exposure disable, not profitable filtering',()=>{
+  const {bundle,rows}=sample();
+  for(const row of rows)Object.assign(row,{direction:'long',gross_currency_value:0.5,total_commission:1,net_profit_loss:-0.5});
+  const result=evaluateResearch(bundle,rows);
+  assert.equal(result.aggregate.gross_profit_loss,30);assert.equal(result.aggregate.fees,60);
+  assert.equal(result.aggregate.net_profit_loss,-30);assert.equal(result.experiments[0].observed_exclusion_delta,30);
+  assert.equal(result.direction_exclusion_dispositions[0].retained_trades,0);assert.deepEqual(result.proposals,[]);
+  assert.equal(result.outcome,'NO_SUPPORTED_CHANGE');assert.equal(result.candidate_validation.status,'NOT_DUE');
 });
 
 test('Sierra DateValue encoding keeps raw45904 for2025-09-04 and rejects YYYYMMDD or ISO-string substitutions',()=>{

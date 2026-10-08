@@ -1,10 +1,10 @@
-import { objectHash } from './common.mjs';
+import { objectHash, requireThat } from './common.mjs';
 import { sessionEvidence, nativeDateLabel } from './operational-native-sessions.mjs';
 export { SESSION_SCHEMA, sessionEvidence, readObservedSessionProofs } from './operational-native-sessions.mjs';
 
 export const RESEARCH_V5='ocean-cumulative-research/v5';
 export const RESEARCH_V6='ocean-cumulative-research/v6';
-export const PROTOCOL_VERSION='ocean-native-day-direction-discovery/v2';
+export const PROTOCOL_VERSION='ocean-native-day-direction-discovery/v3';
 export const REASSESSMENT_ORIGIN='OPERATIONAL_RESEARCH_REASSESSMENT';
 // These inherited, uncalibrated 3/10 checks describe robustness only. They do
 // not replace the frozen approved aggregate policy or prevent plan authoring.
@@ -32,6 +32,29 @@ function bounds(key) {
 }
 const iso=ms=>new Date(ms).toISOString();
 const sum=rows=>Math.round(rows.reduce((n,row)=>n+Number(row.net_profit_loss),0)*100)/100;
+
+// Uses sealed accounting counts, including old reports, without recomputing or
+// rewriting their returns. A zero-trade remainder is strategy-disable context.
+export function directionExclusionExposure(report,proposal) {
+  const baseline=report?.aggregate?.trades;
+  const counts=Array.isArray(proposal?.runs)?proposal.runs.map(run=>run?.trades):null;
+  const valid=Number.isSafeInteger(baseline) && baseline>0 && counts?.length>0
+    && counts.every(count=>Number.isSafeInteger(count) && count>=0);
+  const excluded=valid?counts.reduce((total,count)=>total+count,0):null;
+  const verified=valid && excluded>0 && excluded<=baseline;
+  const retained=verified?baseline-excluded:null;
+  return {basis:'RECORDED_TRADE_COUNTS_NOT_EXECUTED_FILTER_PERFORMANCE',
+    baseline_trades:Number.isSafeInteger(baseline)?baseline:null,excluded_trades:excluded,retained_trades:retained,
+    disposition:!verified?'INSUFFICIENT_RETAINED_EXPOSURE_EVIDENCE'
+      :retained===0?'RISK_DISABLE_REVIEW_REQUIRED':'ENTRY_FILTER_WITH_RETAINED_EXPOSURE'};
+}
+
+export function requireDirectionExclusionExposure(report,proposal) {
+  const exposure=directionExclusionExposure(report,proposal);
+  requireThat(exposure.disposition==='ENTRY_FILTER_WITH_RETAINED_EXPOSURE',409,
+    exposure.retained_trades===0?'ZERO_RETAINED_EXPOSURE_STRATEGY_DISABLE':'RETAINED_EXPOSURE_NOT_VERIFIED');
+  return exposure;
+}
 
 // The unit rule is fixed before reading returns. Contract rollover is a child
 // stratum, never an extra independent observation or a result-selected boundary.
@@ -141,12 +164,17 @@ export function evaluateV6(bundle,rows,accounting) {
       ...(empty.length?['UNOBSERVED_DIRECTION_IN_RETAINED_CHILD_STRATUM']:[]),
       ...(!sessions.mapping_verified?['NATIVE_BLOCK_ASSIGNMENT_UNVERIFIED']:[])];
     const hypothesis=item.observed_exclusion_delta>0;
-    const supported=reasons.length===0 && hypothesis && contradictory.length===0;
+    const exposure=directionExclusionExposure(accounting,item);
+    const supported=reasons.length===0 && hypothesis && contradictory.length===0
+      && exposure.disposition==='ENTRY_FILTER_WITH_RETAINED_EXPOSURE';
     return {...item,blocks,evidence_sufficient:reasons.length===0,supported,hypothesis_generated:hypothesis,
+      retained_exposure:exposure,
       contradictory_child_run_ids:contradictory.map(run=>run.run_id),unobserved_child_run_ids:empty.map(run=>run.run_id),
       robustness:{status:contradictory.length?'CONTRADICTED':diagnosticReasons.length?'NOT_ESTABLISHED':'DESCRIPTIVE_CHECKS_MET',
         reasons:diagnosticReasons,statistical_calibration:'NOT_CALIBRATED',candidate_acceptance:false},
       reason:reasons.length?'APPROVED_AGGREGATE_EVIDENCE_NOT_VERIFIED':!hypothesis?'NO_AGGREGATE_DIRECTION_LOSS'
+        :exposure.retained_trades===0?'ZERO_RETAINED_EXPOSURE_STRATEGY_DISABLE'
+        :exposure.retained_trades===null?'RETAINED_EXPOSURE_NOT_VERIFIED'
         :contradictory.length?'CONTRADICTORY_RETAINED_CHILD_STRATA'
         :'QUALIFIED_EXPLORATORY_HYPOTHESIS_NOT_CANDIDATE_ACCEPTANCE'};
   });
@@ -159,18 +187,26 @@ export function evaluateV6(bundle,rows,accounting) {
     unevaluated_direction_values:reasons.length?experiments.map(item=>item.value):[]};
   const proposals=experiments.filter(item=>item.supported),remediation=remediationV6(sufficiency);
   const hypotheses=experiments.filter(item=>item.hypothesis_generated).map(item=>({dimension:item.dimension,value:item.value,
-    observed_exclusion_delta:item.observed_exclusion_delta,qualification:reasons.length?'DESCRIPTIVE_ONLY':'QUALIFIED_DISCOVERY',
+    observed_exclusion_delta:item.observed_exclusion_delta,
+    qualification:item.retained_exposure.retained_trades===0?'STRATEGY_DISABLE_OBSERVATION_ONLY'
+      :reasons.length || item.retained_exposure.retained_trades===null?'DESCRIPTIVE_ONLY':'QUALIFIED_DISCOVERY',
+    retained_exposure:item.retained_exposure,
     contradictory_child_run_ids:item.contradictory_child_run_ids,robustness:item.robustness}));
+  const dispositions=experiments.filter(item=>item.retained_exposure.disposition!=='ENTRY_FILTER_WITH_RETAINED_EXPOSURE')
+    .map(item=>({dimension:item.dimension,value:item.value,...item.retained_exposure}));
+  const disableAction=dispositions.some(item=>item.retained_trades===0)
+    ?' Zero retained exposure means excluding the only observed direction would disable all observed trading, not establish a profitable entry filter. Keep this as risk-disable review context under separate governance; no strategy disable, candidate or execution is authorized.' :'';
   return {...accounting,schema_version:RESEARCH_V6,screening_policy:screeningPolicy,
     descriptive_excluded_history:bundle.descriptive_excluded_history || null,
     protocol:{version:PROTOCOL_VERSION,timezone:zone,boundary_selection:'PREDECLARED_CALENDAR_NOT_OUTCOME_SELECTED',
       native_block_assignment:'NATIVE_TRADING_DAY_CALENDAR_LABEL_NOT_FILL_UTC',
       hypothesis_generation:'RECORDED_ENTRY_DIRECTION_AGGREGATE_LOSS_DESCRIPTIVE_NO_MINIMUM_MONTH_GATE',
-      proposal_rule:'APPROVED_AGGREGATE_FLOOR_AND_NO_CONTRADICTORY_RETAINED_CHILD_STRATA',
+      proposal_rule:'APPROVED_AGGREGATE_FLOOR_NO_CONTRADICTORY_RETAINED_CHILD_STRATA_AND_NONZERO_RETAINED_EXPOSURE',
       robustness_role:'REPORT_3_COMPLETE_BLOCKS_10_DIRECTION_TRADES_PER_BLOCK_NOT_PLANNING_GATE',
       candidate_acceptance:'SEPARATE_FROZEN_CANDIDATE_AND_REVIEWED_VALIDATION_NOT_EVALUATED',
       child_strata_retained:true,all_qualified_rows_retained:true,statistical_independence_verified:false},
     approved_evidence_eligibility:eligibility,evidence_sufficiency:sufficiency,evidence_remediation:remediation,hypotheses,
+    direction_exclusion_dispositions:dispositions,
     native_session_evidence:{verification_status:sessions.verification_status,mapping_verified:sessions.mapping_verified,
       mapped_entry_day_count:sessions.mapped_entry_day_count,session_config_hash:sessions.session_config_hash,
       market_coverage_status:sessions.market_coverage_status,exit_audit:sessions.exit_audit},
@@ -178,7 +214,8 @@ export function evaluateV6(bundle,rows,accounting) {
       distinct_coverage_count:calendar.blocks.length,complete_calendar_block_count:complete.length,blocks:calendar.blocks},
     experiments,proposals,outcome:proposals.length?'EXPLORATORY_PROPOSAL':reasons.length?'INSUFFICIENT_EVIDENCE':'NO_SUPPORTED_CHANGE',
     next_action:proposals.length?'The existing owned Brain planning worker freezes this exact non-live hypothesis, retained contradictions and prospective comparison scope. Report unresolved 3/10 robustness checks in the plan; do not treat them as aggregate eligibility or invent candidate acceptance. No candidate is approved or tested.'
-      :reasons.length?`Keep the baseline. This is insufficient verified evidence, not an evaluated no-change finding. ${remediation.next_action}`
-        :'Keep the baseline. The qualified aggregate direction hypothesis screen found no contradiction-free direction exclusion. This is a scoped discovery no-change finding, not candidate validation or a conclusion about all improvements.',
-    limitations:[...accounting.limitations,'V6 prospectively separates approved 50/20/DQ0 eligibility from descriptive hypotheses, uncalibrated 3/10 robustness diagnostics and separately governed candidate acceptance. Native entry trading-day units do not prove IID or full market-session coverage. Frozen v4/v5 reports are not rewritten.']};
+      :reasons.length?`Keep the baseline. This is insufficient verified evidence, not an evaluated no-change finding. ${remediation.next_action}${disableAction}`
+        :`Keep the baseline. The qualified aggregate direction hypothesis screen found no contradiction-free entry filter with retained exposure. This is a scoped discovery no-change finding, not candidate validation or a conclusion about all improvements.${disableAction}`,
+    limitations:[...accounting.limitations,'V6 prospectively separates approved 50/20/DQ0 eligibility from descriptive hypotheses, uncalibrated 3/10 robustness diagnostics and separately governed candidate acceptance. Native entry trading-day units do not prove IID or full market-session coverage. Frozen v4/v5 reports are not rewritten.',
+      'Retained-exposure counts are recorded accounting, not an executed filter backtest. A loss-exclusion delta leaving zero trades is strategy-disable context, not evidence of a profitable entry-filter candidate. Frozen reports remain unchanged; new protocol v3 captures this distinction.']};
 }
