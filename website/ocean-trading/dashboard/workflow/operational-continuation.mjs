@@ -1,4 +1,5 @@
 import { digest, objectHash, requireThat } from './common.mjs';
+import { OperationalProposalPlan } from './operational-proposal-plan.mjs';
 
 export const CONTINUATION_ORIGIN = 'OPERATIONAL_RESEARCH_CONTINUATION';
 const VERSION = 'ocean-research-planning-continuation/v1';
@@ -11,7 +12,7 @@ const evidenceGroup = binding => objectHash(Object.fromEntries(['strategy_id','e
   .map(key=>[key,binding[key]])));
 
 export class OperationalContinuation {
-  constructor(research) { this.research=research;this.backend=research.backend;this.db=research.db; }
+  constructor(research) { this.research=research;this.backend=research.backend;this.db=research.db;this.plans=new OperationalProposalPlan(this); }
   source(job) {
     const row=this.backend.one('ow_cases',job.case_id);
     requireThat(JSON.parse(row.payload_json).origin==='OPERATIONAL_LEARNING'
@@ -96,7 +97,7 @@ export class OperationalContinuation {
   }
   action(kind,owner) {
     return kind==='PROPOSAL_PLANNING'
-      ?`Owner ${owner}: review the supported direction rule and freeze an exact non-live development/test/comparison plan with a scoped recipient. Operational plan submission and approval are not enabled in this increment; no candidate has been built or tested.`
+      ?`Owner ${owner}: review the supported direction rule and freeze an exact non-live development/test/comparison plan with a scoped recipient through the operational proposal work queue. Returned drafts remain planning work until execution contracts are verified; no candidate has been built or tested.`
       :`Owner ${owner}: resolve the frozen coverage/direction-sample shortfalls through new qualified, governed non-live discovery evidence and a new Research evaluation. Insufficient evidence is not an evaluated no-change finding. Keep the baseline; no proposal or approval is due.`;
   }
   ensure(job,actor) {
@@ -137,7 +138,11 @@ export class OperationalContinuation {
       const task=this.db.prepare('SELECT * FROM ow_tasks WHERE id=?').get(taskId);
       if(task)requireThat(task.case_id===caseId && task.kind===item.task_kind && task.required===1,
         409,'CONTINUATION_TASK_CONFLICT');
-      else this.db.prepare("INSERT INTO ow_tasks VALUES(?,?,?,'NOT_RUN',?,1)").run(taskId,caseId,item.task_kind,artifactId);
+      else {
+        const returned=this.plans.forCase(row)?.returned;
+        this.db.prepare('INSERT INTO ow_tasks VALUES(?,?,?,?,?,1)').run(taskId,caseId,item.task_kind,
+          returned?'BLOCKED':'NOT_RUN',returned?.artifact_id || artifactId);
+      }
       const existing=this.db.prepare("SELECT payload_json FROM ow_events WHERE entity_id=? AND action=? AND json_extract(payload_json,'$.payload.continuation_case_id')=?")
         .all(source.row.id,LINK,caseId);
       if(existing.length)requireThat(existing.every(event=>objectHash(JSON.parse(event.payload_json).payload.source)===objectHash(source.reference)),
@@ -241,6 +246,8 @@ export class OperationalContinuation {
         409,'CONTINUATION_PROGRESS_PROOF_CONFLICT');
       }
     }catch(error){reason=errorCode(error);}
+    const planWork=this.plans.forCase(row);
+    reason ||= planWork?.blocked_reason;
     const status=terminal.has(row.work_status)?row.work_status:reason?'BLOCKED':row.work_status;
     return {case_id:row.id,kind:payload.kind,owner_id:row.owner_id,work_status:status,
       support_hash:payload.support_hash,lineage_artifact_id:payload.lineage_artifact_id,
@@ -248,10 +255,11 @@ export class OperationalContinuation {
       tasks:this.db.prepare('SELECT kind,status,artifact_id,required FROM ow_tasks WHERE case_id=? ORDER BY kind').all(row.id),
       blocked_reason:reason,qualified_for_planning:!reason,
       progress,
+      plan_work:planWork,
       next_action:reason?`Owner ${row.owner_id}: resolve ${reason} before this continuation can support current planning. Preserve its recorded disposition and frozen evidence; no approval or candidate execution is due.`
         :row.work_status==='COMPLETED' && progress?.status==='REASSESSED'?progress.next_action
         :terminal.has(row.work_status)?`Planning is ${row.work_status.toLowerCase()}; owner ${row.owner_id} retains the recorded disposition. Restart does not reopen it. No candidate testing or approval is implied.`
-        :row.waiting_on || this.action(payload.kind,row.owner_id),
+        :planWork?.returned?planWork.next_action:row.waiting_on || this.action(payload.kind,row.owner_id),
       scope:'OWNED_PLANNING_ONLY',candidate_testing:'NOT_DUE',approval_due:false,authority:noAuthority};
   }
   links(caseId) {
@@ -300,5 +308,6 @@ export class OperationalContinuation {
     for(const row of this.db.prepare("SELECT * FROM ow_cases WHERE json_extract(payload_json,'$.origin')=?").all(CONTINUATION_ORIGIN)) {
       this.backend.store.transaction(()=>this.refresh(row,actor));
     }
+    this.plans.processOnce();
   }
 }

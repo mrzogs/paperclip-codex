@@ -861,6 +861,9 @@ export class WorkflowBackend {
         else if(/^trade-events\/[A-Za-z0-9_.:-]+$/.test(local) && request.method==='GET')result=this.operational.tradeEventRead(actor,local.slice(13));
         else if(/^brain-results\/[A-Za-z0-9_.:-]+$/.test(local) && request.method==='GET')result=this.operationalResults.read(actor,local.slice(14));
         else if(/^cases\/[A-Za-z0-9_.:-]+$/.test(local) && request.method==='GET')result=this.readCase(actor,local.slice(6));
+        else if(local==='proposals/work' && request.method==='GET')result=this.operationalResearch.continuations.plans.queue(actor);
+        else if(/^proposals\/[A-Za-z0-9_.:-]+\/work$/.test(local) && request.method==='GET')result=this.operationalResearch.continuations.plans.read(actor,local.split('/')[1]);
+        else if(['proposals/claim','proposals/progress','proposals/plans'].includes(local) && request.method==='POST')result=this.operationalResearch.continuations.plans.perform(local.slice(10),actor,await jsonBody(request));
         else if(/^artifacts\/[A-Za-z0-9_.:-]+(?:\/download)?$/.test(local) && request.method==='GET') {
           const artifactId=local.split('/')[1];const artifact=this.download(actor,artifactId);
           if(local.endsWith('/download')) {

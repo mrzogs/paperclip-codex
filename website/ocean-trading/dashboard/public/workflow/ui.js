@@ -473,6 +473,11 @@ function casePage(data) {
     ['Purpose',esc(human(data.planning.kind))],['Authority','Planning only; no candidate development or test permission'],
     ['Candidate testing',badge('NOT_DUE')],['Approval','Not due'],['Source Research',data.planning.source_case_id?link('cases',data.planning.source_case_id):'Proof required'],
     ['Frozen lineage',link('artifacts',data.planning.lineage_artifact_id)],
+    ...(data.planning.plan_work?[
+      ['Plan work',badge(data.planning.plan_work.status)],
+      ['Returned plan',data.planning.plan_work.returned?.artifact_id?link('artifacts',data.planning.plan_work.returned.artifact_id):'Not returned'],
+      ['Planning complete',data.planning.plan_work.planning_complete===true?'Yes':'No'],
+    ]:[]),
     ['Latest Research',data.planning.progress?.source?.case_id?link('cases',data.planning.progress.source.case_id):'Await new qualified Research'],
   ])):'') + facts([
     ['Stage', esc(human(data.stage))], ['Owner', esc(data.owner_id)], ['Waiting on', esc(data.work_status==='COMPLETED'?'None':data.waiting_on || 'Stage prerequisites')], ['Next action', esc(data.next_action)], ['Strategy', link('strategies', data.strategy_id, data.strategy_name)], ['Run', link('runs', data.run_id)], ['Baseline', hash(data.baseline_hash)], ['Candidate', data.candidate_hash ? hash(data.candidate_hash) : 'None registered'], ['Priority', esc(data.priority ? human(data.priority) : 'Not assigned')],

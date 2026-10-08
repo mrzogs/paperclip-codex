@@ -11,6 +11,7 @@ import { OperationalLearning } from './operational-learning.mjs';
 import { CONTINUATION_ORIGIN } from './operational-continuation.mjs';
 import { readWorkflowView } from './ui-api.mjs';
 import { digest, objectHash } from './common.mjs';
+import { consumePlanningOnce } from '../../../../scripts/consume-ocean-proposal-planning.mjs';
 
 function fixture({insufficient=false,noChange=false,partial=false}={}) {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'ocean-planning-'));
@@ -372,5 +373,255 @@ test('actual source UI links owned progress and labels planning work without off
     assert.match(html,/Planning only; no candidate development or test permission/);assert.match(html,/Required planning work/);
     assert.match(html,/Candidate testing: NOT_DUE/);assert.doesNotMatch(html,/BUTTON:(Upload result|Pause|Resume|Retry)|Historical validation/);
     assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+const plans=f=>f.worker.continuations.plans;
+function claimPlan(f,message='plan-claim'){
+  const child=f.children()[0];
+  return plans(f).perform('claim',f.actor,{message_id:message,data:{case_id:child.id,
+    expected_revision:child.revision,support_hash:JSON.parse(child.payload_json).support_hash}});
+}
+function planInput(claim,message='plan-return'){
+  return {message_id:message,data:{case_id:claim.case_id,expected_revision:claim.revision,
+    support_hash:claim.support_hash,lease_id:claim.lease_id,
+    plan:{...claim.template,planning_notes:'Checked source-bound direction exclusion; execution contracts remain unavailable.'}}};
+}
+const returnedCount=f=>f.backend.db.prepare("SELECT COUNT(*) n FROM ow_events WHERE action='operational.proposal.plan.returned'").get().n;
+
+test('exact operational owner returns an immutable planning brief with four concrete owned contracts, never candidate PASS',()=>{
+  const f=fixture();try{
+    f.complete();const before=sealed(f),child=f.children()[0];
+    const queue=plans(f).queue(f.actor);assert.equal(queue.items.length,1);assert.equal(queue.items[0].status,'READY');
+    const claim=claimPlan(f);assert.equal(claim.template.proposed_change.value,'short');
+    assert.equal(claim.template.baseline.strategy_code_hash,child.baseline_hash);
+    assert.equal(plans(f).read(f.actor,child.id).status,'IN_PROGRESS');
+    const input=planInput(claim),result=plans(f).perform('plans',f.actor,input);
+    assert.equal(result.planning_complete,false);assert.equal(result.approval_due,false);assert.equal(result.candidate_testing,'NOT_DUE');
+    assert.equal(result.missing_contracts.length,4);assert.equal(plans(f).queue(f.actor).items.length,0);
+    const view=f.backend.readCase(f.human,child.id);
+    assert.equal(view.planning.plan_work.status,'PLAN_RETURNED');assert.equal(view.tasks[0].status,'BLOCKED');
+    assert.equal(view.stage,'RESEARCH');assert.equal(view.work_status,'READY');
+    assert.equal(view.blockers.length,4);assert.ok(view.blockers.every(row=>row.owner_id==='strategy' && row.state==='OPEN'));
+    assert.match(view.next_action,/Source owner strategy.*not an executable candidate plan/);
+    const artifact=f.backend.artifactFor(f.backend.one('ow_cases',child.id),result.artifact_id,'RECOMMENDATION');
+    assert.equal(artifact.producer_id,'brain');assert.equal(artifact.recipient_id,'strategy');
+    assert.deepEqual(JSON.parse(artifact.dependencies_json),[JSON.parse(child.payload_json).lineage_artifact_id]);
+    assert.deepEqual(plans(f).perform('plans',f.actor,input),result);assert.equal(returnedCount(f),1);
+    const recorded=f.backend.one('ow_cases',child.id);f.restart();f.worker.reconcile();f.worker.reconcile();
+    assert.deepEqual(f.backend.one('ow_cases',child.id),recorded);assert.equal(returnedCount(f),1);
+    assertSealed(f,before);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('planning claims/progress survive restart, reject competing and expired leases, and preserve exact request replay',()=>{
+  const f=fixture();try{
+    f.complete();const before=sealed(f),child=f.children()[0],claim=claimPlan(f);
+    assert.throws(()=>claimPlan(f,'other-claim'),/PROPOSAL_LEASE_HELD/);
+    const progress={message_id:'plan-progress',data:{case_id:child.id,expected_revision:claim.revision,
+      support_hash:claim.support_hash,lease_id:claim.lease_id,note:'Checking source contract prerequisites.'}};
+    const recorded=plans(f).perform('progress',f.actor,progress);
+    f.restart();assert.deepEqual(plans(f).perform('progress',f.actor,progress),recorded);
+    const now=Date.now;try{
+      Date.now=()=>recorded.lease_until_ms+1;
+      const resumed=claimPlan(f,'new-lease');assert.notEqual(resumed.lease_id,claim.lease_id);
+      assert.throws(()=>plans(f).perform('plans',f.actor,planInput({...claim,revision:resumed.revision})),/PROPOSAL_LEASE_EXPIRED/);
+      plans(f).perform('plans',f.actor,planInput(resumed,'new-return'));
+    }finally{Date.now=now;}
+    assert.equal(returnedCount(f),1);assertSealed(f,before);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('planning return failure rolls back draft/blockers/task and retries exactly once after restart',()=>{
+  const f=fixture();try{
+    f.complete();const before=sealed(f),child=f.children()[0],claim=claimPlan(f),input=planInput(claim);
+    const event=f.backend.event.bind(f.backend);
+    f.backend.event=(entity,action,...rest)=>{if(action==='operational.proposal.plan.returned')throw Error('plan return crash');return event(entity,action,...rest);};
+    assert.throws(()=>plans(f).perform('plans',f.actor,input),/plan return crash/);
+    assert.equal(returnedCount(f),0);assert.equal(f.backend.readCase(f.human,child.id).blockers.length,0);
+    assert.equal(f.backend.one('ow_cases',child.id).revision,claim.revision);
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_artifacts WHERE id LIKE 'test-proposal-plan-%'").get().n,0);
+    f.backend.event=event;f.restart();plans(f).perform('plans',f.actor,input);plans(f).perform('plans',f.actor,input);
+    assert.equal(returnedCount(f),1);assertSealed(f,before);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('plan work rejects TEST, wrong owner/role/scope, changed support, and caller-created execution authority',()=>{
+  const f=fixture();try{
+    f.complete();const child=f.children()[0],data={case_id:child.id,expected_revision:child.revision,
+      support_hash:JSON.parse(child.payload_json).support_hash};
+    for(const actor of [{...f.actor,namespace:'TEST'},{...f.actor,id:'strategy',role:'STRATEGY'},
+      {...f.actor,role:'STRATEGY'},{...f.actor,scopes:['read','event.write']},f.human]){
+      assert.throws(()=>plans(f).perform('claim',actor,{message_id:'bad-owner',data}),/PROPOSAL_|WRONG_ACTION_SCOPE/);
+    }
+    assert.throws(()=>plans(f).perform('claim',f.actor,{message_id:'bad-support',data:{...data,support_hash:digest('other')}}),/PROPOSAL_SUPPORT_CONFLICT/);
+    const claim=claimPlan(f);
+    for(const change of [plan=>{plan.authority.candidate_approved=true;},plan=>{plan.execution.status='AVAILABLE';},
+      plan=>{plan.proposed_change.value='long';},plan=>{plan.protocol.tests[0].status='PASS';},
+      plan=>{plan.baseline.strategy_code_hash=digest('different');},plan=>{plan.command='run arbitrary code';}]){
+      const input=planInput(structuredClone(claim));change(input.data.plan);
+      assert.throws(()=>plans(f).perform('plans',f.actor,input),/PROPOSAL_PLAN_BINDING_CONFLICT|UNKNOWN_OR_AUTHORITY_FIELD/);
+    }
+    assert.equal(returnedCount(f),0);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('lost proof/owner/recipient/baseline blocks every new return and duplicate replay without changing sealed evidence',()=>{
+  for(const mode of ['proof','owner','recipient','baseline','cancelled']){
+    const f=fixture();try{
+      f.complete();const before=sealed(f),child=f.children()[0],claim=claimPlan(f),input=planInput(claim);
+      if(mode==='proof')f.setProof(false);
+      if(mode==='owner')f.backend.config.identities[0].revoked=true;
+      if(mode==='recipient')f.backend.config.identities[1].revoked=true;
+      if(mode==='baseline')f.backend.db.prepare('UPDATE ow_strategies SET baseline_hash=? WHERE id=?').run(digest('changed'),'s');
+      if(mode==='cancelled')f.backend.db.prepare("UPDATE ow_cases SET work_status='CANCELLED' WHERE id=?").run(child.id);
+      assert.throws(()=>plans(f).perform('plans',f.actor,input),/CONTINUATION_|PROPOSAL_|BLOCKED_RECONCILIATION/);
+      assert.equal(returnedCount(f),0);assertSealed(f,before);assertNoAuthority(f);
+    }finally{f.close();}
+  }
+  const f=fixture();try{
+    f.complete();const claim=claimPlan(f),input=planInput(claim);plans(f).perform('plans',f.actor,input);
+    f.setProof(false);assert.throws(()=>plans(f).perform('plans',f.actor,input),/CONTINUATION_CURRENT_PROVENANCE_REQUIRED/);
+    assert.equal(returnedCount(f),1);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('insufficient/no-change/historical outcomes never enter the proposal queue or fabricate planning work',()=>{
+  for(const options of [{insufficient:true},{noChange:true}]){
+    const f=fixture(options);try{
+      f.complete();assert.equal(plans(f).queue(f.actor).items.length,0);
+      if(options.insufficient)assert.throws(()=>plans(f).read(f.actor,f.children()[0].id),/SUPPORTED_OPERATIONAL_PROPOSAL_REQUIRED/);
+      assert.equal(returnedCount(f),0);assertNoAuthority(f);
+    }finally{f.close();}
+  }
+});
+
+test('operational plan HTTP route delegates only exact owned planning mutations and keeps generic TEST mutations denied',async()=>{
+  const f=fixture();try{
+    f.complete();const child=f.children()[0];
+    f.backend.auth.authenticate=()=>f.actor;
+    const invoke=async(route,body)=>{
+      const request={method:body?'POST':'GET',headers:{'content-type':'application/json'},socket:{remoteAddress:'127.0.0.1'},
+        async *[Symbol.asyncIterator](){if(body)yield Buffer.from(JSON.stringify(body));}};
+      let output;const response={setHeader(){},end(value){output=JSON.parse(value);},statusCode:200};
+      await f.backend.handle(request,response,new URL(`http://127.0.0.1/api/workflow/operational/v1/${route}`));
+      assert.equal(response.statusCode,200);return output;
+    };
+    assert.equal((await invoke('proposals/work')).items[0].case_id,child.id);
+    const work=await invoke(`proposals/${child.id}/work`);
+    const claim=await invoke('proposals/claim',{message_id:'http-claim',data:{case_id:child.id,
+      expected_revision:work.revision,support_hash:work.support_hash}});
+    const returned=await invoke('proposals/plans',planInput(claim,'http-return'));
+    assert.equal(returned.planning_complete,false);assert.equal(returnedCount(f),1);
+    assert.throws(()=>f.backend.mutate('approval.request',f.actor,{message_id:'test-no-approval',data:{case_id:child.id}}),/OPERATIONAL_PLANNING_MUTATION_NOT_ENABLED/);
+    assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+function workerFixture(f){
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'ocean-plan-consumer-'));
+  const tokenFile=path.join(root,'owner.token'),stateFile=path.join(root,'work.json');
+  const token='ocean_service_v1.brain.explicit-mock-credential-never-runtime';fs.writeFileSync(tokenFile,token);
+  const fetch=async(url,options)=>{
+    assert.equal(options.redirect,'error');assert.equal(options.headers.Authorization,`Bearer ${token}`);
+    const route=new URL(url).pathname.slice('/api/workflow/operational/v1/'.length);
+    let result;
+    try{
+      if(route==='identity')result={identity:{id:f.actor.id,namespace:f.actor.namespace,role:f.actor.role,scopes:f.actor.scopes}};
+      else if(route==='proposals/work')result=plans(f).queue(f.actor);
+      else result=plans(f).perform(route.slice(10),f.actor,JSON.parse(options.body));
+      return {ok:true,status:200,json:async()=>result};
+    }catch(error){return {ok:false,status:error.status || 500,json:async()=>({error:error.code || 'fixture-transport'})};}
+  };
+  return {root,tokenFile,stateFile,fetch,token,options:{api:'http://127.0.0.1:4002',tokenFile,stateFile,fetch},
+    close(){fs.rmSync(root,{recursive:true,force:true});}};
+}
+
+test('real planning consumer returns exact owned brief once and reconciles lost successful responses after restart',async()=>{
+  for(const lost of ['claim','plans',null]){
+    const f=fixture(),w=workerFixture(f);try{
+      f.complete();const before=sealed(f);let interrupted=false;
+      const fetch=async(url,options)=>{
+        const response=await w.fetch(url,options);
+        if(!interrupted && lost && url.endsWith(`/proposals/${lost}`)){interrupted=true;throw Error('lost successful response');}
+        return response;
+      };
+      await consumePlanningOnce({...w.options,fetch});
+      f.restart();await consumePlanningOnce(w.options);await consumePlanningOnce(w.options);
+      assert.equal(returnedCount(f),1);assert.equal(f.backend.readCase(f.human,f.children()[0].id).planning.plan_work.status,'PLAN_RETURNED');
+      const state=fs.readFileSync(w.stateFile,'utf8');assert.equal(state.includes(w.token),false);
+      assert.equal(Object.values(JSON.parse(state).work)[0].phase,'RETURNED');
+      assertSealed(f,before);assertNoAuthority(f);
+    }finally{w.close();f.close();}
+  }
+});
+
+test('planning consumer does not claim blocked evidence or non-operational identity and never transports secrets off loopback',async()=>{
+  const f=fixture(),w=workerFixture(f);try{
+    f.complete();f.setProof(false);const result=await consumePlanningOnce(w.options);
+    assert.equal(result.returned.length,0);assert.equal(result.blocked.length,1);assert.equal(returnedCount(f),0);
+    await assert.rejects(consumePlanningOnce({...w.options,api:'https://external.invalid'}),/LOOPBACK_OCEAN_API_REQUIRED/);
+    await assert.rejects(consumePlanningOnce({...w.options,fetch:async()=>({ok:true,json:async()=>({identity:{...f.actor,namespace:'TEST'}})})}),/PLANNING_WORKER_OWNER_SCOPE_REQUIRED/);
+    assertNoAuthority(f);
+  }finally{w.close();f.close();}
+});
+
+test('persistent Research reconciliation actually executes the owner planning worker and never repeats a returned draft',()=>{
+  const f=fixture();try{
+    f.complete();const before=sealed(f),child=f.children()[0];
+    assert.equal(returnedCount(f),0);f.worker.reconcile();
+    assert.equal(returnedCount(f),1);const view=f.backend.readCase(f.human,child.id);
+    assert.equal(view.planning.plan_work.status,'PLAN_RETURNED');assert.equal(view.planning.plan_work.planning_complete,false);
+    assert.equal(view.blockers.length,4);assert.match(view.next_action,/Source owner strategy/);
+    const recorded=f.backend.one('ow_cases',child.id);f.restart();for(let i=0;i<3;i++)f.worker.reconcile();
+    assert.deepEqual(f.backend.one('ow_cases',child.id),recorded);assert.equal(returnedCount(f),1);
+    f.backend.db.prepare('DELETE FROM ow_tasks WHERE case_id=?').run(child.id);f.worker.reconcile();
+    const task=f.backend.readCase(f.human,child.id).tasks[0];assert.equal(task.status,'BLOCKED');
+    assert.equal(task.artifact_id,view.planning.plan_work.returned.artifact_id);assert.equal(returnedCount(f),1);
+    assertSealed(f,before);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('persistent worker failure leaves one bounded owner failure and resumes an expired claim after restart',()=>{
+  const f=fixture();try{
+    f.complete();const before=sealed(f),child=f.children()[0];
+    const write=f.backend.writeArtifact.bind(f.backend);
+    f.backend.writeArtifact=(actor,data)=>{if(data.artifact_id.startsWith('test-proposal-plan-'))throw Error('worker crash');return write(actor,data);};
+    f.worker.reconcile();f.worker.reconcile();assert.equal(returnedCount(f),0);
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_events WHERE action='operational.proposal.plan.worker-blocked'").get().n,1);
+    const lease=plans(f).forCase(f.backend.one('ow_cases',child.id)).lease;
+    f.backend.writeArtifact=write;f.restart();const now=Date.now;
+    try{Date.now=()=>Date.parse(lease.expires_at_utc)+1;f.worker.reconcile();}finally{Date.now=now;}
+    assert.equal(returnedCount(f),1);f.worker.reconcile();assert.equal(returnedCount(f),1);
+    assertSealed(f,before);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('automatic planning does not impersonate fallback operator or dispatch absent/revoked recipient and stale proof',()=>{
+  for(const mode of ['operator','recipient','proof','paused']){
+    const f=fixture();try{
+      if(mode==='operator')f.backend.config.identities[0].revoked=true;
+      f.complete();const before=sealed(f),child=f.children()[0];
+      if(mode==='recipient')f.backend.config.identities[1].revoked=true;
+      if(mode==='proof')f.setProof(false);
+      if(mode==='paused')f.backend.db.prepare("UPDATE ow_cases SET work_status='PAUSED' WHERE id=?").run(child.id);
+      f.worker.reconcile();f.restart();f.worker.reconcile();
+      assert.equal(returnedCount(f),0);
+      assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_events WHERE action='operational.proposal.plan.lease'").get().n,0);
+      assertSealed(f,before);assertNoAuthority(f);
+    }finally{f.close();}
+  }
+});
+
+test('returned plan retains immutable history but loses current support when its exact source owner is revoked',()=>{
+  const f=fixture();try{
+    f.complete();f.worker.reconcile();const before=sealed(f),child=f.children()[0];
+    const returned=plans(f).forCase(child).returned,artifact=f.backend.one('ow_artifacts',returned.artifact_id);
+    f.backend.config.identities[1].revoked=true;f.restart();f.worker.reconcile();
+    const view=f.backend.readCase(f.human,child.id);
+    assert.equal(view.planning.qualified_for_planning,false);assert.equal(view.planning.plan_work.status,'BLOCKED');
+    assert.equal(view.planning.plan_work.blocked_reason,'PROPOSAL_CURRENT_SOURCE_OWNER_REQUIRED');
+    assert.deepEqual(f.backend.one('ow_artifacts',artifact.id),artifact);assert.equal(returnedCount(f),1);
+    assert.equal(plans(f).queue(f.actor).items[0].status,'BLOCKED');assertSealed(f,before);assertNoAuthority(f);
   }finally{f.close();}
 });
