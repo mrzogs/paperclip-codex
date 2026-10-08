@@ -100,7 +100,7 @@ function New-BridgeClient($Binding) {
 }
 
 function Invoke-OceanRequest([string]$Method, [string]$Route, $Body = $null) {
-  if ($Route -cnotmatch '^/api/workflow/(status|health|run-manager/context/[A-Za-z0-9_.:-]+|run-manager/(claim|renew|activate|pin|evidence|progress|end|finish)|operational/v1/runs/[A-Za-z0-9_.:-]+|operational/v1/run/(claim|renew|activate|pin|evidence|progress|end|finish))$') { throw 'ROUTE_REJECTED' }
+  if ($Route -cnotmatch '^/api/workflow/(status|health|run-manager/context/[A-Za-z0-9_.:-]+|run-manager/(claim|renew|activate|reconcile|pin|evidence|progress|end|finish)|operational/v1/runs/[A-Za-z0-9_.:-]+|operational/v1/run/(claim|renew|activate|reconcile|pin|evidence|progress|end|finish))$') { throw 'ROUTE_REJECTED' }
   $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::new($Method), ($Config.base_url + $Route))
   try {
     if ($null -ne $Body) {
@@ -249,15 +249,112 @@ function Submit-EvidencePlan($Plan, [string]$LeaseId) {
   }
 }
 
-function Write-State($State) {
-  $directory = Split-Path -Parent $Config.state_file
+function Write-AtomicJson([string]$Path, $Value) {
+  $directory = Split-Path -Parent $Path
   New-Item -ItemType Directory -Force -Path $directory | Out-Null
+  $temp = $Path + '.next'
+  [IO.File]::WriteAllText($temp, ($Value | ConvertTo-Json -Depth 30), [Text.UTF8Encoding]::new($false))
+  Move-Item -LiteralPath $temp -Destination $Path -Force
+}
+
+function Get-BridgeHealthPath {
+  return ([string]$Config.state_file + '.health.json')
+}
+
+function Get-LastAuthenticatedRunIdentity {
+  if (-not [IO.File]::Exists([string]$Config.state_file)) { return $null }
+  try {
+    $state = [IO.File]::ReadAllText([string]$Config.state_file) | ConvertFrom-Json
+    if ($state.config_sha256 -cne $script:ConfigHash) { return $null }
+    if ($state.identity_fresh -eq $false -and $state.last_authenticated_run_identity) {
+      $preserved = $state.last_authenticated_run_identity
+      if ($preserved.config_sha256 -cne $script:ConfigHash -or [string]::IsNullOrWhiteSpace([string]$preserved.run_id)) { return $null }
+      return [ordered]@{
+        run_id=[string]$preserved.run_id
+        run_state=[string]$preserved.run_state
+        observed_at_utc=[string]$preserved.observed_at_utc
+        config_sha256=[string]$preserved.config_sha256
+      }
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$state.run_id)) { return $null }
+    return [ordered]@{
+      run_id=[string]$state.run_id
+      run_state=[string]$state.run_state
+      observed_at_utc=[string]$state.updated_at_utc
+      config_sha256=[string]$state.config_sha256
+    }
+  } catch { return $null }
+}
+
+function Get-BridgeFailureReason($FailureRecord) {
+  $message = [string]$FailureRecord.Exception.Message
+  if ($message -cmatch '^[A-Z][A-Z0-9_]{1,100}$') { return $message }
+  if ($message -match '(?i)database is locked|sqlite.*busy|busy.*sqlite') { return 'TRANSIENT_WORKFLOW_STATE_UNAVAILABLE' }
+  if ($message -match '(?i)timed?\s*out|timeout') { return 'TRANSIENT_DEPENDENCY_TIMEOUT' }
+  if ($message -match '(?i)actively refused|connection refused|unable to connect|no connection could be made') { return 'TRANSIENT_OCEAN_UNAVAILABLE' }
+  return 'BRIDGE_CYCLE_FAILED'
+}
+
+function Get-BridgeFailureDetail($FailureRecord) {
+  $message = [string]$FailureRecord.Exception.Message
+  if ([string]::IsNullOrWhiteSpace($message)) { return $null }
+  $message = [Regex]::Replace($message, '(?i)(bearer\s+)[^\s,;]+', '$1[REDACTED]')
+  $message = [Regex]::Replace($message, '(?i)(token\s*[=:]\s*)[^\s,;]+', '$1[REDACTED]')
+  if ($message.Length -gt 512) { $message = $message.Substring(0,512) }
+  return $message
+}
+
+function Write-BridgeHealth([string]$Status, [string]$ReasonCode, $LastAuthenticatedRunIdentity, [string]$FailureDetail = $null) {
+  $health = [ordered]@{
+    schema_version='ocean-replay-bridge-health/v1'
+    status=$Status
+    reason_code=$ReasonCode
+    identity_fresh=($Status -ceq 'HEALTHY')
+    last_authenticated_run_identity=$LastAuthenticatedRunIdentity
+    failure_detail=$FailureDetail
+    updated_at_utc=[DateTimeOffset]::UtcNow.ToString('o')
+    pid=$PID
+    config_sha256=$script:ConfigHash
+  }
+  Write-AtomicJson (Get-BridgeHealthPath) $health
+}
+
+function Write-State($State, [switch]$SuppressHealthyReceipt) {
   $State.updated_at_utc = [DateTimeOffset]::UtcNow.ToString('o')
   $State.pid = $PID
   $State.config_sha256 = $script:ConfigHash
-  $temp = $Config.state_file + '.next'
-  [IO.File]::WriteAllText($temp, ($State | ConvertTo-Json -Depth 30))
-  Move-Item -LiteralPath $temp -Destination $Config.state_file -Force
+  if (-not $State.Contains('identity_fresh')) { $State.identity_fresh = $true }
+  Write-AtomicJson ([string]$Config.state_file) $State
+  if (-not $SuppressHealthyReceipt) {
+    $identity = if ([string]::IsNullOrWhiteSpace([string]$State.run_id)) { $null } else {
+      [ordered]@{run_id=[string]$State.run_id;run_state=[string]$State.run_state;observed_at_utc=[string]$State.updated_at_utc;config_sha256=$script:ConfigHash}
+    }
+    Write-BridgeHealth 'HEALTHY' $null $identity
+  }
+}
+
+function Publish-BridgeCycleFailure($FailureRecord, [bool]$RestartRequired) {
+  $reason = Get-BridgeFailureReason $FailureRecord
+  $detail = Get-BridgeFailureDetail $FailureRecord
+  $lastIdentity = Get-LastAuthenticatedRunIdentity
+  $status = if ($RestartRequired) { 'RESTART_REQUIRED' } else { 'DEGRADED' }
+
+  # Health is published first so a crash during state projection cannot erase
+  # the reason for the failed cycle or present preserved identity as fresh.
+  Write-BridgeHealth $status $reason $lastIdentity $detail
+  $state = [ordered]@{
+    status=$status
+    error=$reason
+    identity_fresh=$false
+    last_authenticated_run_identity=$lastIdentity
+    run_id=if ($lastIdentity) { [string]$lastIdentity.run_id } else { $null }
+    run_state=if ($lastIdentity) { [string]$lastIdentity.run_state } else { $null }
+    safety=if ($script:Namespace -ceq 'OPERATIONAL') { 'OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED' } else { 'TEST_ONLY_INGESTION_OFF' }
+  }
+  if ($RestartRequired) {
+    $state.next_action = 'Restart only ReplayBridge through the existing Ocean service lifecycle; revalidate current config and protected identity. Existing run leases expire normally; no binding is hot-swapped.'
+  }
+  Write-State $state -SuppressHealthyReceipt
 }
 
 function Invoke-BridgeCycle {
@@ -268,7 +365,6 @@ function Invoke-BridgeCycle {
 
 function Invoke-PinnedBridgeCycle {
   if (Complete-VerifiedFailedAttempt) { return }
-  Test-OperationalPhysicalBinding $Config
   $probe = Get-Probe
   if (-not $probe.run) {
     $safety = if ($script:Namespace -ceq 'OPERATIONAL') { 'OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED' } else { 'TEST_ONLY_INGESTION_OFF' }
@@ -281,8 +377,12 @@ function Invoke-PinnedBridgeCycle {
     $script:LeaseRunId = $null
   }
   $context = Get-RunContext $runId
+  $evidencePlan = Get-EvidencePlan $runId
   if ($script:Namespace -ceq 'OPERATIONAL' -and $context.state -eq 'READY') {
-    if (-not $probe.telemetry.preflight_verified) {
+    if ($evidencePlan.status -cne 'READY') {
+      Test-OperationalPhysicalBinding $Config
+    }
+    if ($evidencePlan.status -cne 'READY' -and -not $probe.telemetry.preflight_verified) {
       Write-State ([ordered]@{status='AWAITING_SOURCE_PREFLIGHT';run_id=$runId;run_state=$context.state;telemetry=$probe.telemetry;safety='OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED'})
       return
     }
@@ -301,7 +401,7 @@ function Invoke-PinnedBridgeCycle {
       Write-State ([ordered]@{status='AWAITING_HUMAN_RELEASE';run_id=$runId;run_state=$context.state;telemetry=$probe.telemetry;release_recorded=$false;release_request=$releaseRequest;safety='OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED'})
       return
     }
-    if (-not $probe.telemetry.verified) {
+    if ($evidencePlan.status -cne 'READY' -and -not $probe.telemetry.verified) {
       Write-State ([ordered]@{status='AWAITING_MATCHING_REPLAY_RUN';run_id=$runId;run_state=$context.state;telemetry=$probe.telemetry;release_recorded=$true;safety='OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED'})
       return
     }
@@ -315,16 +415,31 @@ function Invoke-PinnedBridgeCycle {
   } elseif ($lease.owner_id -ceq $script:Credential.identity_id -and -not $lease.expired -and
             $script:LeaseRunId -ceq $runId -and $script:LeaseId) {
     $leaseId = [string]$script:LeaseId
+  } elseif ($lease.owner_id -ceq $script:Credential.identity_id -and -not $lease.expired) {
+    # Lease identifiers are deliberately absent from readback. A restarted
+    # bridge waits for the bounded owner lease to expire, then claims a fresh
+    # lease instead of reading protected state directly from SQLite.
+    throw 'OWNER_LEASE_RECOVERY_WAIT'
   } else { throw 'FOREIGN_OR_UNAVAILABLE_RUN_LEASE' }
 
   if ($context.state -eq 'READY') {
-    if (-not $probe.telemetry.verified) { throw 'TELEMETRY_BINDING_NOT_VERIFIED' }
-    $source = New-ObservedSourceState $probe
-    $context = Invoke-Mutation 'activate' @{
-      run_id=$runId
-      lease_id=$leaseId
-      expected_revision=[int]$context.revision
-      observed_handshake=@{instance=$context.plan.instance;source_state=$source;plan_hash=$context.plan.plan_hash;context_hash=$context.context.context_hash}
+    if ($evidencePlan.status -ceq 'READY') {
+      $context = Invoke-Mutation 'reconcile' @{
+        run_id=$runId
+        lease_id=$leaseId
+        expected_revision=[int]$context.revision
+        completion_receipt=$evidencePlan.completion_receipt
+        evidence_image_sha256=[string]$evidencePlan.evidence_image.sha256
+      }
+    } else {
+      if (-not $probe.telemetry.verified) { throw 'TELEMETRY_BINDING_NOT_VERIFIED' }
+      $source = New-ObservedSourceState $probe
+      $context = Invoke-Mutation 'activate' @{
+        run_id=$runId
+        lease_id=$leaseId
+        expected_revision=[int]$context.revision
+        observed_handshake=@{instance=$context.plan.instance;source_state=$source;plan_hash=$context.plan.plan_hash;context_hash=$context.context.context_hash}
+      }
     }
   } else {
     $context = Invoke-Mutation 'renew' @{run_id=$runId;lease_id=$leaseId}
@@ -332,7 +447,6 @@ function Invoke-PinnedBridgeCycle {
 
   $reconciliation = $null
   if ($context.state -in @('ACTIVE','COMPLETING')) {
-    $evidencePlan = Get-EvidencePlan $runId
     if ($evidencePlan.status -ceq 'READY') {
       Submit-EvidencePlan $evidencePlan $leaseId
       $reconciliation = [ordered]@{status=$evidencePlan.status;evidence_image=$evidencePlan.evidence_image;metrics=$evidencePlan.metrics;action_count=@($evidencePlan.actions).Count}
@@ -408,9 +522,15 @@ function Complete-VerifiedFailedAttempt {
   return $true
 }
 
-$Config = Read-BridgeConfig
-$script:Namespace = if ($Config.schema_version -ceq 'ocean-replay-run-bridge/v4') { 'OPERATIONAL' } else { 'TEST' }
+$bridgeMutex = [Threading.Mutex]::new($false, 'Local\OceanTrading-ReplayBridge')
+$bridgeMutexAcquired = $false
 try {
+  try { $bridgeMutexAcquired = $bridgeMutex.WaitOne(0) }
+  catch [Threading.AbandonedMutexException] { $bridgeMutexAcquired = $true }
+  if (-not $bridgeMutexAcquired) { return }
+
+  $Config = Read-BridgeConfig
+  $script:Namespace = if ($Config.schema_version -ceq 'ocean-replay-run-bridge/v4') { 'OPERATIONAL' } else { 'TEST' }
   $startupGuard = Open-BridgeConfigGuard
   try {
     $script:Credential = Read-ProtectedCredential $Config
@@ -419,18 +539,15 @@ try {
   do {
     try { Invoke-BridgeCycle }
     catch {
-      $safety = if ($script:Namespace -ceq 'OPERATIONAL') { 'OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED' } else { 'TEST_ONLY_INGESTION_OFF' }
-      if ($_.Exception.Message -in @('BRIDGE_CONFIG_CHANGED_RESTART_REQUIRED','BRIDGE_CONFIG_UNAVAILABLE_RESTART_REQUIRED')) {
-        $code = $_.Exception.Message
-        Write-State ([ordered]@{status='RESTART_REQUIRED';error=$code;run_id=$script:LeaseRunId;safety=$safety;
-          next_action='Restart only ReplayBridge through the existing Ocean service lifecycle; revalidate current config and protected identity. Existing run leases expire normally; no binding is hot-swapped.'})
-        throw $code
-      }
-      Write-State ([ordered]@{status='DEGRADED';error=$(if ($_.Exception.Message -cmatch '^[A-Z][A-Z0-9_]{1,100}$') {$_.Exception.Message} else {'BRIDGE_CYCLE_FAILED'});safety=$safety})
+      $restartRequired = $_.Exception.Message -in @('BRIDGE_CONFIG_CHANGED_RESTART_REQUIRED','BRIDGE_CONFIG_UNAVAILABLE_RESTART_REQUIRED')
+      Publish-BridgeCycleFailure $_ $restartRequired
+      if ($restartRequired) { throw $_.Exception.Message }
     }
     if (-not $Once) { Start-Sleep -Seconds ([int]$Config.poll_seconds) }
   } while (-not $Once)
 } finally {
   if ($script:Client) { $script:Client.Dispose() }
   if ($script:Credential) { $script:Credential.token = $null }
+  if ($bridgeMutexAcquired) { $bridgeMutex.ReleaseMutex() }
+  $bridgeMutex.Dispose()
 }
