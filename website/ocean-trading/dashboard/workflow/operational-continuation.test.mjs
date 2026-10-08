@@ -943,13 +943,78 @@ test('new operational planning is visible in existing read views but TEST servic
   }finally{f.close();}
 });
 
-test('learning projection does not call an open owned continuation a completed whole loop',()=>{
+function learningProjection(f,classification) {
+  const learner=Object.create(OperationalLearning.prototype);
+  Object.assign(learner,{backend:f.backend,db:f.backend.db,registryContext:null,retry:new Map(),classification,
+    resultFor:()=>({result:{},callback:{status:'COMPLETED'},details:{conclusion_type:'RECOMMENDATION',continuation:{case_id:'source'}}})});
+  return learner;
+}
+
+test('learning projection prioritizes missing current provenance over an open compatibility continuation',()=>{
   const f=fixture({insufficient:true});try {
-    f.complete();const learner=Object.create(OperationalLearning.prototype);
-    Object.assign(learner,{backend:f.backend,db:f.backend.db,registryContext:null,retry:new Map(),classification:()=>({eligible:true,reasons:[],telemetry:{}}),
-      resultFor:()=>({result:{},callback:{status:'COMPLETED'},details:{conclusion_type:'RECOMMENDATION',continuation:{case_id:'source'}}})});
-    const status=learner.statusForRun('r1');assert.equal(status.stage,'COMPLETE');assert.equal(status.loop_stage,'EVIDENCE_REQUIRED');
-    assert.match(status.next_action,/Owner brain/);assert.equal(status.research.state,'COMPLETED');assertNoAuthority(f);
+    f.complete();const before=sealed(f),action='Owner provenance: resolve current physical/raw proof before continuing.';
+    const learner=learningProjection(f,()=>({eligible:false,reasons:['CURRENT_PROVENANCE_MISSING'],
+      telemetry:{verified:false,bypassed:false,required_action:action}}));
+    const status=learner.statusForRun('r1');
+    assert.equal(status.stage,'COMPLETE','The preserved callback is not rewritten');
+    assert.equal(status.research.analysis_version,LEGACY_RESEARCH_VERSION);
+    assert.equal(status.research.historical,false,'This fixture explicitly runs the v4 compatibility worker');
+    assert.equal(status.recorded_loop_stage,'EVIDENCE_REQUIRED');
+    assert.equal(status.loop_stage,'QUALIFICATION_REQUIRED');
+    assert.equal(status.current_qualification_status,'QUALIFICATION_REQUIRED');
+    assert.equal(status.current_provenance_qualified,false);assert.equal(status.next_action,action);
+    assert.equal(status.historical_result.loop_stage,'EVIDENCE_REQUIRED');
+    assert.equal(status.research.state,'COMPLETED');assertSealed(f,before);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('learning projection keeps a current-qualified v6 open continuation evidence-required, not whole-loop complete',()=>{
+  const f=fixture({prospective:true,insufficient:true});try {
+    const classification=f.backend.operationalLearning.classification;
+    // Explicit qualification fixture, not physical execution or an approval.
+    f.backend.operationalLearning.classification=run=>{
+      const current=classification(run);
+      return {...current,telemetry:{verified:current.eligible,bypassed:false,proof_basis:'EXPLICIT_MOCK_ONLY',
+        ...(!current.eligible?{required_action:'Owner provenance: restore exact current physical/raw proof.'}:{})}};
+    };
+    f.complete();const before=sealed(f),child=f.children()[0];
+    const learner=learningProjection(f,f.backend.operationalLearning.classification);
+    const checkCurrent=()=>{
+      const status=learner.statusForRun('r1');
+      assert.equal(status.stage,'COMPLETE');assert.equal(status.loop_stage,'EVIDENCE_REQUIRED');
+      assert.equal(status.recorded_loop_stage,'EVIDENCE_REQUIRED');assert.equal(status.current_qualification_status,'CURRENT');
+      assert.equal(status.current_provenance_qualified,true);assert.equal(status.historical_result,null);
+      assert.equal(status.research.analysis_version,RESEARCH_VERSION);assert.equal(status.research.historical,false);
+      assert.equal(status.research.qualified_for_new_support,true);assert.equal(status.research.state,'COMPLETED');
+      assert.equal(status.next_action,status.research.next_action);assert.match(status.next_action,/Owner brain/);
+      assert.ok(status.next_action.includes(child.id));assert.notEqual(status.loop_stage,'COMPLETE');
+    };
+    checkCurrent();
+    f.setProof(false);const blocked=learner.statusForRun('r1');
+    assert.equal(blocked.loop_stage,'QUALIFICATION_REQUIRED');
+    assert.equal(blocked.current_provenance_qualified,false);
+    assert.equal(blocked.next_action,'Owner provenance: restore exact current physical/raw proof.');
+    f.setProof(true);checkCurrent();assertSealed(f,before);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('learning projection treats a completed legacy report as historical even with current physical qualification',()=>{
+  const f=fixture({insufficient:true});try {
+    f.complete();const before=sealed(f);
+    f.worker.version=RESEARCH_VERSION;
+    const learner=learningProjection(f,()=>({eligible:true,reasons:[],
+      telemetry:{verified:true,bypassed:false,proof_basis:'EXPLICIT_MOCK_ONLY'}}));
+    const status=learner.statusForRun('r1');
+    assert.equal(status.stage,'COMPLETE');assert.equal(status.current_provenance_qualified,true);
+    assert.equal(status.research.analysis_version,LEGACY_RESEARCH_VERSION);assert.equal(status.research.state,'COMPLETED');
+    assert.equal(status.research.historical,true);assert.equal(status.research.qualified_for_new_support,false);
+    assert.equal(status.loop_stage,'QUALIFICATION_REQUIRED');
+    assert.equal(status.current_qualification_status,'QUALIFICATION_REQUIRED');
+    assert.equal(status.historical_result.loop_stage,status.recorded_loop_stage);
+    assert.equal(status.next_action,status.research.next_action);
+    assert.match(status.next_action,/Historical Research is completed and preserved/);
+    assert.match(status.next_action,/provenance owner/);assert.doesNotMatch(status.next_action,/Owner brain: obtain/);
+    assertSealed(f,before);assertNoAuthority(f);
   }finally{f.close();}
 });
 
