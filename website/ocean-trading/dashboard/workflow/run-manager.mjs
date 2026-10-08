@@ -400,9 +400,14 @@ export class RunManager {
       source_observation_basis:'HISTORICAL_ACTIVATION_NOT_CURRENT_EXECUTION'};
     if(namespace==='OPERATIONAL') {
       try {
-        const proof=this.terminalFailure(run.id) || (['READY','ACTIVE'].includes(run.state) && this.b.operationalLearning?.physicalBindingFile
+        // Display-only independent sources must not extend a writer transaction
+        // or project its uncommitted state. Sealed own-DB failure proof remains readable.
+        const deferred=this.db.isTransaction;
+        const proof=this.terminalFailure(run.id) || (!deferred && ['READY','ACTIVE'].includes(run.state) && this.b.operationalLearning?.physicalBindingFile
           ?readBackendAttemptFailure(this.b,{run,plan,context}):null);
         if(proof)execution={...execution,...failureReadView(proof,plan.reprocess_of_run_id,run.state)};
+        else if(deferred)execution={...execution,reason:'PHYSICAL_PROJECTION_DEFERRED_UNTIL_COMMIT',completed_coverage_granted:false,
+          next_owner:'Ocean run view',next_action:'Refresh this run with a fresh GET after the workflow transaction commits to verify current physical execution. No completed coverage is granted.'};
         else if(contextStatus==='CURRENT' && ['READY','ACTIVE','COMPLETING'].includes(run.state) && this.b.operationalLearning?.physicalBindingFile) {
           execution={...execution,...readCurrentReplayExecution(this.b.operationalLearning.physicalBindingFile,
             {run,plan,context,storedPlan:parse(this.managed(run.id))})};
