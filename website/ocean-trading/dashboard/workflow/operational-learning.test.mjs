@@ -5,10 +5,25 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { digest, objectHash } from './common.mjs';
-import { OperationalLearning, cumulativeLearningProposal, criticalCausalQualityFlags, parseSttl2Identity } from './operational-learning.mjs';
+import { OperationalLearning, cumulativeLearningProposal, criticalCausalQualityFlags, parseSttl2Identity,
+  REVIEWED_V238_PROFILE6, reviewedPhysicalProfileBinding } from './operational-learning.mjs';
 
 const strategyId = 'cicd-vwap-pull-back-strategy';
 const instanceId = 'cicd-vwap-pull-back-strategy:replay-two:chart1';
+
+test('reviewed v238 successor requires the exact physical and unchanged logical tuple', () => {
+  const mapping = REVIEWED_V238_PROFILE6;
+  assert.equal(reviewedPhysicalProfileBinding(mapping, mapping.module_sha256), mapping);
+  assert.equal(reviewedPhysicalProfileBinding(mapping, mapping.module_sha256.slice(7).toUpperCase()), mapping);
+  for (const key of ['strategy_id', 'strategy_profile_id', 'strategy_profile_version', 'strategy_code_hash',
+    'strategy_config_hash', 'strategy_version', 'candidate_id']) {
+    assert.equal(reviewedPhysicalProfileBinding({ ...mapping, [key]: 'wrong' }, mapping.module_sha256), null, key);
+  }
+  for (const hash of [null, '', digest('generic DLL'), 'sha256:9a79f333273b88bb6f4d97a405c9d08eb32506a8604bec273638bc1970a6713e']) {
+    assert.equal(reviewedPhysicalProfileBinding(mapping, hash), null, String(hash));
+  }
+  assert.equal(Object.isFrozen(mapping), true);
+});
 
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ocean-learning-'));
@@ -584,6 +599,38 @@ test('learning requires recorded DLL and raw STTL2 proof for both logical and ma
       assert.deepEqual(rejected.telemetry.raw_identity_qualification.approved_profile_mapping.trade_ids,[]);
     }
     assert.equal(f.learner.classification(setProfile()).eligible,true,'restoring exact approved pins qualifies the fixture again');
+    // TEST-only telemetry fixture: validate new raw mapping separately from the
+    // physical module gate. The mock binary must never attest the reviewed build.
+    const successor=REVIEWED_V238_PROFILE6;
+    writeBinding(successor.strategy_version);
+    telemetry.prepare('UPDATE ocean_run_lineage_v1 SET strategy_version=?,candidate_id=?')
+      .run(successor.strategy_version,successor.candidate_id);
+    telemetry.prepare('UPDATE replay_runs SET strategy_version=?').run(successor.strategy_version);
+    rawFields.candidate=successor.candidate_id;
+    const successorRun=setProfile({version:successor.raw_version});
+    telemetry.prepare('UPDATE trade_causal_context SET candidate_id=?').run(successor.candidate_id);
+    const successorBinding=JSON.parse(fs.readFileSync(physicalBindingFile,'utf8'));
+    successorBinding.managed_candidate_id=successor.candidate_id;
+    fs.writeFileSync(physicalBindingFile,JSON.stringify(successorBinding));
+    const successorResult=f.learner.classification(successorRun);
+    assert.equal(successorResult.telemetry.raw_identity_qualification.verified,true);
+    assert.ok(successorResult.reasons.includes('REVIEWED_PHYSICAL_SUCCESSOR_MAPPING_CONFLICT'));
+    assert.equal(successorResult.eligible,false,'mock hash cannot qualify a real reviewed v238 release');
+    successorBinding.expected_strategy_module_sha256=successor.module_sha256;
+    fs.writeFileSync(physicalBindingFile,JSON.stringify(successorBinding));
+    assert.ok(f.learner.classification(successorRun).reasons.includes('APPROVED_STRATEGY_MODULE_HASH_CONFLICT'),
+      'reviewed hash in config cannot replace actual module bytes');
+    for (const version of ['v0.6.238-managed-lineage-candidate',physicalVersion]) {
+      assert.equal(f.learner.classification(setProfile({version})).telemetry.raw_identity_qualification.verified,false);
+    }
+    assert.equal(f.learner.classification(setProfile({version:successor.raw_version,profile:'nasdaq_v0449_hmm_risk1000_qty5_control'}))
+      .telemetry.raw_identity_qualification.verified,false,'Profile3 cannot stand in for frozen Profile6');
+    writeBinding('v0.6.237');
+    telemetry.prepare("UPDATE ocean_run_lineage_v1 SET strategy_version='v0.6.237',candidate_id='candidate'").run();
+    telemetry.prepare("UPDATE replay_runs SET strategy_version='v0.6.237'").run();
+    rawFields.candidate='candidate';
+    telemetry.prepare("UPDATE trade_causal_context SET candidate_id='candidate'").run();
+    assert.equal(f.learner.classification(setProfile()).eligible,true,'v237 mapping is preserved, not replaced');
     telemetry.prepare('UPDATE ocean_run_lineage_v1 SET strategy_profile_id=?,strategy_profile_version=?,strategy_code_hash=?,strategy_config_hash=?')
       .run(context.strategy_profile_id,context.strategy_profile_version,context.strategy_code_hash,context.strategy_config_hash);
     const mappedTag=encodeTag({...rawFields,strategy_v:'v0.6.237'});

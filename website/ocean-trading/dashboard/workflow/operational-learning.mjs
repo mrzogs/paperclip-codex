@@ -65,10 +65,40 @@ export function parseSttl2Identity(text) {
   return fields;
 }
 
+// Exact engineering successor; not a strategy approval or a native input receipt.
+// Keep the immutable logical pins separate from this reviewed physical artifact.
+export const REVIEWED_V238_PROFILE6 = Object.freeze({
+  strategy_id: 'cicd-vwap-pull-back-strategy',
+  strategy_profile_id: 'cicd-vwap-pull-back-strategy.profile-v0.1.0-source-bound',
+  strategy_profile_version: 'v0.1.3',
+  strategy_code_hash: 'sha256:8b26b689b013f1473304a1fdde4bcf265ddbfd4cf05e58e11a97e9f777ed7909',
+  strategy_config_hash: 'sha256:21968c73dbff8646ff15bfffafaa0d85e4e8db5b8273f5b0a88eec001942af4d',
+  strategy_version: 'v0.6.238', candidate_id: 'v0.6.238-managed-entry-boundary',
+  module_sha256: 'sha256:6c871ad65aaa7e5891d8aa5133c3c18bc5c5a4fb72911c77181f01deaeaf9435',
+  source_sha256: 'sha256:0dd0bb987dbc6e0a3b319ae9653d8118668e74bb470c24e2b9c0d954377fba9d',
+  source_commit: 'ae2ea1c08da32d56c534cbe92ba9fb2d638a12e9',
+  independent_handoff_sha256: 'sha256:b0a1f49360bf3f7ac2f71fb8797d318e32dc203aadbca62abe5711f710ee383b',
+  mapping_record_sha256: 'sha256:f01acc7cfd00017a13f02b1edb6d186e285bd061774a95b2626b34d71575d736',
+  logical_strategy_version: 'v0.1.1',
+  raw_profile: 'nasdaq_v0608_us_trendup_weak_distance_qty1_replay_status_preserve_risk1100_qty5_candidate',
+  raw_version: 'v0.6.238-managed-entry-boundary-candidate',
+});
+
+export function reviewedPhysicalProfileBinding(lineage, moduleHash) {
+  const mapping = REVIEWED_V238_PROFILE6;
+  return canonicalDllHash(moduleHash) === mapping.module_sha256
+    && ['strategy_id', 'strategy_profile_id', 'strategy_profile_version', 'strategy_code_hash',
+      'strategy_config_hash', 'strategy_version', 'candidate_id'].every(key => lineage[key] === mapping[key])
+    ? mapping : null;
+}
+
 function rawProfileBinding(raw, lineage) {
   // Frozen ow_profile v0.1.3 approves Profile6/risk1100/qty5, not Profile3.
   // Export sha256 7a74ded1c6617e984296a0a034453f37f1c830c45eea611ead70adac13b6d074.
   // Logical code/config pins are distinct from the independently checked physical DLL.
+  const successor = reviewedPhysicalProfileBinding(lineage, REVIEWED_V238_PROFILE6.module_sha256);
+  if (successor) return raw.profile === successor.raw_profile && raw.strategy_v === successor.raw_version
+    && raw.profile_v === successor.raw_version;
   return lineage.strategy_id === 'cicd-vwap-pull-back-strategy'
     && lineage.strategy_profile_id === 'cicd-vwap-pull-back-strategy.profile-v0.1.0-source-bound'
     && lineage.strategy_profile_version === 'v0.1.3'
@@ -435,6 +465,14 @@ export class OperationalLearning {
     if (!approvedHash || !path.isAbsolute(binding.expected_strategy_module_path || '')) {
       return { verified: false, reason: 'APPROVED_STRATEGY_MODULE_BINDING_REQUIRED' };
     }
+    const successor = reviewedPhysicalProfileBinding(lineage, approvedHash);
+    if (lineage.strategy_version === REVIEWED_V238_PROFILE6.strategy_version
+      && (!successor || context.strategy_version !== successor.logical_strategy_version)) {
+      return { verified: false, reason: 'REVIEWED_PHYSICAL_SUCCESSOR_MAPPING_CONFLICT' };
+    }
+    const recordedTradeVersions = successor
+      ? [successor.strategy_version, successor.raw_version]
+      : [lineage.strategy_version, `${lineage.strategy_version}-managed-lineage-candidate`];
     let currentHash;
     try { currentHash = fileHash(binding.expected_strategy_module_path); } catch {}
     if (currentHash !== approvedHash) {
@@ -455,7 +493,7 @@ export class OperationalLearning {
         || trades.length !== Number(lineage.closed_trade_count)
         || trades.some(trade => trade.instance_id !== recordedRun.instance_id || trade.trade_account !== expectedAccount
           || trade.strategy_id !== run.strategy_id
-          || ![lineage.strategy_version, `${lineage.strategy_version}-managed-lineage-candidate`].includes(trade.strategy_version))) {
+          || !recordedTradeVersions.includes(trade.strategy_version))) {
         return { verified: false, reason: 'RECORDED_STRATEGY_PROVENANCE_SCOPE_CONFLICT' };
       }
       if (!canonicalDllHash(recordedRun.dll_hash) || trades.some(trade => !canonicalDllHash(trade.dll_hash))) {
@@ -475,6 +513,7 @@ export class OperationalLearning {
         closed_trade_count: trades.length,
         proof_basis: 'APPROVED_CURRENT_MODULE_AND_RECORDED_RUN_AND_CLOSED_TRADE_METADATA_AGREE',
         independent_historical_execution_attestation: false,
+        ...(successor ? { reviewed_physical_successor: successor } : {}),
       };
     } catch {
       return { verified: false, reason: 'RECORDED_STRATEGY_DLL_PROVENANCE_REQUIRED' };
