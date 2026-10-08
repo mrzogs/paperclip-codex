@@ -34,6 +34,11 @@ test('v4 evaluator reconciles recorded simulation fees and screens only entry di
   assert.equal(result.proposals[0].value,'short');assert.equal(result.missing_exit_attribution,30);
   assert.equal(result.candidate_validation.status,'NOT_DUE');assert.equal(result.authority.live_authorized,false);
   assert.equal(result.schema_version,RESEARCH_VERSION);
+  assert.deepEqual(result.screening_policy,{minimum_distinct_declared_periods:3,minimum_direction_trades_per_retained_run:10,
+    positive_net_exclusion_required_in_every_retained_run:true,basis:'EXISTING_DIRECTION_DISCOVERY_SCREEN_NOT_STATISTICALLY_CALIBRATED'});
+  assert.equal(result.evidence_sufficiency.status,'SUFFICIENT');
+  assert.equal(result.evidence_sufficiency.assessment_complete,true);
+  assert.deepEqual(result.evidence_sufficiency.evaluated_direction_values,['long','short']);
   assert.ok(result.experiments.every(value=>value.dimension==='direction' && value.proposal_eligible && value.lookahead_safe));
   assert.ok(result.observational_breakdowns.every(value=>!value.proposal_eligible && !value.lookahead_safe && !value.supported));
   assert.deepEqual(result.authority,{automatic_strategy_change:false,candidate_approved:false,paper_authorized:false,live_authorized:false});
@@ -66,8 +71,9 @@ test('signal session labels remain observational despite profitable-looking excl
   assert.equal(asia.availability_basis,'PRE_ENTRY_LABEL_AVAILABILITY_NOT_INDEPENDENTLY_PROVEN');
   assert.equal(asia.lookahead_safe,false);assert.equal(asia.supported,false);
   assert.equal(result.outcome,'NO_SUPPORTED_CHANGE');assert.deepEqual(result.proposals,[]);
+  assert.equal(result.evidence_sufficiency.assessment_complete,true);
   assert.equal(result.candidate_validation.candidate_hash,null);
-  assert.match(result.next_action,/No supported direction filter.*No actual candidate exists/);
+  assert.match(result.next_action,/no supported direction filter.*No actual candidate exists/i);
   assert.ok(result.limitations.some(value=>/Asia signal label.*London 08:00/.test(value)));
 });
 
@@ -101,7 +107,10 @@ test('different configurations with repeated coverage retain all accounting but 
   assert.equal(result.historical_periods.accounting_runs_retained,true);
   assert.deepEqual(result.excluded_evidence,bundle.excluded_evidence,'no invented wire exclusion codes');
   assert.equal(result.cohort_hash,objectHash(bundle.cohort));assert.equal(result.evidence_hash,objectHash(rows));
-  assert.equal(result.outcome,'NO_SUPPORTED_CHANGE');assert.deepEqual(result.proposals,[]);
+  assert.equal(result.outcome,'INSUFFICIENT_EVIDENCE');assert.deepEqual(result.proposals,[]);
+  assert.deepEqual(result.evidence_sufficiency.reasons,['INSUFFICIENT_DISTINCT_DECLARED_PERIODS']);
+  assert.deepEqual(result.evidence_sufficiency.evaluated_direction_values,[]);
+  assert.match(result.next_action,/insufficient evidence, not an evaluated no-change finding/);
   assert.equal(objectHash({rows,bundle}),inputHash,'evaluator does not rewrite source evidence');
   assert.notEqual(inputHash,before,'fixture actually supplied repeated historical coverage');
 });
@@ -113,15 +122,17 @@ test('later completion does not replace a qualified distinct configuration with 
   const result=evaluateResearch(bundle,rows);
   assert.deepEqual(result.eligible_run_ids,['a','b','c']);
   assert.equal(result.aggregate.trades,60);assert.equal(result.historical_periods.distinct_coverage_count,2);
-  assert.equal(result.outcome,'NO_SUPPORTED_CHANGE');
+  assert.equal(result.outcome,'INSUFFICIENT_EVIDENCE');
 });
 
 test('unproven historical coverage cannot supply a direction proposal period',()=>{
   const {rows,bundle}=sample();delete bundle.research_coverage.b;
   const result=evaluateResearch(bundle,rows);
   assert.equal(result.aggregate.trades,60);
-  assert.equal(result.outcome,'NO_SUPPORTED_CHANGE');
+  assert.equal(result.outcome,'INSUFFICIENT_EVIDENCE');
   assert.deepEqual(result.historical_periods.missing_coverage_run_ids,['b']);
+  assert.deepEqual(result.evidence_sufficiency.missing_coverage_run_ids,['b']);
+  assert.ok(result.evidence_sufficiency.reasons.includes('HISTORICAL_COVERAGE_NOT_PROVEN'));
   assert.ok(result.experiments.every(item=>!item.supported && item.reason==='HISTORICAL_COVERAGE_NOT_PROVEN'));
 });
 
@@ -140,7 +151,76 @@ test('mixed periods finish Research with no supported change rather than inventi
     row.gross_currency_value=10;row.net_profit_loss=9;
   }
   const result=evaluateResearch(bundle,rows);assert.equal(result.outcome,'NO_SUPPORTED_CHANGE');
+  assert.equal(result.evidence_sufficiency.status,'SUFFICIENT');
+  assert.deepEqual(result.evidence_sufficiency.reasons,[]);
+  assert.ok(result.experiments.every(item=>item.evidence_sufficient && !item.supported));
+  assert.match(result.next_action,/recorded direction screen met its evidence floor/);
+  assert.match(result.next_action,/does not evaluate all possible improvements/);
   assert.match(result.next_action,/No approval is pending/);
+});
+
+test('one fresh qualified period completes accounting but cannot claim an evaluated no-change finding',()=>{
+  const fixture=sample();const rows=fixture.rows.filter(row=>row.run_id==='a');
+  const bundle=fixture.bundle;bundle.cohort.eligible_runs=bundle.cohort.eligible_runs.slice(0,1);
+  bundle.cohort.aggregate.observed_sample_count=rows.length;
+  const before=objectHash({rows,bundle});const result=evaluateResearch(bundle,rows);
+  assert.equal(result.outcome,'INSUFFICIENT_EVIDENCE');assert.equal(result.aggregate.trades,20);
+  assert.equal(result.evidence_sufficiency.distinct_declared_periods,1);
+  assert.deepEqual(result.evidence_sufficiency.reasons,['INSUFFICIENT_DISTINCT_DECLARED_PERIODS']);
+  assert.equal(result.candidate_validation.status,'NOT_DUE');assert.deepEqual(result.proposals,[]);
+  assert.equal(objectHash({rows,bundle}),before);
+});
+
+test('nine direction trades in one retained run is insufficient, not negative evidence',()=>{
+  const {rows,bundle}=sample();
+  rows.find(row=>row.run_id==='b' && row.direction==='short').direction='long';
+  for(const row of rows){row.gross_currency_value=10;row.net_profit_loss=9;}
+  const result=evaluateResearch(bundle,rows);
+  assert.equal(result.outcome,'INSUFFICIENT_EVIDENCE');assert.deepEqual(result.proposals,[]);
+  assert.deepEqual(result.evidence_sufficiency.sample_shortfalls,[{direction:'short',run_id:'b',observed_trades:9,required_trades:10}]);
+  assert.deepEqual(result.evidence_sufficiency.evaluated_direction_values,['long']);
+  assert.deepEqual(result.evidence_sufficiency.unevaluated_direction_values,['short']);
+  assert.equal(result.experiments.find(item=>item.value==='short').reason,'INSUFFICIENT_DIRECTION_SAMPLE_IN_RETAINED_RUN');
+});
+
+test('a supported direction survives an explicitly partial screen without declaring every group evaluated',()=>{
+  const {rows,bundle}=sample();
+  rows.find(row=>row.run_id==='b' && row.direction==='long').direction='short';
+  const result=evaluateResearch(bundle,rows);
+  assert.equal(result.outcome,'EXPLORATORY_PROPOSAL');assert.equal(result.evidence_sufficiency.assessment_complete,false);
+  assert.deepEqual(result.proposals.map(item=>item.value),['short']);
+  assert.deepEqual(result.evidence_sufficiency.sample_shortfalls,[{direction:'long',run_id:'b',observed_trades:9,required_trades:10}]);
+  assert.match(result.next_action,/Other recorded direction groups remain unassessed/);
+  assert.equal(result.candidate_validation.candidate_hash,null);
+});
+
+test('zero direction samples in a retained run and unknown-only directions remain insufficient',()=>{
+  const {rows,bundle}=sample();for(const row of rows.filter(row=>row.run_id==='b'))row.direction='long';
+  const result=evaluateResearch(bundle,rows);
+  assert.equal(result.outcome,'INSUFFICIENT_EVIDENCE');
+  assert.deepEqual(result.evidence_sufficiency.sample_shortfalls,[{direction:'short',run_id:'b',observed_trades:0,required_trades:10}]);
+  for(const row of rows)row.direction='unknown';
+  const unknownOnly=evaluateResearch(bundle,rows);
+  assert.equal(unknownOnly.outcome,'INSUFFICIENT_EVIDENCE');
+  assert.deepEqual(unknownOnly.evidence_sufficiency.reasons,['NO_RECORDED_DIRECTION_GROUPS']);
+  assert.deepEqual(unknownOnly.experiments,[]);assert.deepEqual(unknownOnly.proposals,[]);
+});
+
+test('empty qualified coverage cannot pass evidence sufficiency by vacuous checks',()=>{
+  const {bundle}=sample();bundle.cohort.eligible_runs=[];bundle.cohort.aggregate.observed_sample_count=0;
+  const result=evaluateResearch(bundle,[]);
+  assert.equal(result.outcome,'INSUFFICIENT_EVIDENCE');
+  assert.equal(result.evidence_sufficiency.assessment_complete,false);assert.equal(result.aggregate.trades,0);
+  assert.ok(result.evidence_sufficiency.reasons.includes('HISTORICAL_COVERAGE_NOT_PROVEN'));
+});
+
+test('ten samples meets the unchanged floor but zero net exclusion cannot pass a proposal',()=>{
+  const {rows,bundle}=sample();
+  for(const row of rows.filter(row=>row.direction==='short')){row.gross_currency_value=1;row.net_profit_loss=0;}
+  const result=evaluateResearch(bundle,rows);
+  assert.equal(result.outcome,'NO_SUPPORTED_CHANGE');assert.equal(result.evidence_sufficiency.assessment_complete,true);
+  assert.deepEqual(result.evidence_sufficiency.sample_shortfalls,[]);
+  assert.ok(result.experiments.every(item=>item.reason==='DIRECTION_LOSS_NOT_REPEATED_IN_EVERY_RETAINED_RUN'));
 });
 
 test('flat gross trades losing after fees count as net losses',()=>{
@@ -537,6 +617,17 @@ test('Research UI preserves completed status while distinguishing historical sup
     qualified_for_new_support:false,qualification_warning:'Uncaptured case is retained as superseded history; automatic retry is not due'});
   assert.match(superseded,/Status: HISTORICAL_SUPERSEDED/);assert.match(superseded,/automatic retry is not due/);
   assert.match(panel({job_id:'fresh',state:'COMPLETED',qualified_for_new_support:true,report}),/Currently qualified history/);
+  const insufficient=sample();delete insufficient.bundle.research_coverage.b;
+  const insufficientReport=evaluateResearch(insufficient.bundle,insufficient.rows);
+  const insufficientPanel=panel({job_id:'insufficient',state:'COMPLETED',qualified_for_new_support:true,report:insufficientReport,
+    next_action:insufficientReport.next_action});
+  assert.match(insufficientPanel,/Status: COMPLETED/);assert.match(insufficientPanel,/Outcome: INSUFFICIENT_EVIDENCE/);
+  assert.match(insufficientPanel,/Direction-screen evidence: INSUFFICIENT/);
+  assert.match(insufficientPanel,/not an evaluated no-change finding/);assert.match(insufficientPanel,/Candidate validation: NOT_DUE/);
+  const sealedReport=structuredClone(report);delete sealedReport.evidence_sufficiency;
+  const sealedHash=objectHash(sealedReport);
+  assert.match(panel({job_id:'sealed',state:'COMPLETED',report:sealedReport}),/Not recorded in preserved report/);
+  assert.equal(objectHash(sealedReport),sealedHash);
 });
 
 test('queue mutation rolls back with its caller transaction; unapproved authority is rejected',()=>{
@@ -562,6 +653,60 @@ test('captured Research input is immutable and reused after restart without rere
   }finally{f.close();}
 });
 
+test('insufficient evidence is a completed finding, not endless RETRY or invented candidate/test work',()=>{
+  const f=queueFixture();try {
+    const {rows,bundle}=sample();delete bundle.research_coverage.b;
+    const result=evaluateResearch(bundle,rows);
+    f.worker.enqueue('case','a');const job=f.worker.claim();
+    const status=f.worker.complete(job,result,{id:'brain'},'strategy');
+    assert.equal(status.state,'COMPLETED');assert.equal(status.report.outcome,'INSUFFICIENT_EVIDENCE');
+    assert.match(status.next_action,/insufficient evidence, not an evaluated no-change finding/);
+    assert.equal(status.report.candidate_validation.status,'NOT_DUE');
+    assert.equal(f.backend.one('ow_cases','case').candidate_hash,null);
+    assert.equal(f.backend.db.prepare('SELECT COUNT(*) n FROM ow_tasks').get().n,0);
+    assert.equal(f.backend.db.prepare('SELECT COUNT(*) n FROM ow_approval_requests').get().n,0);
+    const artifact=f.backend.one('ow_artifacts',status.result_artifact_id);
+    const completed=f.backend.one('ow_research_jobs',job.id);
+    f.restart();f.worker.reconcile();
+    assert.equal(f.worker.claim(),null);assert.equal(f.worker.enqueue('case','a').id,job.id);
+    assert.deepEqual(f.backend.one('ow_research_jobs',job.id),completed);
+    assert.deepEqual(f.backend.one('ow_artifacts',status.result_artifact_id),artifact);
+  }finally{f.close();}
+});
+
+test('sealed pre-distinction v4 outcomes remain byte-identical and are never retroactively evaluated',()=>{
+  const f=historicalFixture(RESEARCH_VERSION);try {
+    for(let i=0;i<2;i++) {
+      f.worker.reconcile();const status=f.worker.statusForCase('case');
+      assert.equal(status.report.outcome,'NO_SUPPORTED_CHANGE');
+      assert.equal(status.report.evidence_sufficiency,undefined);
+      assert.equal(status.report.next_action,'Original v2 report instruction.');
+      assert.equal(f.worker.enqueue('case','a').id,f.legacyId);assert.equal(f.worker.claim(),null);
+      f.assertPreserved();f.restart();
+    }
+  }finally{f.close();}
+});
+
+test('frozen pre-distinction v4 input is resumed unchanged instead of being reclassified',()=>{
+  const f=queueFixture();try {
+    const {rows,bundle}=sample();bundle.research_coverage.b=bundle.research_coverage.a;
+    const result=evaluateResearch(bundle,rows);
+    assert.equal(result.outcome,'INSUFFICIENT_EVIDENCE');
+    // Explicit legacy fixture: a sealed v4 capture made before outcome distinction.
+    result.outcome='NO_SUPPORTED_CHANGE';delete result.evidence_sufficiency;delete result.screening_policy;
+    result.next_action='Preserved pre-distinction instruction.';
+    const snapshot={result,evidence:{historical:true}};const content=JSON.stringify(snapshot);
+    f.worker.enqueue('case','a');const job=f.worker.claim();
+    f.backend.db.prepare('UPDATE ow_research_jobs SET input_json=?,input_hash=? WHERE id=?')
+      .run(content,digest(content),job.id);
+    f.restart();f.backend.db.prepare('UPDATE ow_research_jobs SET lease_until_ms=0').run();
+    const resumed=f.worker.claim();f.worker.evidence=()=>{throw Error('frozen input must not be re-evaluated');};
+    assert.deepEqual(f.worker.capture(resumed),snapshot);
+    assert.equal(f.backend.one('ow_research_jobs',job.id).input_json,content);
+    assert.equal(f.backend.one('ow_research_jobs',job.id).input_hash,digest(content));
+  }finally{f.close();}
+});
+
 test('v4 snapshot preserves upstream cohort/exclusions/aggregates while period support stays internal',()=>{
   const f=queueFixture();try {
     const {rows,bundle}=sample();
@@ -581,7 +726,7 @@ test('v4 snapshot preserves upstream cohort/exclusions/aggregates while period s
     assert.deepEqual(captured.result.excluded_evidence,bundle.excluded_evidence);
     assert.equal(captured.evidence.bundle.research_coverage,undefined,'coverage is report-only provenance');
     assert.equal(captured.result.aggregate.trades,60);assert.equal(captured.result.historical_periods.distinct_coverage_count,2);
-    assert.equal(captured.result.outcome,'NO_SUPPORTED_CHANGE');
+    assert.equal(captured.result.outcome,'INSUFFICIENT_EVIDENCE');
   }finally{f.close();}
 });
 
@@ -610,7 +755,7 @@ test('real read-only extraction binds internal completion coverage without chang
     f.worker.enqueue('case','a');const captured=f.worker.capture(f.worker.claim());
     assert.deepEqual(classifications,['r','r','r','b','c','r']);
     assert.deepEqual(captured.result.eligible_run_ids,['b','c','r'],'all qualified configurations retained');
-    assert.equal(captured.result.aggregate.trades,60);assert.equal(captured.result.outcome,'NO_SUPPORTED_CHANGE');
+    assert.equal(captured.result.aggregate.trades,60);assert.equal(captured.result.outcome,'INSUFFICIENT_EVIDENCE');
     assert.equal(captured.result.historical_periods.distinct_coverage_count,2);
     assert.deepEqual(captured.evidence.bundle.cohort,bundle.cohort);
     assert.deepEqual(captured.evidence.bundle.excluded_evidence,bundle.excluded_evidence);

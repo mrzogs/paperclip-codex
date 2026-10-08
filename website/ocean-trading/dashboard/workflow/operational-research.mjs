@@ -8,6 +8,9 @@ export const RESEARCH_VERSION = 'ocean-cumulative-research/v4';
 const unknown = value => !value || /^(unknown|none|null|n\/a)$/i.test(String(value).trim());
 const round = value => Math.round(value * 100) / 100;
 const authority = Object.freeze({ automatic_strategy_change:false, candidate_approved:false, paper_authorized:false, live_authorized:false });
+const screeningPolicy = Object.freeze({ minimum_distinct_declared_periods:3, minimum_direction_trades_per_retained_run:10,
+  positive_net_exclusion_required_in_every_retained_run:true,
+  basis:'EXISTING_DIRECTION_DISCOVERY_SCREEN_NOT_STATISTICALLY_CALIBRATED' });
 
 function totals(rows) {
   const sum = field => round(rows.reduce((total,row) => total + Number(row[field]),0));
@@ -58,7 +61,7 @@ export function evaluateResearch(bundle, rows) {
     return {run_id,coverage,period_id:coverage?objectHash(coverage):null};
   });
   const periodIds=new Set(coverageByRun.map(run=>run.period_id).filter(Boolean));
-  const coverageProven=coverageByRun.every(run=>run.coverage!==null);
+  const coverageProven=coverageByRun.length>0 && coverageByRun.every(run=>run.coverage!==null);
   const perRun = coverageByRun.map(run=>({run_id:run.run_id,historical_period_id:run.period_id,
     ...totals(rows.filter(row=>row.run_id===run.run_id))}));
   const experiments = [];
@@ -72,23 +75,45 @@ export function evaluateResearch(bundle, rows) {
           ...totals(group),observed_exclusion_delta:round(-totals(group).net_profit_loss)};
       });
       const proposalEligible=dimension==='direction';
-      const supported=proposalEligible && coverageProven && periodIds.size>=3
-        && runs.every(run=>run.trades>=10 && run.observed_exclusion_delta>0);
+      const evidenceSufficient=proposalEligible && coverageProven && periodIds.size>=screeningPolicy.minimum_distinct_declared_periods
+        && runs.every(run=>run.trades>=screeningPolicy.minimum_direction_trades_per_retained_run);
+      const supported=evidenceSufficient && runs.every(run=>run.observed_exclusion_delta>0);
       const breakdown={dimension,value,runs,observed_exclusion_delta:round(-totals(selected).net_profit_loss),
         proposal_eligible:proposalEligible,lookahead_safe:proposalEligible,
         availability_basis:proposalEligible?'RECORDED_ENTRY_DIRECTION':'PRE_ENTRY_LABEL_AVAILABILITY_NOT_INDEPENDENTLY_PROVEN',
+        evidence_sufficient:evidenceSufficient,
         supported,reason:!proposalEligible?'OBSERVATIONAL_LABEL_ONLY_NOT_LOOKAHEAD_SAFE'
           :!coverageProven?'HISTORICAL_COVERAGE_NOT_PROVEN'
-          :supported?'REPEATED_EXPLORATORY_DIRECTION_LOSS':'INSUFFICIENT_OR_INCONSISTENT_HISTORICAL_COVERAGE_EVIDENCE'};
+          :periodIds.size<screeningPolicy.minimum_distinct_declared_periods?'INSUFFICIENT_DISTINCT_DECLARED_PERIODS'
+          :!evidenceSufficient?'INSUFFICIENT_DIRECTION_SAMPLE_IN_RETAINED_RUN'
+          :supported?'REPEATED_EXPLORATORY_DIRECTION_LOSS':'DIRECTION_LOSS_NOT_REPEATED_IN_EVERY_RETAINED_RUN'};
       if(proposalEligible)experiments.push(breakdown);
       else observations.push({...breakdown,label_basis:dimension==='session_name'
         ?'RECORDED_SIGNAL_SESSION_LABEL_NOT_EXECUTION_SESSION':'RECORDED_REGIME_LABEL_NOT_PROVEN_AVAILABLE_AT_ENTRY'});
     }
   }
   const proposals=experiments.filter(item=>item.supported);
+  const sampleShortfalls=experiments.flatMap(item=>item.runs
+    .filter(run=>run.trades<screeningPolicy.minimum_direction_trades_per_retained_run)
+    .map(run=>({direction:item.value,run_id:run.run_id,observed_trades:run.trades,
+      required_trades:screeningPolicy.minimum_direction_trades_per_retained_run})));
+  const insufficiencyReasons=[
+    ...(!coverageProven?['HISTORICAL_COVERAGE_NOT_PROVEN']:[]),
+    ...(periodIds.size<screeningPolicy.minimum_distinct_declared_periods?['INSUFFICIENT_DISTINCT_DECLARED_PERIODS']:[]),
+    ...(!experiments.length?['NO_RECORDED_DIRECTION_GROUPS']:[]),
+    ...(sampleShortfalls.length?['INSUFFICIENT_DIRECTION_SAMPLE_IN_RETAINED_RUN']:[]),
+  ];
+  const assessmentComplete=insufficiencyReasons.length===0;
   const result={
     schema_version:RESEARCH_VERSION,
-    outcome:proposals.length?'EXPLORATORY_PROPOSAL':'NO_SUPPORTED_CHANGE',
+    outcome:proposals.length?'EXPLORATORY_PROPOSAL':assessmentComplete?'NO_SUPPORTED_CHANGE':'INSUFFICIENT_EVIDENCE',
+    screening_policy:screeningPolicy,
+    evidence_sufficiency:{status:assessmentComplete?'SUFFICIENT':'INSUFFICIENT',assessment_complete:assessmentComplete,
+      scope:'RECORDED_ENTRY_DIRECTION_DISCOVERY_SCREEN_ONLY',reasons:insufficiencyReasons,
+      evaluated_direction_values:experiments.filter(item=>item.evidence_sufficient).map(item=>item.value),
+      unevaluated_direction_values:experiments.filter(item=>!item.evidence_sufficient).map(item=>item.value),
+      missing_coverage_run_ids:coverageByRun.filter(run=>run.coverage===null).map(run=>run.run_id),
+      distinct_declared_periods:periodIds.size,sample_shortfalls:sampleShortfalls},
     eligible_run_ids:eligibleIds,
     evidence_hash:objectHash(rows), cohort_hash:objectHash(bundle.cohort),
     accounting_basis:'Recorded simulated execution gross P&L, logger-recorded fees and net (gross minus fees); wins use recorded net P&L > 0.',
@@ -118,10 +143,13 @@ export function evaluateResearch(bundle, rows) {
       'Sierra decimal date counts, upstream session counts and distinct declared coverage do not prove sessions, independent periods, statistical independence or a probability of success.',
       'Repeated exact coverage counts once for direction-proposal period support only; distinct upstream configurations and all qualified trades remain in accounting. Overlapping or distinct coverage is not proven independent.',
       'Exploratory exclusion deltas are in-sample and do not establish candidate performance.',
+      'Evidence sufficiency applies only to the recorded entry-direction discovery screen, not all possible improvements or candidate validation. Its existing thresholds are not independently statistically calibrated.',
     ],
     next_action:proposals.length
-      ?'Review the exploratory direction proposal before freezing a separate candidate; test it on independent evidence. No actual candidate exists and no trading change has been made.'
-      :'Keep the current baseline. No supported direction filter was found across every qualified historical coverage; collect new non-live evidence. No actual candidate exists. No approval is pending.',
+      ?`Review the exploratory direction proposal before freezing a separate candidate; test it on independent evidence.${assessmentComplete?'':' Other recorded direction groups remain unassessed; resolve the reported evidence shortfalls before judging those groups.'} No actual candidate exists and no trading change has been made.`
+      :assessmentComplete
+        ?'Keep the current baseline. The recorded direction screen met its evidence floor, but no supported direction filter was found across every qualified historical coverage. This does not evaluate all possible improvements. No actual candidate exists. No approval is pending.'
+        :'Keep the current baseline. Research recorded insufficient evidence, not an evaluated no-change finding. Prove requested coverage for every retained run and collect new qualified non-live discovery evidence until at least three distinct declared coverages and ten trades per recorded direction in every retained run are available; resolve the report shortfalls. No actual candidate exists. No approval is pending.',
     authority,
   };
   return result;

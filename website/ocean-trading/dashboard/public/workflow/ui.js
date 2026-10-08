@@ -448,6 +448,7 @@ function researchPanel(research) {
     ['Simulated execution net P/L',esc(report.aggregate.net_profit_loss)],['Net wins / losses / flat',`${report.aggregate.wins} / ${report.aggregate.losses} / ${report.aggregate.flat}`],
     ['Accounting basis',esc(report.accounting_basis)],
     ['Missing exit attribution',esc(report.missing_exit_attribution)],
+    ['Direction-screen evidence',report.evidence_sufficiency ? badge(report.evidence_sufficiency.status) : 'Not recorded in preserved report'],
     ['Candidate validation',badge(report.candidate_validation.status)],
     ['Research Brain record',esc(report.brain_record?.record_id || 'Not recorded')],
   ]):research.last_error?`<p class='form-error'>${esc(human(research.last_error))}</p>`:''));
