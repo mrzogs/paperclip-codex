@@ -417,7 +417,9 @@ export class OperationalResearch {
       continuations,
       loop_stage:openContinuations.length?openContinuations.some(item=>item.blocked_reason || item.work_status==='BLOCKED')?'BLOCKED_CONTINUATION'
         :openContinuations.some(item=>item.kind==='PROPOSAL_PLANNING')?'PROPOSAL_PLANNING'
-        :openContinuations.some(item=>item.evidence_remediation?.requires_design_review)?'RESEARCH_DESIGN_REVIEW_REQUIRED':'EVIDENCE_REQUIRED'
+        :openContinuations.some(item=>item.evidence_remediation?.requires_design_review)?'RESEARCH_DESIGN_REVIEW_REQUIRED'
+        :openContinuations.some(item=>item.kind==='EVIDENCE_FOLLOW_UP')?'EVIDENCE_REQUIRED'
+        :openContinuations.some(item=>item.kind==='RISK_DISABLE_REVIEW')?'RISK_DISABLE_REVIEW_REQUIRED':'EVIDENCE_REQUIRED'
         :evidenceReassessed.length?evidenceReassessed.some(item=>item.progress.outcome==='EXPLORATORY_PROPOSAL')?'PROPOSAL_PLANNING':'DIRECTION_SCREEN_NO_SUPPORTED_CHANGE'
         :continuationWarning?'BLOCKED_CONTINUATION':null,
       next_action:superseded?supersededAction:completedCase && job.state==='COMPLETED' && (job.analysis_version!==this.version || backfillSkipped)

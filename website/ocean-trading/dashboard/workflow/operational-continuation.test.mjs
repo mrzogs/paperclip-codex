@@ -109,6 +109,27 @@ function assertNoAuthority(f) {
   assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_artifacts WHERE kind IN ('CANDIDATE','BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT')").get().n,0);
 }
 
+function assertRiskReview(f,status) {
+  const child=f.children().find(row=>JSON.parse(row.payload_json).kind==='RISK_DISABLE_REVIEW');
+  assert.ok(child);const view=f.backend.readCase(f.human,child.id);
+  assert.equal(view.namespace,'OPERATIONAL');assert.equal(view.owner_id,'brain');assert.equal(view.candidate_hash,null);
+  assert.equal(view.planning.scope,'OWNED_RISK_REVIEW_ONLY');assert.equal(view.planning.qualified_for_planning,false);
+  assert.equal(Boolean(view.planning.blocked_reason),false);assert.equal(view.planning.plan_work,null);
+  assert.equal(view.planning.risk_review.disposition,'RISK_DISABLE_REVIEW_REQUIRED');
+  assert.equal(view.planning.risk_review.retained_trades,0);assert.equal(view.planning.approval_due,false);
+  assert.equal(view.tasks[0].kind,'RISK_DISABLE_REVIEW');assert.equal(view.tasks[0].status,'NOT_RUN');
+  assert.match(view.next_action,/Owner brain: review the frozen .* direction loss observation/);
+  assert.match(view.next_action,/Keep the baseline unchanged; no strategy disable, candidate, execution or human approval/);
+  assert.match(status.next_action,new RegExp(child.id));
+  const payload=JSON.parse(child.payload_json),artifact=f.backend.one('ow_artifacts',payload.lineage_artifact_id);
+  const frozen=JSON.parse(Buffer.from(artifact.content).toString());
+  assert.equal(artifact.kind,'EVIDENCE');assert.equal(frozen.source.report_hash,status.result_hash);
+  assert.equal(frozen.source.input_hash,status.input_hash);assert.equal(objectHash(frozen.support),payload.support_hash);
+  assert.equal(frozen.support.requirement.experiment_hash,objectHash(status.report.experiments[0]));
+  assert.deepEqual(plans(f).queue(f.actor).items,[]);assert.equal(returnedCount(f),0);
+  assertNoAuthority(f);return {child,artifact,view};
+}
+
 test('actual completion of a large mock-native cumulative report survives restart without clipping evidence',t=>{
   // Evidence/physical qualification are explicitly mocked; completion, artifact
   // size enforcement, transactions, immutable input and restart use real software.
@@ -246,12 +267,14 @@ test('large report continuation comparisons resolve later evidence without rewri
 test('large zero-exposure reports still require G21 risk-disable review, not candidate planning',()=>{
   const f=fixture({prospective:true,oneDirection:'long',rowsPerRun:500});try {
     const status=f.complete(),before=sealed(f);
-    assert.equal(status.report.outcome,'NO_SUPPORTED_CHANGE');assert.equal(f.children().length,0);
+    assert.equal(status.report.outcome,'NO_SUPPORTED_CHANGE');assert.equal(f.children().length,1);
     assert.equal(status.report.direction_exclusion_dispositions[0].retained_trades,0);
     assert.equal(status.report.direction_exclusion_dispositions[0].disposition,'RISK_DISABLE_REVIEW_REQUIRED');
     assert.equal(status.report.native_session_evidence.exit_audit.length,1500);
     assert.equal(status.report.candidate_validation.status,'NOT_DUE');
+    const {child,artifact}=assertRiskReview(f,status);
     f.restart();f.worker.reconcile();assertSealed(f,before);assertNoAuthority(f);
+    assert.deepEqual(f.backend.one('ow_cases',child.id),child);assert.deepEqual(f.backend.one('ow_artifacts',artifact.id),artifact);
     assert.deepEqual(f.worker.statusForCase('source').report,status.report);
   }finally{f.close();}
 });
@@ -282,9 +305,105 @@ test('prospective all-one-direction losses create no entry-filter planning work 
     const status=f.complete(),before=sealed(f);
     assert.equal(status.report.outcome,'NO_SUPPORTED_CHANGE');assert.deepEqual(status.report.proposals,[]);
     assert.equal(status.report.direction_exclusion_dispositions[0].disposition,'RISK_DISABLE_REVIEW_REQUIRED');
-    assert.equal(status.report.candidate_validation.status,'NOT_DUE');assert.equal(f.children().length,0);
+    assert.equal(status.report.candidate_validation.status,'NOT_DUE');assert.equal(f.children().length,1);
+    assert.equal(status.loop_stage,'RISK_DISABLE_REVIEW_REQUIRED');const {child,artifact}=assertRiskReview(f,status);
     f.restart();for(let i=0;i<3;i++)f.worker.reconcile();
-    assert.equal(f.children().length,0);assertSealed(f,before);assertNoAuthority(f);
+    assert.equal(f.children().length,1);assertSealed(f,before);assertNoAuthority(f);
+    assert.deepEqual(f.backend.one('ow_cases',child.id),child);assert.deepEqual(f.backend.one('ow_artifacts',artifact.id),artifact);
+  }finally{f.close();}
+});
+
+test('risk review coalesces duplicate support, recovers only its missing task and never invokes planning',()=>{
+  const f=fixture({prospective:true,oneDirection:'short'});try {
+    const status=f.complete(),before=sealed(f),{child,artifact}=assertRiskReview(f,status);
+    f.seed('duplicate-risk');f.complete();assert.equal(f.children().length,1);
+    assert.equal(f.worker.statusForCase('duplicate-risk').continuations[0].case_id,child.id);
+    f.backend.db.prepare('DELETE FROM ow_tasks WHERE case_id=?').run(child.id);
+    f.restart();for(let i=0;i<3;i++)f.worker.reconcile();
+    assert.equal(f.children().length,1);assert.equal(f.backend.readCase(f.human,child.id).tasks.length,1);
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_events WHERE action='operational.research.planning.created'").get().n,1);
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_events WHERE action='operational.research.continuation.link'").get().n,2);
+    assert.deepEqual(f.backend.one('ow_cases',child.id),child);assert.deepEqual(f.backend.one('ow_artifacts',artifact.id),artifact);
+    assert.throws(()=>f.backend.db.prepare("UPDATE ow_artifacts SET content='changed' WHERE id=?").run(artifact.id),/immutable workflow record/);
+    assert.throws(()=>plans(f).read(f.actor,child.id),/SUPPORTED_OPERATIONAL_PROPOSAL_REQUIRED/);
+    for(const actor of [f.human,{...f.actor,namespace:'TEST'},f.actor])
+      for(const operation of ['case.transition','artifact.write','approval.request','task.result'])
+        assert.throws(()=>f.backend.mutate(operation,actor,{message_id:'test-risk-denied',data:{case_id:child.id}}),/OPERATIONAL_PLANNING_MUTATION_NOT_ENABLED/);
+    assertSealed(f,before);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('insufficient loss observation retains both risk review and independent evidence remediation',()=>{
+  const f=fixture({prospective:true,oneDirection:'long',insufficient:true});try {
+    const status=f.complete(),before=sealed(f);assert.equal(status.report.outcome,'INSUFFICIENT_EVIDENCE');
+    assert.equal(status.loop_stage,'EVIDENCE_REQUIRED');assert.equal(f.children().length,2);
+    const {child}=assertRiskReview(f,status);assert.equal(status.continuations.find(item=>item.case_id===child.id).risk_review.evidence_status,'INSUFFICIENT');
+    assert.ok(status.continuations.some(item=>item.kind==='EVIDENCE_FOLLOW_UP' && item.evidence_remediation.status==='QUALIFIED_EVIDENCE_REQUIRED'));
+    f.restart();f.worker.reconcile();assert.equal(f.children().length,2);assertSealed(f,before);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('profitable zero-remainder accounting and ordinary no-change do not invent risk-disable work',()=>{
+  for(const options of [{prospective:true,oneDirection:'long'},{prospective:true,noChange:true}]) {
+    const f=fixture(options);try {
+      if(options.oneDirection)for(const row of f.rows)Object.assign(row,{gross_currency_value:20,net_profit_loss:19});
+      const status=f.complete(),before=sealed(f);assert.equal(status.report.outcome,'NO_SUPPORTED_CHANGE');
+      assert.deepEqual(f.children(),[]);assert.deepEqual(status.continuations,[]);
+      f.restart();f.worker.reconcile();assert.deepEqual(f.children(),[]);assertSealed(f,before);assertNoAuthority(f);
+    }finally{f.close();}
+  }
+});
+
+test('risk routing checks sealed disposition agreement and current source/owner proof rather than trusting a flag',()=>{
+  const f=fixture({prospective:true,oneDirection:'long'});try {
+    const {result}=f.capture(),c=f.worker.continuations;
+    for(const mutate of [report=>report.direction_exclusion_dispositions=[],report=>report.hypotheses=[],
+      report=>report.experiments[0].retained_exposure.retained_trades=1]) {
+      const changed=structuredClone(result);mutate(changed);
+      assert.throws(()=>c.items({report:changed}),/CONTINUATION_RISK_DISPOSITION_CONFLICT/);
+    }
+  }finally{f.close();}
+  for(const mode of ['unqualified','owner','historical']) {
+    const f=fixture({prospective:true,oneDirection:'short'});try {
+      if(mode==='historical')f.worker.continuations.ensure=()=>[];
+      const status=f.complete(),before=sealed(f);
+      if(mode==='historical')f.backend.db.prepare("UPDATE ow_research_jobs SET analysis_version='ocean-cumulative-research/v5' WHERE id=?").run(before.job.id);
+      if(mode==='unqualified')f.setProof(false);
+      if(mode==='owner')f.backend.config.identities[0].revoked=true;
+      const retained=sealed(f);f.restart();for(let i=0;i<3;i++)f.worker.reconcile();assertSealed(f,retained);
+      if(mode==='historical')assert.equal(f.children().length,0);
+      else {const view=f.backend.readCase(f.human,f.children()[0].id);assert.equal(view.work_status,'BLOCKED');
+        assert.match(view.planning.blocked_reason,mode==='owner'?/OWNER_REQUIRED/:/PROVENANCE_REQUIRED/);
+        assert.match(view.next_action,/Owner brain: resolve/);}
+      assertNoAuthority(f);
+    }finally{f.close();}
+  }
+});
+
+test('risk publication failure rolls back completion and retry seals exactly one review',()=>{
+  const f=fixture({prospective:true,oneDirection:'short'});try {
+    const {job,result}=f.capture(),write=f.backend.writeArtifact.bind(f.backend),input=f.backend.one('ow_research_jobs',job.id).input_json;
+    f.backend.writeArtifact=(actor,data)=>{if(data.artifact_id.startsWith('test-research-lineage-'))throw Error('risk publication crash');return write(actor,data);};
+    assert.throws(()=>f.worker.complete(job,result,f.actor,'strategy'),/risk publication crash/);
+    assert.equal(f.children().length,0);assert.equal(f.backend.one('ow_research_jobs',job.id).input_json,input);
+    f.backend.writeArtifact=write;f.restart();f.backend.db.prepare('UPDATE ow_research_jobs SET lease_until_ms=0 WHERE id=?').run(job.id);
+    const resumed=f.worker.claim();f.worker.complete(resumed,JSON.parse(input).result,f.actor,'strategy');
+    const status=f.worker.statusForCase('source');assertRiskReview(f,status);const before=sealed(f);
+    f.restart();f.worker.reconcile();assert.equal(f.children().length,1);assertSealed(f,before);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('risk review cancellation is preserved rather than reopened or treated as an authorized disable',()=>{
+  const f=fixture({prospective:true,oneDirection:'short'});try {
+    const status=f.complete(),{child,artifact}=assertRiskReview(f,status),before=sealed(f);
+    // Disposable fixture of a separately recorded terminal disposition; this
+    // does not introduce a browser mutation or fabricate a production review.
+    f.backend.db.prepare("UPDATE ow_cases SET work_status='CANCELLED',revision=revision+1 WHERE id=?").run(child.id);
+    const cancelled=f.backend.one('ow_cases',child.id);f.restart();f.worker.reconcile();f.worker.reconcile();
+    assert.deepEqual(f.backend.one('ow_cases',child.id),cancelled);assert.equal(f.children().length,1);
+    const view=f.backend.readCase(f.human,child.id);assert.equal(view.work_status,'CANCELLED');
+    assert.match(view.next_action,/Risk review is cancelled.*No strategy disable, candidate testing or approval is implied/);
+    assert.deepEqual(f.backend.one('ow_artifacts',artifact.id),artifact);assertSealed(f,before);assertNoAuthority(f);
   }finally{f.close();}
 });
 
@@ -578,6 +697,62 @@ test('actual source UI links owned progress and labels planning work without off
 });
 
 const plans=f=>f.worker.continuations.plans;
+test('isolated Chrome links the actual owned risk review, retains it across restart and offers no disable or approval',
+  {skip:!process.env.OCEAN_RISK_REVIEW_UI_ARTIFACTS},async t=>{
+  const {createRequire}=await import('node:module');
+  const require=createRequire(import.meta.url);
+  const {chromium}=require(require.resolve('playwright',{paths:[process.env.OCEAN_S21_NODE_MODULES]}));
+  const f=fixture({prospective:true,oneDirection:'short'}),browser=await chromium.launch({channel:'chrome',headless:true});
+  try {
+    const status=f.complete(),before=sealed(f),{child,artifact}=assertRiskReview(f,status);
+    const root=new URL('../public/',import.meta.url),base='http://127.0.0.1:17891',errors=[],writes=[];
+    const context=await browser.newContext(),page=await context.newPage();page.on('pageerror',error=>errors.push(error.message));
+    await page.addInitScript(()=>sessionStorage.setItem('ocean-workflow-human-csrf','EXPLICIT_MOCK_BROWSER_SESSION'));
+    // Transport/session are explicit mocks. Read views use the real backend,
+    // disposable SQLite and current UI; no production service or credential is read.
+    await page.route('**/*',async route=>{
+      const request=route.request(),url=new URL(request.url());
+      if(url.origin!==base)return route.abort();
+      if(request.method()!=='GET'){writes.push(request.url());return route.abort();}
+      if(url.pathname==='/api/workflow/session')return route.fulfill({json:{expires_at_utc:new Date(Date.now()+3600000).toISOString()}});
+      if(url.pathname==='/api/workflow/view/dashboard')return route.fulfill({json:{counts:{action_required:0}}});
+      if(url.pathname.startsWith('/api/workflow/view/cases/'))return route.fulfill({json:readWorkflowView(f.backend,f.human,url.pathname.slice('/api/workflow/'.length))});
+      const relative=url.pathname.startsWith('/improvement/')?'workflow/index.html':url.pathname.slice(1);
+      const file=new URL(relative,root);
+      if(!file.href.startsWith(root.href) || !fs.existsSync(file))return route.fulfill({status:404,body:''});
+      const type={'.html':'text/html','.js':'text/javascript','.css':'text/css','.png':'image/png','.svg':'image/svg+xml'}[path.extname(file.pathname)];
+      return route.fulfill({contentType:type || 'application/octet-stream',body:fs.readFileSync(file)});
+    });
+    const settled=()=>page.waitForFunction(()=>document.querySelector('#content')?.getAttribute('aria-busy')==='false');
+    await page.goto(`${base}/improvement/cases/source`);await settled();
+    await page.locator(`a[href='/improvement/cases/${child.id}']`).click();await settled();
+    await page.getByRole('heading',{name:'Risk review scope',exact:true}).waitFor();
+    const body=await page.locator('#content').innerText();
+    assert.match(body,/Owner brain: review the frozen short direction loss observation/);
+    assert.match(body,/60 baseline \/ 60 excluded \/ 0 retained trades/);assert.match(body,/Required risk review/);
+    assert.match(body,/no strategy disable, candidate development or test permission/);
+    assert.doesNotMatch(body,/Await new qualified Research|Required planning work|Historical validation/);
+    assert.equal(await page.locator('#content [data-action]').count(),0);
+    const output=process.env.OCEAN_RISK_REVIEW_UI_ARTIFACTS;fs.mkdirSync(output,{recursive:true});
+    for(const [width,height,label] of [[1440,1000,'desktop'],[390,844,'mobile']]) {
+      await page.setViewportSize({width,height});
+      await page.screenshot({path:path.join(output,`risk-review-${label}.png`),fullPage:true,animations:'disabled'});
+      const overflow=await page.evaluate(()=>({viewport:innerWidth,document:document.documentElement.scrollWidth,
+        elements:[...document.querySelectorAll('#content *')].filter(node=>node.getBoundingClientRect().right>innerWidth)
+          .slice(0,12).map(node=>({tag:node.tagName,class:node.className,text:node.textContent.slice(0,100),right:node.getBoundingClientRect().right}))}));
+      if(overflow.document>overflow.viewport)t.diagnostic(JSON.stringify(overflow));
+      assert.equal(overflow.document<=overflow.viewport,true);
+    }
+    f.restart();f.worker.reconcile();await page.reload();await settled();
+    assert.equal(await page.getByRole('heading',{name:'Risk review scope',exact:true}).count(),1);
+    assert.match(await page.locator('#content').innerText(),/Owner brain: review/);
+    await page.locator('dt').filter({hasText:'Source Research'}).locator('..').getByRole('link').click();await settled();
+    assert.equal(new URL(page.url()).pathname,'/improvement/cases/source');
+    assert.match(await page.locator('#content').innerText(),/Owned continuation work/);
+    assert.deepEqual(errors,[]);assert.deepEqual(writes,[]);assertSealed(f,before);
+    assert.deepEqual(f.backend.one('ow_artifacts',artifact.id),artifact);assertNoAuthority(f);
+  }finally{await browser.close();f.close();}
+});
 function claimPlan(f,message='plan-claim'){
   const child=f.children()[0];
   return plans(f).perform('claim',f.actor,{message_id:message,data:{case_id:child.id,
