@@ -148,6 +148,14 @@ function New-ObservedSourceState($Probe) {
   }
 }
 
+function Test-BridgeWindowsPath([string]$Left, [string]$Right) {
+  if ([string]::IsNullOrWhiteSpace($Left) -or [string]::IsNullOrWhiteSpace($Right) -or
+      -not [IO.Path]::IsPathRooted($Left) -or -not [IO.Path]::IsPathRooted($Right)) { return $false }
+  try {
+    return [StringComparer]::OrdinalIgnoreCase.Equals([IO.Path]::GetFullPath($Left), [IO.Path]::GetFullPath($Right))
+  } catch { return $false }
+}
+
 function Test-OperationalPhysicalBinding($BridgeConfig) {
   if ($BridgeConfig.schema_version -cne 'ocean-replay-run-bridge/v4') { return }
   foreach ($pair in @(
@@ -160,14 +168,14 @@ function Test-OperationalPhysicalBinding($BridgeConfig) {
   }
   $expectedExe = [IO.Path]::GetFullPath([string]$BridgeConfig.expected_sierra_exe)
   $matches = @(Get-Process -Name 'SierraChart_64' -ErrorAction SilentlyContinue | Where-Object {
-    try { [IO.Path]::GetFullPath([string]$_.Path) -ceq $expectedExe } catch { $false }
+    Test-BridgeWindowsPath ([string]$_.Path) $expectedExe
   })
   if ($matches.Count -ne 1) { throw 'EXACT_SIERRA_PROCESS_REQUIRED' }
   $process = $matches[0]
   $modulePaths = @($process.Modules | ForEach-Object { [IO.Path]::GetFullPath([string]$_.FileName) })
   foreach ($modulePath in @([string]$BridgeConfig.expected_strategy_module_path,[string]$BridgeConfig.expected_telemetry_module_path)) {
     $expectedPath = [IO.Path]::GetFullPath($modulePath)
-    if (-not ($modulePaths | Where-Object { $_ -ceq $expectedPath })) { throw 'EXPECTED_MODULE_NOT_LOADED' }
+    if (-not ($modulePaths | Where-Object { Test-BridgeWindowsPath $_ $expectedPath })) { throw 'EXPECTED_MODULE_NOT_LOADED' }
   }
   # Sierra's main-window title is mutable and commonly shows the active chart
   # rather than the chartbook name. Exact process/module binding is verified

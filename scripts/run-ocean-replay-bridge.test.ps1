@@ -91,6 +91,74 @@ function Assert-BridgeThrows([ScriptBlock]$Action, [string]$Code) {
   Assert-BridgeTest ($observed -ceq $Code) ('EXPECTED_' + $Code)
 }
 
+# Exercise the physical guard with mock processes and disposable non-binary files.
+& {
+  function Get-Process([string]$Name, [string]$ErrorAction) {
+    Assert-BridgeTest ($Name -ceq 'SierraChart_64') 'PHYSICAL_PROCESS_MOCK_SCOPE_CONFLICT'
+    return $script:PhysicalProcesses
+  }
+  function New-MockPhysicalProcess([string]$Path, $Modules, [bool]$Responding = $true) {
+    return [pscustomobject]@{Path=$Path;Modules=@($Modules | ForEach-Object { [pscustomobject]@{FileName=$_} });Responding=$Responding}
+  }
+  $physicalRoot = Join-Path ([IO.Path]::GetTempPath()) ('ocean-bridge-path-test-' + [Guid]::NewGuid().ToString('N'))
+  $null = [IO.Directory]::CreateDirectory($physicalRoot)
+  $strategyPath = Join-Path $physicalRoot 'mock-strategy.dll'
+  $telemetryPath = Join-Path $physicalRoot 'mock-telemetry.dll'
+  try {
+    [IO.File]::WriteAllText($strategyPath, 'MOCK_ONLY_NOT_A_DLL')
+    [IO.File]::WriteAllText($telemetryPath, 'MOCK_ONLY_NOT_A_LOGGER')
+    $physicalConfig = [pscustomobject]@{
+      schema_version='ocean-replay-run-bridge/v4'
+      expected_sierra_exe=(Join-Path $physicalRoot 'SierraChart_64.exe')
+      expected_strategy_module_path=$strategyPath; expected_telemetry_module_path=$telemetryPath
+      expected_strategy_module_sha256=('sha256:' + (Get-FileHash -LiteralPath $strategyPath -Algorithm SHA256).Hash.ToLowerInvariant())
+      expected_telemetry_module_sha256=('sha256:' + (Get-FileHash -LiteralPath $telemetryPath -Algorithm SHA256).Hash.ToLowerInvariant())
+    }
+    $paths = @($strategyPath,$telemetryPath)
+    Assert-BridgeTest (Test-BridgeWindowsPath $physicalConfig.expected_sierra_exe $physicalConfig.expected_sierra_exe.ToUpperInvariant()) 'WINDOWS_PATH_CASE_REJECTED'
+    Assert-BridgeTest (Test-BridgeWindowsPath (Join-Path $physicalRoot '.\SierraChart_64.exe') $physicalConfig.expected_sierra_exe) 'WINDOWS_PATH_NOT_NORMALIZED'
+    Assert-BridgeTest (-not (Test-BridgeWindowsPath '' $physicalConfig.expected_sierra_exe)) 'EMPTY_WINDOWS_PATH_ACCEPTED'
+    Assert-BridgeTest (-not (Test-BridgeWindowsPath 'SierraChart_64.exe' $physicalConfig.expected_sierra_exe)) 'RELATIVE_WINDOWS_PATH_ACCEPTED'
+
+    $script:PhysicalProcesses = @(New-MockPhysicalProcess $physicalConfig.expected_sierra_exe $paths)
+    Test-OperationalPhysicalBinding $physicalConfig
+    $casePaths = @($paths | ForEach-Object { $_.ToUpperInvariant() })
+    $caseProcess = New-MockPhysicalProcess $physicalConfig.expected_sierra_exe.ToUpperInvariant() $casePaths
+    $script:PhysicalProcesses = @($caseProcess)
+    Test-OperationalPhysicalBinding $physicalConfig
+
+    $script:PhysicalProcesses = @(New-MockPhysicalProcess (Join-Path $physicalRoot 'other-root\SierraChart_64.exe') $paths)
+    Assert-BridgeThrows { Test-OperationalPhysicalBinding $physicalConfig } 'EXACT_SIERRA_PROCESS_REQUIRED'
+    $script:PhysicalProcesses = @($caseProcess,$caseProcess)
+    Assert-BridgeThrows { Test-OperationalPhysicalBinding $physicalConfig } 'EXACT_SIERRA_PROCESS_REQUIRED'
+    $script:PhysicalProcesses = @()
+    Assert-BridgeThrows { Test-OperationalPhysicalBinding $physicalConfig } 'EXACT_SIERRA_PROCESS_REQUIRED'
+    $script:PhysicalProcesses = @(New-MockPhysicalProcess '' $paths)
+    Assert-BridgeThrows { Test-OperationalPhysicalBinding $physicalConfig } 'EXACT_SIERRA_PROCESS_REQUIRED'
+
+    $script:PhysicalProcesses = @(New-MockPhysicalProcess $physicalConfig.expected_sierra_exe @($strategyPath))
+    Assert-BridgeThrows { Test-OperationalPhysicalBinding $physicalConfig } 'EXPECTED_MODULE_NOT_LOADED'
+    $wrongModule = Join-Path $physicalRoot 'other-root\mock-telemetry.dll'
+    $script:PhysicalProcesses = @(New-MockPhysicalProcess $physicalConfig.expected_sierra_exe @($strategyPath,$wrongModule))
+    Assert-BridgeThrows { Test-OperationalPhysicalBinding $physicalConfig } 'EXPECTED_MODULE_NOT_LOADED'
+    $script:PhysicalProcesses = @($caseProcess)
+    $correctHash = $physicalConfig.expected_strategy_module_sha256
+    $physicalConfig.expected_strategy_module_sha256 = 'sha256:' + ('0' * 64)
+    Assert-BridgeThrows { Test-OperationalPhysicalBinding $physicalConfig } 'EXPECTED_MODULE_HASH_MISMATCH'
+    $physicalConfig.expected_strategy_module_sha256 = $correctHash
+    $script:PhysicalProcesses = @(New-MockPhysicalProcess $physicalConfig.expected_sierra_exe $paths $false)
+    Assert-BridgeThrows { Test-OperationalPhysicalBinding $physicalConfig } 'EXPECTED_SIERRA_PROCESS_NOT_RESPONDING'
+    Write-Output 'PASS: 14 mock Windows-path/physical-guard cases; exact count, root, loaded modules and DLL hashes retained.'
+  } finally {
+    foreach ($path in @($strategyPath,$telemetryPath)) {
+      if ([IO.Path]::GetFullPath([IO.Path]::GetDirectoryName($path)) -cne [IO.Path]::GetFullPath($physicalRoot)) { throw 'PHYSICAL_TEST_CLEANUP_SCOPE_CONFLICT' }
+      [IO.File]::Delete($path)
+    }
+    [IO.Directory]::Delete($physicalRoot)
+    $script:PhysicalProcesses = $null
+  }
+}
+
 # Only disposable mock config files are used; no credential, DB, service or
 # physical-process call is made by these executable configuration regressions.
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('ocean-bridge-config-test-' + [Guid]::NewGuid().ToString('N'))
