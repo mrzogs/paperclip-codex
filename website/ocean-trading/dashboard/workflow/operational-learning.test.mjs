@@ -165,10 +165,58 @@ test('a Brain recommendation creates one deterministic Research continuation',as
     assert.equal(trigger.conclusion_type,'RECOMMENDATION');
     assert.match(trigger.continuation_case_id,/^CASE-OPERATIONAL-/);
     assert.match(trigger.continuation_artifact_id,/^test-operational-learning-recommendation-/);
-    assert.match(trigger.next_action,/persist and complete Research/);
-    assert.equal(trigger.loop_stage,'PENDING_RESEARCH');
+    assert.match(trigger.next_action,/provenance owner/,'Mock-only completion retains an explicit current qualification action');
+    assert.equal(trigger.loop_stage,'QUALIFICATION_REQUIRED','Mock-only provenance cannot claim current completion');
+    assert.equal(trigger.recorded_loop_stage,'PENDING_RESEARCH');
     await f.learner.flushOnce();
     assert.equal(f.continuations.length,2,'completed continuation must remain idempotent');
+  }finally{f.close();}
+});
+
+test('G08 read-only run status separates preserved completion from current qualification and restores qualified positive support',()=>{
+  const f=fixture();
+  try {
+    const content=JSON.stringify({conclusion_type:'NO_CHANGE',registry_record_sha256:f.registry.record_sha256,
+      continuation:{case_id:'preserved-research-case'},next_action:'Keep current baseline.'});
+    f.db.prepare('INSERT INTO ow_operational_brain_results VALUES(?,?,?)').run('preserved-result',f.trigger,
+      JSON.stringify({result_id:'preserved-result',content}));
+    f.db.prepare('INSERT INTO ow_operational_brain_callbacks VALUES(?,?)').run('preserved-result',JSON.stringify({status:'COMPLETED'}));
+    f.learner.registryContext=f.registry;
+    let research={state:'COMPLETED',historical:true,qualified_for_new_support:false,analysis_version:'ocean-cumulative-research/v2',
+      report:{outcome:'NO_SUPPORTED_CHANGE',next_action:'Keep current baseline.'},next_action:'Resolve current provenance; preserve the prior report.'};
+    f.backend.operationalResearch={statusForCase:()=>research};
+    const classify=f.learner.classification.bind(f.learner);
+    let telemetry={verified:false,bypassed:false,required_action:'Resolve physical strategy binding and raw STTL2 identity conflict.'};
+    // Explicit qualification fixture; no native replay or operational authority is represented.
+    f.learner.classification=run=>({...classify(run),eligible:telemetry.verified,telemetry,
+      reasons:telemetry.verified?[]:['PHYSICAL_STRATEGY_BINDING_CONFLICT','RAW_STTL2_IDENTITY_CONFLICT']});
+    const snapshot=()=>objectHash(['ow_runs','ow_run_plans','ow_operational_brain_results','ow_operational_brain_callbacks']
+      .map(table=>f.db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()));
+    const before=snapshot(),reportHash=objectHash(research);
+    for(let i=0;i<2;i++) {
+      const status=f.learner.statusForRun(f.trigger);
+      assert.equal(status.stage,'COMPLETE','Recorded callback stays complete');
+      assert.equal(status.current_provenance_qualified,false);
+      assert.equal(status.loop_stage,'QUALIFICATION_REQUIRED');
+      assert.equal(status.current_qualification_status,'QUALIFICATION_REQUIRED');
+      assert.deepEqual(status.historical_result,{learning_stage:'COMPLETE',loop_stage:'COMPLETE',
+        conclusion_type:'NO_CHANGE',research_outcome:'NO_SUPPORTED_CHANGE'});
+      assert.match(status.next_action,/physical strategy binding and raw STTL2 identity conflict/);
+      assert.doesNotMatch(status.next_action,/Keep current baseline/);
+    }
+    assert.equal(snapshot(),before);assert.equal(objectHash(research),reportHash);
+    telemetry={verified:true,bypassed:false};
+    assert.equal(f.learner.statusForRun(f.trigger).loop_stage,'QUALIFICATION_REQUIRED','Historical report is not new support even if physical proof is restored');
+    research={...research,historical:false,qualified_for_new_support:true,analysis_version:'ocean-cumulative-research/v6',
+      next_action:'Keep current baseline. Qualified direction screen found no supported change.'};
+    const current=f.learner.statusForRun(f.trigger);
+    assert.equal(current.loop_stage,'COMPLETE');assert.equal(current.current_qualification_status,'CURRENT');
+    assert.equal(current.current_provenance_qualified,true);assert.equal(current.historical_result,null);
+    assert.match(current.next_action,/Qualified direction screen/);
+    f.backend.operationalResearch.statusForCase=()=>null;telemetry={verified:false,bypassed:false};
+    assert.equal(f.learner.statusForRun(f.trigger).loop_stage,'QUALIFICATION_REQUIRED','A completed callback alone does not grant current support');
+    assert.match(f.learner.statusForRun(f.trigger).next_action,/provenance owner/);
+    assert.equal(snapshot(),before);
   }finally{f.close();}
 });
 

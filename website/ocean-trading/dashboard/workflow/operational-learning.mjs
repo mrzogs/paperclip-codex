@@ -974,14 +974,22 @@ export class OperationalLearning {
       ?this.db.prepare("SELECT id FROM ow_cases WHERE run_id=? AND json_extract(payload_json,'$.origin')='OPERATIONAL_RESEARCH_REASSESSMENT' ORDER BY rowid DESC LIMIT 1").get(runId)?.id:null;
     const researchCase=accountingCase || details?.continuation?.case_id;
     const research = researchCase?this.backend.operationalResearch?.statusForCase(researchCase) || null:null;
+    const currentProvenanceQualified=classification.telemetry.verified && !classification.telemetry.bypassed;
+    const recordedLoopStage=stage === 'COMPLETE' && (research || details?.conclusion_type === 'RECOMMENDATION')
+      ? research?.loop_stage || (research?.state === 'COMPLETED' ? 'COMPLETE' : research?.effective_state || research?.state || 'PENDING_RESEARCH') : stage;
+    const qualificationRequired=stage==='COMPLETE' && (!currentProvenanceQualified
+      || research?.historical===true || research?.qualified_for_new_support===false);
     return {
       stage,
-      loop_stage: stage === 'COMPLETE' && (research || details?.conclusion_type === 'RECOMMENDATION')
-        ? research?.loop_stage || (research?.state === 'COMPLETED' ? 'COMPLETE' : research?.effective_state || research?.state || 'PENDING_RESEARCH') : stage,
+      loop_stage:qualificationRequired?'QUALIFICATION_REQUIRED':recordedLoopStage,
+      recorded_loop_stage:recordedLoopStage,
+      current_qualification_status:qualificationRequired?'QUALIFICATION_REQUIRED':currentProvenanceQualified?'CURRENT':'NOT_VERIFIED',
+      historical_result:qualificationRequired?{learning_stage:stage,loop_stage:recordedLoopStage,
+        conclusion_type:details?.conclusion_type || null,research_outcome:research?.report?.outcome || null}:null,
       research,
       eligible: classification.eligible,
       reasons: classification.reasons,
-      current_provenance_qualified: classification.telemetry.verified && !classification.telemetry.bypassed,
+      current_provenance_qualified: currentProvenanceQualified,
       qualification_warning: classification.telemetry.required_action || null,
       result_id: stored?.result?.result_id || latest?.result?.result_id || null,
       brain_record_id: details?.record_id || null,
@@ -991,7 +999,9 @@ export class OperationalLearning {
       registry_record_sha256: currentFingerprint || details?.registry_record_sha256 || null,
       continuation_case_id: researchCase || null,
       continuation_artifact_id: research?.result_artifact_id || details?.continuation?.artifact_id || null,
-      next_action: classification.telemetry.required_action || research?.next_action || details?.continuation?.next_action || details?.next_action || null,
+      next_action: qualificationRequired
+        ? classification.telemetry.required_action || research?.next_action || PROVENANCE_ACTION
+        : classification.telemetry.required_action || research?.next_action || details?.continuation?.next_action || details?.next_action || null,
       last_error: this.retry.get(`${runId}:${currentFingerprint || 'unbound'}`)?.error || null,
     };
   }
