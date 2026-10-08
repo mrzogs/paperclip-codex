@@ -414,6 +414,183 @@ function riskInput(f,caseId,message='risk-return',disposition='KEEP_BASELINE') {
     support_hash:JSON.parse(row.payload_json).support_hash,disposition,
     review_notes:'Reviewed the frozen zero-retained-exposure observation and its recorded child strata. No disable is authorized.'}};
 }
+function assertMachineRisk(f,child) {
+  const view=f.backend.readCase(f.human,child.id),value=view.planning.risk_disposition;
+  assert.equal(view.work_status,'COMPLETED');assert.equal(value.disposition,'EVIDENCE_LIMITED');
+  assert.equal(value.review_method,'MACHINE_ZERO_EXPOSURE_EVIDENCE_QUALIFICATION_V1');
+  assert.equal(value.reviewer_id,child.owner_id);assert.equal(value.disable_authorized,false);
+  assert.match(value.review_notes,/^Machine evidence qualification; not a human review or substantive risk decision\./);
+  const assessment=JSON.parse(value.review_notes.split('\n')[1]);
+  assert.equal(assessment.unchanged_baseline_hash,child.baseline_hash);
+  assert.equal(assessment.baseline_trades,view.planning.risk_review.baseline_trades);
+  assert.equal(assessment.excluded_trades,assessment.baseline_trades);assert.equal(assessment.retained_trades,0);
+  assert.equal(value.source.report_hash,assessment.source.report_hash);
+  assert.equal(view.tasks[0].status,'COMPLETED');assert.equal(view.tasks[0].artifact_id,value.artifact_id);
+  assert.equal(view.planning.qualified_for_planning,false);assertNoAuthority(f);
+  return {view,value,assessment};
+}
+
+test('G28 existing website learning tick records only checked machine evidence limitation and survives reopen',async()=>{
+  const f=fixture({prospective:true,oneDirection:'short',insufficient:true,ownerScopes:['read','artifact.write','case.transition','approval.request','delivery','event.write']});
+  try {
+    const status=f.complete(),before=sealed(f),{child,artifact}=assertRiskReview(f,status);
+    f.backend.operationalLearning.brainActor=(strategy,instance)=>OperationalLearning.prototype.brainActor.call({backend:f.backend},strategy,instance);
+    f.worker.recordInBrain=()=>{throw Error('No model or new Brain call is due for risk qualification');};
+    const learner=Object.assign(Object.create(OperationalLearning.prototype),{enabled:true,running:false,backend:f.backend,
+      token:()=> 'EXPLICIT_MOCK_TICK_IDENTITY',verifyIdentity:async()=>{},registry:async()=>({}),pendingRun:()=>null,status:()=>({})});
+    await learner.flushOnce();
+    const {value}=assertMachineRisk(f,child),closed=f.backend.one('ow_cases',child.id),receipt=f.backend.one('ow_artifacts',value.artifact_id);
+    const expectedMessage=`risk-review:risk-evidence-${objectHash({method:value.review_method,case_id:child.id,
+      owner_id:child.owner_id,support_hash:value.support_hash,report_hash:value.source.report_hash}).slice(7)}`;
+    assert.equal(f.backend.db.prepare('SELECT COUNT(*) n FROM ow_inbox WHERE producer_id=? AND message_id=?').get(child.owner_id,expectedMessage).n,1);
+    assert.equal(f.worker.statusForCase('source').loop_stage,'EVIDENCE_REQUIRED');
+    f.restart();for(let i=0;i<3;i++)f.worker.reconcile();
+    assert.deepEqual(f.backend.one('ow_cases',child.id),closed);assert.deepEqual(f.backend.one('ow_artifacts',receipt.id),receipt);
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_events WHERE action='operational.research.risk-review.recorded'").get().n,1);
+    assert.deepEqual(f.backend.one('ow_artifacts',artifact.id),artifact);assertSealed(f,before);
+    assert.equal(f.worker.continuations.riskEvidenceOnce().status,'NOT_DUE');
+  }finally{f.close();}
+});
+
+test('G28 notes retain actual contradiction and native evidence gaps without closing separate evidence follow-up',()=>{
+  for(const missingProof of [false,true]) {
+  const f=fixture({prospective:true,oneDirection:'long'});try {
+    const native=structuredClone(f.bundle.execution_sessions);
+    for(const row of f.rows.filter(row=>row.run_id==='r2'))Object.assign(row,{gross_currency_value:20,net_profit_loss:19});
+    if(missingProof)delete f.bundle.execution_sessions.r2;
+    const status=f.complete(),before=sealed(f),{child}=assertRiskReview(f,status);
+    const evidence=f.children().find(row=>JSON.parse(row.payload_json).kind==='EVIDENCE_FOLLOW_UP');
+    f.worker.reconcile();const {value,assessment}=assertMachineRisk(f,child);
+    assert.equal(assessment.aggregate_evidence.status,missingProof?'INSUFFICIENT':'SUFFICIENT');
+    assert.equal(assessment.aggregate_evidence.reasons.includes('OBSERVED_EXECUTION_SESSION_PROOF_REQUIRED'),missingProof);
+    assert.equal(assessment.aggregate_evidence.session_proof_gaps.count,missingProof?1:0);
+    assert.deepEqual(assessment.aggregate_evidence.session_proof_gaps.sample,missingProof?['r2']:[]);
+    assert.deepEqual(assessment.retained_contradictions.sample,['r2']);
+    assert.equal(assessment.retained_contradictions.count,1);assert.equal(assessment.robustness.status,'CONTRADICTED');
+    assert.deepEqual(assessment.contradiction_facts.sample,[{run_id:'r2',trades:20,net_profit_loss:380,observed_exclusion_delta:-380}]);
+    if(missingProof)assert.deepEqual(f.backend.one('ow_cases',evidence.id),evidence);
+    else assert.equal(evidence,undefined);
+    assert.equal(f.worker.statusForCase('source').loop_stage,missingProof?'EVIDENCE_REQUIRED':'RISK_REVIEW_RECORDED');
+    assert.match(value.review_notes,/unsampled entries.*exact immutable source report/);
+    if(missingProof) {
+      f.bundle.execution_sessions=native;
+      f.worker.sessionRows=run=>f.rows.filter(row=>row.run_id===run);f.worker.observedSessions=()=>f.bundle.execution_sessions;
+      f.worker.reconcile();
+      assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_research_jobs WHERE state='PENDING'").get().n,1);
+    }
+    assert.equal(f.backend.one('ow_cases',child.id).work_status,'COMPLETED');assertSealed(f,before);
+  }finally{f.close();}
+  }
+});
+
+test('G28 return rollback and lost committed response retry without duplicate completion or source mutation',()=>{
+  for(const fault of ['artifact','event','inbox','readback','proof-drift','owner-drift','lost-response']) {
+    const f=fixture({prospective:true,oneDirection:'short',insufficient:true});try {
+      const status=f.complete(),before=sealed(f),{child}=assertRiskReview(f,status),c=f.worker.continuations;
+      const write=f.backend.writeArtifact.bind(f.backend),event=f.backend.event.bind(f.backend),record=c.recordRiskDisposition.bind(c);
+      if(fault==='artifact')f.backend.writeArtifact=(actor,data)=>{if(data.artifact_id.startsWith('test-risk-disposition-'))throw Error('EXPLICIT_MOCK_DISK_FAILURE');return write(actor,data);};
+      if(fault==='event')f.backend.event=(entity,action,...args)=>{if(action==='operational.research.risk-review.recorded')throw Error('EXPLICIT_MOCK_RETURN_FAILURE');return event(entity,action,...args);};
+      if(fault==='readback')f.backend.event=(entity,action,...args)=>event(entity,action,...(action==='operational.research.risk-review.recorded'
+        ?[args[0],{...args[1],disposition:'KEEP_BASELINE'}]:args));
+      if(fault==='inbox')f.backend.db.exec("CREATE TRIGGER mock_risk_inbox_failure BEFORE INSERT ON ow_inbox WHEN NEW.message_id LIKE 'risk-review:risk-evidence-%' BEGIN SELECT RAISE(ABORT,'EXPLICIT_MOCK_INBOX_FAILURE'); END");
+      if(fault==='lost-response')c.recordRiskDisposition=(...args)=>{record(...args);throw Error('EXPLICIT_MOCK_LOST_COMMITTED_RESPONSE');};
+      if(fault==='proof-drift')c.recordRiskDisposition=(...args)=>{f.setProof(false);return record(...args);};
+      if(fault==='owner-drift')c.recordRiskDisposition=(...args)=>{f.backend.db.prepare('UPDATE ow_cases SET owner_id=? WHERE id=?').run('replacement-owner',child.id);return record(...args);};
+      const result=c.riskEvidenceOnce();assert.equal(result.status,'RETRY');assert.equal(result.returned.length,0);
+      if(fault!=='lost-response') {
+        assert.equal(f.backend.one('ow_cases',child.id).work_status,'READY');
+        assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_artifacts WHERE id LIKE 'test-risk-disposition-%'").get().n,0);
+        assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_inbox WHERE message_id LIKE 'risk-review:risk-evidence-%'").get().n,0);
+        const blocker=f.backend.db.prepare("SELECT * FROM ow_blockers WHERE id=?").get(`${child.id}:risk-worker`);
+        assert.equal(blocker.owner_id,fault==='owner-drift'?'replacement-owner':child.owner_id);assert.equal(blocker.state,'OPEN');
+        assert.equal(result.blocked[0].owner_id,blocker.owner_id);assert.match(blocker.action,new RegExp(`Owner ${blocker.owner_id}:`));
+        c.riskEvidenceOnce();assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_events WHERE action='operational.research.risk-review.worker-blocked'").get().n,1);
+      }
+      f.backend.writeArtifact=write;f.backend.event=event;
+      f.setProof(true);
+      if(fault==='owner-drift')f.backend.db.prepare('UPDATE ow_cases SET owner_id=? WHERE id=?').run(child.owner_id,child.id);
+      if(fault==='inbox')f.backend.db.exec('DROP TRIGGER mock_risk_inbox_failure');
+      f.restart();f.worker.reconcile();const {value}=assertMachineRisk(f,child);
+      const inbox=f.backend.db.prepare("SELECT * FROM ow_inbox WHERE message_id LIKE 'risk-review:risk-evidence-%'").get();
+      const returned=JSON.parse(inbox.result_json),closed=f.backend.one('ow_cases',child.id);
+      const notes=value.review_notes,input={message_id:inbox.message_id.slice('risk-review:'.length),
+        data:{case_id:child.id,expected_revision:returned.revision-1,support_hash:returned.support_hash,
+          disposition:'EVIDENCE_LIMITED',review_notes:notes}};
+      assert.deepEqual(f.worker.continuations.recordRiskDisposition(f.actor,input,true),returned);
+      f.restart();for(let i=0;i<3;i++)f.worker.reconcile();
+      assert.deepEqual(f.backend.one('ow_cases',child.id),closed);
+      assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_events WHERE action='operational.research.risk-review.recorded'").get().n,1);
+      assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_blockers WHERE case_id=? AND state='OPEN'").get(child.id).n,0);
+      assertSealed(f,before);assertNoAuthority(f);
+    }finally{f.close();}
+  }
+});
+
+test('G28 sufficient zero-exposure without contradictions or shortfalls stays explicitly owned and unqualified',()=>{
+  const f=fixture({prospective:true,oneDirection:'short'});try {
+    const status=f.complete(),before=sealed(f),{child}=assertRiskReview(f,status),c=f.worker.continuations;
+    const result=c.riskEvidenceOnce();assert.equal(result.status,'UNQUALIFIED');assert.deepEqual(result.returned,[]);
+    assert.equal(result.blocked[0].reason,'RISK_MACHINE_LIMITATION_NOT_ESTABLISHED');
+    assert.equal(f.backend.one('ow_cases',child.id).work_status,'READY');
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_events WHERE action='operational.research.risk-review.recorded'").get().n,0);
+    const blocker=f.backend.db.prepare('SELECT * FROM ow_blockers WHERE id=?').get(`${child.id}:risk-worker`);
+    assert.equal(blocker.owner_id,child.owner_id);assert.match(blocker.action,/genuine owner risk review remains due/);
+    f.restart();f.worker.reconcile();assert.equal(f.backend.one('ow_cases',child.id).work_status,'READY');
+    const returned=f.worker.continuations.recordRiskDisposition(f.actor,riskInput(f,child.id,'genuine-owner-return'));
+    assert.equal(returned.disposition,'KEEP_BASELINE');assert.equal(returned.review_method,undefined);
+    assertSealed(f,before);assertNoAuthority(f);
+  }finally{f.close();}
+  const limited=fixture({prospective:true,oneDirection:'short',insufficient:true});try {
+    const status=limited.complete(),{child}=assertRiskReview(limited,status),c=limited.worker.continuations;
+    const work=c.riskWork(limited.actor,child.id),source=c.source(limited.backend.one('ow_research_jobs',work.frozen.source.job_id));
+    const changed=structuredClone(source);changed.report.proposals=[{dimension:'direction',value:'long',supported:true}];
+    assert.throws(()=>c.riskEvidenceNotes(work.frozen,changed),/RISK_MACHINE_LIMITATION_NOT_ESTABLISHED/);
+    assert.equal(limited.backend.one('ow_cases',child.id).work_status,'READY');assertNoAuthority(limited);
+  }finally{limited.close();}
+});
+
+test('G28 wrong owner, revocation and stale/restored source remain owned retry work, never default decisions',()=>{
+  for(const mode of ['wrong-owner','revoked','scope','proof','registry','baseline']) {
+    const f=fixture({prospective:true,oneDirection:'short',insufficient:true});try {
+      const status=f.complete(),before=sealed(f),{child}=assertRiskReview(f,status),identity=f.backend.config.identities[0];
+      const select=f.backend.operationalLearning.brainActor;
+      if(mode==='wrong-owner')f.backend.operationalLearning.brainActor=()=>({...f.actor,id:'other'});
+      if(mode==='revoked')identity.revoked=true;
+      if(mode==='scope')f.backend.operationalLearning.brainActor=()=>({...f.actor,scopes:['read','event.write']});
+      if(mode==='proof')f.setProof(false);
+      if(mode==='registry')f.backend.operationalLearning.registryContext={record_sha256:digest('drift')};
+      if(mode==='baseline')f.backend.db.prepare('UPDATE ow_strategies SET baseline_hash=? WHERE id=?').run(digest('drift'),'s');
+      const retained=sealed(f);f.restart();f.worker.reconcile();
+      assert.notEqual(f.backend.one('ow_cases',child.id).work_status,'COMPLETED');
+      const blocker=f.backend.db.prepare('SELECT * FROM ow_blockers WHERE id=?').get(`${child.id}:risk-worker`);
+      assert.equal(blocker.owner_id,child.owner_id);assert.equal(blocker.state,'OPEN');assert.match(blocker.action,/No default risk decision or completion/);
+      assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_events WHERE action='operational.research.risk-review.recorded'").get().n,0);
+      f.backend.operationalLearning.brainActor=select;delete identity.revoked;f.setProof(true);delete f.backend.operationalLearning.registryContext;
+      if(mode==='baseline')f.backend.db.prepare('UPDATE ow_strategies SET baseline_hash=? WHERE id=?').run(child.baseline_hash,'s');
+      f.worker.reconcile();assertMachineRisk(f,child);assertSealed(f,retained);
+      assert.deepEqual(before,retained);assertNoAuthority(f);
+    }finally{f.close();}
+  }
+});
+
+test('G28 empty queue is NOT_DUE and bounded rotation retries beyond an old blocked batch',()=>{
+  const empty=fixture();try {
+    const counts=()=>Object.fromEntries(['ow_cases','ow_events','ow_artifacts','ow_inbox','ow_blockers'].map(table=>[table,empty.backend.db.prepare(`SELECT COUNT(*) n FROM ${table}`).get().n]));
+    const before=counts();assert.equal(empty.worker.continuations.riskEvidenceOnce().status,'NOT_DUE');assert.deepEqual(counts(),before);
+  }finally{empty.close();}
+  const f=fixture({prospective:true,oneDirection:'short',insufficient:true});try {
+    for(let i=0;i<21;i++) {
+      Object.assign(f.rows[0],{net_profit_loss:-11-i,gross_currency_value:-10-i});if(i)f.seed(`batch-risk-${i}`);f.complete();
+    }
+    assert.equal(f.children().filter(row=>JSON.parse(row.payload_json).kind==='RISK_DISABLE_REVIEW').length,21);f.setProof(false);
+    const c=f.worker.continuations,first=c.riskEvidenceOnce(),second=c.riskEvidenceOnce();
+    assert.equal(first.blocked.length,20);assert.equal(second.blocked.length,1);
+    assert.equal(first.returned.length,0);assert.equal(second.returned.length,0);
+    f.setProof(true);f.worker.reconcile();f.worker.reconcile();
+    assert.equal(f.children().filter(row=>JSON.parse(row.payload_json).kind==='RISK_DISABLE_REVIEW' && row.work_status==='COMPLETED').length,21);
+    assert.equal(c.riskEvidenceOnce().status,'NOT_DUE');assertNoAuthority(f);
+  }finally{f.close();}
+});
 
 // The second scope set is the read-only CICD OPERATIONAL catalog observation
 // from 2026-10-08; identity, session and qualification remain isolated fixtures.
@@ -803,7 +980,7 @@ test('isolated Chrome links the actual owned risk review, retains it across rest
   const {createRequire}=await import('node:module');
   const require=createRequire(import.meta.url);
   const {chromium}=require(require.resolve('playwright',{paths:[process.env.OCEAN_S21_NODE_MODULES]}));
-  const f=fixture({prospective:true,oneDirection:'short'}),browser=await chromium.launch({channel:'chrome',headless:true});
+  const f=fixture({prospective:true,oneDirection:'short',insufficient:true}),browser=await chromium.launch({channel:'chrome',headless:true});
   try {
     const status=f.complete(),before=sealed(f),{child,artifact}=assertRiskReview(f,status);
     const root=new URL('../public/',import.meta.url),base='http://127.0.0.1:17891',errors=[],writes=[];
@@ -850,15 +1027,14 @@ test('isolated Chrome links the actual owned risk review, retains it across rest
     }
     f.restart();f.worker.reconcile();await page.reload();await settled();
     assert.equal(await page.getByRole('heading',{name:'Risk review scope',exact:true}).count(),1);
-    assert.match(await page.locator('#content').innerText(),/Owner brain: review/);
-    const input=riskInput(f,child.id,'browser-fixture-return');
-    const returned=f.worker.continuations.recordRiskDisposition(f.actor,input);
+    const {value:returned}=assertMachineRisk(f,child);
+    assert.match(await page.locator('#content').innerText(),/Machine evidence qualification; not a human review or substantive risk decision/);
     f.restart();f.worker.reconcile();
     await page.reload();await settled();
-    assert.match(await page.locator('#content').innerText(),/risk review recorded KEEP_BASELINE/);
+    assert.match(await page.locator('#content').innerText(),/risk review recorded EVIDENCE_LIMITED/);
     assert.equal(await fact('Observation classification').innerText(),'Risk disable review required');
-    assert.equal(await fact('Review disposition').innerText(),'Keep baseline');
-    assert.equal(await fact('Review notes').innerText(),input.data.review_notes);
+    assert.equal(await fact('Review disposition').innerText(),'Evidence limited');
+    assert.equal(await fact('Review notes').textContent(),returned.review_notes);
     assert.equal(await fact('Reviewer').innerText(),f.actor.id);
     assert.equal(await fact('Immutable review artifact').getByRole('link').getAttribute('href'),
       `/improvement/artifacts/${returned.artifact_id}`);

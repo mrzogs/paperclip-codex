@@ -8,6 +8,7 @@ const VERSION = 'ocean-research-planning-continuation/v1';
 const LINK = 'operational.research.continuation.link';
 const RISK_RETURN = 'operational.research.risk-review.recorded';
 const RISK_VERSION = 'ocean-risk-review-disposition/v1';
+const RISK_MACHINE = 'MACHINE_ZERO_EXPOSURE_EVIDENCE_QUALIFICATION_V1';
 const noAuthority = Object.freeze({ automatic_strategy_change:false, candidate_approved:false, paper_authorized:false, live_authorized:false });
 const terminal = new Set(['COMPLETED','CANCELLED','PAUSED','FAILED']);
 const errorCode = error => String(error.code || 'CONTINUATION_PROOF_REQUIRED').slice(0,200);
@@ -158,7 +159,49 @@ export class OperationalContinuation {
     }
     return {namespace:'OPERATIONAL',owner_id:actor.id,items,authority:noAuthority};
   }
-  recordRiskDisposition(actor,input) {
+  riskEvidenceNotes(frozen,source) {
+    const observation=frozen.support.requirement,report=source.report;
+    const experiments=report.experiments.filter(item=>objectHash(item)===observation.experiment_hash);
+    requireThat(report.schema_version===RESEARCH_V6 && experiments.length===1
+      && observation.disposition==='RISK_DISABLE_REVIEW_REQUIRED' && observation.retained_trades===0
+      && observation.baseline_trades>0 && observation.excluded_trades===observation.baseline_trades,
+    409,'RISK_MACHINE_ZERO_EXPOSURE_PROOF_REQUIRED');
+    const experiment=experiments[0],sufficiency=report.evidence_sufficiency,eligibility=report.approved_evidence_eligibility;
+    requireThat(eligibility && Array.isArray(sufficiency.reasons)
+      && sufficiency.reasons.every(reason=>typeof reason==='string' && reason.length>0)
+      && sufficiency.status===(sufficiency.reasons.length?'INSUFFICIENT':'SUFFICIENT')
+      && Number.isSafeInteger(eligibility.observed_comparable_trades)
+      && (eligibility.observed_session_count===null || Number.isSafeInteger(eligibility.observed_session_count)),
+    409,'RISK_MACHINE_EVIDENCE_DETAIL_REQUIRED');
+    const contradictions=experiment.runs.filter(run=>run.trades>0 && run.observed_exclusion_delta<=0);
+    requireThat(objectHash(contradictions.map(run=>run.run_id))===objectHash(experiment.contradictory_child_run_ids)
+      && Array.isArray(report.proposals) && report.proposals.length===0
+      && (contradictions.length>0 || sufficiency.reasons.length>0),409,'RISK_MACHINE_LIMITATION_NOT_ESTABLISHED');
+    const summarize=items=>{
+      requireThat(Array.isArray(items),409,'RISK_MACHINE_EVIDENCE_DETAIL_REQUIRED');
+      return {count:items.length,sha256:objectHash(items),sample:items.slice(0,3)};
+    };
+    const assessment={review_method:RISK_MACHINE,source:source.reference,unchanged_baseline_hash:source.row.baseline_hash,
+      direction:observation.value,basis:observation.basis,baseline_trades:observation.baseline_trades,
+      excluded_trades:observation.excluded_trades,retained_trades:observation.retained_trades,
+      observed_exclusion_delta:observation.observed_exclusion_delta,
+      candidate_limitation:'Zero retained exposure is not executed profitable filter performance or candidate validation.',
+      aggregate_evidence:{status:sufficiency.status,reasons:sufficiency.reasons,
+        observed_trades:eligibility.observed_comparable_trades,approved_trade_floor:eligibility.policy?.minimum_comparable_trades ?? null,
+        observed_entry_days:eligibility.observed_session_count,approved_entry_day_floor:eligibility.policy?.minimum_independent_sessions ?? null,
+        statistical_independence_verified:eligibility.statistical_independence_verified,
+        session_proof_gaps:summarize(sufficiency.session_proof_missing_run_ids),session_conflicts:summarize(sufficiency.session_conflicts),
+        coverage_overlaps:summarize(eligibility.coverage_overlaps),missing_coverage:summarize(sufficiency.missing_coverage_run_ids)},
+      retained_contradictions:summarize(experiment.contradictory_child_run_ids),
+      contradiction_facts:summarize(contradictions.map(run=>({run_id:run.run_id,trades:run.trades,
+        net_profit_loss:run.net_profit_loss,observed_exclusion_delta:run.observed_exclusion_delta}))),
+      unobserved_child_strata:summarize(experiment.unobserved_child_run_ids),robustness:experiment.robustness,
+      complete_frozen_evidence:'All details, including any unsampled entries, remain in the exact immutable source report.'};
+    const notes=`Machine evidence qualification; not a human review or substantive risk decision.\n${JSON.stringify(assessment)}\nSeparate evidence follow-up and reassessment remain due independently. No disable, approval, candidate validation, threshold or trading change is authorized.`;
+    requireThat(notes.length<=4000,409,'RISK_MACHINE_EVIDENCE_NOTES_LIMIT');
+    return notes;
+  }
+  recordRiskDisposition(actor,input,machine=false) {
     exactKeys(input,['message_id','data']);id(input.message_id);noSecrets(input,this.backend.environment);
     const data=input.data;exactKeys(data,['case_id','expected_revision','support_hash','disposition','review_notes']);
     requireThat(['KEEP_BASELINE','EVIDENCE_LIMITED'].includes(data.disposition),422,'RISK_REVIEW_DISPOSITION_REQUIRED');
@@ -169,6 +212,10 @@ export class OperationalContinuation {
       const work=this.riskWork(actor,data.case_id,'event.write'),{row,payload,frozen}=work;
       this.backend.authorize(actor,'artifact.write',row.strategy_id,row.instance_id);
       requireThat(data.support_hash===payload.support_hash,409,'RISK_REVIEW_SUPPORT_CONFLICT');
+      const source=this.source(this.backend.one('ow_research_jobs',frozen.source.job_id));
+      if(machine)requireThat(actor.role==='BRAIN' && actor.namespace==='OPERATIONAL'
+        && data.disposition==='EVIDENCE_LIMITED' && data.review_notes===this.riskEvidenceNotes(frozen,source),
+      409,'RISK_MACHINE_REVIEW_PROOF_CONFLICT');
       const previous=this.db.prepare('SELECT * FROM ow_inbox WHERE producer_id=? AND message_id=?').get(actor.id,key);
       if(previous){requireThat(previous.payload_hash===hash,409,'DUPLICATE_CONFLICT');return JSON.parse(previous.result_json);}
       this.backend.expect(row,data.expected_revision);
@@ -177,23 +224,73 @@ export class OperationalContinuation {
       const content=JSON.stringify({schema_version:RISK_VERSION,case_id:row.id,support_hash:payload.support_hash,
         source:frozen.source,observation:frozen.support.requirement,reviewer_id:actor.id,
         disposition:data.disposition,review_notes:data.review_notes,next_action:nextAction,
+        ...(machine?{review_method:RISK_MACHINE}:{}),
         disable_authorized:false,authority:noAuthority});
       const contentHash=digest(content),artifactId=`test-risk-disposition-${contentHash.slice(7)}`,operationalActor={...actor,namespace:'OPERATIONAL'};
       this.backend.writeArtifact(operationalActor,{artifact_id:artifactId,case_id:row.id,run_id:row.run_id,
-        recipient_id:this.source(this.backend.one('ow_research_jobs',frozen.source.job_id)).recipient,
+        recipient_id:source.recipient,
         kind:'EVIDENCE',media_type:'application/json',content,content_hash:contentHash,candidate_hash:null,
         dependency_ids:[payload.lineage_artifact_id]});
       const returned={artifact_id:artifactId,content_hash:contentHash,support_hash:payload.support_hash,
-        source:frozen.source,reviewer_id:actor.id,disposition:data.disposition,authority:noAuthority};
+        source:frozen.source,reviewer_id:actor.id,disposition:data.disposition,
+        ...(machine?{review_method:RISK_MACHINE}:{}),authority:noAuthority};
       this.backend.event(row.id,RISK_RETURN,operationalActor,returned);
       const updated=this.db.prepare("UPDATE ow_tasks SET status='COMPLETED',artifact_id=? WHERE case_id=? AND kind='RISK_DISABLE_REVIEW' AND required=1").run(artifactId,row.id);
       requireThat(updated.changes===1,409,'RISK_REVIEW_REQUIRED_TASK_CONFLICT');
       this.db.prepare("UPDATE ow_cases SET work_status='COMPLETED',revision=revision+1,waiting_on=? WHERE id=?").run(nextAction,row.id);
+      this.db.prepare("UPDATE ow_blockers SET state='RESOLVED' WHERE id=? AND case_id=?")
+        .run(`${row.id}:risk-worker`,row.id);
       const result={...returned,case_id:row.id,revision:row.revision+1,risk_review_complete:true,
         disable_authorized:false,candidate_testing:'NOT_DUE',approval_due:false,next_action:nextAction};
+      if(machine) {
+        const readback=this.forCase(this.backend.one('ow_cases',row.id));
+        requireThat(!readback.blocked_reason && readback.risk_disposition?.artifact_id===artifactId
+          && readback.risk_disposition.content_hash===contentHash && readback.risk_disposition.review_method===RISK_MACHINE
+          && readback.risk_disposition.disposition==='EVIDENCE_LIMITED',409,'RISK_MACHINE_RETURN_READBACK_FAILED');
+      }
       this.db.prepare('INSERT INTO ow_inbox VALUES(?,?,?,?)').run(actor.id,key,hash,JSON.stringify(result));
       return result;
     });
+  }
+  riskEvidenceOnce() {
+    const select=cursor=>this.db.prepare(`SELECT rowid cursor,* FROM ow_cases WHERE rowid>?
+      AND json_extract(payload_json,'$.origin')=? AND json_extract(payload_json,'$.kind')='RISK_DISABLE_REVIEW'
+      AND work_status NOT IN ('COMPLETED','CANCELLED','PAUSED','FAILED') ORDER BY rowid LIMIT 20`).all(cursor,CONTINUATION_ORIGIN);
+    let rows=select(this.riskCursor || 0);
+    if(!rows.length){this.riskCursor=0;rows=select(0);}
+    const returned=[],blocked=[];
+    for(const row of rows) {
+      this.riskCursor=row.cursor;
+      let actor={id:'ocean-research',role:'BRAIN',namespace:'OPERATIONAL'};
+      try {
+        actor=this.backend.operationalLearning.brainActor(row.strategy_id,row.instance_id);
+        const work=this.riskWork(actor,row.id),notes=this.riskEvidenceNotes(work.frozen,
+          this.source(this.backend.one('ow_research_jobs',work.frozen.source.job_id)));
+        returned.push(this.recordRiskDisposition(actor,{message_id:`risk-evidence-${objectHash({
+          method:RISK_MACHINE,case_id:row.id,owner_id:actor.id,support_hash:work.payload.support_hash,
+          report_hash:work.frozen.source.report_hash}).slice(7)}`,
+          data:{case_id:row.id,expected_revision:work.row.revision,support_hash:work.payload.support_hash,
+            disposition:'EVIDENCE_LIMITED',review_notes:notes}},true));
+      }catch(error) {
+        const reason=String(error.code || 'RISK_MACHINE_RETURN_INTERRUPTED').slice(0,200);
+        this.backend.store.transaction(()=>{
+          const current=this.backend.one('ow_cases',row.id);
+          blocked.push({case_id:row.id,owner_id:current.owner_id,reason,
+            qualification:reason==='RISK_MACHINE_LIMITATION_NOT_ESTABLISHED'?'UNQUALIFIED':'RETRY'});
+          if(terminal.has(current.work_status))return;
+          const action=reason==='RISK_MACHINE_LIMITATION_NOT_ESTABLISHED'
+            ?`Owner ${current.owner_id}: machine evidence qualification is not established by the sealed source; genuine owner risk review remains due. No default risk decision or completion is claimed.`
+            :`Owner ${current.owner_id}: resolve machine evidence qualification ${reason}; retry only with exact current owner/source/support proof. No default risk decision or completion is claimed.`;
+          this.db.prepare("INSERT INTO ow_blockers VALUES(?,?,?,?,'OPEN') ON CONFLICT(id) DO UPDATE SET owner_id=excluded.owner_id,action=excluded.action,state='OPEN'")
+            .run(`${row.id}:risk-worker`,row.id,current.owner_id,action);
+          if(!this.db.prepare("SELECT 1 FROM ow_events WHERE entity_id=? AND action='operational.research.risk-review.worker-blocked' AND json_extract(payload_json,'$.payload.reason')=? AND json_extract(payload_json,'$.payload.owner_id')=?").get(row.id,reason,current.owner_id))
+            this.backend.event(row.id,'operational.research.risk-review.worker-blocked',actor,{reason,owner_id:current.owner_id,next_action:action});
+        });
+      }
+    }
+    return {status:!rows.length?'NOT_DUE':blocked.length
+      ?blocked.every(item=>item.qualification==='UNQUALIFIED') && !returned.length?'UNQUALIFIED':'RETRY'
+      :'RECORDED',returned,blocked,authority:noAuthority};
   }
   ensure(job,actor) {
     const source=this.source(job);
@@ -344,6 +441,9 @@ export class OperationalContinuation {
             && objectHash(ref.authority)===objectHash(noAuthority) && row.work_status==='COMPLETED'
             && task.status==='COMPLETED' && task.artifact_id===returned.id,
           409,'RISK_REVIEW_RETURN_PROOF_CONFLICT');
+          if(value.review_method || ref.review_method)requireThat(value.review_method===RISK_MACHINE
+            && ref.review_method===RISK_MACHINE && value.disposition==='EVIDENCE_LIMITED'
+            && value.review_notes===this.riskEvidenceNotes(frozen,source),409,'RISK_MACHINE_REVIEW_PROOF_CONFLICT');
           riskDisposition={...value,artifact_id:returned.id,content_hash:ref.content_hash};
         } else requireThat(row.work_status!=='COMPLETED',409,'RISK_REVIEW_RETURN_PROOF_REQUIRED');
       }
@@ -442,5 +542,6 @@ export class OperationalContinuation {
       this.backend.store.transaction(()=>this.refresh(row,actor));
     }
     this.plans.processOnce();
+    this.riskEvidenceOnce();
   }
 }
