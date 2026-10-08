@@ -104,7 +104,7 @@ test('source adapter cannot bypass physical/raw qualifications and schema13 cann
   }finally{f.close();}
 });
 
-test('actual v545 recorded own-logger hash plus reviewed source/current config pin passes without granting IID/fullcoverage',()=>{
+test('actual v545 recorded own-logger hash plus versioned reviewed source/exact scope passes without granting IID/fullcoverage',()=>{
   const f=fixture({producerPin:true});try {
     const before=digest(fs.readFileSync(f.filename)),proofs=readObservedSessionProofs(f.backend,['r'],f.rows);
     assert.equal(proofs.r.producer_verification.verified,true);
@@ -135,9 +135,8 @@ test('syntactic recorded is not approved: rejected544/wrong/strategy/missing/mix
   }
 });
 
-test('recorded correct producer cannot override wrong current approved config/source pin or physical scope',()=>{
-  for(const change of [binding=>{binding.expected_telemetry_module_sha256=digest('wrong');},
-    binding=>{binding.expected_telemetry_version='v0.5.44';},binding=>{binding.instance_id='other';},
+test('recorded approved producer cannot override wrong strategy/instance/factual binding scope',()=>{
+  for(const change of [binding=>{binding.strategy_id='other';},binding=>{binding.instance_id='other';},
     binding=>{binding.factual_binding_hash=digest('other');}]) {
     const f=fixture({producerPin:true});try {
       change(f.binding);fs.writeFileSync(f.bindingFile,JSON.stringify(f.binding));
@@ -167,6 +166,23 @@ test('upstream Learning and downstream Research use the same real SQL producer p
     assert.notEqual(read().r.source_receipt_hash,before,'immutable producer proof changes the continuation fingerprint');
     fs.writeFileSync(f.bindingFile,JSON.stringify({...f.binding,expected_telemetry_module_path:path.join(f.root,'absent.dll')}));
     assert.equal(read().r.producer_verification.verified,false);
+  }finally{f.close();}
+});
+
+test('past approved v545 native proof survives a routine current logger upgrade; future unreviewed recorded hashes do not',()=>{
+  const f=fixture({producerPin:true});try {
+    const read=()=>readObservedSessionProofs(f.backend,['r'],f.rows).r;
+    const before=read().source_receipt_hash;
+    fs.writeFileSync(f.bindingFile,JSON.stringify({...f.binding,expected_telemetry_version:'v0.5.46',
+      expected_telemetry_module_sha256:digest('future logger'),expected_telemetry_module_path:path.join(f.root,'different-current.dll')}));
+    const proof=read();assert.equal(proof.producer_verification.verified,true);
+    assert.equal(proof.producer_verification.reviewed_build.version,'v0.5.45');
+    assert.equal(proof.source_receipt_hash,before,'routine current logger changes cannot reclassify immutable past native evidence');
+    assert.equal(sessionEvidence({cohort:{eligible_runs:[{run_id:'r'}]},execution_sessions:{r:proof}},f.rows).observed_session_count,3);
+    f.edit(`UPDATE exchange_session_observations SET logger_module_sha256='${digest('future logger').slice(7)}';
+      UPDATE replay_runs SET study_name='Sierra Trade Telemetry Logger v0.5.46'`);
+    assert.equal(read().producer_verification.verified,false);
+    assert.equal(read().producer_verification.reason,'NATIVE_LOGGER_REVIEWED_PRODUCER_BUILD_CONFLICT');
   }finally{f.close();}
 });
 

@@ -6,10 +6,12 @@ import { objectHash, requireThat } from './common.mjs';
 export const SESSION_SCHEMA='ocean-native-entry-trading-days/v1';
 export const SESSION_MODE='sierra_trading_day_v1';
 export const SESSION_DEFINITION='UNION_OF_NATIVE_ENTRY_TRADING_DAY_UNITS_KEYED_BY_VERIFIED_CONFIGURATION_AND_DATE_NOT_IID_OR_FULL_COVERAGE';
-export const NATIVE_LOGGER_BUILD=Object.freeze({version:'v0.5.45',
+// Append separately reviewed releases; retain past entries for immutable observations.
+export const NATIVE_LOGGER_BUILDS=Object.freeze([Object.freeze({version:'v0.5.45',
   module_sha256:'c3dea9e08b2b4ed2c827a2e0ad37f85f09f8939b0c9e70945021eecda07b038a',
   source_commit:'b1fb6e642d6a40cb9dac1c295895c2c48d28b2f4',
-  contract:'schema14-native-session-producer-pin',runtime_deployment_authorized:false});
+  contract:'schema14-native-session-producer-pin',runtime_deployment_authorized:false})]);
+export const NATIVE_LOGGER_BUILD=NATIVE_LOGGER_BUILDS[0];
 const settings=['chart_timezone','start_time1','end_time1','start_time2','end_time2','use_second_start_end_times','trading_day_starts_previous_date'];
 const sha=value=>createHash('sha256').update(value).digest('hex');
 const rawHash=value=>String(value || '').replace(/^sha256:/,'').toLowerCase();
@@ -139,7 +141,7 @@ export function sessionEvidence(bundle,rows) {
 }
 
 function recordedProducerVerification(backend,workflowRun,run,attempt,observations,qualification,trades) {
-  const metadata={reviewed_build:NATIVE_LOGGER_BUILD,recorded_hashes:[],
+  const metadata={reviewed_build:null,reviewed_build_catalog_hash:objectHash(NATIVE_LOGGER_BUILDS),recorded_hashes:[],
     next_action:'The existing Telemetry/deployment owner must install only the reviewed producer build through the controlled instance lifecycle, pin the existing bridge, and collect fresh managed native observations. No old row is backfilled.'};
   try {
     if(!trades.length)return {...metadata,verified:true,basis:'NO_SCORED_ENTRY_UNITS_NO_SESSION_COUNT_GRANTED'};
@@ -147,23 +149,25 @@ function recordedProducerVerification(backend,workflowRun,run,attempt,observatio
     requireThat(rows.length>0 && rows.every(row=>row.logger_module_provenance_status==='recorded'
       && /^[a-fA-F0-9]{64}$/.test(row.logger_module_sha256 || '')),409,'NATIVE_LOGGER_RECORDED_BUILD_PROOF_REQUIRED');
     metadata.recorded_hashes=[...new Set(rows.map(row=>rawHash(row.logger_module_sha256)))];
-    requireThat(metadata.recorded_hashes.length===1 && metadata.recorded_hashes[0]===NATIVE_LOGGER_BUILD.module_sha256
-      && run.study_name===`Sierra Trade Telemetry Logger ${NATIVE_LOGGER_BUILD.version}`,
+    const reviewed=metadata.recorded_hashes.length===1
+      ?NATIVE_LOGGER_BUILDS.find(build=>build.module_sha256===metadata.recorded_hashes[0]):null;
+    requireThat(reviewed && run.study_name===`Sierra Trade Telemetry Logger ${reviewed.version}`,
     409,'NATIVE_LOGGER_REVIEWED_PRODUCER_BUILD_CONFLICT');
+    metadata.reviewed_build=reviewed;
     const binding=JSON.parse(fs.readFileSync(backend.operationalLearning.physicalBindingFile,'utf8'));
     const physical=qualification.telemetry.physical_strategy_binding;
     requireThat(binding.schema_version==='ocean-replay-run-bridge/v4' && binding.namespace==='OPERATIONAL'
       && binding.strategy_id===workflowRun.strategy_id && binding.instance_id===workflowRun.instance_id
       && physical?.verified && physical.factual_binding_hash===binding.factual_binding_hash
-      && physical.recorded_sierra_instance_id===run.instance_id
-      && binding.expected_telemetry_version===NATIVE_LOGGER_BUILD.version
-      && rawHash(binding.expected_telemetry_module_sha256)===NATIVE_LOGGER_BUILD.module_sha256,
+      && physical.recorded_sierra_instance_id===run.instance_id,
     409,'NATIVE_LOGGER_APPROVED_PHYSICAL_BINDING_CONFLICT');
-    requireThat(fs.existsSync(binding.expected_telemetry_module_path)
-      && sha(fs.readFileSync(binding.expected_telemetry_module_path))===NATIVE_LOGGER_BUILD.module_sha256,
-    409,'NATIVE_LOGGER_CURRENT_MODULE_PIN_CONFLICT');
-    return {...metadata,verified:true,basis:'RECORDED_OWN_LOGGER_HASH_AND_REVIEWED_BUILD_AND_EXISTING_PHYSICAL_BINDING_AGREE',
-      factual_binding_hash:binding.factual_binding_hash,binding_hash:objectHash(binding)};
+    // A current logger upgrade cannot invalidate recorded producer proof. The
+    // runner checks current loaded/disk pins before start, not this historical read.
+    const scope={schema_version:binding.schema_version,namespace:binding.namespace,strategy_id:binding.strategy_id,
+      instance_id:binding.instance_id,factual_binding_hash:binding.factual_binding_hash,
+      recorded_sierra_instance_id:physical.recorded_sierra_instance_id};
+    return {...metadata,verified:true,basis:'RECORDED_OWN_LOGGER_HASH_AND_VERSIONED_REVIEWED_BUILD_AND_EXACT_PHYSICAL_SCOPE_AGREE',
+      factual_binding_hash:binding.factual_binding_hash,binding_hash:objectHash(scope)};
   }catch(error) {return {...metadata,verified:false,reason:error.code || 'NATIVE_LOGGER_APPROVED_PHYSICAL_BINDING_REQUIRED'};}
 }
 
