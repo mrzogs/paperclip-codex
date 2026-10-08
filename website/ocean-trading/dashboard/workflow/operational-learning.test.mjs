@@ -516,25 +516,42 @@ test('learning requires recorded DLL and raw STTL2 proof for both logical and ma
     assert.ok(mappingRejected.reasons.includes('PHYSICAL_STRATEGY_BINDING_CONFLICT'));
     writeBinding('v0.6.237');
     const logicalProfile='cicd-vwap-pull-back-strategy.profile-v0.1.0-source-bound';
-    const physicalProfile='nasdaq_v0449_hmm_risk1000_qty5_control';
+    const physicalProfile='nasdaq_v0608_us_trendup_weak_distance_qty1_replay_status_preserve_risk1100_qty5_candidate';
     const physicalVersion='v0.6.237-managed-lineage-candidate';
-    const profileRun={...run,context_json:JSON.stringify({...context,strategy_profile_id:logicalProfile,strategy_profile_version:'v0.1.3'})};
-    telemetry.prepare('UPDATE ocean_run_lineage_v1 SET strategy_profile_id=?,strategy_profile_version=?').run(logicalProfile,'v0.1.3');
-    const physicalTag=encodeTag({...rawFields,strategy_v:physicalVersion,profile:physicalProfile,profile_v:physicalVersion});
-    telemetry.prepare('UPDATE trades SET strategy_version=?,text_tag=?').run(physicalVersion,physicalTag);
-    telemetry.prepare('UPDATE trade_causal_context SET strategy_version=?,strategy_profile_id=?,strategy_profile_version=?,raw_text_tag=?')
-      .run(physicalVersion,physicalProfile,physicalVersion,physicalTag);
+    const approvedCode='sha256:8b26b689b013f1473304a1fdde4bcf265ddbfd4cf05e58e11a97e9f777ed7909';
+    const approvedConfig='sha256:21968c73dbff8646ff15bfffafaa0d85e4e8db5b8273f5b0a88eec001942af4d';
+    const setProfile=({profile=physicalProfile,version=physicalVersion,code=approvedCode,config=approvedConfig,profileVersion='v0.1.3'}={})=>{
+      telemetry.prepare('UPDATE ocean_run_lineage_v1 SET strategy_profile_id=?,strategy_profile_version=?,strategy_code_hash=?,strategy_config_hash=?')
+        .run(logicalProfile,profileVersion,code,config);
+      const physicalTag=encodeTag({...rawFields,strategy_v:version,profile,profile_v:version,code_hash:code,config_hash:config});
+      telemetry.prepare('UPDATE trades SET strategy_version=?,text_tag=?').run(version,physicalTag);
+      telemetry.prepare('UPDATE trade_causal_context SET strategy_version=?,strategy_profile_id=?,strategy_profile_version=?,strategy_code_hash=?,strategy_config_hash=?,raw_text_tag=?')
+        .run(version,profile,version,code,config,physicalTag);
+      return {...run,context_json:JSON.stringify({...context,strategy_version:'v0.1.1',strategy_profile_id:logicalProfile,
+        strategy_profile_version:profileVersion,strategy_code_hash:code,strategy_config_hash:config})};
+    };
+    const profileRun=setProfile();
     const approvedProfile=f.learner.classification(profileRun);
     assert.equal(approvedProfile.eligible,true,approvedProfile.reasons.join(','));
+    assert.equal(approvedProfile.telemetry.raw_identity_qualification.approved_profile_mapping.rule,'FROZEN_V013_PROFILE6_EXACT_LOGICAL_PINS');
+    assert.deepEqual(approvedProfile.telemetry.raw_identity_qualification.approved_profile_mapping.trade_ids,[1]);
     telemetry.prepare('UPDATE trade_causal_context SET strategy_profile_id=?,strategy_profile_version=?').run(logicalProfile,'v0.1.3');
     assert.equal(f.learner.classification(profileRun).eligible,true,'explicit approved logical normalization is also accepted');
-    telemetry.prepare('UPDATE trade_causal_context SET raw_text_tag=?').run(encodeTag({...rawFields,strategy_v:physicalVersion,profile:'unapproved-physical-profile',profile_v:physicalVersion}));
-    assert.ok(f.learner.classification(profileRun).reasons.includes('RAW_STTL2_IDENTITY_CONFLICT'),'suffix alone is not an approved profile mapping');
-    telemetry.prepare('UPDATE ocean_run_lineage_v1 SET strategy_profile_id=?,strategy_profile_version=?').run(context.strategy_profile_id,context.strategy_profile_version);
+    for(const variant of [{profile:'nasdaq_v0449_hmm_risk1000_qty5_control'},{profile:'unapproved-physical-profile'},
+      {profile:`${physicalProfile}-alias`},{code:digest('different-code')},{config:digest('different-config')},
+      {profileVersion:'v0.1.2'},{version:'v0.6.238-managed-lineage-candidate'}]) {
+      const rejected=f.learner.classification(setProfile(variant));
+      assert.equal(rejected.eligible,false,JSON.stringify(variant));
+      assert.ok(rejected.reasons.includes('RAW_STTL2_IDENTITY_CONFLICT'),JSON.stringify(variant));
+      assert.deepEqual(rejected.telemetry.raw_identity_qualification.approved_profile_mapping.trade_ids,[]);
+    }
+    assert.equal(f.learner.classification(setProfile()).eligible,true,'restoring exact approved pins qualifies the fixture again');
+    telemetry.prepare('UPDATE ocean_run_lineage_v1 SET strategy_profile_id=?,strategy_profile_version=?,strategy_code_hash=?,strategy_config_hash=?')
+      .run(context.strategy_profile_id,context.strategy_profile_version,context.strategy_code_hash,context.strategy_config_hash);
     const mappedTag=encodeTag({...rawFields,strategy_v:'v0.6.237'});
     telemetry.prepare('UPDATE trades SET strategy_version=?,text_tag=?').run('v0.6.237',mappedTag);
-    telemetry.prepare('UPDATE trade_causal_context SET strategy_version=?,strategy_profile_id=?,strategy_profile_version=?,raw_text_tag=?')
-      .run('v0.6.237',context.strategy_profile_id,context.strategy_profile_version,mappedTag);
+    telemetry.prepare('UPDATE trade_causal_context SET strategy_version=?,strategy_profile_id=?,strategy_profile_version=?,strategy_code_hash=?,strategy_config_hash=?,raw_text_tag=?')
+      .run('v0.6.237',context.strategy_profile_id,context.strategy_profile_version,context.strategy_code_hash,context.strategy_config_hash,mappedTag);
     telemetry.prepare("UPDATE ocean_trade_causal_v2 SET quality_flags='strategy_version_mismatch'").run();
     const criticalFlagRejected=f.learner.classification(run);
     assert.equal(criticalFlagRejected.eligible,false);

@@ -65,13 +65,17 @@ export function parseSttl2Identity(text) {
 }
 
 function rawProfileBinding(raw, lineage) {
-  // The explicit physical-to-logical profile exception in telemetry's
-  // IsApprovedLogicalProfileBinding; never infer a mapping from version suffix alone.
+  // Frozen ow_profile v0.1.3 approves Profile6/risk1100/qty5, not Profile3.
+  // Export sha256 7a74ded1c6617e984296a0a034453f37f1c830c45eea611ead70adac13b6d074.
+  // Logical code/config pins are distinct from the independently checked physical DLL.
   return lineage.strategy_id === 'cicd-vwap-pull-back-strategy'
     && lineage.strategy_profile_id === 'cicd-vwap-pull-back-strategy.profile-v0.1.0-source-bound'
     && lineage.strategy_profile_version === 'v0.1.3'
-    && raw.profile === 'nasdaq_v0449_hmm_risk1000_qty5_control'
-    && raw.strategy_v === `${lineage.strategy_version}-managed-lineage-candidate`
+    && lineage.strategy_code_hash === 'sha256:8b26b689b013f1473304a1fdde4bcf265ddbfd4cf05e58e11a97e9f777ed7909'
+    && lineage.strategy_config_hash === 'sha256:21968c73dbff8646ff15bfffafaa0d85e4e8db5b8273f5b0a88eec001942af4d'
+    && lineage.strategy_version === 'v0.6.237'
+    && raw.profile === 'nasdaq_v0608_us_trendup_weak_distance_qty1_replay_status_preserve_risk1100_qty5_candidate'
+    && raw.strategy_v === 'v0.6.237-managed-lineage-candidate'
     && raw.profile_v === raw.strategy_v;
 }
 
@@ -533,7 +537,7 @@ export class OperationalLearning {
       return { verified: discrepancies.length === 0,
         ...(discrepancies.length ? { reason: 'RAW_STTL2_IDENTITY_CONFLICT' } : {}),
         contract: 'STTL2_PARSE_TEXT_TAG_IDENTITY_AND_TRADE_ID_JOIN', closed_trade_count: rows.length, discrepancies,
-        approved_profile_mapping: { rule: 'TELEMETRY_IS_APPROVED_LOGICAL_PROFILE_BINDING', trade_ids: mappedProfileTrades },
+        approved_profile_mapping: { rule: 'FROZEN_V013_PROFILE6_EXACT_LOGICAL_PINS', trade_ids: mappedProfileTrades },
         session_rule: lineage.session_name === 'All' ? 'MANAGED_ALL_WITH_EXACT_RAW_STORED_SIGNAL_SESSION' : 'EXACT_MANAGED_RAW_STORED_SESSION' };
     } catch {
       return { verified: false, reason: 'RAW_STTL2_IDENTITY_PROOF_REQUIRED' };
