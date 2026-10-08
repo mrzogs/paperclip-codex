@@ -9,13 +9,14 @@ import { WorkflowBackend } from './backend.mjs';
 import { LEGACY_RESEARCH_VERSION, RESEARCH_VERSION, OperationalResearch, evaluateResearch } from './operational-research.mjs';
 import { mockNativeProof } from './operational-native-sessions.test-fixtures.mjs';
 import { RESEARCH_V5 } from './operational-research-protocol.mjs';
+import { REPORT_REFERENCE_VERSION } from './operational-research-report.mjs';
 import { OperationalLearning } from './operational-learning.mjs';
 import { CONTINUATION_ORIGIN } from './operational-continuation.mjs';
 import { readWorkflowView } from './ui-api.mjs';
 import { digest, objectHash } from './common.mjs';
 import { consumePlanningOnce } from '../../../../scripts/consume-ocean-proposal-planning.mjs';
 
-function fixture({insufficient=false,noChange=false,partial=false,prospective=false,oneDirection=null}={}) {
+function fixture({insufficient=false,noChange=false,partial=false,prospective=false,oneDirection=null,rowsPerRun=20}={}) {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'ocean-planning-'));
   const filename=path.join(root,'workflow.sqlite');let store=new WorkflowStore(filename);
   const backend=Object.create(WorkflowBackend.prototype);
@@ -40,14 +41,14 @@ function fixture({insufficient=false,noChange=false,partial=false,prospective=fa
     dataset_manifest_revision:1,dataset_manifest_hash:digest('dataset'),execution_instance_id:'i',expected_environment:'REPLAY'}]));
   for(const run of runs)backend.db.prepare('INSERT INTO ow_runs VALUES(?,?,?,1,?,?)').run(run,'s','i','COMPLETED',JSON.stringify(contexts[run]));
   const bundle={policy:{project:'fixture',strategy_name:'Isolated planning fixture'},excluded_evidence:[],
-    cohort:{eligible_runs:runs.map(run_id=>({run_id,context_hash:contexts[run_id].context_hash,observed_sample_count:20})),
-      aggregate:{observed_sample_count:60}},research_coverage:Object.fromEntries(runs.map((run,index)=>[run,[{
+    cohort:{eligible_runs:runs.map(run_id=>({run_id,context_hash:contexts[run_id].context_hash,observed_sample_count:rowsPerRun})),
+      aggregate:{observed_sample_count:rowsPerRun*runs.length}},research_coverage:Object.fromEntries(runs.map((run,index)=>[run,[{
         start_utc:`2025-0${index+1}-01T00:00:00Z`,end_utc:`2025-0${index+2}-01T00:00:00Z`}]]))};
   if(insufficient)bundle.research_coverage.r2=bundle.research_coverage.r1;
-  const rows=runs.flatMap((run_id,index)=>Array.from({length:20},(_,i)=>({run_id,trade_id:index*100+i,
-    entry_datetime:45000+index+i/24,direction:i<10?'long':'short',session_name:'UNKNOWN',regime_label:'UNKNOWN',
-    gross_currency_value:i<10 || (noChange && index===1)?20:-10,total_commission:1,
-    net_profit_loss:i<10 || (noChange && index===1)?19:-11,exit_causality:'unknown'})));
+  const rows=runs.flatMap((run_id,index)=>Array.from({length:rowsPerRun},(_,i)=>({run_id,trade_id:index*rowsPerRun+i,
+    entry_datetime:45000+index+i/24,direction:i<rowsPerRun/2?'long':'short',session_name:'UNKNOWN',regime_label:'UNKNOWN',
+    gross_currency_value:i<rowsPerRun/2 || (noChange && index===1)?20:-10,total_commission:1,
+    net_profit_loss:i<rowsPerRun/2 || (noChange && index===1)?19:-11,exit_causality:'unknown'})));
   if(partial)rows.find(row=>row.run_id==='r2' && row.direction==='long').direction='short';
   if(oneDirection)for(const row of rows)Object.assign(row,{direction:oneDirection,gross_currency_value:-10,net_profit_loss:-11});
   const version=prospective?RESEARCH_VERSION:LEGACY_RESEARCH_VERSION;
@@ -107,6 +108,153 @@ function assertNoAuthority(f) {
   assert.equal(f.backend.db.prepare('SELECT COUNT(*) n FROM ow_handoffs').get().n,0);
   assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_artifacts WHERE kind IN ('CANDIDATE','BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT')").get().n,0);
 }
+
+test('actual completion of a large mock-native cumulative report survives restart without clipping evidence',t=>{
+  // Evidence/physical qualification are explicitly mocked; completion, artifact
+  // size enforcement, transactions, immutable input and restart use real software.
+  const f=fixture({prospective:true,rowsPerRun:500});try {
+    const {job,result}=f.capture(),input=f.backend.one('ow_research_jobs',job.id).input_json;
+    const bytes=Buffer.byteLength(JSON.stringify({...result,job_id:job.id,case_id:job.case_id,
+      source_recommendation_id:job.artifact_id,source_recommendation_hash:job.artifact_hash,
+      completed_at_utc:new Date().toISOString()},null,2));
+    assert.ok(bytes>128*1024);assert.equal(result.native_session_evidence.exit_audit.length,1500);
+    t.diagnostic(JSON.stringify({report_bytes:bytes,cap_bytes:128*1024,scored_rows:f.rows.length,
+      exit_audit_records:result.native_session_evidence.exit_audit.length,mocks:'EVIDENCE_AND_PHYSICAL_QUALIFICATION_ONLY'}));
+    result.brain_record={record_id:'EXPLICIT_MOCK_BRAIN_RECEIPT',content_hash:digest('mock-record')};
+    const status=f.worker.complete(job,result,f.actor,'strategy');
+    assert.equal(status.state,'COMPLETED');assert.deepEqual(status.report.native_session_evidence.exit_audit,result.native_session_evidence.exit_audit);
+    assert.equal(f.backend.one('ow_research_jobs',job.id).input_json,input);
+    const sealedResult=sealed(f),reference=JSON.parse(Buffer.from(sealedResult.artifact.content).toString());
+    assert.equal(reference.schema_version,REPORT_REFERENCE_VERSION);
+    assert.ok(Buffer.from(sealedResult.artifact.content).length<=128*1024);
+    assert.equal(reference.full_report.content_hash,digest(JSON.stringify(status.report,null,2)));
+    assert.equal(status.result_hash,digest(Buffer.from(sealedResult.artifact.content)));
+    t.diagnostic(JSON.stringify({full_report_bytes:reference.full_report.bytes,
+      outcome_artifact_bytes:Buffer.from(sealedResult.artifact.content).length,full_report_hash:reference.full_report.content_hash}));
+    assert.notEqual(reference.full_report.content_hash,status.result_hash,'artifact and full-report hashes have explicit separate meanings');
+    assert.equal(status.report.candidate_validation.status,'NOT_DUE');
+    const planning=f.worker.continuations.plans.read(f.actor,status.continuations[0].case_id);
+    assert.equal(planning.template.proposed_change.value,'short');
+    assert.equal(planning.template.source.report_hash,status.result_hash);
+    assert.deepEqual(f.worker.continuations.source(sealedResult.job).report,status.report);
+    assert.deepEqual(f.backend.readCase(f.human,'source').research.report,status.report);
+    f.restart();f.worker.reconcile();f.worker.reconcile();
+    assert.deepEqual(f.worker.statusForCase('source').report,status.report);assertSealed(f,sealedResult);assertNoAuthority(f);
+    assert.throws(()=>f.backend.writeArtifact(f.actor,{artifact_id:'test-oversized-unrelated',case_id:'source',run_id:'r1',
+      recipient_id:'strategy',kind:'OUTCOME',media_type:'application/json',content:JSON.stringify({data:'x'.repeat(128*1024)}),
+      content_hash:digest('irrelevant'),candidate_hash:null,dependency_ids:[]}),/UNSAFE_ARTIFACT_TYPE_OR_SIZE/);
+  }finally{f.close();}
+});
+
+test('large contradictory and insufficient reports retain full evidence and honest disposition after restart',()=>{
+  for(const options of [{noChange:true},{insufficient:true}]) {
+    const f=fixture({prospective:true,rowsPerRun:500,...options});try {
+      const {job,result}=f.capture(),status=f.worker.complete(job,result,f.actor,'strategy');
+      assert.equal(status.report.outcome,options.noChange?'NO_SUPPORTED_CHANGE':'INSUFFICIENT_EVIDENCE');
+      for(const key of Object.keys(result))assert.deepEqual(status.report[key],result[key]);
+      assert.equal(status.report.native_session_evidence.exit_audit.length,1500);
+      if(options.noChange) {
+        assert.deepEqual(status.report.experiments.find(item=>item.value==='short').contradictory_child_run_ids,['r2']);
+        assert.equal(f.children().length,0);
+      } else assert.equal(status.continuations[0].kind,'EVIDENCE_FOLLOW_UP');
+      const before=sealed(f);f.restart();f.worker.reconcile();
+      assert.deepEqual(f.worker.statusForCase('source').report,status.report);assertSealed(f,before);assertNoAuthority(f);
+    }finally{f.close();}
+  }
+});
+
+test('large completion rollback and renewed lease retry preserve full frozen input and older inline reports',()=>{
+  const f=fixture({prospective:true});try {
+    f.complete();const original=sealed(f);
+    assert.equal(JSON.parse(Buffer.from(original.artifact.content).toString()).schema_version,RESEARCH_VERSION);
+    f.bundle.excluded_evidence.push({run_id:'EXPLICIT_MOCK_EXCLUDED_HISTORY',exclusion_reason:'Retain contradiction '.repeat(7000)});
+    f.seed('large-later');const {job,result}=f.capture(),input=f.backend.one('ow_research_jobs',job.id).input_json;
+    const write=f.backend.writeArtifact.bind(f.backend);
+    f.backend.writeArtifact=(actor,data)=>{if(data.kind==='OUTCOME'){write(actor,data);throw Error('EXPLICIT_MOCK_CRASH_AFTER_OUTCOME_WRITE');}return write(actor,data);};
+    assert.throws(()=>f.worker.complete(job,result,f.actor,'strategy'),/EXPLICIT_MOCK_CRASH_AFTER_OUTCOME_WRITE/);
+    assert.equal(f.backend.one('ow_research_jobs',job.id).state,'RUNNING');
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_artifacts WHERE case_id='large-later' AND kind='OUTCOME'").get().n,0);
+    f.backend.writeArtifact=write;f.restart();
+    f.backend.db.prepare('UPDATE ow_research_jobs SET lease_until_ms=0 WHERE id=?').run(job.id);
+    const resumed=f.worker.claim();assert.notEqual(resumed.lease_id,job.lease_id);
+    assert.throws(()=>f.worker.complete(job,result,f.actor,'strategy'),/RESEARCH_LEASE_EXPIRED/);
+    const snapshot=f.worker.capture(resumed);assert.equal(f.backend.one('ow_research_jobs',job.id).input_json,input);
+    const status=f.worker.complete(resumed,snapshot.result,f.actor,'strategy');
+    assert.deepEqual(status.report.excluded_evidence,result.excluded_evidence);
+    assert.equal(status.report.excluded_evidence[0].exclusion_reason.length,'Retain contradiction '.repeat(7000).length);
+    assert.throws(()=>f.worker.complete(resumed,snapshot.result,f.actor,'strategy'),/RESEARCH_LEASE_EXPIRED/);
+    f.restart();f.worker.reconcile();f.worker.reconcile();
+    assert.deepEqual(f.worker.statusForCase('large-later').report,status.report);assertSealed(f,original);assertNoAuthority(f);
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_artifacts WHERE case_id='large-later' AND kind='OUTCOME'").get().n,1);
+  }finally{f.close();}
+});
+
+test('large report worker retries the exact mock Brain request after completion failure and resumes across restart',async()=>{
+  const f=fixture({prospective:true,rowsPerRun:500});try {
+    // Only the Brain transport/identity/registry and evidence facts are mocked.
+    // flushOnce/capture/recordInBrain/complete and SQLite remain production code.
+    const {job}=f.capture(),input=f.backend.one('ow_research_jobs',job.id).input_json;
+    f.worker.fail(job,Error('EXPLICIT_MOCK_PRE_BRAIN_INTERRUPTION'));
+    const calls=[];
+    Object.assign(f.backend.operationalLearning,{path:'/EXPLICIT_MOCK_ONLY',token:()=> 'mock-test-token',verifyIdentity:async()=>{},
+      registry:async()=>({record_sha256:digest('registry'),reconciliation_id:'registry'}),
+      call:async(_path,_token,request)=>{
+        calls.push(request);
+        const content=JSON.stringify({registry_record_sha256:request.registry_record_sha256,
+          registry_reconciliation_id:request.registry_reconciliation_id});
+        return {schema_version:'ocean-operational-learning-result/v1',record_id:'EXPLICIT_MOCK_RESEARCH_RECORD',
+          relative_path:'EXPLICIT_MOCK_ONLY/result.json',content,content_sha256:digest(content),
+          correlation:request.correlation,source_record_ids:['r1','r2','r3']};
+      }});
+    const write=f.backend.writeArtifact.bind(f.backend);
+    f.backend.writeArtifact=(actor,data)=>{if(data.kind==='OUTCOME'){write(actor,data);throw Error('EXPLICIT_MOCK_COMPLETION_INTERRUPTION');}return write(actor,data);};
+    f.backend.db.prepare('UPDATE ow_research_jobs SET next_attempt_ms=0 WHERE id=?').run(job.id);
+    await f.worker.flushOnce();
+    const failed=f.backend.one('ow_research_jobs',job.id);
+    assert.equal(failed.state,'RETRY');assert.equal(failed.last_error,'EXPLICIT_MOCK_COMPLETION_INTERRUPTION');
+    assert.equal(failed.input_json,input);assert.ok(failed.brain_request_json);
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_artifacts WHERE kind='OUTCOME'").get().n,0);
+    assert.equal(f.children().length,0);f.backend.writeArtifact=write;f.restart();
+    f.worker.evidence=()=>{throw Error('must use frozen evidence');};
+    f.backend.operationalLearning.registry=async()=>{throw Error('must use frozen Brain request');};
+    f.backend.db.prepare('UPDATE ow_research_jobs SET next_attempt_ms=0 WHERE id=?').run(job.id);
+    await f.worker.flushOnce();
+    const status=f.worker.statusForCase('source'),completed=sealed(f);
+    assert.equal(status.state,'COMPLETED');assert.equal(calls.length,2);assert.deepEqual(calls[1],calls[0]);
+    assert.ok(calls[0].proposed_recommendation.content.length<=50000);
+    assert.equal(status.report.brain_record.record_id,'EXPLICIT_MOCK_RESEARCH_RECORD');
+    assert.equal(status.report.native_session_evidence.exit_audit.length,1500);
+    assert.equal(completed.job.input_json,input);assert.equal(completed.job.brain_request_json,failed.brain_request_json);
+    f.restart();await f.worker.flushOnce();assert.equal(calls.length,2);assertSealed(f,completed);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('large report continuation comparisons resolve later evidence without rewriting the earlier reference',()=>{
+  const f=fixture({prospective:true,insufficient:true,rowsPerRun:500});try {
+    const first=f.complete(),before=sealed(f),child=first.continuations[0];
+    assert.equal(first.report.outcome,'INSUFFICIENT_EVIDENCE');thirdCoverage(f);f.seed('large-qualified-later');
+    const status=f.complete();assert.equal(status.report.outcome,'EXPLORATORY_PROPOSAL');
+    const view=f.backend.readCase(f.human,child.case_id);
+    assert.equal(view.work_status,'COMPLETED');assert.equal(view.planning.progress.status,'REASSESSED');
+    assert.equal(view.planning.progress.source.report_hash,status.result_hash);
+    assert.equal(view.planning.progress.source.case_id,'large-qualified-later');
+    f.restart();f.worker.reconcile();f.worker.reconcile();
+    assert.equal(progressCount(f),1);assertSealed(f,before);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('large zero-exposure reports still require G21 risk-disable review, not candidate planning',()=>{
+  const f=fixture({prospective:true,oneDirection:'long',rowsPerRun:500});try {
+    const status=f.complete(),before=sealed(f);
+    assert.equal(status.report.outcome,'NO_SUPPORTED_CHANGE');assert.equal(f.children().length,0);
+    assert.equal(status.report.direction_exclusion_dispositions[0].retained_trades,0);
+    assert.equal(status.report.direction_exclusion_dispositions[0].disposition,'RISK_DISABLE_REVIEW_REQUIRED');
+    assert.equal(status.report.native_session_evidence.exit_audit.length,1500);
+    assert.equal(status.report.candidate_validation.status,'NOT_DUE');
+    f.restart();f.worker.reconcile();assertSealed(f,before);assertNoAuthority(f);
+    assert.deepEqual(f.worker.statusForCase('source').report,status.report);
+  }finally{f.close();}
+});
 
 test('supported completion atomically freezes an owned planning case/task and exposes linked real action',()=>{
   const f=fixture();try {

@@ -3,6 +3,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { PROVENANCE_ACTION, parseSttl2Identity } from './operational-learning.mjs';
 import { digest, objectHash, requireThat } from './common.mjs';
 import { OperationalContinuation } from './operational-continuation.mjs';
+import { researchReportContent, readResearchReport } from './operational-research-report.mjs';
 import { RESEARCH_V5, RESEARCH_V6, REASSESSMENT_ORIGIN, evaluateV6, readObservedSessionProofs, remediationV6 } from './operational-research-protocol.mjs';
 
 // New physical/raw provenance gates apply only to new jobs, never relabel history.
@@ -386,9 +387,7 @@ export class OperationalResearch {
       if(historical)job=historical;
     }
     const artifact=job.result_artifact_id?this.backend.one('ow_artifacts',job.result_artifact_id):null;
-    if(artifact)requireThat(digest(Buffer.from(artifact.content))===job.result_hash
-      && JSON.parse(artifact.manifest_json).content_hash===job.result_hash,409,'RESEARCH_RESULT_HASH_CONFLICT');
-    const report=artifact?JSON.parse(Buffer.from(artifact.content).toString('utf8')):null;
+    const report=artifact?readResearchReport(job,artifact):null;
     const currentQualification=this.qualification(job);
     const superseded=currentQualification.superseded===true;
     const historical=superseded || (job.state==='COMPLETED' && (job.analysis_version!==this.version || backfillSkipped));
@@ -587,7 +586,7 @@ export class OperationalResearch {
       requireThat(current.state==='RUNNING' && current.lease_id===job.lease_id && current.lease_until_ms>Date.now(),409,'RESEARCH_LEASE_EXPIRED');
       const report={...result,job_id:job.id,case_id:job.case_id,source_recommendation_id:job.artifact_id,
         source_recommendation_hash:job.artifact_hash,completed_at_utc:new Date().toISOString()};
-      const content=JSON.stringify(report,null,2);
+      const content=researchReportContent(current,report);
       const artifactId=`test-research-result-${job.id.slice('research-'.length)}`;
       const row=this.backend.one('ow_cases',job.case_id);
       this.backend.writeArtifact(actor,{artifact_id:artifactId,case_id:row.id,run_id:row.run_id,recipient_id:recipient,

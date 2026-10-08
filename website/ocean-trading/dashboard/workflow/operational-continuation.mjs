@@ -1,6 +1,7 @@
 import { digest, objectHash, requireThat } from './common.mjs';
 import { OperationalProposalPlan } from './operational-proposal-plan.mjs';
 import { REASSESSMENT_ORIGIN, directionExclusionExposure, requireDirectionExclusionExposure } from './operational-research-protocol.mjs';
+import { readResearchReport } from './operational-research-report.mjs';
 
 export const CONTINUATION_ORIGIN = 'OPERATIONAL_RESEARCH_CONTINUATION';
 const VERSION = 'ocean-research-planning-continuation/v1';
@@ -20,7 +21,7 @@ export class OperationalContinuation {
       && job.state==='COMPLETED' && job.analysis_version===this.research.version,409,'CONTINUATION_CURRENT_RESEARCH_REQUIRED');
     const artifact=this.backend.artifactFor(row,job.result_artifact_id,'OUTCOME');
     requireThat(digest(Buffer.from(artifact.content))===job.result_hash,409,'CONTINUATION_REPORT_HASH_CONFLICT');
-    const report=JSON.parse(Buffer.from(artifact.content).toString('utf8'));
+    const report=readResearchReport(job,artifact);
     if(report.schema_version!==this.research.version || !report.screening_policy || !report.evidence_sufficiency
       || !['EXPLORATORY_PROPOSAL','INSUFFICIENT_EVIDENCE','NO_SUPPORTED_CHANGE'].includes(report.outcome))return null;
     requireThat(!['PAUSED','CANCELLED','FAILED','BLOCKED'].includes(row.work_status),409,'CONTINUATION_SOURCE_DISPOSITION_HELD');
