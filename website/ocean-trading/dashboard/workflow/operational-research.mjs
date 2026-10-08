@@ -3,9 +3,11 @@ import { DatabaseSync } from 'node:sqlite';
 import { PROVENANCE_ACTION } from './operational-learning.mjs';
 import { digest, objectHash, requireThat } from './common.mjs';
 import { OperationalContinuation } from './operational-continuation.mjs';
+import { RESEARCH_V5, REASSESSMENT_ORIGIN, evaluateV5, readObservedSessionProofs, remediationV5 } from './operational-research-protocol.mjs';
 
 // New physical/raw provenance gates apply only to new jobs, never relabel history.
-export const RESEARCH_VERSION = 'ocean-cumulative-research/v4';
+export const LEGACY_RESEARCH_VERSION = 'ocean-cumulative-research/v4';
+export const RESEARCH_VERSION = RESEARCH_V5;
 const unknown = value => !value || /^(unknown|none|null|n\/a)$/i.test(String(value).trim());
 const round = value => Math.round(value * 100) / 100;
 const authority = Object.freeze({ automatic_strategy_change:false, candidate_approved:false, paper_authorized:false, live_authorized:false });
@@ -20,7 +22,7 @@ export function evidenceRemediation(sufficiency) {
   const actions=[];
   if(missing.length)actions.push(`Verify original requested coverage and provenance for retained runs ${missing.join(', ')}; missing proof is not permission to relabel or discard history.`);
   if(missingPeriods)actions.push(`Obtain ${missingPeriods} additional genuinely distinct, qualified non-live discovery coverage(s) and a new Research evaluation. This can resolve the period shortfall, not fixed retained-run sample counts.`);
-  if(fixed.length)actions.push(`Research design review required for ${fixed.map(item=>`${item.direction} in ${item.run_id} (${item.observed_trades}/${item.required_trades})`).join(', ')}. Adding later runs cannot increase those frozen counts. The Research owner must document a prospective sampling-unit/protocol review for Wayne, including why the existing every-retained-run rule is or is not suitable. Keep all recorded trades, contradictory history and current floors; do not change policy or create a candidate from this review without separate authorization.`);
+  if(fixed.length)actions.push(`Research design review required for ${fixed.map(item=>`${item.direction} in ${item.run_id} (${item.observed_trades}/${item.required_trades})`).join(', ')}. Adding later runs cannot increase those frozen counts. The Research engineering owner must author and test a prospective sampling-unit/protocol revision under the existing engineering authorization. Preserve this v4 snapshot, every contradiction and the approved aggregate evidence policy; no candidate or holdout tuning is authorized by this review.`);
   if(noDirections)actions.push('Review source entry-direction availability before designing another screen; do not invent direction or exit labels. No direction has been assessed.');
   return {status:fixed.length || noDirections?'RESEARCH_DESIGN_REVIEW_REQUIRED':actions.length?'QUALIFIED_EVIDENCE_REQUIRED':'NOT_REQUIRED',
     requires_design_review:fixed.length>0 || noDirections,
@@ -57,7 +59,7 @@ function historicalCoverage(ranges) {
 
 // Only recorded entry direction can enter the exploratory proposal screen.
 // Signal labels have no independently proven pre-entry availability timestamp.
-export function evaluateResearch(bundle, rows) {
+export function evaluateResearchV4(bundle, rows) {
   const sourceIds = bundle.cohort.eligible_runs.map(run=>run.run_id).sort();
   requireThat(new Set(sourceIds).size===sourceIds.length,409,'RESEARCH_DUPLICATE_RUN');
   requireThat(rows.every(row=>sourceIds.includes(row.run_id)),409,'RESEARCH_FOREIGN_EVIDENCE');
@@ -130,7 +132,7 @@ export function evaluateResearch(bundle, rows) {
     distinct_declared_periods:periodIds.size,sample_shortfalls:sampleShortfalls};
   const remediation=evidenceRemediation(sufficiency);
   const result={
-    schema_version:RESEARCH_VERSION,
+    schema_version:LEGACY_RESEARCH_VERSION,
     outcome:proposals.length?'EXPLORATORY_PROPOSAL':assessmentComplete?'NO_SUPPORTED_CHANGE':'INSUFFICIENT_EVIDENCE',
     screening_policy:screeningPolicy,
     evidence_sufficiency:sufficiency,evidence_remediation:remediation,
@@ -175,11 +177,16 @@ export function evaluateResearch(bundle, rows) {
   return result;
 }
 
+export function evaluateResearch(bundle,rows) {
+  return evaluateV5(bundle,rows,evaluateResearchV4(bundle,rows));
+}
+
 export class OperationalResearch {
   constructor(backend) { this.backend=backend;this.db=backend.db;this.running=false;this.stopped=false;
     this.version=RESEARCH_VERSION;this.continuations=new OperationalContinuation(this); }
   stop() {this.stopped=true;}
-  remediation(sufficiency){return evidenceRemediation(sufficiency);}
+  remediation(sufficiency){return sufficiency.scope==='RECORDED_ENTRY_DIRECTION_DISCOVERY_SCREEN_ONLY'
+    && 'missing_distinct_block_count' in sufficiency?remediationV5(sufficiency):evidenceRemediation(sufficiency);}
   historicalCompletion(caseId,artifactId=null) {
     return this.db.prepare(`SELECT * FROM ow_research_jobs WHERE case_id=? AND state='COMPLETED'
       AND result_artifact_id IS NOT NULL AND (? IS NULL OR artifact_id=?) ORDER BY rowid DESC LIMIT 1`)
@@ -187,10 +194,11 @@ export class OperationalResearch {
   }
   enqueue(caseId,artifactId) {
     const row=this.backend.one('ow_cases',caseId);
-    requireThat(JSON.parse(row.payload_json).origin==='OPERATIONAL_LEARNING',409,'RESEARCH_OPERATIONAL_CASE_REQUIRED');
-    const artifact=this.backend.artifactFor(row,artifactId,'RECOMMENDATION');
+    const reassessment=JSON.parse(row.payload_json).origin===REASSESSMENT_ORIGIN;
+    requireThat(reassessment || JSON.parse(row.payload_json).origin==='OPERATIONAL_LEARNING',409,'RESEARCH_OPERATIONAL_CASE_REQUIRED');
+    const artifact=this.backend.artifactFor(row,artifactId,reassessment?'EVIDENCE':'RECOMMENDATION');
     const content=JSON.parse(Buffer.from(artifact.content).toString('utf8'));
-    requireThat(content.schema_version==='ocean-operational-learning-recommendation/v1'
+    requireThat(content.schema_version===(reassessment?'ocean-operational-research-reassessment/v1':'ocean-operational-learning-recommendation/v1')
       && Object.keys(authority).every(key=>content.authority?.[key]===false),409,'RESEARCH_AUTHORITY_BOUNDARY');
     const hash=JSON.parse(artifact.manifest_json).content_hash;
     // Completed cases are historical snapshots, never automatic version backfill.
@@ -201,13 +209,16 @@ export class OperationalResearch {
       requireThat(historical.artifact_hash===hash,409,'RESEARCH_INPUT_HASH_CONFLICT');
       return historical;
     }
-    const id=`research-${digest(`${caseId}:${artifactId}:${RESEARCH_VERSION}`).slice(-24)}`;
+    // A previously frozen job resumes its exact version/input; never recapture it as v5.
+    const frozen=this.db.prepare("SELECT * FROM ow_research_jobs WHERE case_id=? AND artifact_id=? AND analysis_version=? AND input_json IS NOT NULL AND state<>'COMPLETED' ORDER BY rowid DESC LIMIT 1").get(caseId,artifactId,LEGACY_RESEARCH_VERSION);
+    if(frozen){requireThat(frozen.artifact_hash===hash,409,'RESEARCH_INPUT_HASH_CONFLICT');return frozen;}
+    const id=`research-${digest(`${caseId}:${artifactId}:${this.version}`).slice(-24)}`;
     const existing=this.db.prepare('SELECT * FROM ow_research_jobs WHERE id=?').get(id);
     if(existing) { requireThat(existing.artifact_hash===hash,409,'RESEARCH_INPUT_HASH_CONFLICT');return existing; }
     const created=new Date().toISOString();
     this.db.prepare(`INSERT INTO ow_research_jobs(id,case_id,artifact_id,artifact_hash,analysis_version,state,next_attempt_ms,created_at_utc)
-      VALUES(?,?,?,?,?,'PENDING',?,?)`).run(id,caseId,artifactId,hash,RESEARCH_VERSION,Date.now(),created);
-    this.backend.event(caseId,'operational.research.queued',{id:'ocean-research',role:'BRAIN'},{job_id:id,artifact_id:artifactId,analysis_version:RESEARCH_VERSION});
+      VALUES(?,?,?,?,?,'PENDING',?,?)`).run(id,caseId,artifactId,hash,this.version,Date.now(),created);
+    this.backend.event(caseId,'operational.research.queued',{id:'ocean-research',role:'BRAIN'},{job_id:id,artifact_id:artifactId,analysis_version:this.version});
     return this.db.prepare('SELECT * FROM ow_research_jobs WHERE id=?').get(id);
   }
   reconcile() {
@@ -217,12 +228,97 @@ export class OperationalResearch {
       this.backend.store.transaction(()=>this.enqueue(row.id,row.artifact_id));
     }
     this.continuations.reconcile();
+    if(this.version===RESEARCH_VERSION)this.reconcileFollowUps();
+  }
+  queueEvidenceReview(run,actor,result,details,bundle) {
+    requireThat(actor.role==='BRAIN' && actor.namespace==='OPERATIONAL'
+      && this.continuations.ownerCurrent(actor.id,run),403,'RESEARCH_CURRENT_OWNER_REQUIRED');
+    this.backend.authorize(actor,'artifact.write',run.strategy_id,run.instance_id);
+    this.backend.authorize(actor,'event.write',run.strategy_id,run.instance_id);
+    requireThat(this.backend.operationalLearning.classification(run).eligible && ['NO_CHANGE','BLOCKED'].includes(details?.conclusion_type)
+      && result.context_hash===JSON.parse(run.context_json).context_hash,409,'RESEARCH_SCOPED_LEARNING_RESULT_REQUIRED');
+    const stored=this.db.prepare('SELECT payload_json FROM ow_operational_brain_results WHERE id=? AND run_id=?').get(result.result_id,run.id);
+    const recorded=stored?JSON.parse(stored.payload_json):null;
+    requireThat(recorded?.content_sha256===result.content_sha256 && recorded.producer_id===actor.id
+      && recorded.context_hash===result.context_hash && digest(recorded.content)===result.content_sha256
+      && objectHash(JSON.parse(recorded.content))===objectHash(details),409,'RESEARCH_RECORDED_LEARNING_RESULT_REQUIRED');
+    const recipient=this.backend.config.identities.find(identity=>identity.namespace==='OPERATIONAL' && identity.role==='STRATEGY'
+      && !identity.revoked && Date.parse(identity.expires_at_utc)>Date.now() && identity.strategy_ids.includes(run.strategy_id)
+      && identity.instance_ids.includes(run.instance_id) && identity.scopes.includes('read') && this.backend.store.identityCurrent(identity)
+      && !this.backend.auth?.bindingErrors?.has(identity.identity_id));
+    requireThat(recipient,409,'RESEARCH_SCOPED_RECIPIENT_REQUIRED');
+    return this.backend.store.transaction(()=>{
+      const fingerprint=objectHash({run_id:run.id,result_id:result.result_id,result_hash:result.content_sha256,cohort_hash:objectHash(bundle.cohort),version:this.version});
+      const caseId=`research-evidence-${fingerprint.slice(7)}`,artifactId=`test-research-evidence-${fingerprint.slice(7)}`;
+      if(!this.db.prepare('SELECT id FROM ow_cases WHERE id=?').get(caseId)) {
+        const registry=this.backend.one('ow_strategies',run.strategy_id);
+        const content=JSON.stringify({schema_version:'ocean-operational-research-reassessment/v1',
+          learning_result_id:result.result_id,learning_result_hash:result.content_sha256,learning_conclusion:details.conclusion_type,
+          basis:'DETERMINISTIC_RESEARCH_REQUIRED_NOT_A_FABRICATED_RECOMMENDATION',cohort_hash:objectHash(bundle.cohort),authority});
+        this.db.prepare("INSERT INTO ow_cases VALUES(?,?,?,?,1,'RESEARCH','READY',?,NULL,?,?,?)").run(caseId,run.strategy_id,run.instance_id,
+          run.id,registry.baseline_hash,actor.id,'Evaluate recorded executions and evidence sufficiency; a Brain no-change conclusion is not proof of an assessed direction screen.',
+          JSON.stringify({origin:REASSESSMENT_ORIGIN,registry_revision:registry.revision,registry_reconciliation_id:details.registry_reconciliation_id,
+            registry_record_sha256:details.registry_record_sha256,evidence_revision_hash:fingerprint}));
+        this.backend.writeArtifact(actor,{artifact_id:artifactId,case_id:caseId,run_id:run.id,recipient_id:recipient.identity_id,kind:'EVIDENCE',
+          media_type:'application/json',content,content_hash:digest(content),candidate_hash:null,dependency_ids:[]});
+      }
+      const job=this.enqueue(caseId,artifactId);
+      return {case_id:caseId,artifact_id:artifactId,job_id:job.id,recipient_id:recipient.identity_id,stage:'RESEARCH',work_status:'READY'};
+    });
+  }
+  reconcileFollowUps() {
+    for(const child of this.db.prepare("SELECT * FROM ow_cases WHERE json_extract(payload_json,'$.origin')='OPERATIONAL_RESEARCH_CONTINUATION' AND json_extract(payload_json,'$.kind')='EVIDENCE_FOLLOW_UP' AND work_status NOT IN ('COMPLETED','CANCELLED','PAUSED','FAILED')").all()) {
+      const view=this.continuations.forCase(child);
+      if(!view.qualified_for_planning)continue;
+      try {
+        const payload=JSON.parse(child.payload_json),lineage=JSON.parse(Buffer.from(this.backend.artifactFor(child,payload.lineage_artifact_id).content).toString());
+        const original=this.backend.one('ow_research_jobs',lineage.source.job_id),frozen=JSON.parse(original.input_json);
+        const candidates=this.db.prepare("SELECT * FROM ow_runs WHERE strategy_id=? AND state='COMPLETED' ORDER BY rowid DESC").all(child.strategy_id);
+        let source=null,trigger=null;
+        for(const run of candidates) {
+          if(!this.backend.operationalLearning.classification(run).eligible)continue;
+          try{source=this.backend.operationalLearning.cohort(run);trigger=run;break;}
+          catch(error){if(error.code!=='TRIGGER_RUN_NOT_IN_ELIGIBLE_COHORT')throw error;}
+        }
+        if(!source)continue;
+        const rows=source.cohort.eligible_runs.flatMap(run=>this.sessionRows(run.run_id));
+        const profile=JSON.parse(this.backend.one('ow_profiles',this.backend.one('ow_strategies',child.strategy_id).profile_id).payload_json);
+        const sessions=this.observedSessions(source,rows);
+        const fingerprint=(cohort,policy,proofs)=>objectHash({cohort_hash:objectHash(cohort),policy_hash:policy?objectHash(policy):null,
+          session_receipts:Object.entries(proofs || {}).map(([run_id,proof])=>({run_id,hash:proof.source_receipt_hash || proof.proof_error || null})).sort((a,b)=>a.run_id.localeCompare(b.run_id))});
+        const current=fingerprint(source.cohort,profile.evidence_policy,sessions);
+        if(current===fingerprint(frozen.evidence.bundle.cohort,frozen.evidence.bundle.approved_evidence_policy,frozen.evidence.bundle.execution_sessions))continue;
+        const actor=this.backend.operationalLearning.brainActor(child.strategy_id,child.instance_id);
+        requireThat(actor.id===child.owner_id && this.continuations.ownerCurrent(actor.id,child),403,'REASSESSMENT_CURRENT_OWNER_REQUIRED');
+        this.backend.store.transaction(()=>{
+          const caseId=`research-reassessment-${digest(`${child.id}:${current}:${this.version}`).slice(7)}`;
+          if(this.db.prepare('SELECT id FROM ow_cases WHERE id=?').get(caseId))return;
+          const content=JSON.stringify({schema_version:'ocean-operational-research-reassessment/v1',
+            source_continuation_case_id:child.id,source:lineage.source,evidence_revision_hash:current,
+            basis:'NEW_QUALIFIED_COHORT_OR_OBSERVED_POLICY_SESSION_PROOF',authority});
+          const artifactId=`test-research-reassessment-${digest(content).slice(7)}`;
+          const casePayload={...JSON.parse(frozen.evidence.row.payload_json),origin:REASSESSMENT_ORIGIN,
+            source_continuation_case_id:child.id,evidence_revision_hash:current};
+          this.db.prepare("INSERT INTO ow_cases VALUES(?,?,?,?,1,'RESEARCH','READY',?,NULL,?,?,?)").run(caseId,child.strategy_id,
+            child.instance_id,trigger.id,child.baseline_hash,actor.id,'Evaluate the new qualified evidence revision; this is not a new Brain recommendation or candidate approval.',JSON.stringify(casePayload));
+          this.backend.writeArtifact(actor,{artifact_id:artifactId,case_id:caseId,run_id:trigger.id,recipient_id:frozen.evidence.recipient,
+            kind:'EVIDENCE',media_type:'application/json',content,content_hash:digest(content),candidate_hash:null,dependency_ids:[]});
+          const job=this.enqueue(caseId,artifactId);
+          this.backend.event(child.id,'operational.research.evidence.reassessment-queued',actor,{case_id:caseId,job_id:job.id,evidence_revision_hash:current});
+        });
+      }catch(error){
+        const reason=String(error.code || 'REASSESSMENT_PROOF_REQUIRED').slice(0,200);
+        if(!this.db.prepare("SELECT 1 FROM ow_events WHERE entity_id=? AND action='operational.research.evidence.reassessment-blocked' AND json_extract(payload_json,'$.payload.reason')=?").get(child.id,reason))
+          this.backend.event(child.id,'operational.research.evidence.reassessment-blocked',{id:child.owner_id,role:'BRAIN',namespace:'OPERATIONAL'},
+            {reason,next_action:'The existing Research owner must resolve this exact evidence/producer proof gap. No old report or input is rewritten.'});
+      }
+    }
   }
   qualification(job) {
     try {
       const row=this.backend.one('ow_cases',job.case_id);
       const ids=[row.run_id];
-      if(job.input_json && job.analysis_version===RESEARCH_VERSION) {
+      if(job.input_json && [this.version,LEGACY_RESEARCH_VERSION].includes(job.analysis_version)) {
         requireThat(digest(job.input_json)===job.input_hash,409,'RESEARCH_SNAPSHOT_HASH_CONFLICT');
         const snapshot=JSON.parse(job.input_json);
         ids.push(...snapshot.result.eligible_run_ids);
@@ -234,7 +330,7 @@ export class OperationalResearch {
       // Uncaptured work must still belong to the cohort it would capture. Frozen
       // input and completed history keep their original membership semantics.
       if(!excluded.length && !job.input_json && job.state!=='COMPLETED'
-        && row.work_status!=='COMPLETED' && job.analysis_version===RESEARCH_VERSION) {
+        && row.work_status!=='COMPLETED' && job.analysis_version===this.version) {
         try {
           const source=this.backend.operationalLearning.cohort(this.backend.one('ow_runs',row.run_id));
           requireThat(source.cohort.eligible_runs.some(run=>run.run_id===row.run_id),409,'TRIGGER_RUN_NOT_IN_ELIGIBLE_COHORT');
@@ -266,7 +362,7 @@ export class OperationalResearch {
     const report=artifact?JSON.parse(Buffer.from(artifact.content).toString('utf8')):null;
     const currentQualification=this.qualification(job);
     const superseded=currentQualification.superseded===true;
-    const historical=superseded || (job.state==='COMPLETED' && (job.analysis_version!==RESEARCH_VERSION || skipped.length>0));
+    const historical=superseded || (job.state==='COMPLETED' && (job.analysis_version!==this.version || skipped.length>0));
     const supersededAction='This uncaptured Research case is retained as superseded history: its trigger is outside the current exact-coverage cohort. No completion is claimed and automatic retry is not due. Continue Research on the current eligible case; recorded job state and historical artifacts remain unchanged.';
     const continuations=this.continuations.links(caseId);
     const openContinuations=continuations.filter(item=>item && (item.blocked_reason || !['COMPLETED','CANCELLED'].includes(item.work_status)));
@@ -288,7 +384,7 @@ export class OperationalResearch {
       qualification_warning:superseded?supersededAction:historical
         ?'Preserved historical report: its original qualified-history label is not current physical/raw provenance proof. It cannot support new proposals without current qualification.'
         :!currentQualification.verified?PROVENANCE_ACTION:null,
-      version_backfill_skipped:completedCase && (job.analysis_version!==RESEARCH_VERSION || skipped.length>0),
+      version_backfill_skipped:completedCase && (job.analysis_version!==this.version || skipped.length>0),
       skipped_version_backfill_jobs:skipped,
       continuations,
       loop_stage:openContinuations.length?openContinuations.some(item=>item.blocked_reason || item.work_status==='BLOCKED')?'BLOCKED_CONTINUATION'
@@ -296,8 +392,8 @@ export class OperationalResearch {
         :openContinuations.some(item=>item.evidence_remediation?.requires_design_review)?'RESEARCH_DESIGN_REVIEW_REQUIRED':'EVIDENCE_REQUIRED'
         :evidenceReassessed.length?evidenceReassessed.some(item=>item.progress.outcome==='EXPLORATORY_PROPOSAL')?'PROPOSAL_PLANNING':'DIRECTION_SCREEN_NO_SUPPORTED_CHANGE'
         :continuationWarning?'BLOCKED_CONTINUATION':null,
-      next_action:superseded?supersededAction:completedCase && job.state==='COMPLETED' && (job.analysis_version!==RESEARCH_VERSION || skipped.length>0)
-        ?`Historical Research is completed and preserved. Completed cases are not version backfilled; new evidence cases use v4. No current version backfill is queued for this case and no candidate or approval is created. ${PROVENANCE_ACTION}`
+      next_action:superseded?supersededAction:completedCase && job.state==='COMPLETED' && (job.analysis_version!==this.version || skipped.length>0)
+        ?`Historical Research is completed and preserved. Completed cases are not version backfilled; new evidence cases use ${this.version}. No current version backfill is queued for this case and no candidate or approval is created. ${PROVENANCE_ACTION}`
         :completedCase && job.state!=='COMPLETED'
           ?'This completed case has a retained historical queue entry but no completed Research report. Version backfill will not run; the entry is not current pending work and no completion is claimed.'
         :!currentQualification.verified?PROVENANCE_ACTION
@@ -306,11 +402,11 @@ export class OperationalResearch {
   claim() {
     return this.backend.store.transaction(()=>{
       const jobs=this.db.prepare(`SELECT j.* FROM ow_research_jobs j JOIN ow_cases c ON c.id=j.case_id
-        WHERE j.analysis_version=? AND ((j.state IN ('PENDING','RETRY') AND j.next_attempt_ms<=?)
+        WHERE (j.analysis_version=? OR (j.analysis_version=? AND j.input_json IS NOT NULL)) AND ((j.state IN ('PENDING','RETRY') AND j.next_attempt_ms<=?)
         OR (j.state='RUNNING' AND j.lease_until_ms<=?)) AND c.stage='RESEARCH' AND c.work_status NOT IN ('PAUSED','CANCELLED','COMPLETED')
-        ORDER BY j.rowid`).all(RESEARCH_VERSION,Date.now(),Date.now());
+        ORDER BY j.rowid`).all(this.version,LEGACY_RESEARCH_VERSION,Date.now(),Date.now());
       // Schema 11 has no SKIPPED state. Completed-case backfills and any frozen
-      // inputs stay untouched and unclaimed across restarts; fresh cases use v4.
+      // inputs keep their version across restarts; fresh cases use v5.
       // Ineligible evidence is owner-action work, not a repeatedly leased RETRY.
       const job=jobs.find(value=>this.qualification(value).verified);
       if(!job)return null;
@@ -320,10 +416,18 @@ export class OperationalResearch {
       return {...job,lease_id:lease,attempts:job.attempts+1};
     });
   }
+  sessionRows(runId) {
+    const database=new DatabaseSync(this.backend.operationalLearning.telemetryDb,{readOnly:true,timeout:2000});
+    try{return database.prepare("SELECT trade_id,run_id,entry_datetime,trade_account,symbol FROM ocean_trade_causal_v2 WHERE run_id=? AND lower(status)='closed' ORDER BY trade_id").all(runId);}
+    finally{database.close();}
+  }
+  observedSessions(bundle,rows) {
+    return readObservedSessionProofs(this.backend,bundle.cohort.eligible_runs.map(run=>run.run_id),rows);
+  }
   evidence(job) {
     const row=this.backend.one('ow_cases',job.case_id);
     this.backend.baseline(row);
-    const artifact=this.backend.artifactFor(row,job.artifact_id,'RECOMMENDATION');
+    const artifact=this.backend.artifactFor(row,job.artifact_id,JSON.parse(row.payload_json).origin===REASSESSMENT_ORIGIN?'EVIDENCE':'RECOMMENDATION');
     requireThat(digest(Buffer.from(artifact.content))===job.artifact_hash,409,'RESEARCH_INPUT_HASH_CONFLICT');
     const run=this.backend.one('ow_runs',row.run_id);
     const source=this.backend.operationalLearning.cohort(run);
@@ -332,24 +436,31 @@ export class OperationalResearch {
         .summary?.completion?.requested_coverage || []]))};
     const database=new DatabaseSync(this.backend.operationalLearning.telemetryDb,{readOnly:true,timeout:2000});
     try {
-      const rows=bundle.cohort.eligible_runs.flatMap(run=>database.prepare(`SELECT trade_id,run_id,entry_datetime,direction,
+      const identityColumns=job.analysis_version===LEGACY_RESEARCH_VERSION?'':'trade_account,symbol,';
+      const rows=bundle.cohort.eligible_runs.flatMap(run=>database.prepare(`SELECT trade_id,run_id,entry_datetime,${identityColumns}direction,
         gross_currency_value,total_commission,net_profit_loss,exit_causality,session_name,regime_label
         FROM ocean_trade_causal_v2 WHERE run_id=? AND lower(status)='closed' ORDER BY trade_id`).all(run.run_id));
       const context=JSON.parse(run.context_json);
+      if(job.analysis_version!==LEGACY_RESEARCH_VERSION) {
+        const profile=JSON.parse(this.backend.one('ow_profiles',this.backend.one('ow_strategies',row.strategy_id).profile_id).payload_json);
+        bundle.approved_evidence_policy=profile.evidence_policy || null;
+        bundle.execution_sessions=this.observedSessions(bundle,rows);
+      }
       return {bundle,rows,row,context,completion_hash:objectHash(this.backend.operationalLearning.classification(run).summary.completion),recipient:artifact.recipient_id};
     } finally {database.close();}
   }
   capture(job) {
     const current=this.db.prepare('SELECT * FROM ow_research_jobs WHERE id=?').get(job.id);
-    if(current.analysis_version===RESEARCH_VERSION)requireThat(this.qualification(current).verified,409,'RESEARCH_CURRENT_PROVENANCE_REQUIRED');
+    if([this.version,LEGACY_RESEARCH_VERSION].includes(current.analysis_version))requireThat(this.qualification(current).verified,409,'RESEARCH_CURRENT_PROVENANCE_REQUIRED');
     if(current.input_json) {
       requireThat(digest(current.input_json)===current.input_hash,409,'RESEARCH_SNAPSHOT_HASH_CONFLICT');
       return JSON.parse(current.input_json);
     }
     const evidence=this.evidence(job);
-    const result=evaluateResearch(evidence.bundle,evidence.rows);
+    const result=current.analysis_version===LEGACY_RESEARCH_VERSION?evaluateResearchV4(evidence.bundle,evidence.rows):evaluateResearch(evidence.bundle,evidence.rows);
     const snapshot={result,evidence:{bundle:{cohort:evidence.bundle.cohort,excluded_evidence:evidence.bundle.excluded_evidence,
-      policy:evidence.bundle.policy},row:evidence.row,context:evidence.context,completion_hash:evidence.completion_hash,recipient:evidence.recipient}};
+      policy:evidence.bundle.policy,approved_evidence_policy:evidence.bundle.approved_evidence_policy,
+      execution_sessions:evidence.bundle.execution_sessions},row:evidence.row,context:evidence.context,completion_hash:evidence.completion_hash,recipient:evidence.recipient}};
     const content=JSON.stringify(snapshot);
     const updated=this.db.prepare(`UPDATE ow_research_jobs SET input_json=?,input_hash=?
       WHERE id=? AND state='RUNNING' AND lease_id=? AND input_json IS NULL`).run(content,digest(content),job.id,job.lease_id);
@@ -425,9 +536,11 @@ export class OperationalResearch {
       this.db.prepare(`UPDATE ow_research_jobs SET state='COMPLETED',lease_id=NULL,lease_until_ms=NULL,last_error=NULL,
         result_artifact_id=?,result_hash=?,completed_at_utc=? WHERE id=?`).run(artifactId,digest(content),report.completed_at_utc,job.id);
       const completedJob=this.backend.one('ow_research_jobs',job.id);
-      this.continuations.ensure(completedJob,actor);
-      const continuationSource=this.continuations.source(completedJob);
-      if(continuationSource)this.continuations.reconcileEvidence(continuationSource,actor);
+      if(completedJob.analysis_version===this.version) {
+        this.continuations.ensure(completedJob,actor);
+        const continuationSource=this.continuations.source(completedJob);
+        if(continuationSource)this.continuations.reconcileEvidence(continuationSource,actor);
+      }
       this.db.prepare("UPDATE ow_cases SET work_status='COMPLETED',revision=revision+1,waiting_on=NULL WHERE id=?").run(row.id);
       this.backend.event(row.id,'operational.research.complete',actor,{job_id:job.id,result_artifact_id:artifactId,
         result_hash:digest(content),outcome:result.outcome,next_action:result.next_action,automatic_strategy_change:false});

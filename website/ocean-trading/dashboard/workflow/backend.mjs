@@ -31,6 +31,8 @@ import {
 import { OnboardingBrainSync, retryOnboardingBrain } from './onboarding-brain-sync.mjs';
 
 export const TABLE = JSON.parse(fs.readFileSync(new URL("./workflow-transition-table.json", import.meta.url), "utf8"));
+const candidateRouteImplementationHash=digest(fs.readFileSync(new URL('./backend.mjs',import.meta.url)));
+const candidateRunLifecycleHash=digest(fs.readFileSync(new URL('./run-manager.mjs',import.meta.url)));
 const GATES = { ONBOARDING: "DISCOVERY", DEVELOPMENT: "DEVELOPMENT_REVIEW", SHADOW: "SHADOW_REVIEW", PRODUCTION: "DEPLOYMENT_REVIEW", ROLLBACK: "ROLLBACK_REVIEW" };
 const ARTIFACT_KINDS = new Set(["EVIDENCE", "RECOMMENDATION", "CANDIDATE", "BACKTEST", "ROBUSTNESS", "WALK_FORWARD", "OOS_HOLDOUT", "EVALUATION", "FORWARD_RESULT", "FORWARD_EVALUATION", "DEPLOYMENT_PLAN", "ROLLBACK_PLAN", "VALIDATION_REPORT", "OUTCOME", "LESSON", "NO_BENEFIT"]);
 const HUMAN_OPERATIONS = new Set(["profile.register", "strategy.register", "instance.register", "dataset.register", "plan.register", "run.register", "case.register", "approval.decide", "approval.revoke", "setup.register", "outbox.retry", "handoff.create", "onboarding.draft", "onboarding.submit", "onboarding.brain.retry", "onboarding.register", "onboarding.activate", "onboarding.pause", "onboarding.deactivate", "onboarding.emergency-stop"]);
@@ -120,7 +122,7 @@ export class WorkflowBackend {
   }
   caseFor(actor, caseId, scope) {
     const row = this.one("ow_cases", caseId);
-    if(JSON.parse(row.payload_json).origin===CONTINUATION_ORIGIN)requireThat(actor.role==='HUMAN' || actor.namespace==='OPERATIONAL',403,'TEST_PLANNING_CASE_ACCESS_REJECTED');
+    if([CONTINUATION_ORIGIN,'OPERATIONAL_RESEARCH_REASSESSMENT'].includes(JSON.parse(row.payload_json).origin))requireThat(actor.role==='HUMAN' || actor.namespace==='OPERATIONAL',403,'TEST_PLANNING_CASE_ACCESS_REJECTED');
     this.authorize(actor, scope, row.strategy_id, row.instance_id);
     return row;
   }
@@ -148,7 +150,7 @@ export class WorkflowBackend {
     requireThat(input.data && typeof input.data === "object", 422, "DATA_REQUIRED");
     if(input.data.case_id) {
       const row=this.db.prepare('SELECT payload_json FROM ow_cases WHERE id=?').get(input.data.case_id);
-      requireThat(!row || JSON.parse(row.payload_json).origin!==CONTINUATION_ORIGIN,403,'OPERATIONAL_PLANNING_MUTATION_NOT_ENABLED');
+      requireThat(!row || ![CONTINUATION_ORIGIN,'OPERATIONAL_RESEARCH_REASSESSMENT'].includes(JSON.parse(row.payload_json).origin),403,'OPERATIONAL_PLANNING_MUTATION_NOT_ENABLED');
     }
     if (HUMAN_OPERATIONS.has(operation)) requireThat(actor.role === "HUMAN", 403, "WAYNE_BROWSER_ONLY");
     const hash = objectHash({ operation, data: input.data });
@@ -522,6 +524,15 @@ export class WorkflowBackend {
       };
     });
   }
+  operationalCandidateCapabilities() {
+    return {catalog_version:'ocean-operational-candidate-routes/v1',
+      implementation_hash:candidateRouteImplementationHash,
+      run_lifecycle_hash:candidateRunLifecycleHash,
+      operational_candidate_test_dispatch:false,
+      available_operational_routes:['proposals/work','proposals/claim','proposals/progress','proposals/plans','run/claim','run/evidence','run/finish'],
+      generic_candidate_lifecycle:'TEST_ONLY_NO_OPERATIONAL_EXECUTION',
+      scope:'THIS_WEBSITE_ROUTE_IMPLEMENTATION_NOT_A_CLAIM_ABOUT_ALL_EXTERNAL_PROVIDERS'};
+  }
   writeArtifact(actor, data) {
     exactKeys(data, ["artifact_id", "case_id", "run_id", "recipient_id", "kind", "media_type", "content", "content_encoding", "content_hash", "candidate_hash", "dependency_ids"]);
     id(data.artifact_id, true); id(data.recipient_id);
@@ -776,7 +787,7 @@ export class WorkflowBackend {
     const row = this.caseFor(actor, caseId, "read");
     const research = this.operationalResearch.statusForCase(row.id);
     const planning=this.operationalResearch.continuations.forCase(row);
-    return { case_id: row.id, strategy_id: row.strategy_id, execution_instance_id: row.instance_id, run_id: row.run_id, stage: row.stage, work_status: planning?.work_status || row.work_status, revision: row.revision, baseline_hash: row.baseline_hash, candidate_hash: row.candidate_hash, owner_id: row.owner_id, waiting_on: row.waiting_on, next_action: planning?.next_action || research?.next_action || row.waiting_on || `Complete ${row.stage} prerequisites; propose a revision-checked transition`, research, planning, namespace: ['OPERATIONAL_LEARNING',CONTINUATION_ORIGIN].includes(JSON.parse(row.payload_json).origin) ? 'OPERATIONAL' : "TEST", pending_sync: this.db.prepare("SELECT COUNT(*) AS n FROM ow_outbox WHERE entity_id=? AND state<>'ACKNOWLEDGED'").get(row.id).n, handoffs: this.db.prepare("SELECT id,recipient_id,state,revision FROM ow_handoffs WHERE case_id=?").all(row.id), tasks: this.db.prepare("SELECT kind,status,artifact_id,required FROM ow_tasks WHERE case_id=? ORDER BY kind").all(row.id), approvals: this.db.prepare("SELECT id,gate,state,snapshot_hash,expires_at_utc FROM ow_approval_requests WHERE case_id=? ORDER BY rowid").all(row.id), blockers: this.db.prepare("SELECT id,owner_id,action,state FROM ow_blockers WHERE case_id=?").all(row.id) };
+    return { case_id: row.id, strategy_id: row.strategy_id, execution_instance_id: row.instance_id, run_id: row.run_id, stage: row.stage, work_status: planning?.work_status || row.work_status, revision: row.revision, baseline_hash: row.baseline_hash, candidate_hash: row.candidate_hash, owner_id: row.owner_id, waiting_on: row.waiting_on, next_action: planning?.next_action || research?.next_action || row.waiting_on || `Complete ${row.stage} prerequisites; propose a revision-checked transition`, research, planning, namespace: ['OPERATIONAL_LEARNING',CONTINUATION_ORIGIN,'OPERATIONAL_RESEARCH_REASSESSMENT'].includes(JSON.parse(row.payload_json).origin) ? 'OPERATIONAL' : "TEST", pending_sync: this.db.prepare("SELECT COUNT(*) AS n FROM ow_outbox WHERE entity_id=? AND state<>'ACKNOWLEDGED'").get(row.id).n, handoffs: this.db.prepare("SELECT id,recipient_id,state,revision FROM ow_handoffs WHERE case_id=?").all(row.id), tasks: this.db.prepare("SELECT kind,status,artifact_id,required FROM ow_tasks WHERE case_id=? ORDER BY kind").all(row.id), approvals: this.db.prepare("SELECT id,gate,state,snapshot_hash,expires_at_utc FROM ow_approval_requests WHERE case_id=? ORDER BY rowid").all(row.id), blockers: this.db.prepare("SELECT id,owner_id,action,state FROM ow_blockers WHERE case_id=?").all(row.id) };
   }
   readDecision(actor, decisionId) {
     const decision = this.one("ow_decisions", decisionId); const row = this.caseFor(actor, decision.case_id, "read"); const binding = JSON.parse(decision.binding_json);

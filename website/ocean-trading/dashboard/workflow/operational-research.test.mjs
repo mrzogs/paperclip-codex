@@ -7,7 +7,7 @@ import vm from 'node:vm';
 import { WorkflowStore } from './store.mjs';
 import { digest, objectHash, WorkflowError } from './common.mjs';
 import { OperationalLearning } from './operational-learning.mjs';
-import { RESEARCH_VERSION, OperationalResearch, evaluateResearch } from './operational-research.mjs';
+import { LEGACY_RESEARCH_VERSION as RESEARCH_VERSION, OperationalResearch, evaluateResearchV4 as evaluateResearch } from './operational-research.mjs';
 
 function sample() {
   const rows=['a','b','c'].flatMap((run_id,index)=>Array.from({length:20},(_,i)=>({
@@ -184,7 +184,7 @@ test('nine direction trades in one retained run is insufficient, not negative ev
   assert.equal(result.evidence_remediation.status,'RESEARCH_DESIGN_REVIEW_REQUIRED');
   assert.equal(result.evidence_remediation.additional_discovery_can_resolve_fixed_sample_shortfalls,false);
   assert.match(result.next_action,/Adding later runs cannot increase those frozen counts/);
-  assert.match(result.next_action,/prospective sampling-unit\/protocol review for Wayne/);
+  assert.match(result.next_action,/author and test a prospective sampling-unit\/protocol revision under the existing engineering authorization/);
 });
 
 test('adding a third qualified period resolves period count but never a frozen retained-segment sample shortfall',()=>{
@@ -315,7 +315,8 @@ function queueFixture() {
         data.case_id,'brain',data.recipient_id,data.kind,null,hash,JSON.stringify(data.dependency_ids),
         JSON.stringify({content_hash:data.content_hash}),Buffer.from(data.content));
     }};
-  let worker=new OperationalResearch(backend);
+  // These retained regressions deliberately exercise the frozen v4 policy.
+  let worker=new OperationalResearch(backend);worker.version=RESEARCH_VERSION;
   return {backend,file,actor,get worker(){return worker;},captureForCompletion(job,{rows,bundle}) {
     for(const item of bundle.cohort.eligible_runs) {
       if(item.run_id==='a') {item.run_id='r';for(const row of rows)if(row.run_id==='a')row.run_id='r';
@@ -326,7 +327,7 @@ function queueFixture() {
     }
     worker.evidence=()=>({rows,bundle,row:backend.one('ow_cases','case'),context:mockContext('r'),completion_hash:digest('completion'),recipient:'strategy'});
     return worker.capture(job).result;
-  },restart(){store.close();store=new WorkflowStore(file);backend.store=store;backend.db=store.db;worker=new OperationalResearch(backend);},
+  },restart(){store.close();store=new WorkflowStore(file);backend.store=store;backend.db=store.db;worker=new OperationalResearch(backend);worker.version=RESEARCH_VERSION;},
     close(){store.close();fs.rmSync(root,{recursive:true,force:true});}};
 }
 

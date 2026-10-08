@@ -6,14 +6,15 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { WorkflowStore } from './store.mjs';
 import { WorkflowBackend } from './backend.mjs';
-import { OperationalResearch } from './operational-research.mjs';
+import { LEGACY_RESEARCH_VERSION, RESEARCH_VERSION, OperationalResearch, evaluateResearch } from './operational-research.mjs';
+import { SESSION_SCHEMA } from './operational-research-protocol.mjs';
 import { OperationalLearning } from './operational-learning.mjs';
 import { CONTINUATION_ORIGIN } from './operational-continuation.mjs';
 import { readWorkflowView } from './ui-api.mjs';
 import { digest, objectHash } from './common.mjs';
 import { consumePlanningOnce } from '../../../../scripts/consume-ocean-proposal-planning.mjs';
 
-function fixture({insufficient=false,noChange=false,partial=false}={}) {
+function fixture({insufficient=false,noChange=false,partial=false,prospective=false}={}) {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'ocean-planning-'));
   const filename=path.join(root,'workflow.sqlite');let store=new WorkflowStore(filename);
   const backend=Object.create(WorkflowBackend.prototype);
@@ -26,9 +27,12 @@ function fixture({insufficient=false,noChange=false,partial=false}={}) {
   Object.assign(backend,{db:store.db,store,config:{identities:[identity,recipient],browser:{subject_id:human.id}},environment:{},
     auth:{human:{state:'CONFIGURED'},bindingErrors:new Map()},validate:kind=>assert.equal(kind,'artifact-manifest'),runs:{managed:()=>false}});
   store.registerIdentity(identity);store.registerIdentity(recipient);
-  backend.db.prepare('INSERT INTO ow_profiles VALUES(?,?,?,?,?)').run('p','s','1',digest('profile'),JSON.stringify({profile_id:'p',profile_version:'1'}));
+  const approvedPolicy={status:'APPROVED',policy_version:'1.0.0',minimum_comparable_trades:50,
+    minimum_independent_sessions:20,maximum_data_quality_issues:0,contradictory_evidence_tolerance:0};
+  backend.db.prepare('INSERT INTO ow_profiles VALUES(?,?,?,?,?)').run('p','s','1',digest('profile'),JSON.stringify({profile_id:'p',profile_version:'1',
+    ...(prospective?{evidence_policy:approvedPolicy}:{})}));
   backend.db.prepare('INSERT INTO ow_strategies VALUES(?,?,?,?,?)').run('s','p',1,baseline,JSON.stringify({strategy_name:'Isolated planning fixture'}));
-  backend.db.prepare('INSERT INTO ow_instances VALUES(?,?,?)').run('i','s','{}');
+  backend.db.prepare('INSERT INTO ow_instances VALUES(?,?,?)').run('i','s',JSON.stringify(prospective?{telemetry_producer_id:'telemetry'}:{}));
   const runs=['r1','r2','r3'];
   const contexts=Object.fromEntries(runs.map(run_id=>[run_id,{run_id,context_hash:digest(`context-${run_id}`),strategy_profile_id:'p',
     strategy_profile_version:'1',strategy_code_hash:baseline,strategy_config_hash:digest('config'),dataset_manifest_id:'discovery',
@@ -44,12 +48,35 @@ function fixture({insufficient=false,noChange=false,partial=false}={}) {
     gross_currency_value:i<10 || (noChange && index===1)?20:-10,total_commission:1,
     net_profit_loss:i<10 || (noChange && index===1)?19:-11,exit_causality:'unknown'})));
   if(partial)rows.find(row=>row.run_id==='r2' && row.direction==='long').direction='short';
+  const version=prospective?RESEARCH_VERSION:LEGACY_RESEARCH_VERSION;
+  if(prospective) {
+    bundle.research_coverage.r3[0].end_utc='2025-03-31T23:00:00Z';
+    bundle.approved_evidence_policy=approvedPolicy;bundle.execution_sessions={};
+    for(const [index,run_id] of runs.entries()) {
+      const entries=rows.filter(row=>row.run_id===run_id).map((row,i)=>{
+        const start=Date.UTC(2025,index,i+1),entry=start+1800000;
+        Object.assign(row,{entry_datetime:(entry-Date.UTC(1899,11,30))/86400000,trade_account:'Sim1',symbol:'EXPLICIT_MOCK_SYMBOL'});
+        return {trade_id:row.trade_id,entry_datetime:row.entry_datetime,entry_utc:new Date(entry).toISOString(),trade_account:row.trade_account,
+          symbol:row.symbol,trading_day_date:new Date(start).toISOString().slice(0,10),session_start_utc:new Date(start).toISOString(),session_end_utc:new Date(start+3600000).toISOString()};
+      });
+      const calendarBinding={timezone:'Europe/London',revision:'EXPLICIT_MOCK_ONLY_NATIVE_CALENDAR',
+        source_config_hash:digest('EXPLICIT_MOCK_PINNED_CONFIG'),chart_settings_hash:digest('EXPLICIT_MOCK_CHART_SETTINGS'),effective_chart_timezone:'EXPLICIT_MOCK_ONLY'};
+      bundle.execution_sessions[run_id]={context:contexts[run_id],calendar_binding:calendarBinding,
+        source_receipt_ref:`EXPLICIT_MOCK_RECEIPT_${run_id}`,source_receipt_hash:digest(`EXPLICIT_MOCK_RECEIPT_${run_id}`),
+        native_contract_verified:true,native_contract_receipt_hash:digest('EXPLICIT_MOCK_ONLY_NATIVE_PROVIDER'),
+        observation:{schema_version:SESSION_SCHEMA,run_id,context_hash:contexts[run_id].context_hash,observed_at_utc:new Date().toISOString(),
+          calendar:{...calendarBinding,mapping_method:'SIERRA_NATIVE_TRADING_DAY_AND_UTC_CONVERSION',
+            trading_day_method:'sc.GetTradingDayDate',utc_method:'sc.ConvertDateTimeFromChartTimeZone',chart_settings_hash:digest('EXPLICIT_MOCK_CHART_SETTINGS'),effective_chart_timezone:'EXPLICIT_MOCK_ONLY'},entries}};
+    }
+  }
   let proof=true;
   backend.operationalLearning={enabled:true,brainActor:()=>actor,statusForRun:()=>null,
     // Explicit mock-only qualification. These tests prove persistence/isolation, not physical execution.
     classification:()=>({eligible:proof,reasons:proof?[]:['PHYSICAL_STRATEGY_DLL_HASH_CONFLICT'],
       telemetry:{bypassed:true,proof_basis:'EXPLICIT_MOCK_ONLY'}}),cohort:()=>bundle};
   backend.operationalResearch=new OperationalResearch(backend);
+  // Historical v4 continuation fixtures; prospective v5 has separate proof tests.
+  backend.operationalResearch.version=version;
   const seed=(case_id,trigger='r1')=>{
     backend.db.prepare("INSERT INTO ow_cases VALUES(?,?,?,?,1,'RESEARCH','READY',?,NULL,'brain',NULL,?)")
       .run(case_id,'s','i',trigger,baseline,JSON.stringify({origin:'OPERATIONAL_LEARNING',registry_revision:1,
@@ -72,7 +99,7 @@ function fixture({insufficient=false,noChange=false,partial=false}={}) {
   return {backend,actor,human,bundle,rows,seed,capture,complete,
     get worker(){return backend.operationalResearch;},setProof(value){proof=value;},
     children:()=>backend.db.prepare("SELECT * FROM ow_cases WHERE json_extract(payload_json,'$.origin')=?").all(CONTINUATION_ORIGIN),
-    restart(){store.close();store=new WorkflowStore(filename);backend.db=store.db;backend.store=store;backend.operationalResearch=new OperationalResearch(backend);},
+    restart(){store.close();store=new WorkflowStore(filename);backend.db=store.db;backend.store=store;backend.operationalResearch=new OperationalResearch(backend);backend.operationalResearch.version=version;},
     close(){store.close();fs.rmSync(root,{recursive:true,force:true});}};
 }
 
@@ -255,7 +282,7 @@ test('failure while persisting a continuation rolls back report/job completion; 
     const capture=f.worker.capture(resumed);assert.equal(f.backend.one('ow_research_jobs',job.id).input_json,input);
     f.worker.complete(resumed,capture.result,f.actor,'strategy');
     f.restart();f.worker.reconcile();f.worker.reconcile();assert.equal(f.children().length,1);
-    assert.equal(f.backend.db.prepare('SELECT COUNT(*) n FROM ow_tasks').get().n,1);assert.equal(f.worker.claim(),null);assertNoAuthority(f);
+    assert.equal(f.backend.db.prepare('SELECT COUNT(*) n FROM ow_tasks').get().n,2);assert.equal(f.worker.claim(),null);assertNoAuthority(f);
   }finally{f.close();}
 });
 
@@ -266,7 +293,7 @@ test('duplicate support reports coalesce, task recovery is idempotent and sealed
     assert.equal(f.worker.statusForCase('same-support').continuations[0].case_id,child.id);
     f.backend.db.prepare('DELETE FROM ow_tasks WHERE case_id=?').run(child.id);
     f.restart();for(let i=0;i<3;i++)f.worker.reconcile();
-    assert.equal(f.children().length,1);assert.equal(f.backend.db.prepare('SELECT COUNT(*) n FROM ow_tasks').get().n,1);
+    assert.equal(f.children().length,1);assert.equal(f.backend.db.prepare('SELECT COUNT(*) n FROM ow_tasks').get().n,2);
     assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_events WHERE action='operational.research.continuation.link'").get().n,2);
     assert.deepEqual(f.backend.one('ow_artifacts',original.id),original);assertSealed(f,before);assertNoAuthority(f);
   }finally{f.close();}
@@ -389,7 +416,7 @@ function planInput(claim,message='plan-return'){
 }
 const returnedCount=f=>f.backend.db.prepare("SELECT COUNT(*) n FROM ow_events WHERE action='operational.proposal.plan.returned'").get().n;
 
-test('exact operational owner returns an immutable planning brief with four concrete owned contracts, never candidate PASS',()=>{
+test('exact operational owner returns an immutable plan with observed scoped capability debt, never candidate PASS',()=>{
   const f=fixture();try{
     f.complete();const before=sealed(f),child=f.children()[0];
     const queue=plans(f).queue(f.actor);assert.equal(queue.items.length,1);assert.equal(queue.items[0].status,'READY');
@@ -397,13 +424,13 @@ test('exact operational owner returns an immutable planning brief with four conc
     assert.equal(claim.template.baseline.strategy_code_hash,child.baseline_hash);
     assert.equal(plans(f).read(f.actor,child.id).status,'IN_PROGRESS');
     const input=planInput(claim),result=plans(f).perform('plans',f.actor,input);
-    assert.equal(result.planning_complete,false);assert.equal(result.approval_due,false);assert.equal(result.candidate_testing,'NOT_DUE');
-    assert.equal(result.missing_contracts.length,4);assert.equal(plans(f).queue(f.actor).items.length,0);
+    assert.equal(result.planning_complete,true);assert.equal(result.approval_due,false);assert.equal(result.candidate_testing,'NOT_DUE');
+    assert.deepEqual(result.missing_contracts,['SCOPED_CANDIDATE_TEST_DISPATCH']);assert.equal(plans(f).queue(f.actor).items.length,0);
     const view=f.backend.readCase(f.human,child.id);
-    assert.equal(view.planning.plan_work.status,'PLAN_RETURNED');assert.equal(view.tasks[0].status,'BLOCKED');
+    assert.equal(view.planning.plan_work.status,'PLAN_RETURNED');assert.equal(view.tasks.find(task=>task.kind==='PROPOSAL_PLAN_REVIEW').status,'COMPLETED');
     assert.equal(view.stage,'RESEARCH');assert.equal(view.work_status,'READY');
-    assert.equal(view.blockers.length,4);assert.ok(view.blockers.every(row=>row.owner_id==='strategy' && row.state==='OPEN'));
-    assert.match(view.next_action,/Source owner strategy.*not an executable candidate plan/);
+    assert.equal(view.blockers.length,1);assert.ok(view.blockers.every(row=>row.owner_id==='brain' && row.state==='OPEN'));
+    assert.match(view.next_action,/Source owner strategy.*plan authoring, not candidate execution/);
     const artifact=f.backend.artifactFor(f.backend.one('ow_cases',child.id),result.artifact_id,'RECOMMENDATION');
     assert.equal(artifact.producer_id,'brain');assert.equal(artifact.recipient_id,'strategy');
     assert.deepEqual(JSON.parse(artifact.dependencies_json),[JSON.parse(child.payload_json).lineage_artifact_id]);
@@ -512,7 +539,7 @@ test('operational plan HTTP route delegates only exact owned planning mutations 
     const claim=await invoke('proposals/claim',{message_id:'http-claim',data:{case_id:child.id,
       expected_revision:work.revision,support_hash:work.support_hash}});
     const returned=await invoke('proposals/plans',planInput(claim,'http-return'));
-    assert.equal(returned.planning_complete,false);assert.equal(returnedCount(f),1);
+    assert.equal(returned.planning_complete,true);assert.equal(returnedCount(f),1);
     assert.throws(()=>f.backend.mutate('approval.request',f.actor,{message_id:'test-no-approval',data:{case_id:child.id}}),/OPERATIONAL_PLANNING_MUTATION_NOT_ENABLED/);
     assertNoAuthority(f);
   }finally{f.close();}
@@ -571,12 +598,12 @@ test('persistent Research reconciliation actually executes the owner planning wo
     f.complete();const before=sealed(f),child=f.children()[0];
     assert.equal(returnedCount(f),0);f.worker.reconcile();
     assert.equal(returnedCount(f),1);const view=f.backend.readCase(f.human,child.id);
-    assert.equal(view.planning.plan_work.status,'PLAN_RETURNED');assert.equal(view.planning.plan_work.planning_complete,false);
-    assert.equal(view.blockers.length,4);assert.match(view.next_action,/Source owner strategy/);
+    assert.equal(view.planning.plan_work.status,'PLAN_RETURNED');assert.equal(view.planning.plan_work.planning_complete,true);
+    assert.equal(view.blockers.length,1);assert.match(view.next_action,/Source owner strategy/);
     const recorded=f.backend.one('ow_cases',child.id);f.restart();for(let i=0;i<3;i++)f.worker.reconcile();
     assert.deepEqual(f.backend.one('ow_cases',child.id),recorded);assert.equal(returnedCount(f),1);
     f.backend.db.prepare('DELETE FROM ow_tasks WHERE case_id=?').run(child.id);f.worker.reconcile();
-    const task=f.backend.readCase(f.human,child.id).tasks[0];assert.equal(task.status,'BLOCKED');
+    const task=f.backend.readCase(f.human,child.id).tasks.find(task=>task.kind==='PROPOSAL_PLAN_REVIEW');assert.equal(task.status,'COMPLETED');
     assert.equal(task.artifact_id,view.planning.plan_work.returned.artifact_id);assert.equal(returnedCount(f),1);
     assertSealed(f,before);assertNoAuthority(f);
   }finally{f.close();}
@@ -633,7 +660,7 @@ test('frozen sample debt remains owned design-review work after a third coverage
     const original=f.backend.readCase(f.human,child.id);
     assert.equal(original.planning.evidence_remediation.requires_design_review,true);
     assert.match(original.next_action,/Owner brain.*long in r2 \(9\/10\).*Adding later runs cannot/);
-    assert.equal(original.blockers[0].owner_id,'brain');assert.match(original.blockers[0].action,/prospective sampling-unit\/protocol review for Wayne/);
+    assert.equal(original.blockers[0].owner_id,'brain');assert.match(original.blockers[0].action,/author and test a prospective sampling-unit\/protocol revision under the existing engineering authorization/);
     thirdCoverage(f);f.seed('third-fixed-sample');const next=f.complete();
     assert.equal(next.report.outcome,'EXPLORATORY_PROPOSAL');assert.equal(next.report.historical_periods.distinct_coverage_count,3);
     assert.equal(next.continuations.length,2);assert.equal(next.loop_stage,'PROPOSAL_PLANNING');
@@ -667,4 +694,147 @@ test('existing Learning maintenance route runs planning after startup with no ex
       assertSealed(f,before);assertNoAuthority(f);
     }finally{f.close();}
   }
+});
+
+test('v5 default captures approved eligibility/session proof separately and persistent planning freezes that lineage',()=>{
+  const f=fixture({prospective:true});try {
+    assert.equal(new OperationalResearch(f.backend).version,RESEARCH_VERSION);
+    const status=f.complete();assert.equal(status.report.schema_version,RESEARCH_VERSION);
+    assert.equal(status.report.outcome,'EXPLORATORY_PROPOSAL');assert.equal(status.report.approved_evidence_eligibility.status,'SUFFICIENT');
+    const before=sealed(f),child=f.children()[0];f.worker.reconcile();
+    const view=f.backend.readCase(f.human,child.id),plan=JSON.parse(Buffer.from(f.backend.one('ow_artifacts',view.planning.plan_work.returned.artifact_id).content).toString());
+    assert.equal(plan.protocol.prospective_sampling_protocol.version,status.report.protocol.version);
+    assert.equal(plan.protocol.approved_aggregate_evidence_policy.minimum_comparable_trades,50);
+    assert.equal(plan.protocol.approved_aggregate_evidence_policy.minimum_independent_sessions,20);
+    assert.equal(plan.execution.capabilities.find(item=>item.contract==='CANDIDATE_IMPLEMENTATION_AND_PHYSICAL_PIN').status,'NOT_YET_DUE');
+    assert.equal(plan.execution.capabilities.find(item=>item.contract==='GOVERNED_DEVELOPMENT_DECISION').status,'NOT_YET_DUE');
+    assert.deepEqual(plan.execution.missing_contracts,['SCOPED_CANDIDATE_TEST_DISPATCH']);
+    assert.equal(view.planning.plan_work.planning_complete,true);assert.equal(view.planning.candidate_testing,'NOT_DUE');
+    assertSealed(f,before);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('observed capability changes append recoverable plan revisions, not frozen template rewrites or automatic decisions',()=>{
+  const f=fixture();try {
+    f.complete();const before=sealed(f);f.worker.reconcile();const child=f.children()[0];
+    const first=plans(f).forCase(child).returned,oldArtifact=f.backend.one('ow_artifacts',first.artifact_id);
+    f.backend.db.prepare('INSERT INTO ow_run_versions VALUES(?,?,?)').run('new-recorded-version','s',JSON.stringify({kind:'BASELINE',version:'EXPLICIT_MOCK_ONLY_NEW_REGISTRATION'}));
+    assert.equal(plans(f).forCase(child).status,'REVISION_DUE');
+    f.restart();f.worker.reconcile();const second=plans(f).forCase(f.backend.one('ow_cases',child.id)).returned;
+    assert.notEqual(second.artifact_id,first.artifact_id);assert.equal(second.supersedes_artifact_id,first.artifact_id);
+    assert.equal(returnedCount(f),2);assert.deepEqual(f.backend.one('ow_artifacts',oldArtifact.id),oldArtifact);
+    f.restart();for(let i=0;i<3;i++)f.worker.reconcile();assert.equal(returnedCount(f),2);
+    assertNoAuthority(f);assertSealed(f,before);
+  }finally{f.close();}
+});
+
+test('a capability revision between claim and return fails closed, preserves the claim, and resumes after lease expiry',()=>{
+  const f=fixture();try {
+    f.complete();const claim=claimPlan(f),input=planInput(claim);
+    f.backend.db.prepare('INSERT INTO ow_run_versions VALUES(?,?,?)').run('changed-registration','s',JSON.stringify({kind:'BASELINE',version:'EXPLICIT_MOCK_ONLY'}));
+    assert.throws(()=>plans(f).perform('plans',f.actor,input),/PROPOSAL_CAPABILITIES_CHANGED/);
+    assert.equal(returnedCount(f),0);f.restart();const now=Date.now;
+    try{Date.now=()=>claim.lease_until_ms+1;f.worker.reconcile();}finally{Date.now=now;}
+    assert.equal(returnedCount(f),1);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('observed supported scoped capability clears only its engineering debt, not due candidate/decision work',()=>{
+  const f=fixture();try {
+    f.complete();f.worker.reconcile();const child=f.children()[0],old=plans(f).forCase(child).returned;
+    const catalog=f.backend.operationalCandidateCapabilities();
+    // Explicit mock only: production source still has no operational candidate dispatch adapter.
+    f.backend.operationalCandidateCapabilities=()=>({...catalog,operational_candidate_test_dispatch:true,
+      implementation_hash:digest('EXPLICIT_MOCK_ONLY_SUPPORTED_SCOPED_ADAPTER')});
+    assert.equal(plans(f).forCase(child).status,'REVISION_DUE');f.worker.reconcile();
+    const view=f.backend.readCase(f.human,child.id),current=view.planning.plan_work;
+    const plan=JSON.parse(Buffer.from(f.backend.one('ow_artifacts',current.returned.artifact_id).content).toString());
+    assert.deepEqual(plan.execution.missing_contracts,[]);assert.equal(plan.execution.status,'PLANNING_COMPLETE_EXECUTION_NOT_DUE');
+    assert.match(current.next_action,/No current scoped capability gap is observed/);
+    assert.doesNotMatch(current.next_action,/Implement the observed scoped candidate-test dispatch gap/);
+    assert.notEqual(current.returned.artifact_id,old.artifact_id);
+    assert.equal(view.blockers.filter(item=>item.state==='OPEN').length,0);
+    assert.equal(view.tasks.find(item=>item.kind==='CANDIDATE_DISPATCH_ENGINEERING').status,'NOT_RUN');
+    assert.equal(current.candidate_testing,'NOT_DUE');assert.equal(current.approval_due,false);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('new exact session proof automatically queues/links one Research reassessment and closes evidence work after restart',()=>{
+  const f=fixture({prospective:true});try {
+    const native=structuredClone(f.bundle.execution_sessions);delete f.bundle.execution_sessions;
+    const initial=f.complete();assert.equal(initial.report.outcome,'INSUFFICIENT_EVIDENCE');const before=sealed(f),child=f.children()[0];
+    f.bundle.execution_sessions=native;
+    const adapters=()=>{f.worker.sessionRows=run=>f.rows.filter(row=>row.run_id===run);f.worker.observedSessions=()=>f.bundle.execution_sessions;};
+    adapters();f.worker.reconcile();
+    const queue=f.backend.db.prepare("SELECT * FROM ow_research_jobs WHERE state='PENDING'").all();assert.equal(queue.length,1);
+    assert.equal(JSON.parse(f.backend.one('ow_cases',queue[0].case_id).payload_json).origin,'OPERATIONAL_RESEARCH_REASSESSMENT');
+    f.restart();adapters();f.worker.reconcile();f.worker.reconcile();
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_research_jobs WHERE state='PENDING'").get().n,1);
+    const status=f.complete();assert.equal(status.report.outcome,'EXPLORATORY_PROPOSAL');
+    const view=f.backend.readCase(f.human,child.id);assert.equal(view.work_status,'COMPLETED');
+    assert.equal(view.planning.progress.source.case_id,queue[0].case_id);assert.equal(view.planning.progress.status,'REASSESSED');
+    assert.equal(view.tasks[0].status,'COMPLETED');assertSealed(f,before);assertNoAuthority(f);
+    f.restart();adapters();f.worker.reconcile();assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_research_jobs WHERE state='PENDING'").get().n,0);
+  }finally{f.close();}
+});
+
+test('reassessment queue creation crash rolls back case/artifact/job and restart reconciles exactly once',()=>{
+  const f=fixture({prospective:true});try {
+    const native=structuredClone(f.bundle.execution_sessions);delete f.bundle.execution_sessions;f.complete();const before=sealed(f);
+    f.bundle.execution_sessions=native;f.worker.sessionRows=run=>f.rows.filter(row=>row.run_id===run);f.worker.observedSessions=()=>native;
+    const write=f.backend.writeArtifact.bind(f.backend);
+    f.backend.writeArtifact=(actor,data)=>{if(data.artifact_id.startsWith('test-research-reassessment-'))throw Error('reassessment fixture crash');return write(actor,data);};
+    f.worker.reconcile();f.worker.reconcile();assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_research_jobs WHERE state='PENDING'").get().n,0);
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_cases WHERE json_extract(payload_json,'$.origin')='OPERATIONAL_RESEARCH_REASSESSMENT'").get().n,0);
+    f.backend.writeArtifact=write;f.restart();f.worker.sessionRows=run=>f.rows.filter(row=>row.run_id===run);f.worker.observedSessions=()=>native;
+    f.worker.reconcile();f.worker.reconcile();assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_research_jobs WHERE state='PENDING'").get().n,1);
+    assertSealed(f,before);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('v5 restart resumes frozen unfinished v4 bytes as v4 without a recapture, backfill or new proposal work',()=>{
+  const f=fixture();try {
+    const {job}=f.capture(),input=f.backend.one('ow_research_jobs',job.id).input_json;
+    f.restart();f.worker.version=RESEARCH_VERSION;f.backend.db.prepare('UPDATE ow_research_jobs SET lease_until_ms=0 WHERE id=?').run(job.id);
+    f.worker.evidence=()=>{throw Error('must not recapture legacy evidence');};
+    f.worker.reconcile();const claim=f.worker.claim();assert.equal(claim.id,job.id);assert.equal(claim.analysis_version,LEGACY_RESEARCH_VERSION);
+    const captured=f.worker.capture(claim);assert.equal(captured.result.schema_version,LEGACY_RESEARCH_VERSION);
+    f.worker.complete(claim,captured.result,f.actor,'strategy');assert.equal(f.backend.one('ow_research_jobs',job.id).input_json,input);
+    assert.equal(f.children().length,0);assert.equal(f.worker.statusForCase('source').historical,true);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('current source has no fabricated native-session intake route and cannot turn a caller hook into proof',()=>{
+  const f=fixture({prospective:true});try {
+    const before=f.backend.db.prepare('SELECT COUNT(*) n FROM ow_events').get().n;
+    assert.equal(typeof f.worker.observeSessions,'undefined');
+    f.backend.verifyNativeSessionReceipt=()=>({verified:true,receipt_hash:digest('unsupported-caller-claim')});
+    const proofs=OperationalResearch.prototype.observedSessions.call(f.worker,f.bundle,f.rows);
+    assert.equal(proofs.r1.proof_error,'NATIVE_SESSION_ADAPTER_INTEGRATION_DUE');
+    const result=evaluateResearch({...f.bundle,execution_sessions:proofs},f.rows);
+    assert.equal(result.outcome,'INSUFFICIENT_EVIDENCE');assert.equal(result.approved_evidence_eligibility.observed_session_count,null);
+    assert.equal(f.backend.db.prepare('SELECT COUNT(*) n FROM ow_events').get().n,before);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('recorded Brain no-change queues real evidence Research once, not a fabricated recommendation or lost next action',()=>{
+  const f=fixture({prospective:true});try {
+    const run=f.backend.one('ow_runs','r3'),context=JSON.parse(run.context_json),details={conclusion_type:'NO_CHANGE',
+      registry_record_sha256:digest('registry'),registry_reconciliation_id:'registry',finding:'EXPLICIT_MOCK_ONLY_NO_CHANGE'};
+    const content=JSON.stringify(details),result={result_id:digest('recorded-learning-result'),run_id:run.id,
+      context_hash:context.context_hash,producer_id:f.actor.id,content,content_sha256:digest(content)};
+    f.backend.db.prepare('INSERT INTO ow_operational_brain_results VALUES(?,?,?,?,?,?,?)').run(result.result_id,f.actor.id,
+      run.id,context.context_hash,digest('EXPLICIT_MOCK_REGISTERED_RESULT'),JSON.stringify(result),new Date().toISOString());
+    const before=f.backend.db.prepare('SELECT * FROM ow_operational_brain_results WHERE id=?').get(result.result_id);
+    const queued=f.worker.queueEvidenceReview(run,f.actor,result,details,f.bundle);
+    assert.deepEqual(f.worker.queueEvidenceReview(run,f.actor,result,details,f.bundle),queued);
+    const row=f.backend.one('ow_cases',queued.case_id),artifact=f.backend.one('ow_artifacts',queued.artifact_id);
+    assert.equal(JSON.parse(row.payload_json).origin,'OPERATIONAL_RESEARCH_REASSESSMENT');assert.equal(artifact.kind,'EVIDENCE');
+    assert.equal(JSON.parse(Buffer.from(artifact.content).toString()).basis,'DETERMINISTIC_RESEARCH_REQUIRED_NOT_A_FABRICATED_RECOMMENDATION');
+    assert.equal(f.backend.readCase(f.human,row.id).namespace,'OPERATIONAL');
+    assert.throws(()=>f.backend.mutate('approval.request',f.actor,{message_id:'test-no-internal-approval',data:{case_id:row.id}}),/OPERATIONAL_PLANNING_MUTATION_NOT_ENABLED/);
+    assert.throws(()=>f.worker.queueEvidenceReview(run,f.actor,result,{...details,conclusion_type:'RECOMMENDATION'},f.bundle),/RESEARCH_SCOPED_LEARNING_RESULT_REQUIRED/);
+    assert.deepEqual(f.backend.db.prepare('SELECT * FROM ow_operational_brain_results WHERE id=?').get(result.result_id),before);
+    assertNoAuthority(f);
+  }finally{f.close();}
 });

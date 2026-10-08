@@ -207,7 +207,7 @@ test('an exact governed rerun supersedes rather than double-counts the same cove
   }finally{f.close();}
 });
 
-test('same coverage with a different strategy configuration remains independent evidence',()=>{
+test('same coverage with a different strategy configuration retains accounting, not independent support',()=>{
   const f=fixture();
   try{
     const first=f.addRun({id:'october-config-a',pnl:[100,-20],configHash:digest('config-a')});
@@ -216,6 +216,44 @@ test('same coverage with a different strategy configuration remains independent 
     const bundle=f.learner.cohort(trigger);
     assert.ok(bundle.cohort.eligible_runs.some(value=>value.run_id===first));
     assert.ok(bundle.cohort.eligible_runs.some(value=>value.run_id===second));
+  }finally{f.close();}
+});
+
+test('prospective source summaries never promote floored dates or causal session proxies to the approved native session floor',()=>{
+  const f=fixture();try {
+    f.learner.legacyTelemetrySummary=()=>({trades:30,independent_sessions:100});
+    const run=f.db.prepare('SELECT * FROM ow_runs WHERE id=?').get(f.trigger),classification=f.learner.classification(run);
+    classification.telemetry={causal_summary:{trades:30,independent_sessions:100}};
+    const summary=f.learner.runSummary(run,classification,{minimum_sample_count:2,minimum_independent_session_count:1});
+    assert.equal(summary.summary.observed_sample_count,30);assert.equal(summary.summary.independent_session_count,0);
+    assert.equal(summary.summary.evidence_status,'INSUFFICIENT');assert.equal(summary.native_session_evidence.verified,false);
+    assert.match(summary.native_session_evidence.basis,/NO_CALENDAR_DATE_PROXY/);
+    const bundle=f.learner.cohort(run);assert.equal(bundle.cohort.aggregate.independent_session_count,0);
+    assert.equal(bundle.cohort.aggregate.evidence_status,'INSUFFICIENT');assert.equal(bundle.cohort.aggregate.confidence,0);
+    bundle.diagnostics[0].telemetry={causal_summary:{trades:3,groups:[{direction:'LONG',trades:3,wins:1,losses:2,flat:0,averages:{net_profit_loss:-1}}]}};
+    const proposal=JSON.parse(cumulativeLearningProposal(bundle).content);
+    assert.equal(proposal.schema_version,'ocean-evidence-bound-learning-proposal/v3');assert.equal(proposal.cumulative_evidence.independent_sessions_verified,false);
+    assert.equal(proposal.prospective_source_eligibility.aggregate_support_verified,false);
+  }finally{f.close();}
+});
+
+test('source aggregate uses one observed session union, not per-run sums; overlap remains accounted and cannot be sufficient',()=>{
+  const f=fixture();try {
+    // Explicit mock-only native union, not a deployed telemetry source claim.
+    f.learner.nativeSessionEvidence=ids=>({verified:true,observed_session_count:ids.length>1?2:2,
+      missing_run_ids:[],conflicts:[],statistical_independence_verified:false,basis:'EXPLICIT_MOCK_ONLY_NATIVE_SESSION_UNION'});
+    const trigger=f.db.prepare('SELECT * FROM ow_runs WHERE id=?').get(f.trigger);
+    let bundle=f.learner.cohort(trigger);
+    assert.equal(bundle.cohort.eligible_runs.reduce((n,run)=>n+run.independent_session_count,0),4);
+    assert.equal(bundle.cohort.aggregate.independent_session_count,2);assert.equal(bundle.cohort.aggregate.evidence_status,'SUFFICIENT');
+    const overlap=f.addRun({id:'overlap-different-interval',pnl:[-500],coverage:[{start_utc:'2025-09-15T00:00:00Z',end_utc:'2025-10-15T00:00:00Z'}]});
+    bundle=f.learner.cohort(f.db.prepare('SELECT * FROM ow_runs WHERE id=?').get(overlap));
+    assert.equal(bundle.cohort.aggregate.observed_sample_count,4);assert.equal(bundle.cohort.aggregate.independent_session_count,0);
+    assert.equal(bundle.cohort.aggregate.evidence_status,'INSUFFICIENT');assert.equal(bundle.native_session_evidence.coverage_overlaps.length,2);
+    assert.ok(bundle.cohort.eligible_runs.some(run=>run.run_id===overlap));
+    assert.ok(bundle.native_session_evidence.coverage_overlaps.every(item=>item.records_retained));
+    assert.deepEqual(Object.keys(bundle.cohort.aggregate).sort(),['eligible_run_count','observed_sample_count','independent_session_count',
+      'minimum_sample_count','minimum_independent_session_count','confidence','uncertainty','evidence_status','source_record_ids','aggregate_sha256'].sort());
   }finally{f.close();}
 });
 

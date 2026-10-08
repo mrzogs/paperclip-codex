@@ -3,6 +3,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { digest, objectHash, requireThat } from './common.mjs';
+import { coverageOverlaps, readObservedSessionProofs, sessionEvidence } from './operational-research-protocol.mjs';
 
 const REQUEST_VERSION = 'ocean-operational-learning-request/v1';
 const RESPONSE_VERSION = 'ocean-operational-learning-result/v1';
@@ -189,7 +190,9 @@ function rounded(value, digits = 2) {
 }
 
 export function cumulativeLearningProposal(bundle) {
-  if (bundle.cohort.aggregate.evidence_status !== 'SUFFICIENT') return null;
+  // Prospective source metadata permits descriptive accounting even when its
+  // approved session floor is unverified. It never turns that into support.
+  if (bundle.cohort.aggregate.evidence_status !== 'SUFFICIENT' && !bundle.native_session_evidence) return null;
   const eligible = bundle.diagnostics.filter(value => value.eligible);
   const segmentDimensions = [
     'setup_family', 'direction', 'session_name', 'regime_label',
@@ -258,7 +261,7 @@ export function cumulativeLearningProposal(bundle) {
     };
   });
   const content = {
-    schema_version: 'ocean-evidence-bound-learning-proposal/v2',
+    schema_version: bundle.native_session_evidence?'ocean-evidence-bound-learning-proposal/v3':'ocean-evidence-bound-learning-proposal/v2',
     strategy_id: bundle.policy.project,
     eligible_run_ids: eligible.map(value => value.run_id).sort(),
     cumulative_evidence: {
@@ -269,7 +272,7 @@ export function cumulativeLearningProposal(bundle) {
       win_rate_percent: rounded(100 * wins / trades, 1),
       net_profit_loss: rounded(netProfitLoss),
       independent_sessions: bundle.cohort.aggregate.independent_session_count,
-      session_count_basis: 'Legacy policy count of observed calendar dates; statistical independence is not verified.',
+      session_count_basis: bundle.native_session_evidence?.basis || 'Legacy policy count of observed calendar dates; statistical independence is not verified.',
       independent_sessions_verified: false,
       minimum_segment_trades: minimumSegmentTrades,
       accounting_basis: 'Recorded simulated closed-trade gross minus recorded commissions; not an independent broker ledger.',
@@ -279,6 +282,7 @@ export function cumulativeLearningProposal(bundle) {
     weakest_repeatable_segments: byPerformance.slice(0, 3),
     legacy_segment_field_semantics: 'The repeatable_segments field names are retained for compatibility only. Values are descriptive in-sample observations, not demonstrated repeatability or candidate rules.',
     excluded_context: contextOnly,
+    ...(bundle.native_session_evidence?{prospective_source_eligibility:bundle.native_session_evidence}:{}),
     interpretation: [
       'Segment statistics are descriptive evidence for investigation, not production rules.',
       'Excluded evidence is retained as context but does not contribute to eligible aggregate confidence.',
@@ -747,7 +751,8 @@ export class OperationalLearning {
     const legacy = this.legacyTelemetrySummary(run.id);
     const causal = classification.telemetry?.causal_summary;
     const observedSampleCount = causal?.trades ?? Math.max(metrics.trades, legacy.trades);
-    const independentSessionCount = causal?.independent_sessions ?? legacy.independent_sessions;
+    const native=this.nativeSessionEvidence([run.id]);
+    const independentSessionCount = native.verified?native.observed_session_count:0;
     const completion = classification.summary?.completion;
     const endUtc = completion?.requested_coverage?.at(-1)?.end_utc;
     const sourceRecordIds = [...new Set([
@@ -774,7 +779,23 @@ export class OperationalLearning {
       },
       metrics,
       telemetry: classification.telemetry,
+      native_session_evidence:native,
     };
+  }
+
+  nativeSessionEvidence(runIds) {
+    let database;
+    try {
+      requireThat(this.telemetryDb && fs.existsSync(this.telemetryDb),409,'OBSERVED_EXECUTION_SESSION_SOURCE_REQUIRED');
+      database=new DatabaseSync(this.telemetryDb,{readOnly:true,timeout:2000});
+      const rows=runIds.flatMap(run_id=>database.prepare("SELECT trade_id,run_id,entry_datetime,trade_account,symbol FROM ocean_trade_causal_v2 WHERE run_id=? AND lower(status)='closed' ORDER BY trade_id").all(run_id));
+      const proof=readObservedSessionProofs(this.backend,runIds,rows);
+      const evidence=sessionEvidence({cohort:{eligible_runs:runIds.map(run_id=>({run_id}))},execution_sessions:proof},rows);
+      const {entries,...metadata}=evidence;return metadata;
+    }catch(error){return {verified:false,verification_status:'UNVERIFIED',observed_session_count:0,missing_run_ids:runIds,
+      conflicts:[{reason:String(error.code || 'OBSERVED_EXECUTION_SESSION_SOURCE_REQUIRED').slice(0,200)}],
+      statistical_independence_verified:false,basis:'NOT_VERIFIED_NO_CALENDAR_DATE_PROXY_IS_ELIGIBLE'};}
+    finally{database?.close();}
   }
 
   evidenceIdentity(run, classification) {
@@ -847,12 +868,17 @@ export class OperationalLearning {
     eligibleRuns.sort((left, right) => left.run_id.localeCompare(right.run_id));
     excludedEvidence.sort((left, right) => left.run_id.localeCompare(right.run_id));
     const observedSampleCount = eligibleRuns.reduce((sum, value) => sum + value.observed_sample_count, 0);
-    const independentSessionCount = eligibleRuns.reduce((sum, value) => sum + value.independent_session_count, 0);
+    const native=this.nativeSessionEvidence(eligibleRuns.map(run=>run.run_id));
+    const overlap=coverageOverlaps(Object.fromEntries([...eligibleByEvidence.values()].map(value=>[value.run.id,
+      this.classification(value.run).summary?.completion?.requested_coverage || []])));
+    // Keep every execution in accounting, but overlapping research observations
+    // cannot qualify by summing repeated samples or dates across physical runs.
+    const independentSessionCount = native.verified && !overlap.length?native.observed_session_count:0;
     const confidence = Math.max(0, Math.min(100, Math.round(100 * Math.min(
       observedSampleCount / policy.minimum_sample_count,
       independentSessionCount / policy.minimum_independent_session_count,
     ))));
-    const evidenceStatus = observedSampleCount >= policy.minimum_sample_count
+    const evidenceStatus = native.verified && !overlap.length && observedSampleCount >= policy.minimum_sample_count
       && independentSessionCount >= policy.minimum_independent_session_count ? 'SUFFICIENT' : 'INSUFFICIENT';
     const sourceRecordIds = [...new Set(eligibleRuns.flatMap(value => value.source_record_ids))].sort();
     return {
@@ -874,6 +900,8 @@ export class OperationalLearning {
       excluded_evidence: excludedEvidence,
       diagnostics,
       policy,
+      native_session_evidence:{...native,coverage_overlaps:overlap,
+        accounting_rows_retained:true,aggregate_support_verified:native.verified && !overlap.length},
     };
   }
 
@@ -903,11 +931,13 @@ export class OperationalLearning {
         : stored?.result ? 'BRAIN_RECORDED'
           : classification.eligible && latest?.result && currentFingerprint ? 'PENDING_REANALYSIS'
             : classification.eligible ? 'PENDING' : 'NOT_DUE';
-    const research = details?.continuation?.case_id
-      ? this.backend.operationalResearch?.statusForCase(details.continuation.case_id) || null : null;
+    const accountingCase=this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ow_cases'").get()
+      ?this.db.prepare("SELECT id FROM ow_cases WHERE run_id=? AND json_extract(payload_json,'$.origin')='OPERATIONAL_RESEARCH_REASSESSMENT' ORDER BY rowid DESC LIMIT 1").get(runId)?.id:null;
+    const researchCase=accountingCase || details?.continuation?.case_id;
+    const research = researchCase?this.backend.operationalResearch?.statusForCase(researchCase) || null:null;
     return {
       stage,
-      loop_stage: stage === 'COMPLETE' && details?.conclusion_type === 'RECOMMENDATION'
+      loop_stage: stage === 'COMPLETE' && (research || details?.conclusion_type === 'RECOMMENDATION')
         ? research?.loop_stage || (research?.state === 'COMPLETED' ? 'COMPLETE' : research?.effective_state || research?.state || 'PENDING_RESEARCH') : stage,
       research,
       eligible: classification.eligible,
@@ -920,8 +950,8 @@ export class OperationalLearning {
       callback_status: stored?.callback?.status || null,
       registry_reconciliation_id: this.registryContext?.reconciliation_id || details?.registry_reconciliation_id || null,
       registry_record_sha256: currentFingerprint || details?.registry_record_sha256 || null,
-      continuation_case_id: details?.continuation?.case_id || null,
-      continuation_artifact_id: details?.continuation?.artifact_id || null,
+      continuation_case_id: researchCase || null,
+      continuation_artifact_id: research?.result_artifact_id || details?.continuation?.artifact_id || null,
       next_action: classification.telemetry.required_action || research?.next_action || details?.continuation?.next_action || details?.next_action || null,
       last_error: this.retry.get(`${runId}:${currentFingerprint || 'unbound'}`)?.error || null,
     };
@@ -1069,7 +1099,8 @@ export class OperationalLearning {
       status: 'COMPLETED',
       correlation: result.correlation,
     });
-    const continuation = this.ensureContinuation(run, actor, result, storedDetails);
+    const continuation = this.ensureContinuation(run, actor, result, storedDetails)
+      || this.backend.operationalResearch?.queueEvidenceReview(run,actor,result,storedDetails,cohortBundle);
     this.backend.event(run.id, 'operational.learning.complete', actor, {
       result_id: result.result_id,
       callback_status: callback.status,

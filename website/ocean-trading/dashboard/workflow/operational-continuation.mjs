@@ -1,5 +1,6 @@
 import { digest, objectHash, requireThat } from './common.mjs';
 import { OperationalProposalPlan } from './operational-proposal-plan.mjs';
+import { REASSESSMENT_ORIGIN } from './operational-research-protocol.mjs';
 
 export const CONTINUATION_ORIGIN = 'OPERATIONAL_RESEARCH_CONTINUATION';
 const VERSION = 'ocean-research-planning-continuation/v1';
@@ -8,14 +9,14 @@ const noAuthority = Object.freeze({ automatic_strategy_change:false, candidate_a
 const terminal = new Set(['COMPLETED','CANCELLED','PAUSED','FAILED']);
 const errorCode = error => String(error.code || 'CONTINUATION_PROOF_REQUIRED').slice(0,200);
 const evidenceGroup = binding => objectHash(Object.fromEntries(['strategy_id','execution_instance_id','baseline_hash','registry_revision',
-  'registry_record_sha256','strategy_profile_id','strategy_profile_version','strategy_code_hash','strategy_config_hash','screening_policy']
+  'registry_record_sha256','strategy_profile_id','strategy_profile_version','strategy_code_hash','strategy_config_hash','screening_policy','protocol']
   .map(key=>[key,binding[key]])));
 
 export class OperationalContinuation {
   constructor(research) { this.research=research;this.backend=research.backend;this.db=research.db;this.plans=new OperationalProposalPlan(this); }
   source(job) {
     const row=this.backend.one('ow_cases',job.case_id);
-    requireThat(JSON.parse(row.payload_json).origin==='OPERATIONAL_LEARNING'
+    requireThat(['OPERATIONAL_LEARNING',REASSESSMENT_ORIGIN].includes(JSON.parse(row.payload_json).origin)
       && job.state==='COMPLETED' && job.analysis_version===this.research.version,409,'CONTINUATION_CURRENT_RESEARCH_REQUIRED');
     const artifact=this.backend.artifactFor(row,job.result_artifact_id,'OUTCOME');
     requireThat(digest(Buffer.from(artifact.content))===job.result_hash,409,'CONTINUATION_REPORT_HASH_CONFLICT');
@@ -29,7 +30,7 @@ export class OperationalContinuation {
       && report.job_id===job.id && report.case_id===row.id
       && report.source_recommendation_id===job.artifact_id && report.source_recommendation_hash===job.artifact_hash,
     409,'CONTINUATION_REPORT_INPUT_CONFLICT');
-    const recommendation=this.backend.artifactFor(row,job.artifact_id,'RECOMMENDATION');
+    const recommendation=this.backend.artifactFor(row,job.artifact_id,JSON.parse(row.payload_json).origin===REASSESSMENT_ORIGIN?'EVIDENCE':'RECOMMENDATION');
     requireThat(digest(Buffer.from(recommendation.content))===job.artifact_hash,409,'CONTINUATION_RECOMMENDATION_HASH_CONFLICT');
     const cohort=snapshot.evidence?.bundle?.cohort;
     const ids=report.eligible_run_ids;
@@ -64,7 +65,8 @@ export class OperationalContinuation {
       strategy_profile_version:context.strategy_profile_version,strategy_code_hash:context.strategy_code_hash,
       strategy_config_hash:context.strategy_config_hash,runs,analysis_version:job.analysis_version,
       cohort_hash:report.cohort_hash,evidence_hash:report.evidence_hash,
-      screening_policy:report.screening_policy,historical_periods:report.historical_periods};
+      screening_policy:report.screening_policy,historical_periods:report.historical_periods,
+      ...(report.protocol?{protocol:report.protocol,approved_evidence_eligibility:report.approved_evidence_eligibility}: {})};
     return {row,report,binding,recipient:artifact.recipient_id,reference:{job_id:job.id,case_id:row.id,
       input_hash:job.input_hash,report_artifact_id:artifact.id,report_hash:job.result_hash,
       recommendation_artifact_id:job.artifact_id,recommendation_hash:job.artifact_hash}};
@@ -144,7 +146,7 @@ export class OperationalContinuation {
       else {
         const returned=this.plans.forCase(row)?.returned;
         this.db.prepare('INSERT INTO ow_tasks VALUES(?,?,?,?,?,1)').run(taskId,caseId,item.task_kind,
-          returned?'BLOCKED':'NOT_RUN',returned?.artifact_id || artifactId);
+          returned?'COMPLETED':'NOT_RUN',returned?.artifact_id || artifactId);
       }
       const existing=this.db.prepare("SELECT payload_json FROM ow_events WHERE entity_id=? AND action=? AND json_extract(payload_json,'$.payload.continuation_case_id')=?")
         .all(source.row.id,LINK,caseId);

@@ -53,7 +53,7 @@ export async function consumePlanningOnce({api,tokenFile,stateFile,fetch:fetcher
     }
     if(work.phase==='PLAN_PENDING'){
       const result=await call('proposals/plans',work.input);
-      requireThat(result.planning_complete===false && result.candidate_testing==='NOT_DUE'
+      requireThat(result.planning_complete===true && result.candidate_testing==='NOT_DUE'
         && result.approval_due===false && result.disposition==='DRAFT_FOR_TECHNICAL_REVIEW',409,'PLANNING_WORKER_AUTHORITY_CONFLICT');
       work.phase='RETURNED';work.receipt=result;delete work.input;delete work.error;save();returned.push(result);
     }
@@ -61,7 +61,7 @@ export async function consumePlanningOnce({api,tokenFile,stateFile,fetch:fetcher
   const blocked=[];
   const tryResume=async(caseId,work)=>{
     try{await resume(caseId,work);}catch(error){
-      if(error.code==='PROPOSAL_LEASE_EXPIRED')work.phase='LEASE_EXPIRED';
+      if(['PROPOSAL_LEASE_EXPIRED','PROPOSAL_CAPABILITIES_CHANGED'].includes(error.code))work.phase='LEASE_EXPIRED';
       work.error=String(error.code || 'PLANNING_WORKER_TRANSPORT_INTERRUPTED').slice(0,200);save();
       blocked.push({case_id:caseId,reason:work.error});
     }
@@ -72,7 +72,8 @@ export async function consumePlanningOnce({api,tokenFile,stateFile,fetch:fetcher
   requireThat(queue.schema_version===PLAN_VERSION && queue.owner_id===owner && Array.isArray(queue.items),409,'PLANNING_WORKER_QUEUE_CONFLICT');
   for(const item of queue.items.slice(0,20)){
     if(item.status==='BLOCKED'){blocked.push({case_id:item.case_id,reason:item.blocked_reason});continue;}
-    if(item.status!=='READY' || (state.work[item.case_id] && state.work[item.case_id].phase!=='LEASE_EXPIRED'))continue;
+    if(!['READY','REVISION_DUE'].includes(item.status)
+      || (state.work[item.case_id] && state.work[item.case_id].phase!=='LEASE_EXPIRED' && item.status!=='REVISION_DUE'))continue;
     const work={phase:'CLAIM_PENDING',input:{message_id:`planning-claim-${randomUUID()}`,data:{
       case_id:item.case_id,expected_revision:item.revision,support_hash:item.support_hash}}};
     state.work[item.case_id]=work;save();await tryResume(item.case_id,work);

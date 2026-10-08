@@ -454,6 +454,11 @@ function researchPanel(research) {
     ['Accounting basis',esc(report.accounting_basis)],
     ['Missing exit attribution',esc(report.missing_exit_attribution)],
     ['Direction-screen evidence',report.evidence_sufficiency ? badge(report.evidence_sufficiency.status) : 'Not recorded in preserved report'],
+    ...(report.approved_evidence_eligibility?[
+      ['Approved aggregate evidence',badge(report.approved_evidence_eligibility.status)],
+      ['Verified observed sessions',report.approved_evidence_eligibility.observed_session_count==null?'UNVERIFIED':esc(report.approved_evidence_eligibility.observed_session_count)],
+      ['Sampling protocol',esc(report.protocol.version)],
+    ]:[]),
     ['Candidate validation',badge(report.candidate_validation.status)],
     ['Research Brain record',esc(report.brain_record?.record_id || 'Not recorded')],
   ]):research.last_error?`<p class='form-error'>${esc(human(research.last_error))}</p>`:'')
@@ -466,7 +471,7 @@ function continuationTable(items) {
   ]));
 }
 function casePage(data) {
-  const executable = !data.planning && !['COMPLETED','PAUSED','FAILED','BLOCKED','CANCELLED'].includes(data.work_status) && data.stage !== 'CLOSED';
+  const executable = !data.planning && !(data.namespace==='OPERATIONAL' && data.research) && !['COMPLETED','PAUSED','FAILED','BLOCKED','CANCELLED'].includes(data.work_status) && data.stage !== 'CLOSED';
   const statusControl = data.planning ? '' : ['PAUSED','FAILED','BLOCKED'].includes(data.work_status) ? button('resume', data.work_status === 'PAUSED' ? 'Resume' : 'Retry', '', 'play') : executable ? button('pause', 'Pause', '', 'pause') : '';
   const prepare = data.approvals.find(row => row.state === 'APPROVED' && row.decision?.current_test_authority && ['DEVELOPMENT','SHADOW','PRODUCTION','ROLLBACK'].includes(row.gate) && !data.handoffs.some(handoff => handoff.decision_id === row.decision.decision.decision_id));
   return heading(data.case_id, data.strategy_name, badge(data.work_status) + statusControl + (executable ? button('upload', 'Upload result', '', 'upload') : '')) + researchPanel(data.research) + (data.planning?section('Planning scope',facts([
@@ -476,7 +481,7 @@ function casePage(data) {
     ...(data.planning.plan_work?[
       ['Plan work',badge(data.planning.plan_work.status)],
       ['Returned plan',data.planning.plan_work.returned?.artifact_id?link('artifacts',data.planning.plan_work.returned.artifact_id):'Not returned'],
-      ['Planning complete',data.planning.plan_work.planning_complete===true?'Yes':'No'],
+      ['Plan authoring complete (not execution)',data.planning.plan_work.planning_complete===true?'Yes':'No'],
     ]:[]),
     ['Latest Research',data.planning.progress?.source?.case_id?link('cases',data.planning.progress.source.case_id):'Await new qualified Research'],
   ])):'') + facts([
