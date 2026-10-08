@@ -651,3 +651,20 @@ test('frozen sample debt remains owned design-review work after a third coverage
     assertSealed(f,before);assertNoAuthority(f);
   }finally{f.close();}
 });
+
+test('existing Learning maintenance route runs planning after startup with no extra launcher, including empty and duplicate queues',async()=>{
+  for(const options of [{},{noChange:true}]){
+    const f=fixture(options);try{
+      f.complete();const before=sealed(f),learner=f.backend.operationalLearning;
+      Object.assign(learner,{backend:f.backend,running:false,token:()=> 'explicit-mock-brain-access',
+        verifyIdentity:async()=>{},registry:async()=>({}),pendingRun:()=>null,status:()=>({fixture:'EXPLICIT_MOCK_ONLY'})});
+      await OperationalLearning.prototype.flushOnce.call(learner);
+      const expected=options.noChange?0:1;assert.equal(returnedCount(f),expected);
+      f.restart();await OperationalLearning.prototype.flushOnce.call(learner);
+      await OperationalLearning.prototype.flushOnce.call(learner);
+      assert.equal(returnedCount(f),expected);assert.equal(learner.running,false);
+      assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_events WHERE action='operational.proposal.plan.lease'").get().n,expected);
+      assertSealed(f,before);assertNoAuthority(f);
+    }finally{f.close();}
+  }
+});
