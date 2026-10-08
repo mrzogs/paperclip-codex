@@ -25,11 +25,12 @@ test('reviewed v238 successor requires the exact physical and unchanged logical 
   assert.equal(Object.isFrozen(mapping), true);
 });
 
-function fixture() {
+function fixture({file=false,currentProofMock=false}={}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ocean-learning-'));
   const tokenFile = path.join(root, 'brain.token');
   fs.writeFileSync(tokenFile, 'protected-test-token-value-123456');
-  const db = new DatabaseSync(':memory:');
+  const dbPath=file?path.join(root,'workflow.sqlite'):':memory:';
+  let db = new DatabaseSync(dbPath);
   db.exec(`
     CREATE TABLE ow_strategies (id TEXT PRIMARY KEY, profile_id TEXT, revision INTEGER, baseline_hash TEXT, payload_json TEXT);
     CREATE TABLE ow_profiles (id TEXT PRIMARY KEY, strategy_id TEXT, version TEXT, content_hash TEXT, payload_json TEXT);
@@ -40,6 +41,10 @@ function fixture() {
     CREATE TABLE ow_evidence_revisions (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, event_id TEXT, canonical_id TEXT, payload_json TEXT);
     CREATE TABLE ow_operational_brain_results (id TEXT PRIMARY KEY, run_id TEXT, payload_json TEXT);
     CREATE TABLE ow_operational_brain_callbacks (result_id TEXT PRIMARY KEY, payload_json TEXT);
+    CREATE TABLE ow_cases (id TEXT PRIMARY KEY, run_id TEXT, payload_json TEXT);
+    CREATE TABLE ow_artifacts (id TEXT PRIMARY KEY, case_id TEXT, kind TEXT, content BLOB);
+    CREATE TABLE ow_research_jobs (id TEXT PRIMARY KEY, case_id TEXT, artifact_id TEXT);
+    CREATE TABLE ow_events (entity_id TEXT, action TEXT, payload_json TEXT);
   `);
   const summaries = new Map();
   const events = [];
@@ -78,8 +83,31 @@ function fixture() {
         const callback={...input};db.prepare('INSERT INTO ow_operational_brain_callbacks VALUES(?,?)').run(input.result_id,JSON.stringify(callback));return callback;
       },
     },
-    createOperationalLearningContinuation(actor,input){continuations.push(input);return {case_id:input.case_id,artifact_id:input.artifact_id,recipient_id:'strategy-worker',stage:'RESEARCH',work_status:'READY',next_action:'Strategy Research evaluation queued'};},
-    event(entity,action,actor,payload){events.push({entity,action,actor,payload});},
+    createOperationalLearningContinuation(actor,input){
+      continuations.push(input);
+      db.prepare('INSERT OR IGNORE INTO ow_cases VALUES(?,?,?)').run(input.case_id,input.run_id,
+        JSON.stringify({origin:'OPERATIONAL_LEARNING',result_id:input.result_id}));
+      db.prepare('INSERT OR IGNORE INTO ow_artifacts VALUES(?,?,?,?)').run(input.artifact_id,input.case_id,
+        'RECOMMENDATION',JSON.stringify(input.recommendation));
+      db.prepare('INSERT OR IGNORE INTO ow_research_jobs VALUES(?,?,?)').run(`job:${input.case_id}`,input.case_id,input.artifact_id);
+      return {case_id:input.case_id,artifact_id:input.artifact_id,recipient_id:'strategy-worker',stage:'RESEARCH',work_status:'READY',next_action:'Strategy Research evaluation queued'};
+    },
+    operationalResearch:{
+      async flushOnce(){},
+      queueEvidenceReview(run,actor,result){
+        const suffix=digest(result.result_id).slice(7,31),caseId=`research-evidence-${suffix}`,artifactId=`test-research-evidence-${suffix}`;
+        db.prepare('INSERT OR IGNORE INTO ow_cases VALUES(?,?,?)').run(caseId,run.id,
+          JSON.stringify({origin:'OPERATIONAL_RESEARCH_REASSESSMENT'}));
+        db.prepare('INSERT OR IGNORE INTO ow_artifacts VALUES(?,?,?,?)').run(artifactId,caseId,'EVIDENCE',
+          JSON.stringify({learning_result_id:result.result_id,learning_result_hash:result.content_sha256}));
+        db.prepare('INSERT OR IGNORE INTO ow_research_jobs VALUES(?,?,?)').run(`job:${caseId}`,caseId,artifactId);
+        return {case_id:caseId,artifact_id:artifactId};
+      },
+      statusForCase(caseId){return db.prepare('SELECT id FROM ow_cases WHERE id=?').get(caseId)
+        ?{state:'PENDING',loop_stage:'PENDING_RESEARCH'}:null;},
+    },
+    event(entity,action,actor,payload){events.push({entity,action,actor,payload});
+      db.prepare('INSERT INTO ow_events VALUES(?,?,?)').run(entity,action,JSON.stringify({payload}));},
   };
   const addRun = ({id, partition='DISCOVERY', permission='HISTORICAL_DISCOVERY', testRun=false, current=true, pnl=[], contextHash=null, coverage=null, configHash=null}) => {
     const runId=testRun?`test-${id}`:id;
@@ -104,9 +132,164 @@ function fixture() {
     return {ok:true,status:200,json:async()=>({schema_version:'ocean-operational-learning-result/v1',record_id:'reasoning-verified-learning',relative_path:'reasoning/verified-learning.md',content,content_sha256:digest(content),conclusion_type:'NO_CHANGE',source_record_ids:[...input.cohort.eligible_runs,...input.excluded_evidence].map(run=>run.run_id),correlation:input.correlation})};
   };
   // Explicit mock-only provider for Brain/queue tests, never physical provenance evidence.
-  const learner=new OperationalLearning(backend,{enabled:true,strategy_id:strategyId,token_file:tokenFile,fetch,interval_ms:60000,telemetry_required:false});
-  return {root,db,backend,learner,requests,events,continuations,registry,prior,trigger,addRun,close(){learner.stop();db.close();fs.rmSync(root,{recursive:true,force:true});}};
+  const options={enabled:true,strategy_id:strategyId,token_file:tokenFile,fetch,interval_ms:60000,telemetry_required:false};
+  let learner=new OperationalLearning(backend,options);
+  const mockCurrentProof=instance=>{
+    if(!currentProofMock)return;
+    const classify=instance.classification.bind(instance);
+    instance.classification=run=>{
+      const value=classify(run);
+      return {...value,telemetry:{...value.telemetry,verified:true,bypassed:false}};
+    };
+  };
+  mockCurrentProof(learner);
+  const result={root,db,backend,learner,requests,events,continuations,registry,prior,trigger,addRun,
+    restart(){
+      assert.equal(file,true,'restart requires file-backed SQLite');
+      const currentFetch=learner.fetch;
+      learner.stop();db.close();db=new DatabaseSync(dbPath);backend.db=db;
+      learner=new OperationalLearning(backend,{...options,fetch:currentFetch});mockCurrentProof(learner);
+      result.db=db;result.learner=learner;
+    },
+    close(){learner.stop();db.close();fs.rmSync(root,{recursive:true,force:true});}};
+  return result;
 }
+
+function mockBrainConclusion(f, conclusionType) {
+  const original=f.learner.fetch;
+  f.learner.fetch=async(url,options={})=>{
+    if(!options.body)return original(url,options);
+    const input=JSON.parse(options.body);f.requests.push(input);
+    const conclusion={type:conclusionType,reasons:['isolated persistence boundary']};
+    if(conclusionType==='RECOMMENDATION')conclusion.recommendation={
+      title:'Isolated Research hypothesis',content:'Test only; no candidate or approval.'};
+    const content=JSON.stringify({registry_reconciliation_id:input.registry_reconciliation_id,
+      registry_record_sha256:input.registry_record_sha256,conclusion});
+    return {ok:true,status:200,json:async()=>({schema_version:'ocean-operational-learning-result/v1',
+      record_id:`reasoning-isolated-${conclusionType}`,relative_path:`reasoning/isolated-${conclusionType}.md`,
+      content,content_sha256:digest(content),conclusion_type:conclusionType,
+      source_record_ids:[...input.cohort.eligible_runs,...input.excluded_evidence].map(row=>row.run_id),
+      correlation:input.correlation})};
+  };
+}
+
+test('EXPLICIT MOCK: a real SQLite child insert failure leaves callback pending; restart reuses Brain result',async()=>{
+  const f=fixture({file:true,currentProofMock:true});
+  try {
+    f.db.prepare("UPDATE ow_runs SET state='FAILED' WHERE id=?").run(f.prior);
+    mockBrainConclusion(f,'NO_CHANGE');
+    const run=f.db.prepare('SELECT * FROM ow_runs WHERE id=?').get(f.trigger);
+    f.db.exec("CREATE TRIGGER isolated_child_fault BEFORE INSERT ON ow_cases BEGIN SELECT RAISE(ABORT,'isolated-child-sqlite-fault'); END");
+    await assert.rejects(f.learner.process(run,'isolated-test-token',f.registry),/isolated-child-sqlite-fault/);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_operational_brain_results').get().n,1);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_operational_brain_callbacks').get().n,0);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_cases').get().n,0);
+    f.db.exec('DROP TRIGGER isolated_child_fault');
+    f.restart();
+    assert.equal(f.learner.pendingRun(f.registry)?.id,f.trigger);
+    await f.learner.flushOnce();
+    assert.equal(f.requests.length,1,'restart must not call Brain again');
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_operational_brain_callbacks').get().n,1);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_cases').get().n,1);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_events WHERE action=?').get('operational.learning.complete').n,1);
+    assert.equal(f.learner.pendingRun(f.registry),null);
+    await f.learner.process(f.db.prepare('SELECT * FROM ow_runs WHERE id=?').get(f.trigger),'isolated-test-token',f.registry);
+    assert.equal(f.requests.length,1);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_cases').get().n,1);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_events WHERE action=?').get('operational.learning.complete').n,1);
+  }finally{f.close();}
+});
+
+test('EXPLICIT MOCK: callback SQLite failure retains one durable child and restart completes without a second Brain call',async()=>{
+  const f=fixture({file:true,currentProofMock:true});
+  try {
+    f.db.prepare("UPDATE ow_runs SET state='FAILED' WHERE id=?").run(f.prior);
+    mockBrainConclusion(f,'RECOMMENDATION');
+    const run=f.db.prepare('SELECT * FROM ow_runs WHERE id=?').get(f.trigger);
+    f.db.exec("CREATE TRIGGER isolated_callback_fault BEFORE INSERT ON ow_operational_brain_callbacks BEGIN SELECT RAISE(ABORT,'isolated-callback-sqlite-fault'); END");
+    await assert.rejects(f.learner.process(run,'isolated-test-token',f.registry),/isolated-callback-sqlite-fault/);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_cases').get().n,1);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_research_jobs').get().n,1);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_operational_brain_callbacks').get().n,0);
+    f.db.exec('DROP TRIGGER isolated_callback_fault');
+    f.restart();
+    assert.equal(f.learner.pendingRun(f.registry)?.id,f.trigger);
+    await f.learner.flushOnce();
+    assert.equal(f.requests.length,1);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_cases').get().n,1);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_operational_brain_callbacks').get().n,1);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_events WHERE action=?').get('operational.learning.complete').n,1);
+  }finally{f.close();}
+});
+
+for(const conclusionType of ['NO_CHANGE','BLOCKED','RECOMMENDATION']) {
+  test(`EXPLICIT MOCK: stranded current ${conclusionType} callback recovers its Research child after restart`,async()=>{
+    const f=fixture({file:true,currentProofMock:true});
+    try {
+      f.db.prepare("UPDATE ow_runs SET state='FAILED' WHERE id=?").run(f.prior);
+      mockBrainConclusion(f,conclusionType);
+      const run=f.db.prepare('SELECT * FROM ow_runs WHERE id=?').get(f.trigger);
+      f.db.exec("CREATE TRIGGER isolated_child_fault BEFORE INSERT ON ow_cases BEGIN SELECT RAISE(ABORT,'isolated-child-sqlite-fault'); END");
+      await assert.rejects(f.learner.process(run,'isolated-test-token',f.registry),/isolated-child-sqlite-fault/);
+      const stored=f.learner.resultFor(f.trigger,f.registry.record_sha256);
+      f.backend.operationalResults.callback(null,{run_id:f.trigger,context_hash:stored.result.context_hash,
+        result_id:stored.result.result_id,result_sha256:stored.result.content_sha256,
+        status:'COMPLETED',correlation:stored.result.correlation});
+      f.db.exec('DROP TRIGGER isolated_child_fault');
+      f.restart();f.learner.registryContext=f.registry;
+      const before=f.learner.statusForRun(f.trigger);
+      assert.equal(before.stage,'BRAIN_RECORDED');
+      assert.equal(before.loop_stage,'RESEARCH_REQUIRED');
+      assert.equal(before.research,null);
+      assert.equal(before.continuation_case_id,null);
+      assert.equal(before.continuation_artifact_id,null);
+      assert.match(before.next_action,/same immutable result/);
+      assert.equal(f.learner.pendingRun(f.registry)?.id,f.trigger);
+      await f.learner.flushOnce();
+      assert.equal(f.requests.length,1,'recovery must not call Brain again');
+      assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_cases').get().n,1);
+      assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_research_jobs').get().n,1);
+      assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_operational_brain_callbacks').get().n,1);
+      assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_events WHERE action=?').get('operational.learning.complete').n,1);
+      assert.equal(f.learner.pendingRun(f.registry),null);
+    }finally{f.close();}
+  });
+}
+
+test('EXPLICIT MOCK: missing completion event is repaired once without duplicating child or Brain call',async()=>{
+  const f=fixture({file:true,currentProofMock:true});
+  try {
+    f.db.prepare("UPDATE ow_runs SET state='FAILED' WHERE id=?").run(f.prior);
+    mockBrainConclusion(f,'NO_CHANGE');
+    await f.learner.process(f.db.prepare('SELECT * FROM ow_runs WHERE id=?').get(f.trigger),'isolated-test-token',f.registry);
+    f.db.prepare("DELETE FROM ow_events WHERE action='operational.learning.complete'").run();
+    f.restart();
+    assert.equal(f.learner.pendingRun(f.registry)?.id,f.trigger);
+    await f.learner.flushOnce();
+    assert.equal(f.requests.length,1);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_cases').get().n,1);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_events WHERE action=?').get('operational.learning.complete').n,1);
+    await f.learner.flushOnce();
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_events WHERE action=?').get('operational.learning.complete').n,1);
+  }finally{f.close();}
+});
+
+test('EXPLICIT MOCK: completed older-format callback stays historical and is not silently requeued',()=>{
+  const f=fixture({currentProofMock:true});
+  try {
+    const context=JSON.parse(f.db.prepare('SELECT context_json FROM ow_runs WHERE id=?').get(f.trigger).context_json);
+    const content=JSON.stringify({conclusion_type:'NO_CHANGE',registry_record_sha256:f.registry.record_sha256});
+    f.db.prepare('INSERT INTO ow_operational_brain_results VALUES(?,?,?)').run('older-format-result',f.trigger,
+      JSON.stringify({result_id:'older-format-result',context_hash:context.context_hash,content}));
+    f.db.prepare('INSERT INTO ow_operational_brain_callbacks VALUES(?,?)').run('older-format-result',JSON.stringify({status:'COMPLETED'}));
+    assert.equal(f.learner.pendingRun(f.registry)?.id,f.prior);
+    f.db.prepare("UPDATE ow_runs SET state='FAILED' WHERE id=?").run(f.prior);
+    assert.equal(f.learner.pendingRun(f.registry),null);
+    f.learner.registryContext=f.registry;
+    assert.equal(f.learner.statusForRun(f.trigger).stage,'COMPLETE');
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_cases').get().n,0);
+  }finally{f.close();}
+});
 
 test('completed operational runs are analysed cumulatively and protected or TEST evidence is excluded',async()=>{
   const f=fixture();

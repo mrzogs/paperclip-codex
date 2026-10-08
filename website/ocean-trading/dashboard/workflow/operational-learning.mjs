@@ -957,6 +957,41 @@ export class OperationalLearning {
     return null;
   }
 
+  currentContinuationResult(stored, registryRecordSha256, contextHash) {
+    return !!contextHash && stored?.details?.storage_mode === 'BRAIN_IMMUTABLE_REFERENCE'
+      && stored.details.registry_record_sha256 === registryRecordSha256
+      && stored.result?.context_hash === contextHash
+      && ['RECOMMENDATION', 'NO_CHANGE', 'BLOCKED'].includes(stored.details.conclusion_type);
+  }
+
+  continuationRecorded(run, stored) {
+    const {result,details}=stored;
+    if(details.conclusion_type==='RECOMMENDATION') {
+      const caseId=details.continuation?.case_id,artifactId=details.continuation?.artifact_id;
+      if(!caseId || !artifactId)return false;
+      return !!this.db.prepare(`SELECT 1 FROM ow_cases c JOIN ow_artifacts a ON a.case_id=c.id
+        JOIN ow_research_jobs j ON j.case_id=c.id AND j.artifact_id=a.id
+        WHERE c.id=? AND c.run_id=? AND a.id=? AND a.kind='RECOMMENDATION'
+          AND json_extract(c.payload_json,'$.origin')='OPERATIONAL_LEARNING'
+          AND json_extract(c.payload_json,'$.result_id')=? LIMIT 1`).get(caseId,run.id,artifactId,result.result_id);
+    }
+    const rows=this.db.prepare(`SELECT a.content FROM ow_cases c JOIN ow_artifacts a ON a.case_id=c.id
+      JOIN ow_research_jobs j ON j.case_id=c.id AND j.artifact_id=a.id
+      WHERE c.run_id=? AND a.kind='EVIDENCE'
+        AND json_extract(c.payload_json,'$.origin')='OPERATIONAL_RESEARCH_REASSESSMENT'`).all(run.id);
+    return rows.some(row=>{
+      try {
+        const evidence=JSON.parse(Buffer.from(row.content).toString('utf8'));
+        return evidence.learning_result_id===result.result_id && evidence.learning_result_hash===result.content_sha256;
+      } catch { return false; }
+    });
+  }
+
+  completionEventRecorded(run, result) {
+    return !!this.db.prepare(`SELECT 1 FROM ow_events WHERE entity_id=? AND action='operational.learning.complete'
+      AND json_extract(payload_json,'$.payload.result_id')=? LIMIT 1`).get(run.id,result.result_id);
+  }
+
   statusForRun(runId) {
     const run = this.db.prepare('SELECT * FROM ow_runs WHERE id=?').get(runId);
     if (!run) return null;
@@ -965,7 +1000,13 @@ export class OperationalLearning {
     const stored = this.resultFor(runId, currentFingerprint);
     const latest = stored || this.resultFor(runId);
     const details = stored?.details || latest?.details || null;
-    const stage = stored?.callback?.status === 'COMPLETED' ? 'COMPLETE'
+    const currentProvenanceQualified=classification.telemetry.verified && !classification.telemetry.bypassed;
+    const continuationDue=classification.eligible && currentProvenanceQualified
+      && stored?.callback?.status==='COMPLETED'
+      && this.currentContinuationResult(stored,currentFingerprint,classification.context?.context_hash)
+      && !this.continuationRecorded(run,stored);
+    const stage = continuationDue ? 'BRAIN_RECORDED'
+      : stored?.callback?.status === 'COMPLETED' ? 'COMPLETE'
       : stored?.callback?.status === 'FAILED' ? 'FAILED'
         : stored?.result ? 'BRAIN_RECORDED'
           : classification.eligible && latest?.result && currentFingerprint ? 'PENDING_REANALYSIS'
@@ -973,9 +1014,9 @@ export class OperationalLearning {
     const accountingCase=this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ow_cases'").get()
       ?this.db.prepare("SELECT id FROM ow_cases WHERE run_id=? AND json_extract(payload_json,'$.origin')='OPERATIONAL_RESEARCH_REASSESSMENT' ORDER BY rowid DESC LIMIT 1").get(runId)?.id:null;
     const researchCase=accountingCase || details?.continuation?.case_id;
-    const research = researchCase?this.backend.operationalResearch?.statusForCase(researchCase) || null:null;
-    const currentProvenanceQualified=classification.telemetry.verified && !classification.telemetry.bypassed;
-    const recordedLoopStage=stage === 'COMPLETE' && (research || details?.conclusion_type === 'RECOMMENDATION')
+    const research = !continuationDue && researchCase
+      ? this.backend.operationalResearch?.statusForCase(researchCase) || null : null;
+    const recordedLoopStage=continuationDue?'RESEARCH_REQUIRED':stage === 'COMPLETE' && (research || details?.conclusion_type === 'RECOMMENDATION')
       ? research?.loop_stage || (research?.state === 'COMPLETED' ? 'COMPLETE' : research?.effective_state || research?.state || 'PENDING_RESEARCH') : stage;
     const qualificationRequired=stage==='COMPLETE' && (!currentProvenanceQualified
       || research?.historical===true || research?.qualified_for_new_support===false);
@@ -997,10 +1038,13 @@ export class OperationalLearning {
       callback_status: stored?.callback?.status || null,
       registry_reconciliation_id: this.registryContext?.reconciliation_id || details?.registry_reconciliation_id || null,
       registry_record_sha256: currentFingerprint || details?.registry_record_sha256 || null,
-      continuation_case_id: researchCase || null,
-      continuation_artifact_id: research?.result_artifact_id || details?.continuation?.artifact_id || null,
+      continuation_case_id: continuationDue ? null : researchCase || null,
+      continuation_artifact_id: continuationDue ? null
+        : research?.result_artifact_id || details?.continuation?.artifact_id || null,
       next_action: qualificationRequired
         ? classification.telemetry.required_action || research?.next_action || PROVENANCE_ACTION
+        : continuationDue
+          ? 'Ocean must persist the Research continuation for this recorded Brain result; retry uses the same immutable result and does not call Brain again.'
         : classification.telemetry.required_action || research?.next_action || details?.continuation?.next_action || details?.next_action || null,
       last_error: this.retry.get(`${runId}:${currentFingerprint || 'unbound'}`)?.error || null,
     };
@@ -1014,7 +1058,7 @@ export class OperationalLearning {
       enabled: this.enabled,
       state: !this.enabled ? 'DISABLED' : this.lastError ? 'DEGRADED' : this.identityVerified ? 'READY' : 'STARTING',
       strategy_id: this.strategyId,
-      pending: items.filter(item => ['PENDING', 'PENDING_REANALYSIS'].includes(item.stage)).length,
+      pending: items.filter(item => ['PENDING', 'PENDING_REANALYSIS', 'BRAIN_RECORDED'].includes(item.stage)).length,
       complete: items.filter(item => item.stage === 'COMPLETE').length,
       failed: items.filter(item => item.stage === 'FAILED').length,
       last_success_utc: this.lastSuccessUtc,
@@ -1027,10 +1071,17 @@ export class OperationalLearning {
   pendingRun(registry) {
     const now = Date.now();
     return this.db.prepare("SELECT * FROM ow_runs WHERE state='COMPLETED' AND id NOT LIKE 'test-%' ORDER BY rowid").all()
-      .find(run => (!this.strategyId || run.strategy_id === this.strategyId)
-        && this.classification(run).eligible
-        && this.resultFor(run.id, registry.record_sha256)?.callback?.status !== 'COMPLETED'
-        && (this.retry.get(`${run.id}:${registry.record_sha256}`)?.nextAttemptMs || 0) <= now) || null;
+      .find(run => {
+        if((this.strategyId && run.strategy_id!==this.strategyId)
+          || (this.retry.get(`${run.id}:${registry.record_sha256}`)?.nextAttemptMs || 0)>now)return false;
+        const classification=this.classification(run);
+        if(!classification.eligible)return false;
+        const stored=this.resultFor(run.id,registry.record_sha256);
+        if(stored?.callback?.status!=='COMPLETED')return true;
+        if(!classification.telemetry.verified || classification.telemetry.bypassed)return false;
+        if(!this.currentContinuationResult(stored,registry.record_sha256,classification.context?.context_hash))return false;
+        return !this.continuationRecorded(run,stored) || !this.completionEventRecorded(run,stored.result);
+      }) || null;
   }
 
   ensureContinuation(run, actor, result, details) {
@@ -1140,6 +1191,10 @@ export class OperationalLearning {
         correlation: input.correlation,
       });
     }
+    const continuation = this.ensureContinuation(run, actor, result, storedDetails)
+      || this.backend.operationalResearch?.queueEvidenceReview(run,actor,result,storedDetails,cohortBundle);
+    requireThat(continuation?.case_id && continuation?.artifact_id && this.continuationRecorded(run,{result,details:storedDetails}),
+      503,'OPERATIONAL_LEARNING_CONTINUATION_NOT_PERSISTED');
     const callback = this.backend.operationalResults.callback(actor, {
       run_id: run.id,
       context_hash: classification.context.context_hash,
@@ -1148,9 +1203,7 @@ export class OperationalLearning {
       status: 'COMPLETED',
       correlation: result.correlation,
     });
-    const continuation = this.ensureContinuation(run, actor, result, storedDetails)
-      || this.backend.operationalResearch?.queueEvidenceReview(run,actor,result,storedDetails,cohortBundle);
-    this.backend.event(run.id, 'operational.learning.complete', actor, {
+    if(!this.completionEventRecorded(run,result))this.backend.event(run.id, 'operational.learning.complete', actor, {
       result_id: result.result_id,
       callback_status: callback.status,
       cohort_run_ids: cohortBundle.cohort.eligible_runs.map(value => value.run_id),
