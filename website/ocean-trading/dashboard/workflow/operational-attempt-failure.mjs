@@ -9,6 +9,7 @@ const REASONS = new Set(['start_exception', 'start_status_error', 'managed_evide
 const normPath = value => path.resolve(value).toLowerCase();
 const rawHash = value => String(value || '').replace(/^sha256:/, '').toLowerCase();
 const at = value => Date.parse(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/.test(value || '') ? value.replace(' ', 'T') + 'Z' : value);
+const DELAYED_STOP_DETAIL = 'StopChartReplay called.; replay did not confirm stopped after bounded stop attempts';
 
 // These are the runner's line-delimited command/status files, not STTL2 tags.
 export function decodeRunnerFields(bytes) {
@@ -31,6 +32,35 @@ function retainedBytes(value, hash) {
   return bytes;
 }
 
+function delayedStopSources(config, controller, status, stopId, symbol) {
+  requireThat(controller.action === 'status' && controller.status === 'status'
+    && controller.controllerVersion === 'v0.2.1-cicd-vwap-time-basis' && controller.error == null
+    && controller.replayStatus===0 && controller.chartReplayStatus===0 && controller.chartNumber===config.expected_chart_number
+    && config.expected_symbol===symbol
+    && /^oql-managed-status-[a-f0-9]{32}$/.test(controller.commandId)
+    && status.status === 'error' && status.detail === DELAYED_STOP_DETAIL
+    && status.isReplayRunning === 'true' && status.replayStatus === '1' && status.controllerLifecycleActive === 'true'
+    && status.chartDataType === '2' && Number(status.secondsPerBar) === config.expected_bar_period_seconds,
+  409, 'FAILURE_SUPPORTED_DELAYED_STOP_REQUIRED');
+  const read = file => {
+    const before=fs.statSync(file),bytes=fs.readFileSync(file),after=fs.statSync(file);
+    requireThat(before.isFile() && before.size<=32768 && before.size===after.size && before.mtimeMs===after.mtimeMs,
+      409,'FAILURE_DELAYED_SOURCE_CHANGED');
+    return {file,bytes,modified:after.mtimeMs};
+  };
+  const controllerRoot=path.join(path.dirname(config.expected_sierra_exe),'connector-control','patrading-tp');
+  const stop=read(path.join(path.dirname(config.source_preflight_status_path),'vwap-replay-command.txt'));
+  const request=read(path.join(controllerRoot,'replay-command.json')),receipt=read(path.join(controllerRoot,'replay-status.json'));
+  const command=decodeRunnerFields(stop.bytes),query=JSON.parse(request.bytes),observed=JSON.parse(receipt.bytes);
+  requireThat(command.commandId===stopId && command.action==='stop' && command.expectedSymbol===symbol
+    && query.schema==='ocean-trading.sierra-replay-controller.command.v1' && query.commandId===controller.commandId
+    && query.action==='status' && query.saveChartbook===false && query.chartNumber===config.expected_chart_number
+    && normPath(query.expectedInstanceDataFolder)===normPath(controller.instanceDataFolder)
+    && normPath(controller.statusFilePath)===normPath(receipt.file) && objectHash(observed)===objectHash(controller),
+  409,'FAILURE_DELAYED_CONTROLLER_CORRELATION_REQUIRED');
+  return {stop,request,receipt};
+}
+
 export function readAttemptFailure(config, { run, context, plan }) {
   if(!config.source_preflight_status_path) return null;
   const failurePath = path.join(path.dirname(config.source_preflight_status_path), 'managed-failure-stop.json');
@@ -48,7 +78,7 @@ export function readAttemptFailure(config, { run, context, plan }) {
   const raw = failure.hook_failure_evidence;
   requireThat(raw && raw.reason === failure.reason, 409, 'RETAINED_RUNNER_FAILURE_REQUIRED');
   const start = decodeRunnerFields(retainedBytes(raw.command_bytes_base64, raw.command_sha256));
-  retainedBytes(raw.status_bytes_base64, raw.status_sha256);
+  const originalStatusBytes=retainedBytes(raw.status_bytes_base64, raw.status_sha256);
   const identity = { telemetryRunId: run.id, telemetryStrategyId: context.strategy_id,
     telemetryStrategyCodeHash: context.strategy_code_hash, telemetryStrategyConfigHash: context.strategy_config_hash,
     telemetryContextHash: context.context_hash, telemetryDatasetId: `${context.dataset_manifest_id}:${context.dataset_manifest_revision}`,
@@ -59,7 +89,7 @@ export function readAttemptFailure(config, { run, context, plan }) {
     409, 'FAILURE_START_CONTEXT_CONFLICT');
   const controller = failure.controller_receipt;
   requireThat(controller?.schema === 'ocean-trading.sierra-replay-controller.status.v1'
-    && controller.action === 'stop' && controller.isReplayRunning === false
+    && ['stop','status'].includes(controller.action) && controller.isReplayRunning === false
     && Number(controller.replayStatus) === 0 && Number(controller.chartReplayStatus) === 0
     && Number(controller.chartNumber) === config.expected_chart_number
     && normPath(controller.chartbookPath) === normPath(config.expected_chartbook_path)
@@ -68,9 +98,18 @@ export function readAttemptFailure(config, { run, context, plan }) {
   const statusBytes = fs.readFileSync(config.source_preflight_status_path), status = decodeRunnerFields(statusBytes);
   const stopId = start.commandId?.replace(/-start$/, '-failed-start-stop');
   requireThat(start.commandId?.endsWith('-start') && status.commandId === stopId && status.action === 'stop'
-    && status.status === 'stopped' && status.isReplayRunning === 'false' && status.replayStatus === '0'
-    && status.controllerLifecycleActive === 'false' && Number(status.chartNumber) === config.expected_chart_number
+    && Number(status.chartNumber) === config.expected_chart_number
     && status.symbol === plan.symbol, 409, 'FAILURE_EXACT_HOOK_STOP_NOT_VERIFIED');
+  const delayed=controller.action==='status'?delayedStopSources(config,controller,status,stopId,plan.symbol):null;
+  const hookModified=delayed?fs.statSync(config.source_preflight_status_path).mtimeMs:null;
+  if(delayed) {
+    const originalStatus=decodeRunnerFields(originalStatusBytes);
+    requireThat(originalStatus.commandId===start.commandId && originalStatus.action==='start'
+      && Number(originalStatus.chartNumber)===config.expected_chart_number && originalStatus.symbol===plan.symbol,
+    409,'FAILURE_DELAYED_ORIGINAL_START_REQUIRED');
+  }
+  requireThat(delayed || (status.status==='stopped' && status.isReplayRunning==='false' && status.replayStatus==='0'
+    && status.controllerLifecycleActive==='false'),409,'FAILURE_EXACT_HOOK_STOP_NOT_VERIFIED');
   const db = new DatabaseSync(config.telemetry_db, { readOnly: true, timeout: 2000 });
   try {
     db.exec('PRAGMA query_only=ON; PRAGMA busy_timeout=2000; BEGIN;');
@@ -100,20 +139,39 @@ export function readAttemptFailure(config, { run, context, plan }) {
       && Number.isFinite(ended) && ended >= at(attempt.attempt_started_utc)
       && Math.abs(ended - observed) <= 120000 && at(replay.run_ended_utc) === ended,
     409, 'FAILURE_LATEST_LOGGER_STOP_ACK_REQUIRED');
+    if(delayed) {
+      const latest=db.prepare('SELECT attempt_id FROM replay_run_attempts ORDER BY attempt_id DESC LIMIT 1').get();
+      requireThat(latest?.attempt_id===attempt.attempt_id
+        && delayed.stop.modified>=at(attempt.attempt_started_utc)-1000 && delayed.stop.modified<=ended+1000
+        && hookModified>=delayed.stop.modified-1000 && hookModified<=observed+5000
+        && delayed.request.modified>=ended-1000 && delayed.request.modified<=delayed.receipt.modified+1000
+        && delayed.receipt.modified>=ended-1000 && delayed.receipt.modified<=observed+5000,
+      409,'FAILURE_DELAYED_STOP_BOUNDARY_CONFLICT');
+    }
     requireThat(receipt && receipt.instance_id === replay.instance_id && receipt.strategy_id === run.strategy_id
       && receipt.strategy_version === replay.strategy_version && receipt.trade_account === plan.instance.account_alias
       && at(receipt.observation_started_utc) === at(attempt.attempt_started_utc)
       && at(receipt.observation_ended_utc) === ended, 409, 'FAILURE_TERMINAL_LOGGER_RECEIPT_REQUIRED');
-    const trades = db.prepare('SELECT * FROM trades WHERE run_id=? AND trade_id>? ORDER BY trade_id').all(run.id, attempt.starting_trade_id);
-    const fills = db.prepare('SELECT * FROM fills WHERE run_id=? AND fill_id>? ORDER BY fill_id').all(run.id, attempt.starting_fill_id);
-    requireThat(trades.every(row => row.instance_id === replay.instance_id && row.trade_account === receipt.trade_account
+    // Frozen logger floors scope this attempt, not historical ledger rows or
+    // a claim about current broker positions. Foreign rows in that scope fail.
+    const trades = delayed?db.prepare('SELECT * FROM trades WHERE trade_id>? AND (run_id=? OR (instance_id=? AND trade_account=?)) ORDER BY trade_id')
+      .all(attempt.starting_trade_id,run.id,replay.instance_id,receipt.trade_account)
+      :db.prepare('SELECT * FROM trades WHERE run_id=? AND trade_id>? ORDER BY trade_id').all(run.id, attempt.starting_trade_id);
+    const fills = delayed?db.prepare('SELECT * FROM fills WHERE fill_id>? AND (run_id=? OR (instance_id=? AND trade_account=?)) ORDER BY fill_id')
+      .all(attempt.starting_fill_id,run.id,replay.instance_id,receipt.trade_account)
+      :db.prepare('SELECT * FROM fills WHERE run_id=? AND fill_id>? ORDER BY fill_id').all(run.id, attempt.starting_fill_id);
+    requireThat(trades.every(row => (!delayed || row.run_id===run.id) && row.instance_id === replay.instance_id && row.trade_account === receipt.trade_account
       && row.strategy_id === run.strategy_id && row.is_simulated === 1 && String(row.status).toLowerCase() === 'closed'
-      && Number(row.final_quantity) === 0) && fills.every(row => row.instance_id === replay.instance_id
+      && Number(row.final_quantity) === 0) && fills.every(row => (!delayed || row.run_id===run.id) && row.instance_id === replay.instance_id
       && row.trade_account === receipt.trade_account && row.is_simulated === 1), 409, 'FAILURE_OPEN_OR_FOREIGN_OBSERVATIONS');
     requireThat(receipt.trade_count === trades.length && receipt.closed_trade_count === trades.length && receipt.fill_count === fills.length,
       409, 'FAILURE_TERMINAL_COUNTS_CONFLICT');
     requireThat(fs.readFileSync(failurePath).equals(bytes) && fs.readFileSync(config.source_preflight_status_path).equals(statusBytes),
       409, 'FAILURE_SOURCE_CHANGED_DURING_READ');
+    if(delayed)requireThat(fs.statSync(config.source_preflight_status_path).mtimeMs===hookModified
+      && Object.values(delayed).every(source=>fs.readFileSync(source.file).equals(source.bytes)
+        && fs.statSync(source.file).mtimeMs===source.modified),
+      409,'FAILURE_DELAYED_SOURCE_CHANGED');
     const proof = { schema_version: 'ocean-operational-attempt-failure/v1', run_id: run.id,
       context_hash: context.context_hash, plan_hash: plan.plan_hash, factual_binding_hash: config.factual_binding_hash,
       failure_reason: failure.reason, raw_failure_sha256: digest(bytes), raw_failure_bytes_base64: bytes.toString('base64'),
@@ -121,6 +179,12 @@ export function readAttemptFailure(config, { run, context, plan }) {
       logger_run: replay, logger_attempt: attempt, logger_receipt: receipt, recorded_context: recorded,
       retained_trade_count: trades.length, retained_fill_count: fills.length,
       raw_observation_hash: objectHash({ trades, fills }),
+      ...(delayed?{delayed_stop_verification:{basis:'EXACT_LOGGER_STOP_ACK_AND_CORRELATED_INACTIVE_CONTROLLER',
+        contradictory_hook_status:status.status,contradictory_hook_detail:status.detail,hook_running_claim_preserved:true,
+        observation_scope:'AFTER_EXACT_LOGGER_ATTEMPT_START_FLOORS',open_observation_count:0,
+        stop_command_sha256:digest(delayed.stop.bytes),stop_command_bytes_base64:delayed.stop.bytes.toString('base64'),
+        controller_command_sha256:digest(delayed.request.bytes),controller_command_bytes_base64:delayed.request.bytes.toString('base64'),
+        controller_receipt_sha256:digest(delayed.receipt.bytes),controller_receipt_bytes_base64:delayed.receipt.bytes.toString('base64')}}:{}),
       full_requested_coverage_verified: false, completed_coverage_granted: false };
     return { ...proof, proof_hash: objectHash(proof) };
   } finally { db.close(); }
@@ -129,7 +193,9 @@ export function readAttemptFailure(config, { run, context, plan }) {
 export function readBackendAttemptFailure(backend, workflow) {
   const file = backend.operationalLearning?.physicalBindingFile;
   requireThat(file, 409, 'FAILURE_PHYSICAL_BINDING_CONFIG_REQUIRED');
-  return readAttemptFailure(JSON.parse(fs.readFileSync(file, 'utf8')), workflow);
+  const bytes=fs.readFileSync(file),proof=readAttemptFailure(JSON.parse(bytes),workflow);
+  requireThat(fs.readFileSync(file).equals(bytes),409,'FAILURE_PHYSICAL_BINDING_CONFIG_CHANGED');
+  return proof;
 }
 
 export function verifyFrozenFailureBoundary(backend, proof) {
@@ -143,6 +209,8 @@ export function verifyFrozenFailureBoundary(backend, proof) {
     requireThat(latest && latest.attempt_id===proof.logger_attempt.attempt_id
       && latest.start_command_id===proof.logger_attempt.start_command_id && latest.stop_command_id===proof.logger_attempt.stop_command_id
       && latest.attempt_ended_utc===proof.logger_attempt.attempt_ended_utc,409,'FAILURE_BOUNDARY_SUPERSEDED');
+    if(proof.delayed_stop_verification)requireThat(db.prepare('SELECT attempt_id FROM replay_run_attempts ORDER BY attempt_id DESC LIMIT 1').get()?.attempt_id===latest.attempt_id,
+      409,'FAILURE_BOUNDARY_SUPERSEDED');
   }finally{db.close();}
 }
 

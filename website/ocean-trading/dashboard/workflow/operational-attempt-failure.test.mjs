@@ -9,7 +9,7 @@ import { WorkflowStore } from './store.mjs';
 import { WorkflowBackend } from './backend.mjs';
 import { RunManager } from './run-manager.mjs';
 import { digest, objectHash, sealedHash } from './common.mjs';
-import { decodeRunnerFields, readAttemptFailure } from './operational-attempt-failure.mjs';
+import { decodeRunnerFields, readAttemptFailure, readBackendAttemptFailure } from './operational-attempt-failure.mjs';
 
 const examples=JSON.parse(fs.readFileSync(new URL('./contracts/2.1.0/shared-contracts/examples/positive-examples.json',import.meta.url),'utf8'));
 const schema=execFileSync('git',['show','b1fb6e642d6a40cb9dac1c295895c2c48d28b2f4:src/sierra_trade_telemetry/schema.sql'],
@@ -226,4 +226,139 @@ test('persistent CLI discovers failure before waiting for impossible completion 
   fs.unlinkSync(f.failureFile);assert.equal(run().status,'TERMINAL_FAILURE_READY');
   f.b.runs.perform('finish',f.actor,{run_id:f.context.run_id,lease_id:lease.lease_id,expected_revision:3});
   assert.equal(run().status,'NO_TERMINAL_FAILURE');
+});
+
+// Explicit mock of the retained U25 delayed-stop shape, not a fabricated
+// production receipt. Native error text and protocol fields match source.
+function delayedFixture(t) {
+  const f=fixture(t),encode=value=>Buffer.from(Object.entries(value).map(([k,v])=>`${k}=${v}`).join('\n')+'\n');
+  f.sql.exec('DELETE FROM fills; DELETE FROM trades; UPDATE telemetry_run_receipts SET trade_count=0,closed_trade_count=0,fill_count=0,receipt_kind=\'no_events\'');
+  f.config.expected_bar_period_seconds=300;fs.writeFileSync(f.configFile,JSON.stringify(f.config));
+  const controllerRoot=path.join(f.root,'connector-control','patrading-tp');fs.mkdirSync(controllerRoot,{recursive:true});
+  const controllerFile=path.join(controllerRoot,'replay-status.json'),requestFile=path.join(controllerRoot,'replay-command.json');
+  const stopFile=path.join(f.root,'vwap-replay-command.txt'),stopId='mock-attempt3-failed-start-stop';
+  const commandId=`oql-managed-status-${'a'.repeat(32)}`;
+  f.failure.observed_at_utc='2026-10-08T16:52:36.572Z';
+  f.failure.controller_receipt={...f.failure.controller_receipt,controllerVersion:'v0.2.1-cicd-vwap-time-basis',commandId,
+    action:'status',status:'status',statusFilePath:controllerFile,currentChartDateTime:'2025-09-19 14:25:00',error:null};
+  const hook={commandId:stopId,action:'stop',status:'error',chartNumber:1,symbol:f.config.expected_symbol,
+    isReplayRunning:true,replayStatus:1,controllerLifecycleActive:true,chartDataType:2,secondsPerBar:300,
+    currentChartDateTime:'2025-08-28 17:55:48',detail:'StopChartReplay called.; replay did not confirm stopped after bounded stop attempts'};
+  const original=encode({...hook,commandId:'mock-attempt3-start',action:'start',status:'running',
+    detail:'StartChartReplay result=1; transition_confirmed=true'});
+  f.failure.hook_failure_evidence.status_bytes_base64=original.toString('base64');
+  f.failure.hook_failure_evidence.status_sha256=digest(original).slice(7);
+  fs.writeFileSync(f.config.source_preflight_status_path,encode(hook));
+  fs.writeFileSync(stopFile,encode({commandId:stopId,action:'stop',expectedSymbol:f.config.expected_symbol}));
+  fs.writeFileSync(controllerFile,JSON.stringify(f.failure.controller_receipt));
+  fs.writeFileSync(requestFile,JSON.stringify({schema:'ocean-trading.sierra-replay-controller.command.v1',commandId,action:'status',
+    chartNumber:1,saveChartbook:false,expectedInstanceDataFolder:path.join(f.root,'Data')}));
+  fs.writeFileSync(f.failureFile,JSON.stringify(f.failure));
+  for(const [file,time] of [[stopFile,'2026-10-08T16:52:10Z'],[f.config.source_preflight_status_path,'2026-10-08T16:52:35Z'],
+    [requestFile,'2026-10-08T16:52:36Z'],[controllerFile,'2026-10-08T16:52:36.500Z']]){
+    const date=new Date(time);fs.utimesSync(file,date,date);
+  }
+  const change=(file,patch)=>fs.writeFileSync(file,JSON.stringify({...JSON.parse(fs.readFileSync(file,'utf8')),...patch}));
+  const rewriteHook=patch=>fs.writeFileSync(f.config.source_preflight_status_path,encode({...hook,...patch}));
+  return {...f,hook,stopId,stopFile,requestFile,controllerFile,change,rewriteHook,
+    rewriteFailure:()=>fs.writeFileSync(f.failureFile,JSON.stringify(f.failure))};
+}
+
+test('exact delayed stop retains contradictory hook error, proves failed-only zero observations and survives frozen reconciliation',t=>{
+  const f=delayedFixture(t),files=[f.failureFile,f.config.source_preflight_status_path,f.controllerFile,f.requestFile,f.stopFile],
+    originals=files.map(file=>fs.readFileSync(file)),native=digest(fs.readFileSync(f.config.telemetry_db)),proof=f.read();
+  assert.equal(proof.delayed_stop_verification.contradictory_hook_status,'error');
+  assert.equal(proof.delayed_stop_verification.hook_running_claim_preserved,true);
+  assert.match(Buffer.from(proof.terminal_hook_bytes_base64,'base64').toString(),/isReplayRunning=true/);
+  assert.equal(proof.logger_receipt.receipt_kind,'no_events');assert.equal(proof.retained_trade_count,0);assert.equal(proof.retained_fill_count,0);
+  assert.equal(proof.completed_coverage_granted,false);assert.equal(proof.full_requested_coverage_verified,false);
+  assert.equal(f.b.runs.read(f.actor,f.context.run_id).execution.status,'FAILED_STOP_VERIFIED');
+  const lease=f.b.runs.perform('claim',f.actor,{run_id:f.context.run_id,expected_revision:2});f.end(lease);
+  fs.unlinkSync(f.controllerFile);f.b.runs=new RunManager(f.b);
+  const result=f.b.runs.perform('finish',f.actor,{run_id:f.context.run_id,lease_id:lease.lease_id,expected_revision:3});
+  assert.equal(result.state,'FAILED');assert.equal(result.completion.status,'FAILED');assert.deepEqual(result.completion.observed_coverage,[]);
+  assert.equal(result.completion.no_trade_interval_count,0);assert.equal(result.execution.proof_hash,proof.proof_hash);
+  assert.equal(f.db.prepare("SELECT COUNT(*) n FROM ow_coverage_receipts WHERE status='COMPLETED'").get().n,0);
+  assert.equal(digest(fs.readFileSync(f.config.telemetry_db)),native);
+  files.filter(file=>file!==f.controllerFile).forEach(file=>assert.deepEqual(fs.readFileSync(file),originals[files.indexOf(file)]));
+});
+
+for(const [name,mutate,code] of [
+  ['wrong context',f=>f.sql.exec("UPDATE replay_run_context SET context_hash='wrong'"),'FAILURE_RECORDED_CONTEXT_CONFLICT'],
+  ['missing logger ACK',f=>f.sql.exec('UPDATE replay_run_attempts SET stop_command_id=NULL'),'FAILURE_LATEST_LOGGER_STOP_ACK_REQUIRED'],
+  ['wrong logger stop ID',f=>f.sql.exec("UPDATE replay_run_attempts SET stop_command_id='wrong-stop'"),'FAILURE_LATEST_LOGGER_STOP_ACK_REQUIRED'],
+  ['missing terminal receipt',f=>f.sql.exec('DELETE FROM telemetry_run_receipts'),'FAILURE_TERMINAL_LOGGER_RECEIPT_REQUIRED'],
+  ['wrong hook stop ID',f=>f.rewriteHook({commandId:'wrong-stop'}),'FAILURE_EXACT_HOOK_STOP_NOT_VERIFIED'],
+  ['unrelated hook error',f=>f.rewriteHook({detail:'Some other error'}),'FAILURE_SUPPORTED_DELAYED_STOP_REQUIRED'],
+  ['active controller',f=>{f.failure.controller_receipt.isReplayRunning=true;f.rewriteFailure();},'FAILURE_PHYSICAL_STOP_NOT_VERIFIED'],
+  ['paused controller',f=>{f.failure.controller_receipt.replayStatus=2;f.rewriteFailure();},'FAILURE_PHYSICAL_STOP_NOT_VERIFIED'],
+  ['wrong controller chart',f=>{f.failure.controller_receipt.chartNumber=2;f.rewriteFailure();},'FAILURE_PHYSICAL_STOP_NOT_VERIFIED'],
+  ['wrong controller command ID',f=>f.change(f.requestFile,{commandId:`oql-managed-status-${'b'.repeat(32)}`}), 'FAILURE_DELAYED_CONTROLLER_CORRELATION_REQUIRED'],
+  ['wrong controller folder',f=>f.change(f.requestFile,{expectedInstanceDataFolder:'D:/foreign/Data'}),'FAILURE_DELAYED_CONTROLLER_CORRELATION_REQUIRED'],
+  ['changed independent receipt',f=>f.change(f.controllerFile,{currentChartDateTime:'2025-08-28 17:55:48'}),'FAILURE_DELAYED_CONTROLLER_CORRELATION_REQUIRED'],
+  ['wrong stop command ID',f=>fs.writeFileSync(f.stopFile,'commandId=wrong-stop\naction=stop\nexpectedSymbol=MNQU25_FUT_CME\n'),'FAILURE_DELAYED_CONTROLLER_CORRELATION_REQUIRED'],
+  ['stale receipt at failure boundary',f=>{const d=new Date('2026-10-08T15:00:00Z');fs.utimesSync(f.controllerFile,d,d);},'FAILURE_DELAYED_STOP_BOUNDARY_CONFLICT'],
+  ['wrong approved DLL',f=>{f.config.expected_strategy_module_sha256=digest('wrong');},'FAILURE_RECORDED_PHYSICAL_SCOPE_CONFLICT'],
+  ['open observation',f=>f.sql.exec("INSERT INTO trades(trade_id,instance_id,instance_name,instance_role,environment,trade_account,symbol,is_simulated,strategy_id,run_id,direction,status,final_quantity) VALUES(970,'mock-physical','mock','replay','replay','Sim1','MNQU25_FUT_CME',1,'mock-vwap','mock-failed-u','long','open',5)"),'FAILURE_OPEN_OR_FOREIGN_OBSERVATIONS'],
+  ['foreign observation after boundary',f=>f.sql.exec("INSERT INTO trades(trade_id,instance_id,instance_name,instance_role,environment,trade_account,symbol,is_simulated,strategy_id,run_id,direction,status,final_quantity) VALUES(970,'mock-physical','mock','replay','replay','Sim1','MNQU25_FUT_CME',1,'other',NULL,'long','closed',0)"),'FAILURE_OPEN_OR_FOREIGN_OBSERVATIONS'],
+])test(`delayed stop rejects ${name}`,t=>{const f=delayedFixture(t);mutate(f);assert.throws(f.read,new RegExp(code));});
+
+test('historical unresolved ledger rows before the frozen attempt floor are not current exposure or completed coverage',t=>{
+  const f=delayedFixture(t);
+  f.sql.exec("INSERT INTO trades(trade_id,instance_id,instance_name,instance_role,environment,trade_account,symbol,is_simulated,strategy_id,run_id,direction,status,final_quantity) VALUES(900,'mock-physical','mock','replay','replay','Sim1','MNQU25_FUT_CME',1,'mock-vwap',NULL,'long','open',4)");
+  const native=digest(fs.readFileSync(f.config.telemetry_db)),proof=f.read();
+  assert.equal(proof.retained_trade_count,0);
+  assert.equal(proof.delayed_stop_verification.observation_scope,'AFTER_EXACT_LOGGER_ATTEMPT_START_FLOORS');
+  assert.equal(proof.delayed_stop_verification.open_observation_count,0);
+  assert.equal(proof.completed_coverage_granted,false);
+  assert.equal(digest(fs.readFileSync(f.config.telemetry_db)),native);
+  assert.equal(f.sql.prepare('SELECT status,final_quantity FROM trades WHERE trade_id=900').get().status,'open');
+});
+
+test('same-byte controller replacement with changed file boundary is rejected',t=>{
+  const f=delayedFixture(t),read=fs.readFileSync;let changed=false;
+  try{
+    fs.readFileSync=function(file,...args){const bytes=read.call(this,file,...args);
+      if(String(file)===f.controllerFile && !changed){changed=true;const d=new Date('2026-10-08T17:00:00Z');fs.utimesSync(file,d,d);}
+      return bytes;};
+    assert.throws(f.read,/FAILURE_DELAYED_SOURCE_CHANGED/);
+  }finally{fs.readFileSync=read;}
+});
+
+test('delayed stop source replacement during read is rejected without manufacturing terminal state',t=>{
+  const f=delayedFixture(t),read=fs.readFileSync;let count=0;
+  try{
+    fs.readFileSync=function(file,...args){const bytes=read.call(this,file,...args);
+      return String(file)===f.controllerFile && ++count===2?Buffer.from('{}'):bytes;};
+    assert.throws(f.read,/FAILURE_DELAYED_SOURCE_CHANGED/);
+    assert.equal(f.b.one('ow_runs',f.context.run_id).state,'ACTIVE');
+  }finally{fs.readFileSync=read;}
+});
+
+test('delayed stop requires original start correlation even when replacement bytes are self-hashed',t=>{
+  const f=delayedFixture(t),bytes=Buffer.from('commandId=other-start\naction=start\nchartNumber=1\nsymbol=MNQU25_FUT_CME\n');
+  f.failure.hook_failure_evidence.status_bytes_base64=bytes.toString('base64');
+  f.failure.hook_failure_evidence.status_sha256=digest(bytes).slice(7);f.rewriteFailure();
+  assert.throws(f.read,/FAILURE_DELAYED_ORIGINAL_START_REQUIRED/);
+});
+
+test('backend config replacement during delayed source verification rejects the proof',t=>{
+  const f=delayedFixture(t),read=fs.readFileSync;let changed=false;
+  try{
+    fs.readFileSync=function(file,...args){const bytes=read.call(this,file,...args);
+      if(String(file)===f.controllerFile && !changed){changed=true;fs.writeFileSync(f.configFile,JSON.stringify({...f.config,expected_chart_number:2}));}
+      return bytes;};
+    assert.throws(()=>readBackendAttemptFailure(f.b,{run:f.b.one('ow_runs',f.context.run_id),context:f.context,
+      plan:{...f.plan,instance:{account_alias:'Sim1'},symbol:f.config.expected_symbol}}),/FAILURE_PHYSICAL_BINDING_CONFIG_CHANGED/);
+  }finally{fs.readFileSync=read;}
+});
+
+test('a foreign latest logger attempt blocks delayed proof and supersedes its frozen finish boundary',t=>{
+  const f=delayedFixture(t),lease=f.b.runs.perform('claim',f.actor,{run_id:f.context.run_id,expected_revision:2});f.end(lease);
+  const row=f.sql.prepare('SELECT * FROM replay_runs WHERE run_id=?').get(f.context.run_id),other={...row,run_id:'mock-other-run'},keys=Object.keys(other);
+  f.sql.prepare(`INSERT INTO replay_runs(${keys.join(',')}) VALUES(${keys.map(()=>'?').join(',')})`).run(...Object.values(other));
+  f.sql.prepare('INSERT INTO replay_run_attempts(run_id,attempt_number,attempt_started_utc,start_command_id) VALUES(?,1,?,?)')
+    .run('mock-other-run','2026-10-08T17:00:00Z','other-start');
+  assert.throws(f.read,/FAILURE_DELAYED_STOP_BOUNDARY_CONFLICT/);
+  assert.throws(()=>f.b.runs.perform('finish',f.actor,{run_id:f.context.run_id,lease_id:lease.lease_id,expected_revision:3}),/FAILURE_BOUNDARY_SUPERSEDED/);
 });
