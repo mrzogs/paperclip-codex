@@ -491,3 +491,113 @@ test('v4 probe rejects a duplicate-key producer status instead of choosing a rep
     return true;
   });
 });
+
+function createRunningStartFixture(t) {
+  const fixture = createManagedStatusFixture(t);
+  const started = new Date(Date.now() - 10 * 60 * 1000);
+  const startId = 'managed-frozen-start-command';
+  const context = fixture.context;
+  const start = {
+    commandId: startId, action: 'start', expectedSymbol: fixture.config.expected_symbol,
+    tradeAccount: fixture.config.account_alias, startDateTime: '2025-08-18 00:00:00',
+    tradeStartDateTime: '2025-09-01 00:00:00', endDateTime: '2025-09-13 00:00:00',
+    telemetryRunId: fixture.runId, telemetryStrategyId: fixture.config.strategy_id,
+    telemetryStrategyVersion: fixture.config.expected_strategy_version,
+    telemetryRunStartedUtc: started.toISOString(), telemetryDllSha256: fixture.config.expected_strategy_module_sha256,
+    telemetryContextHash: context.context_hash, telemetryCandidateId: fixture.config.managed_candidate_id,
+    telemetryDatasetId: `${context.dataset_manifest_id}:${context.dataset_manifest_revision}`,
+    telemetryDatasetRole: context.dataset_partition, telemetryStrategyProfileId: context.strategy_profile_id,
+    telemetryStrategyProfileVersion: context.strategy_profile_version, telemetryStrategyCodeHash: context.strategy_code_hash,
+    telemetryStrategyConfigHash: context.strategy_config_hash, telemetrySessionName: fixture.config.expected_session_name,
+    telemetrySessionTimezone: fixture.config.expected_session_timezone,
+  };
+  const db = new DatabaseSync(fixture.telemetryDb);
+  try {
+    db.exec(`ALTER TABLE replay_runs ADD COLUMN dll_hash TEXT;
+      CREATE TABLE replay_run_attempts (attempt_id INTEGER PRIMARY KEY,run_id TEXT,attempt_started_utc TEXT,
+        attempt_ended_utc TEXT,start_command_id TEXT,stop_command_id TEXT);`);
+    db.prepare('UPDATE replay_runs SET dll_hash=?').run(fixture.config.expected_strategy_module_sha256);
+    db.prepare('INSERT INTO replay_run_attempts VALUES (26,?,?,NULL,?,NULL)').run(fixture.runId,started.toISOString(),startId);
+  } finally { db.close(); }
+  const commandFile = path.join(path.dirname(fixture.config.source_preflight_status_path),'vwap-replay-command.txt');
+  fs.writeFileSync(commandFile,Object.entries(start).map(([key,value])=>`${key}=${value}\n`).join(''));
+  const detail = `StartChartReplay result=1; startDateTime=${start.startDateTime}; effectiveStartDateTime=${start.startDateTime}; endDateTime=${start.endDateTime}; tradeStartDateTime=${start.tradeStartDateTime}; transition_confirmed=true`;
+  writeProducerStatus(fixture,{commandId:startId,action:'start',status:'running',controllerLifecycleActive:'true',detail});
+  fs.utimesSync(commandFile,started,started);
+  fs.utimesSync(fixture.config.source_preflight_status_path,new Date(started.getTime()+1000),new Date(started.getTime()+1000));
+  const controllerRoot = path.join(path.dirname(fixture.config.expected_sierra_exe),'connector-control','patrading-tp');
+  fs.mkdirSync(controllerRoot,{recursive:true});
+  const controllerFile = path.join(controllerRoot,'replay-status.json');
+  const controllerCommandFile = path.join(controllerRoot,'replay-command.json');
+  const commandId = `oql-managed-status-${'a'.repeat(32)}`;
+  const request = {schema:'ocean-trading.sierra-replay-controller.command.v1',commandId,action:'status',chartNumber:1,
+    saveChartbook:false,expectedInstanceDataFolder:path.join(fixture.directory,'Data')};
+  const receipt = {schema:'ocean-trading.sierra-replay-controller.status.v1',controllerVersion:'v0.2.1-cicd-vwap-time-basis',
+    commandId,action:'status',status:'status',chartNumber:1,chartbookPath:fixture.config.expected_chartbook_path,
+    statusFilePath:controllerFile,instanceDataFolder:request.expectedInstanceDataFolder,
+    isReplayRunning:true,replayStatus:1,chartReplayStatus:1,error:null,currentChartDateTime:'2025-08-18 14:03:00'};
+  fs.writeFileSync(controllerCommandFile,JSON.stringify(request));
+  fs.writeFileSync(controllerFile,JSON.stringify(receipt));
+  return {...fixture,start,started,commandFile,controllerFile,controllerCommandFile,request,receipt};
+}
+
+test('v4 probe accepts a held exact start with a fresh controller and latest open logger attempt without writing runtime files',t=>{
+  const fixture=createRunningStartFixture(t);
+  const files=[fixture.commandFile,fixture.config.source_preflight_status_path,fixture.controllerFile,fixture.controllerCommandFile];
+  const before=files.map(file=>fs.readFileSync(file));
+  const result=readProbe(fixture);
+  assert.equal(result.telemetry.verified,true);
+  assert.equal(result.telemetry.source_preflight.verification_basis,'EXACT_START_ATTEMPT_AND_FRESH_CONTROLLER');
+  assert.equal(result.telemetry.source_preflight.managed_start_proof.attempt_id,26);
+  assert.equal(result.telemetry.source_preflight.managed_start_proof.context_hash,fixture.context.context_hash);
+  assert.match(result.telemetry.source_preflight.managed_start_proof.controller_receipt_sha256,/^sha256:[a-f0-9]{64}$/);
+  files.forEach((file,index)=>assert.deepEqual(fs.readFileSync(file),before[index]));
+});
+
+test('v4 running-start proof survives probe restart with identical retained start bytes',t=>{
+  const fixture=createRunningStartFixture(t);
+  const first=readProbe(fixture),second=readProbe(fixture);
+  assert.equal(first.telemetry.verified,true);
+  assert.deepEqual(second.telemetry.source_preflight.managed_start_proof,first.telemetry.source_preflight.managed_start_proof);
+});
+
+const rewriteJson=(file,change)=>fs.writeFileSync(file,JSON.stringify({...JSON.parse(fs.readFileSync(file,'utf8')),...change}));
+for(const [name,mutate] of [
+  ['missing attempt table',f=>updateDatabase(f.telemetryDb,'DROP TABLE replay_run_attempts')],
+  ['missing attempt',f=>updateDatabase(f.telemetryDb,'DELETE FROM replay_run_attempts')],
+  ['different latest run',f=>updateDatabase(f.telemetryDb,"UPDATE replay_run_attempts SET run_id='other-run'")],
+  ['newer attempt on another run',f=>updateDatabase(f.telemetryDb,"INSERT INTO replay_run_attempts VALUES(27,'other-run','2026-01-01',NULL,'other-start',NULL)")],
+  ['closed attempt',f=>updateDatabase(f.telemetryDb,"UPDATE replay_run_attempts SET attempt_ended_utc='2026-01-01'")],
+  ['stopped attempt',f=>updateDatabase(f.telemetryDb,"UPDATE replay_run_attempts SET stop_command_id='stop'")],
+  ['different start command',f=>updateDatabase(f.telemetryDb,"UPDATE replay_run_attempts SET start_command_id='other-command'")],
+  ['different recorded DLL',f=>updateDatabase(f.telemetryDb,"UPDATE replay_runs SET dll_hash='wrong-hash'")],
+  ['different context',f=>updateDatabase(f.telemetryDb,"UPDATE replay_run_context SET context_hash='wrong-hash'")],
+  ['different account',f=>updateDatabase(f.telemetryDb,"UPDATE account_snapshot SET trade_account='Sim2'")],
+  ['stale account',f=>updateDatabase(f.telemetryDb,"UPDATE account_snapshot SET snapshot_utc='2026-01-01'")],
+  ['different raw run',f=>fs.writeFileSync(f.commandFile,fs.readFileSync(f.commandFile,'utf8').replace(`telemetryRunId=${f.runId}`,'telemetryRunId=other-run'))],
+  ['different raw DLL',f=>fs.writeFileSync(f.commandFile,fs.readFileSync(f.commandFile,'utf8').replace(f.start.telemetryDllSha256,'sha256:wrong'))],
+  ['different raw account',f=>fs.writeFileSync(f.commandFile,fs.readFileSync(f.commandFile,'utf8').replace('tradeAccount=Sim1','tradeAccount=Sim2'))],
+  ['duplicate raw command field',f=>fs.appendFileSync(f.commandFile,'commandId=other-start\n')],
+  ['stale controller',f=>{const old=new Date(Date.now()-600000);fs.utimesSync(f.controllerFile,old,old)}],
+  ['future controller',f=>{const future=new Date(Date.now()+60000);fs.utimesSync(f.controllerFile,future,future)}],
+  ['stale controller command',f=>{const old=new Date(Date.now()-600000);fs.utimesSync(f.controllerCommandFile,old,old)}],
+  ['controller command mismatch',f=>rewriteJson(f.controllerFile,{commandId:'other-command'})],
+  ['controller stopped',f=>rewriteJson(f.controllerFile,{isReplayRunning:false,replayStatus:0,chartReplayStatus:0})],
+  ['controller paused',f=>rewriteJson(f.controllerFile,{replayStatus:2,chartReplayStatus:2})],
+  ['controller error',f=>rewriteJson(f.controllerFile,{error:'failure'})],
+  ['controller status unknown',f=>rewriteJson(f.controllerFile,{status:'unknown'})],
+  ['controller wrong chart',f=>rewriteJson(f.controllerFile,{chartNumber:2})],
+  ['request wrong chart',f=>rewriteJson(f.controllerCommandFile,{chartNumber:2})],
+  ['request mutation',f=>rewriteJson(f.controllerCommandFile,{action:'stop'})],
+  ['request save chartbook',f=>rewriteJson(f.controllerCommandFile,{saveChartbook:true})],
+  ['controller wrong root',f=>rewriteJson(f.controllerFile,{instanceDataFolder:path.join(f.directory,'other','Data')})],
+  ['controller wrong chartbook',f=>rewriteJson(f.controllerFile,{chartbookPath:path.join(f.directory,'other.Cht')})],
+  ['controller wrong channel',f=>rewriteJson(f.controllerFile,{statusFilePath:path.join(f.directory,'generic-status.json')})],
+  ['controller wrong version',f=>rewriteJson(f.controllerFile,{controllerVersion:'unreviewed'})],
+  ['controller outside replay window',f=>rewriteJson(f.controllerFile,{currentChartDateTime:'2025-10-01 00:00:00'})],
+  ['missing controller',f=>fs.unlinkSync(f.controllerFile)],
+])test(`v4 running-start correlation rejects ${name}`,t=>{
+  const fixture=createRunningStartFixture(t);
+  mutate(fixture);
+  assert.equal(readProbe(fixture).telemetry.verified,false);
+});
