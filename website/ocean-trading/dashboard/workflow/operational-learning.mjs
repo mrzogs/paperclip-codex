@@ -7,6 +7,13 @@ import { coverageOverlaps, readObservedSessionProofs, sessionEvidence } from './
 
 const REQUEST_VERSION = 'ocean-operational-learning-request/v1';
 const RESPONSE_VERSION = 'ocean-operational-learning-result/v1';
+const INPUT_VERSION = 'ocean-operational-learning-input/v1';
+const INPUT_ACTION = 'operational.learning.input';
+const LINEAGE_ERRORS = new Set([
+  'OPERATIONAL_LEARNING_ORIGINAL_INPUT_REQUIRED',
+  'OPERATIONAL_LEARNING_INPUT_LINEAGE_CONFLICT',
+  'OPERATIONAL_LEARNING_CONTINUATION_LINEAGE_CONFLICT',
+]);
 const ELIGIBLE = new Map([
   ['HISTORICAL_DISCOVERY', 'DISCOVERY'],
 ]);
@@ -959,6 +966,7 @@ export class OperationalLearning {
 
   currentContinuationResult(stored, registryRecordSha256, contextHash) {
     return !!contextHash && stored?.details?.storage_mode === 'BRAIN_IMMUTABLE_REFERENCE'
+      && stored.details.schema_version === RESPONSE_VERSION
       && stored.details.registry_record_sha256 === registryRecordSha256
       && stored.result?.context_hash === contextHash
       && ['RECOMMENDATION', 'NO_CHANGE', 'BLOCKED'].includes(stored.details.conclusion_type);
@@ -987,9 +995,141 @@ export class OperationalLearning {
     });
   }
 
-  completionEventRecorded(run, result) {
-    return !!this.db.prepare(`SELECT 1 FROM ow_events WHERE entity_id=? AND action='operational.learning.complete'
-      AND json_extract(payload_json,'$.payload.result_id')=? LIMIT 1`).get(run.id,result.result_id);
+  completionEventRecorded(run, result, frozen = null, continuation = null) {
+    const rows = this.db.prepare(`SELECT payload_json FROM ow_events WHERE entity_id=? AND action='operational.learning.complete'
+      AND json_extract(payload_json,'$.payload.result_id')=?`).all(run.id,result.result_id);
+    if (frozen && rows.length) {
+      const payload = JSON.parse(rows[0].payload_json).payload;
+      requireThat(rows.length === 1 && payload.cohort_hash === objectHash(frozen.input.cohort)
+        && objectHash(payload.cohort_run_ids) === objectHash(frozen.input.cohort.eligible_runs.map(value => value.run_id))
+        && objectHash(payload.excluded_run_ids) === objectHash(frozen.input.excluded_evidence.map(value => value.run_id))
+        && (!payload.input_sha256 || payload.input_sha256 === frozen.input_sha256)
+        && payload.continuation_case_id === continuation.case_id && payload.continuation_artifact_id === continuation.artifact_id,
+      409, 'OPERATIONAL_LEARNING_CONTINUATION_LINEAGE_CONFLICT');
+    }
+    return rows.length > 0;
+  }
+
+  recordedAnalysisInput(run, registry, actor, result = null) {
+    const rows = this.db.prepare(`SELECT payload_json FROM ow_events WHERE entity_id=? AND action=?
+      AND json_extract(payload_json,'$.payload.registry_record_sha256')=?`).all(run.id, INPUT_ACTION, registry.record_sha256);
+    requireThat(rows.length <= 1, 409, 'OPERATIONAL_LEARNING_INPUT_LINEAGE_CONFLICT');
+    if (!rows.length) return null;
+    let event;
+    try { event = JSON.parse(rows[0].payload_json); } catch {}
+    const frozen = event?.payload, input = frozen?.input;
+    const hashInput = input ? structuredClone(input) : {};
+    if (hashInput.correlation) delete hashInput.correlation.input_sha256;
+    requireThat(event?.actor_id === actor.id && frozen?.schema_version === INPUT_VERSION
+      && input?.schema_version === REQUEST_VERSION && input.trigger?.run_id === run.id
+      && input.trigger.context_hash === JSON.parse(run.context_json).context_hash
+      && input.strategy_id === run.strategy_id && input.execution_instance_id === run.instance_id
+      && input.case_id === caseIdFor(run.id, registry.record_sha256)
+      && input.registry_record_sha256 === registry.record_sha256
+      && input.correlation?.input_sha256 === objectHash(hashInput)
+      && frozen.input_sha256 === input.correlation.input_sha256
+      && typeof frozen.research_version === 'string'
+      && (!result || (result.producer_id === actor.id
+        && result.context_hash === input.trigger.context_hash
+        && objectHash(result.correlation) === objectHash(input.correlation))),
+    409, 'OPERATIONAL_LEARNING_INPUT_LINEAGE_CONFLICT');
+    return frozen;
+  }
+
+  continuationSource(run, artifact) {
+    const content = JSON.parse(Buffer.from(artifact.content).toString('utf8'));
+    const resultId = content.learning_result_id || content.result_id;
+    if (!resultId) return null; // Separately versioned evidence reassessments capture their own input.
+    const row = this.db.prepare('SELECT payload_json FROM ow_operational_brain_results WHERE id=? AND run_id=?').get(resultId, run.id);
+    const result = row ? JSON.parse(row.payload_json) : null;
+    const details = result ? JSON.parse(result.content) : null;
+    if (details?.storage_mode !== 'BRAIN_IMMUTABLE_REFERENCE') return null;
+    const actor = this.brainActor(run.strategy_id, run.instance_id);
+    const registry = {record_sha256: details.registry_record_sha256, reconciliation_id: details.registry_reconciliation_id};
+    requireThat(this.currentContinuationResult({result,details}, registry.record_sha256, JSON.parse(run.context_json).context_hash)
+      && result.producer_id === actor.id && digest(result.content) === result.content_sha256,
+    409, 'OPERATIONAL_LEARNING_INPUT_LINEAGE_CONFLICT');
+    let input = this.recordedAnalysisInput(run, registry, actor, result)?.input;
+    if (!input) {
+      try { input = this.analysisInput(run, this.classification(run), registry); }
+      catch { requireThat(false, 409, 'OPERATIONAL_LEARNING_ORIGINAL_INPUT_REQUIRED'); }
+      requireThat(objectHash(input.correlation) === objectHash(result.correlation),
+        409, 'OPERATIONAL_LEARNING_ORIGINAL_INPUT_REQUIRED');
+    }
+    requireThat(!content.cohort_hash || content.cohort_hash === objectHash(input.cohort),
+      409, 'OPERATIONAL_LEARNING_CONTINUATION_LINEAGE_CONFLICT');
+    const policy = {project: input.project, strategy_name: input.strategy_name,
+      minimum_sample_count: input.cohort.aggregate.minimum_sample_count,
+      minimum_independent_session_count: input.cohort.aggregate.minimum_independent_session_count};
+    for (const original of input.cohort.eligible_runs) {
+      const current = this.backend.one('ow_runs', original.run_id);
+      const classification = this.classification(current);
+      requireThat(classification.eligible && objectHash(this.runSummary(current, classification, policy).summary) === objectHash(original),
+        409, 'OPERATIONAL_LEARNING_INPUT_LINEAGE_CONFLICT');
+    }
+    return {cohort: input.cohort, excluded_evidence: input.excluded_evidence, policy};
+  }
+
+  freezeAnalysisInput(run, classification, registry, actor, existing) {
+    return this.backend.store.transaction(() => {
+      const frozen = this.recordedAnalysisInput(run, registry, actor, existing?.result);
+      if (frozen) return frozen;
+      let input;
+      try { input = this.analysisInput(run, classification, registry); }
+      catch (error) {
+        requireThat(!existing, 409, 'OPERATIONAL_LEARNING_ORIGINAL_INPUT_REQUIRED');
+        throw error;
+      }
+      // Older v1 references may be recovered only by an exact original input hash.
+      requireThat(!existing || objectHash(existing.result.correlation) === objectHash(input.correlation),
+        409, 'OPERATIONAL_LEARNING_ORIGINAL_INPUT_REQUIRED');
+      this.backend.event(run.id, INPUT_ACTION, actor, {
+        schema_version: INPUT_VERSION, registry_record_sha256: registry.record_sha256,
+        input_sha256: input.correlation.input_sha256,
+        research_version: this.backend.operationalResearch.version, input,
+      });
+      return this.recordedAnalysisInput(run, registry, actor, existing?.result);
+    });
+  }
+
+  recordedContinuation(run, result, details, frozen) {
+    const rows = this.db.prepare(`SELECT c.id case_id,c.owner_id,c.strategy_id,c.instance_id,c.payload_json,
+      a.id artifact_id,a.content,a.manifest_json,a.producer_id,a.run_id,
+      j.id job_id,j.artifact_hash,j.analysis_version
+      FROM ow_cases c JOIN ow_artifacts a ON a.case_id=c.id
+      JOIN ow_research_jobs j ON j.case_id=c.id AND j.artifact_id=a.id
+      WHERE c.run_id=? AND a.kind=?`).all(run.id, details.conclusion_type === 'RECOMMENDATION' ? 'RECOMMENDATION' : 'EVIDENCE');
+    const matches = rows.filter(row => {
+      let content, payload, manifest;
+      try {
+        content = JSON.parse(Buffer.from(row.content).toString('utf8'));
+        payload = JSON.parse(row.payload_json); manifest = JSON.parse(row.manifest_json);
+      } catch { return false; }
+      const recommendation = details.conclusion_type === 'RECOMMENDATION';
+      if (recommendation ? payload.origin !== 'OPERATIONAL_LEARNING' || content.result_id !== result.result_id
+        : payload.origin !== 'OPERATIONAL_RESEARCH_REASSESSMENT' || content.learning_result_id !== result.result_id) return false;
+      requireThat(row.owner_id === result.producer_id && row.producer_id === result.producer_id
+        && row.strategy_id === run.strategy_id && row.instance_id === run.instance_id && row.run_id === run.id
+        && payload.registry_record_sha256 === details.registry_record_sha256
+        && digest(Buffer.from(row.content)) === manifest.content_hash && row.artifact_hash === manifest.content_hash
+        && row.analysis_version === frozen.research_version
+        && (recommendation ? row.case_id === details.continuation?.case_id && row.artifact_id === details.continuation?.artifact_id
+          : content.learning_result_hash === result.content_sha256
+            && content.cohort_hash === objectHash(frozen.input.cohort)),
+      409, 'OPERATIONAL_LEARNING_CONTINUATION_LINEAGE_CONFLICT');
+      return true;
+    });
+    requireThat(matches.length <= 1, 409, 'OPERATIONAL_LEARNING_CONTINUATION_LINEAGE_CONFLICT');
+    return matches[0] || null;
+  }
+
+  lineageBlock(run, stored, registryRecordSha256) {
+    if (!stored?.result?.result_id || !registryRecordSha256) return null;
+    const row = this.db.prepare(`SELECT payload_json FROM ow_events WHERE entity_id=?
+      AND action='operational.learning.blocked' AND json_extract(payload_json,'$.payload.result_id')=?
+      AND json_extract(payload_json,'$.payload.registry_record_sha256')=? ORDER BY rowid DESC LIMIT 1`)
+      .get(run.id, stored.result.result_id, registryRecordSha256);
+    return row ? JSON.parse(row.payload_json).payload : null;
   }
 
   statusForRun(runId) {
@@ -1005,7 +1145,18 @@ export class OperationalLearning {
       && stored?.callback?.status==='COMPLETED'
       && this.currentContinuationResult(stored,currentFingerprint,classification.context?.context_hash)
       && !this.continuationRecorded(run,stored);
-    const stage = continuationDue ? 'BRAIN_RECORDED'
+    const block = this.lineageBlock(run, stored, currentFingerprint);
+    let lineageRecovered = false;
+    if (block && stored?.callback?.status === 'COMPLETED') {
+      try {
+        const actor = this.brainActor(run.strategy_id, run.instance_id);
+        const frozen = this.recordedAnalysisInput(run, {record_sha256: currentFingerprint}, actor, stored.result);
+        const continuation = frozen && this.recordedContinuation(run, stored.result, stored.details, frozen);
+        lineageRecovered = !!continuation && this.completionEventRecorded(run, stored.result, frozen, continuation);
+      } catch { /* A conflicting immutable envelope remains owned blocked work. */ }
+    }
+    const lineageBlocked = block && !lineageRecovered;
+    const stage = lineageBlocked ? 'BLOCKED' : continuationDue ? 'BRAIN_RECORDED'
       : stored?.callback?.status === 'COMPLETED' ? 'COMPLETE'
       : stored?.callback?.status === 'FAILED' ? 'FAILED'
         : stored?.result ? 'BRAIN_RECORDED'
@@ -1014,7 +1165,7 @@ export class OperationalLearning {
     const accountingCase=this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ow_cases'").get()
       ?this.db.prepare("SELECT id FROM ow_cases WHERE run_id=? AND json_extract(payload_json,'$.origin')='OPERATIONAL_RESEARCH_REASSESSMENT' ORDER BY rowid DESC LIMIT 1").get(runId)?.id:null;
     const researchCase=accountingCase || details?.continuation?.case_id;
-    const research = !continuationDue && researchCase
+    const research = !lineageBlocked && !continuationDue && researchCase
       ? this.backend.operationalResearch?.statusForCase(researchCase) || null : null;
     const recordedLoopStage=continuationDue?'RESEARCH_REQUIRED':stage === 'COMPLETE' && (research || details?.conclusion_type === 'RECOMMENDATION')
       ? research?.loop_stage || (research?.state === 'COMPLETED' ? 'COMPLETE' : research?.effective_state || research?.state || 'PENDING_RESEARCH') : stage;
@@ -1038,15 +1189,15 @@ export class OperationalLearning {
       callback_status: stored?.callback?.status || null,
       registry_reconciliation_id: this.registryContext?.reconciliation_id || details?.registry_reconciliation_id || null,
       registry_record_sha256: currentFingerprint || details?.registry_record_sha256 || null,
-      continuation_case_id: continuationDue ? null : researchCase || null,
-      continuation_artifact_id: continuationDue ? null
+      continuation_case_id: lineageBlocked || continuationDue ? null : researchCase || null,
+      continuation_artifact_id: lineageBlocked || continuationDue ? null
         : research?.result_artifact_id || details?.continuation?.artifact_id || null,
-      next_action: qualificationRequired
+      next_action: lineageBlocked ? block.next_action : qualificationRequired
         ? classification.telemetry.required_action || research?.next_action || PROVENANCE_ACTION
         : continuationDue
           ? 'Ocean must persist the Research continuation for this recorded Brain result; retry uses the same immutable result and does not call Brain again.'
         : classification.telemetry.required_action || research?.next_action || details?.continuation?.next_action || details?.next_action || null,
-      last_error: this.retry.get(`${runId}:${currentFingerprint || 'unbound'}`)?.error || null,
+      last_error: this.retry.get(`${runId}:${currentFingerprint || 'unbound'}`)?.error || (lineageBlocked ? block.reason : null),
     };
   }
 
@@ -1100,10 +1251,8 @@ export class OperationalLearning {
     });
   }
 
-  async process(run, token, registry) {
-    const classification = this.classification(run);
+  analysisInput(run, classification, registry) {
     const cohortBundle = this.cohort(run);
-    const triggerSummary = cohortBundle.cohort.eligible_runs.find(value => value.run_id === run.id);
     const fingerprint = continuationSuffix(run.id, registry.record_sha256);
     const eventId = `learning-event:${run.id}:${fingerprint}`;
     const jobId = `learning-job:${run.id}:${fingerprint}`;
@@ -1131,16 +1280,27 @@ export class OperationalLearning {
     };
     const inputHash = objectHash(input);
     input.correlation.input_sha256 = inputHash;
+    return input;
+  }
+
+  async process(run, token, registry) {
+    const classification = this.classification(run);
+    requireThat(classification.eligible, 409, classification.reasons[0] || 'OPERATIONAL_LEARNING_NOT_ELIGIBLE');
     const actor = this.brainActor(run.strategy_id, run.instance_id);
+    requireThat(this.backend.operationalResearch?.continuations?.ownerCurrent(actor.id, run),
+      403, 'RESEARCH_CURRENT_OWNER_REQUIRED');
     const existing = this.resultFor(run.id, registry.record_sha256);
+    requireThat(!existing || (this.currentContinuationResult(existing, registry.record_sha256, classification.context.context_hash)
+      && existing.result.producer_id === actor.id && digest(existing.result.content) === existing.result.content_sha256),
+    409, 'OPERATIONAL_LEARNING_INPUT_LINEAGE_CONFLICT');
+    const frozen = this.freezeAnalysisInput(run, classification, registry, actor, existing);
+    const input = frozen.input;
+    const triggerSummary = input.cohort.eligible_runs.find(value => value.run_id === run.id);
+    const requiredRunIds = [...input.cohort.eligible_runs, ...input.excluded_evidence].map(value => value.run_id);
     let result = existing?.result || null;
     let storedDetails = existing?.details || null;
     if (!result) {
       const response = await this.call(this.path, token, input);
-      const requiredRunIds = [
-        ...cohortBundle.cohort.eligible_runs.map(value => value.run_id),
-        ...cohortBundle.excluded_evidence.map(value => value.run_id),
-      ];
       let brainContent = null;
       try { brainContent = JSON.parse(response?.content || ''); } catch {}
       requireThat(response?.schema_version === RESPONSE_VERSION
@@ -1151,8 +1311,8 @@ export class OperationalLearning {
         && Array.isArray(response.source_record_ids)
         && requiredRunIds.every(runId => response.source_record_ids.includes(runId))
         && objectHash(response.correlation) === objectHash(input.correlation)
-        && brainContent?.registry_reconciliation_id === registry.reconciliation_id
-        && brainContent?.registry_record_sha256 === registry.record_sha256, 503, 'OPERATIONAL_LEARNING_BRAIN_RESPONSE_INVALID');
+        && brainContent?.registry_reconciliation_id === input.registry_reconciliation_id
+        && brainContent?.registry_record_sha256 === input.registry_record_sha256, 503, 'OPERATIONAL_LEARNING_BRAIN_RESPONSE_INVALID');
       const recommendation = response.conclusion_type === 'RECOMMENDATION'
         ? brainContent?.conclusion?.recommendation : null;
       requireThat(response.conclusion_type !== 'RECOMMENDATION'
@@ -1173,14 +1333,15 @@ export class OperationalLearning {
         recommendation,
         continuation,
         next_action: continuation?.next_action || reasons.join('; ') || 'Continue collecting eligible evidence.',
-        registry_reconciliation_id: registry.reconciliation_id,
-        registry_record_sha256: registry.record_sha256,
+        registry_reconciliation_id: input.registry_reconciliation_id,
+        registry_record_sha256: input.registry_record_sha256,
         storage_mode: 'BRAIN_IMMUTABLE_REFERENCE',
         verified_run_ids: requiredRunIds,
         source_record_count: response.source_record_ids.length,
         source_record_ids_sha256: objectHash(response.source_record_ids),
         brain_content_sha256: response.content_sha256,
         brain_content_bytes: Buffer.byteLength(response.content, 'utf8'),
+        analysis_input_sha256: frozen.input_sha256,
       };
       const storedContent = JSON.stringify(storedDetails);
       result = this.backend.operationalResults.register(actor, {
@@ -1191,8 +1352,19 @@ export class OperationalLearning {
         correlation: input.correlation,
       });
     }
-    const continuation = this.ensureContinuation(run, actor, result, storedDetails)
-      || this.backend.operationalResearch?.queueEvidenceReview(run,actor,result,storedDetails,cohortBundle);
+    requireThat(storedDetails.registry_reconciliation_id === input.registry_reconciliation_id
+      && objectHash(storedDetails.verified_run_ids) === objectHash(requiredRunIds)
+      && (!storedDetails.analysis_input_sha256 || storedDetails.analysis_input_sha256 === frozen.input_sha256),
+    409, 'OPERATIONAL_LEARNING_INPUT_LINEAGE_CONFLICT');
+    let continuation = this.recordedContinuation(run, result, storedDetails, frozen);
+    if (!continuation) {
+      requireThat(frozen.research_version === this.backend.operationalResearch.version,
+        409, 'OPERATIONAL_LEARNING_CONTINUATION_LINEAGE_CONFLICT');
+      this.ensureContinuation(run, actor, result, storedDetails)
+        || this.backend.operationalResearch.queueEvidenceReview(run, actor, result, storedDetails,
+          {cohort: input.cohort, excluded_evidence: input.excluded_evidence});
+      continuation = this.recordedContinuation(run, result, storedDetails, frozen);
+    }
     requireThat(continuation?.case_id && continuation?.artifact_id && this.continuationRecorded(run,{result,details:storedDetails}),
       503,'OPERATIONAL_LEARNING_CONTINUATION_NOT_PERSISTED');
     const callback = this.backend.operationalResults.callback(actor, {
@@ -1203,15 +1375,16 @@ export class OperationalLearning {
       status: 'COMPLETED',
       correlation: result.correlation,
     });
-    if(!this.completionEventRecorded(run,result))this.backend.event(run.id, 'operational.learning.complete', actor, {
+    if(!this.completionEventRecorded(run,result,frozen,continuation))this.backend.event(run.id, 'operational.learning.complete', actor, {
       result_id: result.result_id,
       callback_status: callback.status,
-      cohort_run_ids: cohortBundle.cohort.eligible_runs.map(value => value.run_id),
-      excluded_run_ids: cohortBundle.excluded_evidence.map(value => value.run_id),
-      cohort_hash: objectHash(cohortBundle.cohort),
+      cohort_run_ids: input.cohort.eligible_runs.map(value => value.run_id),
+      excluded_run_ids: input.excluded_evidence.map(value => value.run_id),
+      cohort_hash: objectHash(input.cohort),
+      input_sha256: frozen.input_sha256,
       trigger_evidence_status: triggerSummary.evidence_status,
-      registry_reconciliation_id: registry.reconciliation_id,
-      registry_record_sha256: registry.record_sha256,
+      registry_reconciliation_id: input.registry_reconciliation_id,
+      registry_record_sha256: input.registry_record_sha256,
       continuation_case_id: continuation?.case_id || null,
       continuation_artifact_id: continuation?.artifact_id || null,
       automatic_strategy_change: false,
@@ -1227,6 +1400,17 @@ export class OperationalLearning {
     const previous = this.retry.get(key) || { attempts: 0, error: null };
     const attempts = previous.attempts + 1;
     const message = safeError(error);
+    if (LINEAGE_ERRORS.has(error.code)) {
+      const stored = this.resultFor(run.id, this.registryContext?.record_sha256);
+      const old = this.lineageBlock(run, stored, this.registryContext?.record_sha256);
+      if (!old || old.reason !== error.code) this.backend.event(run.id, 'operational.learning.blocked',
+        this.brainActor(run.strategy_id, run.instance_id), {
+          result_id: stored?.result?.result_id || null,
+          registry_record_sha256: this.registryContext?.record_sha256 || null,
+          reason: error.code,
+          next_action: 'The Brain owner must recover the exact original immutable analysis input and matching continuation. Do not bind newer history to this result; separately version any new evidence reassessment.',
+        });
+    }
     this.retry.set(key, { attempts, error: message, nextAttemptMs: Date.now() + Math.min(300000, 1000 * 2 ** attempts) });
     if (previous.error !== message) this.backend.event(run.id, 'operational.learning.retry', { id: 'ocean-operational-learning', role: 'BRAIN' }, { attempts, error: message });
     this.lastError = message;

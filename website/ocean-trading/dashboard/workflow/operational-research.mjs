@@ -342,6 +342,10 @@ export class OperationalResearch {
     try {
       const row=this.backend.one('ow_cases',job.case_id);
       const ids=[row.run_id];
+      const source=!job.input_json && job.state!=='COMPLETED' && row.work_status!=='COMPLETED'
+        ? this.backend.operationalLearning.continuationSource?.(this.backend.one('ow_runs',row.run_id),
+          this.backend.artifactFor(row,job.artifact_id)) : null;
+      if(source)ids.push(...source.cohort.eligible_runs.map(run=>run.run_id));
       if(job.input_json && [this.version,LEGACY_RESEARCH_VERSION,RESEARCH_V5].includes(job.analysis_version)) {
         requireThat(digest(job.input_json)===job.input_hash,409,'RESEARCH_SNAPSHOT_HASH_CONFLICT');
         const snapshot=JSON.parse(job.input_json);
@@ -353,7 +357,7 @@ export class OperationalResearch {
       });
       // Uncaptured work must still belong to the cohort it would capture. Frozen
       // input and completed history keep their original membership semantics.
-      if(!excluded.length && !job.input_json && job.state!=='COMPLETED'
+      if(!source && !excluded.length && !job.input_json && job.state!=='COMPLETED'
         && row.work_status!=='COMPLETED' && job.analysis_version===this.version) {
         try {
           const source=this.backend.operationalLearning.cohort(this.backend.one('ow_runs',row.run_id));
@@ -366,7 +370,10 @@ export class OperationalResearch {
       }
       return {verified:excluded.length===0,excluded_runs:excluded};
     }catch(error) {
-      return {verified:false,excluded_runs:[],reason:String(error.code || error.message || 'RESEARCH_PROVENANCE_PROOF_REQUIRED').slice(0,300)};
+      const reason=String(error.code || error.message || 'RESEARCH_PROVENANCE_PROOF_REQUIRED').slice(0,300);
+      return {verified:false,excluded_runs:[],reason,
+        ...(reason.startsWith('OPERATIONAL_LEARNING_') ? {required_action:
+          `Owner ${this.backend.one('ow_cases',job.case_id).owner_id}: recover the exact original immutable analysis input and source lineage. Do not substitute newer history; separately version any new evidence reassessment.`} : {})};
     }
   }
   statusForCase(caseId) {
@@ -411,7 +418,7 @@ export class OperationalResearch {
       effective_state:superseded?'HISTORICAL_SUPERSEDED':!currentQualification.verified && job.state!=='COMPLETED'?'BLOCKED_PROVENANCE':job.state,
       qualification_warning:superseded?supersededAction:historical
         ?'Preserved historical report: its original qualified-history label is not current physical/raw provenance proof. It cannot support new proposals without current qualification.'
-        :!currentQualification.verified?PROVENANCE_ACTION:null,
+        :!currentQualification.verified?currentQualification.required_action || PROVENANCE_ACTION:null,
       version_backfill_skipped:completedCase && (job.analysis_version!==this.version || backfillSkipped),
       skipped_version_backfill_jobs:skipped,
       continuations,
@@ -427,7 +434,7 @@ export class OperationalResearch {
         ?`Historical Research is completed and preserved. Completed cases are not version backfilled; new evidence cases use ${this.version}. No current version backfill is queued for this case and no candidate or approval is created. ${PROVENANCE_ACTION}`
         :completedCase && job.state!=='COMPLETED'
           ?'This completed case has a retained historical queue entry but no completed Research report. Version backfill will not run; the entry is not current pending work and no completion is claimed.'
-        :!currentQualification.verified?PROVENANCE_ACTION
+        :!currentQualification.verified?currentQualification.required_action || PROVENANCE_ACTION
         :continuationAction || evidenceReassessed.map(item=>item.next_action).join(' ') || continuationWarning || report?.next_action || (job.state==='RETRY'?'Ocean will retry Research automatically; no human approval is pending.':'Ocean Research is queued and will resume after a website restart.')};
   }
   claim() {
@@ -495,7 +502,8 @@ export class OperationalResearch {
     const artifact=this.backend.artifactFor(row,job.artifact_id,JSON.parse(row.payload_json).origin===REASSESSMENT_ORIGIN?'EVIDENCE':'RECOMMENDATION');
     requireThat(digest(Buffer.from(artifact.content))===job.artifact_hash,409,'RESEARCH_INPUT_HASH_CONFLICT');
     const run=this.backend.one('ow_runs',row.run_id);
-    const source=this.backend.operationalLearning.cohort(run);
+    const source=this.backend.operationalLearning.continuationSource?.(run,artifact)
+      || this.backend.operationalLearning.cohort(run);
     const bundle={...source,research_coverage:Object.fromEntries(source.cohort.eligible_runs.map(item=>[item.run_id,
       this.backend.operationalLearning.classification(this.backend.one('ow_runs',item.run_id))
         .summary?.completion?.requested_coverage || []]))};
