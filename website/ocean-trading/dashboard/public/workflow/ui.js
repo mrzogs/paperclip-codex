@@ -446,6 +446,9 @@ function researchPanel(research) {
     ['Provenance',esc(research.qualification_warning || (research.qualified_for_new_support ? 'Currently qualified for new support' : 'Not qualified for new support'))],
     ['Outcome',report?badge(report.outcome):'Not recorded'],
     ['Next action',esc(research.next_action)],['Attempts',esc(research.attempts)],
+    ...(research.skipped_version_backfill_jobs?.length?[
+      ['Superseded queue history',`${research.skipped_version_backfill_jobs.length} preserved jobs; not current actionable retries`],
+    ]:[]),
     ['Result',research.result_artifact_id?link('artifacts',research.result_artifact_id,'View full Research report'):'Pending'],
   ]) + (report?facts([
     [research.historical || !research.qualified_for_new_support ? 'Preserved report history (not current qualified support)' : 'Currently qualified history',`${report.eligible_run_ids?.length || 0} runs / ${report.aggregate?.trades || 0} closed trades`],
@@ -456,10 +459,22 @@ function researchPanel(research) {
     ['Direction-screen evidence',report.evidence_sufficiency ? badge(report.evidence_sufficiency.status) : 'Not recorded in preserved report'],
     ...(report.approved_evidence_eligibility?[
       ['Approved aggregate evidence',badge(report.approved_evidence_eligibility.status)],
-      ['Verified observed sessions',report.approved_evidence_eligibility.observed_session_count==null?'UNVERIFIED':esc(report.approved_evidence_eligibility.observed_session_count)],
+      ['Verified native entry-day units',report.approved_evidence_eligibility.observed_session_count==null?'UNVERIFIED':esc(report.approved_evidence_eligibility.observed_session_count)],
+      ['Session scope',esc(report.approved_evidence_eligibility.session_definition || 'Preserved definition')],
+      ['Full market coverage / statistical IID','Not proven'],
       ['Sampling protocol',esc(report.protocol.version)],
+      ...(report.hypotheses?[
+        ['Descriptive direction hypotheses',esc(report.hypotheses.length)],
+        ['3/10 robustness',esc(report.experiments.map(item=>`${item.value}: ${item.robustness?.status || 'Not recorded'}`).join('; '))],
+      ]:[]),
     ]:[]),
     ['Candidate validation',badge(report.candidate_validation.status)],
+    ...(report.descriptive_excluded_history?[
+      ['Excluded history (descriptive only)',`${report.descriptive_excluded_history.runs.length} runs / ${report.descriptive_excluded_history.recorded_trade_count} recorded trades; not blended into qualified totals`],
+      ['History exclusions',esc(report.descriptive_excluded_history.runs.map(run=>`${run.run_id}: ${run.exclusion_reason}`).join('; '))],
+      ['History can teach',esc(report.descriptive_excluded_history.can_teach)],
+      ['History cannot prove',esc(report.descriptive_excluded_history.cannot_teach)],
+    ]:[]),
     ['Research Brain record',esc(report.brain_record?.record_id || 'Not recorded')],
   ]):research.last_error?`<p class='form-error'>${esc(human(research.last_error))}</p>`:'')
     + (research.continuations?.length?section('Owned continuation work',continuationTable(research.continuations)):''));

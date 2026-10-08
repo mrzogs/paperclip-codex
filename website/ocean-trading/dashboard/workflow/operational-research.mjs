@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { PROVENANCE_ACTION } from './operational-learning.mjs';
+import { PROVENANCE_ACTION, parseSttl2Identity } from './operational-learning.mjs';
 import { digest, objectHash, requireThat } from './common.mjs';
 import { OperationalContinuation } from './operational-continuation.mjs';
-import { RESEARCH_V5, REASSESSMENT_ORIGIN, evaluateV5, readObservedSessionProofs, remediationV5 } from './operational-research-protocol.mjs';
+import { RESEARCH_V5, RESEARCH_V6, REASSESSMENT_ORIGIN, evaluateV6, readObservedSessionProofs, remediationV6 } from './operational-research-protocol.mjs';
 
 // New physical/raw provenance gates apply only to new jobs, never relabel history.
 export const LEGACY_RESEARCH_VERSION = 'ocean-cumulative-research/v4';
-export const RESEARCH_VERSION = RESEARCH_V5;
+export const RESEARCH_VERSION = RESEARCH_V6;
 const unknown = value => !value || /^(unknown|none|null|n\/a)$/i.test(String(value).trim());
 const round = value => Math.round(value * 100) / 100;
 const authority = Object.freeze({ automatic_strategy_change:false, candidate_approved:false, paper_authorized:false, live_authorized:false });
@@ -178,7 +178,30 @@ export function evaluateResearchV4(bundle, rows) {
 }
 
 export function evaluateResearch(bundle,rows) {
-  return evaluateV5(bundle,rows,evaluateResearchV4(bundle,rows));
+  return evaluateV6(bundle,rows,evaluateResearchV4(bundle,rows));
+}
+
+export function boundedResearchRecommendation(job,result) {
+  const {excluded_evidence,...evaluation}=result;
+  const full={schema_version:'ocean-evidence-bound-learning-proposal/v2',research_evaluation:evaluation,
+    research_input_hash:job.input_hash,excluded_evidence_hash:objectHash(excluded_evidence),authority};
+  const content=JSON.stringify(full);
+  if(content.length<=50000)return content;
+  // The complete report and evidence already live in the immutable job snapshot.
+  // The wire summary references them rather than clipping returns/contradictions.
+  const summary={schema_version:full.schema_version,representation:'BOUNDED_SUMMARY_WITH_FULL_FROZEN_SOURCE_REFERENCES',
+    source:{table:'ow_research_jobs',job_id:job.id,input_hash:job.input_hash,
+      result_hash:objectHash(result),result_content_bytes:Buffer.byteLength(JSON.stringify(result),'utf8')},
+    outcome:result.outcome,aggregate:result.aggregate,cohort_hash:result.cohort_hash,evidence_hash:result.evidence_hash,
+    protocol:result.protocol || null,approved_policy_hash:result.approved_evidence_eligibility?.policy_hash || null,
+    evidence_status:result.evidence_sufficiency?.status || null,
+    experiment_count:result.experiments.length,experiments_hash:objectHash(result.experiments),
+    proposal_count:result.proposals.length,proposals_hash:objectHash(result.proposals),
+    hypotheses_hash:objectHash(result.hypotheses || []),excluded_evidence_hash:full.excluded_evidence_hash,
+    authority,note:'Full executed accounting, all retained strata/contradictions, native proof and report are preserved in the immutable snapshot. This bounded content is not the full report or candidate validation.'};
+  const bounded=JSON.stringify(summary);
+  requireThat(bounded.length<=50000,422,'RESEARCH_BRAIN_BOUNDED_SUMMARY_SIZE_LIMIT');
+  return bounded;
 }
 
 export class OperationalResearch {
@@ -186,7 +209,7 @@ export class OperationalResearch {
     this.version=RESEARCH_VERSION;this.continuations=new OperationalContinuation(this); }
   stop() {this.stopped=true;}
   remediation(sufficiency){return sufficiency.scope==='RECORDED_ENTRY_DIRECTION_DISCOVERY_SCREEN_ONLY'
-    && 'missing_distinct_block_count' in sufficiency?remediationV5(sufficiency):evidenceRemediation(sufficiency);}
+    && 'missing_distinct_block_count' in sufficiency?remediationV6(sufficiency):evidenceRemediation(sufficiency);}
   historicalCompletion(caseId,artifactId=null) {
     return this.db.prepare(`SELECT * FROM ow_research_jobs WHERE case_id=? AND state='COMPLETED'
       AND result_artifact_id IS NOT NULL AND (? IS NULL OR artifact_id=?) ORDER BY rowid DESC LIMIT 1`)
@@ -209,8 +232,8 @@ export class OperationalResearch {
       requireThat(historical.artifact_hash===hash,409,'RESEARCH_INPUT_HASH_CONFLICT');
       return historical;
     }
-    // A previously frozen job resumes its exact version/input; never recapture it as v5.
-    const frozen=this.db.prepare("SELECT * FROM ow_research_jobs WHERE case_id=? AND artifact_id=? AND analysis_version=? AND input_json IS NOT NULL AND state<>'COMPLETED' ORDER BY rowid DESC LIMIT 1").get(caseId,artifactId,LEGACY_RESEARCH_VERSION);
+    // A previously frozen job resumes its exact version/input; never recapture it as v6.
+    const frozen=this.db.prepare("SELECT * FROM ow_research_jobs WHERE case_id=? AND artifact_id=? AND analysis_version IN (?,?) AND input_json IS NOT NULL AND state<>'COMPLETED' ORDER BY rowid DESC LIMIT 1").get(caseId,artifactId,LEGACY_RESEARCH_VERSION,RESEARCH_V5);
     if(frozen){requireThat(frozen.artifact_hash===hash,409,'RESEARCH_INPUT_HASH_CONFLICT');return frozen;}
     const id=`research-${digest(`${caseId}:${artifactId}:${this.version}`).slice(-24)}`;
     const existing=this.db.prepare('SELECT * FROM ow_research_jobs WHERE id=?').get(id);
@@ -318,7 +341,7 @@ export class OperationalResearch {
     try {
       const row=this.backend.one('ow_cases',job.case_id);
       const ids=[row.run_id];
-      if(job.input_json && [this.version,LEGACY_RESEARCH_VERSION].includes(job.analysis_version)) {
+      if(job.input_json && [this.version,LEGACY_RESEARCH_VERSION,RESEARCH_V5].includes(job.analysis_version)) {
         requireThat(digest(job.input_json)===job.input_hash,409,'RESEARCH_SNAPSHOT_HASH_CONFLICT');
         const snapshot=JSON.parse(job.input_json);
         ids.push(...snapshot.result.eligible_run_ids);
@@ -349,10 +372,16 @@ export class OperationalResearch {
     let job=this.db.prepare('SELECT * FROM ow_research_jobs WHERE case_id=? ORDER BY rowid DESC LIMIT 1').get(caseId);
     if(!job)return null;
     const completedCase=this.backend.one('ow_cases',caseId).work_status==='COMPLETED';
-    const skipped=[];
+    let backfillSkipped=false;
+    const skipped=this.db.prepare(`SELECT id,analysis_version,state,input_hash,attempts FROM ow_research_jobs
+      WHERE case_id=? AND id<>? AND analysis_version<>? AND state<>'COMPLETED' ORDER BY rowid`).all(caseId,job.id,this.version)
+      .map(old=>({job_id:old.id,analysis_version:old.analysis_version,state:old.state,input_hash:old.input_hash,attempts:old.attempts,
+        effective_state:'HISTORICAL_SUPERSEDED',actionable:false,
+        reason:'PRESERVED_SUPERSEDED_ANALYSIS_VERSION_NOT_CURRENT_WORK'}));
     if(completedCase && job.state!=='COMPLETED') {
+      backfillSkipped=true;
       skipped.push({job_id:job.id,analysis_version:job.analysis_version,state:job.state,input_hash:job.input_hash,
-        reason:'COMPLETED_HISTORICAL_CASE_VERSION_BACKFILL'});
+        reason:'COMPLETED_HISTORICAL_CASE_VERSION_BACKFILL',effective_state:'HISTORICAL_SUPERSEDED',actionable:false});
       const historical=this.historicalCompletion(caseId);
       if(historical)job=historical;
     }
@@ -362,7 +391,7 @@ export class OperationalResearch {
     const report=artifact?JSON.parse(Buffer.from(artifact.content).toString('utf8')):null;
     const currentQualification=this.qualification(job);
     const superseded=currentQualification.superseded===true;
-    const historical=superseded || (job.state==='COMPLETED' && (job.analysis_version!==this.version || skipped.length>0));
+    const historical=superseded || (job.state==='COMPLETED' && (job.analysis_version!==this.version || backfillSkipped));
     const supersededAction='This uncaptured Research case is retained as superseded history: its trigger is outside the current exact-coverage cohort. No completion is claimed and automatic retry is not due. Continue Research on the current eligible case; recorded job state and historical artifacts remain unchanged.';
     const continuations=this.continuations.links(caseId);
     const openContinuations=continuations.filter(item=>item && (item.blocked_reason || !['COMPLETED','CANCELLED'].includes(item.work_status)));
@@ -384,7 +413,7 @@ export class OperationalResearch {
       qualification_warning:superseded?supersededAction:historical
         ?'Preserved historical report: its original qualified-history label is not current physical/raw provenance proof. It cannot support new proposals without current qualification.'
         :!currentQualification.verified?PROVENANCE_ACTION:null,
-      version_backfill_skipped:completedCase && (job.analysis_version!==this.version || skipped.length>0),
+      version_backfill_skipped:completedCase && (job.analysis_version!==this.version || backfillSkipped),
       skipped_version_backfill_jobs:skipped,
       continuations,
       loop_stage:openContinuations.length?openContinuations.some(item=>item.blocked_reason || item.work_status==='BLOCKED')?'BLOCKED_CONTINUATION'
@@ -392,7 +421,7 @@ export class OperationalResearch {
         :openContinuations.some(item=>item.evidence_remediation?.requires_design_review)?'RESEARCH_DESIGN_REVIEW_REQUIRED':'EVIDENCE_REQUIRED'
         :evidenceReassessed.length?evidenceReassessed.some(item=>item.progress.outcome==='EXPLORATORY_PROPOSAL')?'PROPOSAL_PLANNING':'DIRECTION_SCREEN_NO_SUPPORTED_CHANGE'
         :continuationWarning?'BLOCKED_CONTINUATION':null,
-      next_action:superseded?supersededAction:completedCase && job.state==='COMPLETED' && (job.analysis_version!==this.version || skipped.length>0)
+      next_action:superseded?supersededAction:completedCase && job.state==='COMPLETED' && (job.analysis_version!==this.version || backfillSkipped)
         ?`Historical Research is completed and preserved. Completed cases are not version backfilled; new evidence cases use ${this.version}. No current version backfill is queued for this case and no candidate or approval is created. ${PROVENANCE_ACTION}`
         :completedCase && job.state!=='COMPLETED'
           ?'This completed case has a retained historical queue entry but no completed Research report. Version backfill will not run; the entry is not current pending work and no completion is claimed.'
@@ -402,11 +431,11 @@ export class OperationalResearch {
   claim() {
     return this.backend.store.transaction(()=>{
       const jobs=this.db.prepare(`SELECT j.* FROM ow_research_jobs j JOIN ow_cases c ON c.id=j.case_id
-        WHERE (j.analysis_version=? OR (j.analysis_version=? AND j.input_json IS NOT NULL)) AND ((j.state IN ('PENDING','RETRY') AND j.next_attempt_ms<=?)
+        WHERE (j.analysis_version=? OR (j.analysis_version IN (?,?) AND j.input_json IS NOT NULL)) AND ((j.state IN ('PENDING','RETRY') AND j.next_attempt_ms<=?)
         OR (j.state='RUNNING' AND j.lease_until_ms<=?)) AND c.stage='RESEARCH' AND c.work_status NOT IN ('PAUSED','CANCELLED','COMPLETED')
-        ORDER BY j.rowid`).all(this.version,LEGACY_RESEARCH_VERSION,Date.now(),Date.now());
+        ORDER BY j.rowid`).all(this.version,LEGACY_RESEARCH_VERSION,RESEARCH_V5,Date.now(),Date.now());
       // Schema 11 has no SKIPPED state. Completed-case backfills and any frozen
-      // inputs keep their version across restarts; fresh cases use v5.
+      // inputs keep their version across restarts; fresh cases use v6.
       // Ineligible evidence is owner-action work, not a repeatedly leased RETRY.
       const job=jobs.find(value=>this.qualification(value).verified);
       if(!job)return null;
@@ -423,6 +452,40 @@ export class OperationalResearch {
   }
   observedSessions(bundle,rows) {
     return readObservedSessionProofs(this.backend,bundle.cohort.eligible_runs.map(run=>run.run_id),rows);
+  }
+  descriptiveHistory(bundle,database) {
+    const runs=[];
+    for(const excluded of bundle.excluded_evidence) {
+      const run=this.backend.one('ow_runs',excluded.run_id),context=JSON.parse(run.context_json);
+      // No holdout/validation/TEST evidence is opened for descriptive history.
+      if(run.id.startsWith('test-') || run.state!=='COMPLETED' || context.dataset_partition!=='DISCOVERY'
+        || context.learner_permission!=='HISTORICAL_DISCOVERY')continue;
+      const rows=database.prepare(`SELECT trade_id,instance_id,trade_account,symbol,strategy_version,dll_hash,text_tag,entry_datetime,
+        direction,gross_currency_value,total_commission,net_profit_loss FROM trades
+        WHERE run_id=? AND lower(status)='closed' ORDER BY trade_id`).all(run.id);
+      const accountingVerified=rows.every(row=>['gross_currency_value','total_commission','net_profit_loss'].every(key=>
+        row[key]!=null && Number.isFinite(Number(row[key]))) && Number(row.total_commission)>=0
+        && Math.abs(row.gross_currency_value-row.total_commission-row.net_profit_loss)<0.001);
+      const strata=new Map();
+      for(const row of rows) {
+        const raw=parseSttl2Identity(row.text_tag),stratum={recorded_instance_id:row.instance_id,trade_account:row.trade_account,
+          symbol:row.symbol,recorded_strategy_version:row.strategy_version,recorded_strategy_dll_hash:row.dll_hash,
+          recorded_raw_profile:raw?.profile || null,recorded_raw_config_hash:raw?.config_hash || null,
+          recorded_raw_code_hash:raw?.code_hash || null,recorded_raw_context_hash:raw?.context_hash || null};
+        strata.set(objectHash(stratum),stratum);
+      }
+      const recordedPhysicalStrata=[...strata].map(([recorded_stratum_hash,stratum])=>({...stratum,recorded_stratum_hash}));
+      runs.push({run_id:run.id,exclusion_reason_code:excluded.exclusion_reason_code,exclusion_reason:excluded.exclusion_reason,
+        current_causal_support:false,recorded_trade_count:rows.length,accounting_reconciled:accountingVerified,
+        accounting:accountingVerified?totals(rows):null,recorded_physical_strata:recordedPhysicalStrata,
+        frozen_logical_scope:{context_hash:context.context_hash,strategy_profile_id:context.strategy_profile_id,
+          strategy_profile_version:context.strategy_profile_version,strategy_code_hash:context.strategy_code_hash,
+          strategy_config_hash:context.strategy_config_hash},source_rows_hash:objectHash(rows)});
+    }
+    return {status:'DESCRIPTIVE_EXCLUDED_HISTORY_NOT_CURRENT_CAUSAL_SUPPORT',runs,
+      recorded_trade_count:runs.reduce((n,run)=>n+run.recorded_trade_count,0),source_hash:objectHash(runs),
+      can_teach:'Recorded simulated execution/fee accounting, retained direction context and exact provenance/configuration differences.',
+      cannot_teach:'New qualified causal proposal support, native session sufficiency, candidate acceptance or verified broker execution. Recorded DLL labels are not proven loaded-module identity.'};
   }
   evidence(job) {
     const row=this.backend.one('ow_cases',job.case_id);
@@ -445,13 +508,14 @@ export class OperationalResearch {
         const profile=JSON.parse(this.backend.one('ow_profiles',this.backend.one('ow_strategies',row.strategy_id).profile_id).payload_json);
         bundle.approved_evidence_policy=profile.evidence_policy || null;
         bundle.execution_sessions=this.observedSessions(bundle,rows);
+        bundle.descriptive_excluded_history=this.descriptiveHistory(bundle,database);
       }
       return {bundle,rows,row,context,completion_hash:objectHash(this.backend.operationalLearning.classification(run).summary.completion),recipient:artifact.recipient_id};
     } finally {database.close();}
   }
   capture(job) {
     const current=this.db.prepare('SELECT * FROM ow_research_jobs WHERE id=?').get(job.id);
-    if([this.version,LEGACY_RESEARCH_VERSION].includes(current.analysis_version))requireThat(this.qualification(current).verified,409,'RESEARCH_CURRENT_PROVENANCE_REQUIRED');
+    if([this.version,LEGACY_RESEARCH_VERSION,RESEARCH_V5].includes(current.analysis_version))requireThat(this.qualification(current).verified,409,'RESEARCH_CURRENT_PROVENANCE_REQUIRED');
     if(current.input_json) {
       requireThat(digest(current.input_json)===current.input_hash,409,'RESEARCH_SNAPSHOT_HASH_CONFLICT');
       return JSON.parse(current.input_json);
@@ -460,6 +524,7 @@ export class OperationalResearch {
     const result=current.analysis_version===LEGACY_RESEARCH_VERSION?evaluateResearchV4(evidence.bundle,evidence.rows):evaluateResearch(evidence.bundle,evidence.rows);
     const snapshot={result,evidence:{bundle:{cohort:evidence.bundle.cohort,excluded_evidence:evidence.bundle.excluded_evidence,
       policy:evidence.bundle.policy,approved_evidence_policy:evidence.bundle.approved_evidence_policy,
+      descriptive_excluded_history:evidence.bundle.descriptive_excluded_history,
       execution_sessions:evidence.bundle.execution_sessions},row:evidence.row,context:evidence.context,completion_hash:evidence.completion_hash,recipient:evidence.recipient}};
     const content=JSON.stringify(snapshot);
     const updated=this.db.prepare(`UPDATE ow_research_jobs SET input_json=?,input_hash=?
@@ -482,13 +547,8 @@ export class OperationalResearch {
       const context=evidence.context;
       // Exclusions are supplied in the API's evidence field; do not duplicate
       // the entire evidence catalog inside its bounded recommendation field.
-      const {excluded_evidence,...evaluation}=result;
-      const proposal={schema_version:'ocean-evidence-bound-learning-proposal/v1',
-      strategy_id:evidence.row.strategy_id,eligible_run_ids:result.eligible_run_ids,
-      research_evaluation:evaluation,research_input_hash:job.input_hash || this.db.prepare('SELECT input_hash FROM ow_research_jobs WHERE id=?').get(job.id).input_hash,
-      excluded_evidence_hash:objectHash(excluded_evidence),authority};
-      const proposalContent=JSON.stringify(proposal);
-      requireThat(proposalContent.length<=50000,422,'RESEARCH_BRAIN_RECOMMENDATION_SIZE_LIMIT');
+      const proposalContent=boundedResearchRecommendation({...job,input_hash:job.input_hash
+        || this.db.prepare('SELECT input_hash FROM ow_research_jobs WHERE id=?').get(job.id).input_hash},result);
       input={schema_version:'ocean-operational-learning-request/v1',project:evidence.bundle.policy.project,
       case_id:job.case_id,strategy_id:evidence.row.strategy_id,strategy_name:evidence.bundle.policy.strategy_name,
       strategy_profile_id:context.strategy_profile_id,strategy_version:context.strategy_version,

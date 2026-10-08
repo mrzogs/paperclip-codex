@@ -7,7 +7,8 @@ import vm from 'node:vm';
 import { WorkflowStore } from './store.mjs';
 import { WorkflowBackend } from './backend.mjs';
 import { LEGACY_RESEARCH_VERSION, RESEARCH_VERSION, OperationalResearch, evaluateResearch } from './operational-research.mjs';
-import { SESSION_SCHEMA } from './operational-research-protocol.mjs';
+import { mockNativeProof } from './operational-native-sessions.test-fixtures.mjs';
+import { RESEARCH_V5 } from './operational-research-protocol.mjs';
 import { OperationalLearning } from './operational-learning.mjs';
 import { CONTINUATION_ORIGIN } from './operational-continuation.mjs';
 import { readWorkflowView } from './ui-api.mjs';
@@ -53,20 +54,7 @@ function fixture({insufficient=false,noChange=false,partial=false,prospective=fa
     bundle.research_coverage.r3[0].end_utc='2025-03-31T23:00:00Z';
     bundle.approved_evidence_policy=approvedPolicy;bundle.execution_sessions={};
     for(const [index,run_id] of runs.entries()) {
-      const entries=rows.filter(row=>row.run_id===run_id).map((row,i)=>{
-        const start=Date.UTC(2025,index,i+1),entry=start+1800000;
-        Object.assign(row,{entry_datetime:(entry-Date.UTC(1899,11,30))/86400000,trade_account:'Sim1',symbol:'EXPLICIT_MOCK_SYMBOL'});
-        return {trade_id:row.trade_id,entry_datetime:row.entry_datetime,entry_utc:new Date(entry).toISOString(),trade_account:row.trade_account,
-          symbol:row.symbol,trading_day_date:new Date(start).toISOString().slice(0,10),session_start_utc:new Date(start).toISOString(),session_end_utc:new Date(start+3600000).toISOString()};
-      });
-      const calendarBinding={timezone:'Europe/London',revision:'EXPLICIT_MOCK_ONLY_NATIVE_CALENDAR',
-        source_config_hash:digest('EXPLICIT_MOCK_PINNED_CONFIG'),chart_settings_hash:digest('EXPLICIT_MOCK_CHART_SETTINGS'),effective_chart_timezone:'EXPLICIT_MOCK_ONLY'};
-      bundle.execution_sessions[run_id]={context:contexts[run_id],calendar_binding:calendarBinding,
-        source_receipt_ref:`EXPLICIT_MOCK_RECEIPT_${run_id}`,source_receipt_hash:digest(`EXPLICIT_MOCK_RECEIPT_${run_id}`),
-        native_contract_verified:true,native_contract_receipt_hash:digest('EXPLICIT_MOCK_ONLY_NATIVE_PROVIDER'),
-        observation:{schema_version:SESSION_SCHEMA,run_id,context_hash:contexts[run_id].context_hash,observed_at_utc:new Date().toISOString(),
-          calendar:{...calendarBinding,mapping_method:'SIERRA_NATIVE_TRADING_DAY_AND_UTC_CONVERSION',
-            trading_day_method:'sc.GetTradingDayDate',utc_method:'sc.ConvertDateTimeFromChartTimeZone',chart_settings_hash:digest('EXPLICIT_MOCK_CHART_SETTINGS'),effective_chart_timezone:'EXPLICIT_MOCK_ONLY'},entries}};
+      bundle.execution_sessions[run_id]=mockNativeProof(contexts[run_id],rows.filter(row=>row.run_id===run_id),{month:index+1});
     }
   }
   let proof=true;
@@ -696,7 +684,7 @@ test('existing Learning maintenance route runs planning after startup with no ex
   }
 });
 
-test('v5 default captures approved eligibility/session proof separately and persistent planning freezes that lineage',()=>{
+test('v6 default captures approved eligibility/session proof separately and persistent planning freezes that lineage',()=>{
   const f=fixture({prospective:true});try {
     assert.equal(new OperationalResearch(f.backend).version,RESEARCH_VERSION);
     const status=f.complete();assert.equal(status.report.schema_version,RESEARCH_VERSION);
@@ -792,7 +780,7 @@ test('reassessment queue creation crash rolls back case/artifact/job and restart
   }finally{f.close();}
 });
 
-test('v5 restart resumes frozen unfinished v4 bytes as v4 without a recapture, backfill or new proposal work',()=>{
+test('v6 restart resumes frozen unfinished v4 bytes as v4 without a recapture, backfill or new proposal work',()=>{
   const f=fixture();try {
     const {job}=f.capture(),input=f.backend.one('ow_research_jobs',job.id).input_json;
     f.restart();f.worker.version=RESEARCH_VERSION;f.backend.db.prepare('UPDATE ow_research_jobs SET lease_until_ms=0 WHERE id=?').run(job.id);
@@ -804,13 +792,34 @@ test('v5 restart resumes frozen unfinished v4 bytes as v4 without a recapture, b
   }finally{f.close();}
 });
 
+test('v6 resumes a frozen unfinished v5 snapshot verbatim without recapture or current proposal support',()=>{
+  const f=fixture({prospective:true});try {
+    const old=f.backend.db.prepare('SELECT * FROM ow_research_jobs').get();
+    const result={schema_version:RESEARCH_V5,eligible_run_ids:['r1','r2','r3'],outcome:'INSUFFICIENT_EVIDENCE',
+      next_action:'EXPLICIT_MOCK_ONLY_FROZEN_V5_INSTRUCTION',proposals:[],authority:{automatic_strategy_change:false,
+        candidate_approved:false,paper_authorized:false,live_authorized:false}};
+    const input=JSON.stringify({result,evidence:{context:f.bundle.execution_sessions.r1.context}});
+    f.backend.db.prepare(`UPDATE ow_research_jobs SET analysis_version=?,input_json=?,input_hash=? WHERE id=?`)
+      .run(RESEARCH_V5,input,digest(input),old.id);
+    for(let i=0;i<2;i++) {
+      f.restart();f.worker.evidence=()=>{throw Error('must never recapture v5');};f.worker.reconcile();
+      const job=f.worker.claim();assert.equal(job.analysis_version,RESEARCH_V5);
+      assert.deepEqual(f.worker.capture(job).result,result);
+      if(i===0)f.backend.db.prepare('UPDATE ow_research_jobs SET lease_until_ms=0 WHERE id=?').run(job.id);
+      else f.worker.complete(job,result,f.actor,'strategy');
+    }
+    assert.equal(f.backend.one('ow_research_jobs',old.id).input_json,input);
+    assert.equal(f.worker.statusForCase('source').historical,true);assert.equal(f.children().length,0);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
 test('current source has no fabricated native-session intake route and cannot turn a caller hook into proof',()=>{
   const f=fixture({prospective:true});try {
     const before=f.backend.db.prepare('SELECT COUNT(*) n FROM ow_events').get().n;
     assert.equal(typeof f.worker.observeSessions,'undefined');
     f.backend.verifyNativeSessionReceipt=()=>({verified:true,receipt_hash:digest('unsupported-caller-claim')});
     const proofs=OperationalResearch.prototype.observedSessions.call(f.worker,f.bundle,f.rows);
-    assert.equal(proofs.r1.proof_error,'NATIVE_SESSION_ADAPTER_INTEGRATION_DUE');
+    assert.equal(proofs.r1.proof_error,'NATIVE_SESSION_DATABASE_REQUIRED');
     const result=evaluateResearch({...f.bundle,execution_sessions:proofs},f.rows);
     assert.equal(result.outcome,'INSUFFICIENT_EVIDENCE');assert.equal(result.approved_evidence_eligibility.observed_session_count,null);
     assert.equal(f.backend.db.prepare('SELECT COUNT(*) n FROM ow_events').get().n,before);assertNoAuthority(f);

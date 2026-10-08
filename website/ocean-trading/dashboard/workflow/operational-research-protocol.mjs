@@ -1,18 +1,18 @@
-import { objectHash, requireThat } from './common.mjs';
+import { objectHash } from './common.mjs';
+import { sessionEvidence, nativeDateLabel } from './operational-native-sessions.mjs';
+export { SESSION_SCHEMA, sessionEvidence, readObservedSessionProofs } from './operational-native-sessions.mjs';
 
 export const RESEARCH_V5='ocean-cumulative-research/v5';
-export const PROTOCOL_VERSION='ocean-calendar-direction-discovery/v1';
-export const SESSION_SCHEMA='ocean-observed-execution-sessions/v1';
-// Internal normalized evidence, not a logger wire contract or a new run-context field.
-export const NATIVE_SESSION_INTEGRATION=Object.freeze({status:'INTEGRATION_DUE',
-  reason:'NATIVE_SESSION_ADAPTER_INTEGRATION_DUE',
-  owner:'OCEAN_RESEARCH_ENGINEERING_AND_INSTANCE_TELEMETRY_OWNER',
-  next_action:'Map and test the reviewed additive native logger contract against its exact pinned receipt and source configuration before deployment acceptance.'});
+export const RESEARCH_V6='ocean-cumulative-research/v6';
+export const PROTOCOL_VERSION='ocean-native-day-direction-discovery/v2';
 export const REASSESSMENT_ORIGIN='OPERATIONAL_RESEARCH_REASSESSMENT';
+// These inherited, uncalibrated 3/10 checks describe robustness only. They do
+// not replace the frozen approved aggregate policy or prevent plan authoring.
 export const screeningPolicy=Object.freeze({minimum_distinct_declared_periods:3,
   minimum_direction_trades_per_calendar_block:10,positive_net_exclusion_required_in_every_retained_run:true,
-  sampling_unit:'PREDECLARED_EUROPE_LONDON_CALENDAR_MONTH',
-  basis:'PROSPECTIVE_ENGINEERING_SCREEN_NOT_STATISTICALLY_CALIBRATED_NOT_APPROVED_EVIDENCE_POLICY'});
+  sampling_unit:'PREDECLARED_CALENDAR_BLOCK_WITH_RETAINED_CONTRACT_CHILDREN',
+  role:'ROBUSTNESS_DIAGNOSTIC_NOT_EVIDENCE_ELIGIBILITY_OR_CANDIDATE_ACCEPTANCE',
+  basis:'EXISTING_IMPLEMENTATION_POLICY_NOT_STATISTICALLY_CALIBRATED_NOT_APPROVED_EVIDENCE_POLICY'});
 const zone='Europe/London';
 const dateFormat=new Intl.DateTimeFormat('en-CA',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit'});
 const localDate=ms=>Object.fromEntries(dateFormat.formatToParts(new Date(ms)).map(p=>[p.type,p.value]));
@@ -63,78 +63,6 @@ export function calendarBlocks(bundle) {
   return {blocks,missing_run_ids:[...new Set(missing)].sort()};
 }
 
-export function checkSessionObservation(observation,context,rows,calendarBinding) {
-  requireThat(observation?.schema_version===SESSION_SCHEMA && observation.run_id===context.run_id
-    && observation.context_hash===context.context_hash && observation.calendar?.timezone===zone
-    && calendarBinding?.revision && observation.calendar.revision===calendarBinding.revision
-    && observation.calendar.source_config_hash?.match(/^sha256:[a-f0-9]{64}$/)
-    && observation.calendar.source_config_hash===calendarBinding.source_config_hash
-    && observation.calendar.chart_settings_hash===calendarBinding.chart_settings_hash
-    && observation.calendar.effective_chart_timezone===calendarBinding.effective_chart_timezone
-    && observation.calendar.timezone===calendarBinding.timezone
-    && observation.calendar.mapping_method==='SIERRA_NATIVE_TRADING_DAY_AND_UTC_CONVERSION'
-    && observation.calendar.trading_day_method==='sc.GetTradingDayDate'
-    && observation.calendar.utc_method==='sc.ConvertDateTimeFromChartTimeZone'
-    && observation.calendar.chart_settings_hash?.match(/^sha256:[a-f0-9]{64}$/)
-    && typeof observation.calendar.effective_chart_timezone==='string'
-    && observation.calendar.effective_chart_timezone.length>0,409,'OBSERVED_SESSION_CALENDAR_PROOF_REQUIRED');
-  const actual=new Map(rows.map(row=>[String(row.trade_id),row])),seen=new Set();
-  requireThat(Array.isArray(observation.entries) && observation.entries.length===rows.length,409,'OBSERVED_SESSION_EXACT_TRADES_REQUIRED');
-  const sessions=new Map();
-  for(const entry of observation.entries) {
-    const row=actual.get(String(entry.trade_id)),start=Date.parse(entry.session_start_utc),end=Date.parse(entry.session_end_utc),at=Date.parse(entry.entry_utc);
-    requireThat(row && !seen.has(String(entry.trade_id)) && Number(entry.entry_datetime)===Number(row.entry_datetime)
-      && entry.trade_account===row.trade_account && entry.symbol===row.symbol
-      && Number.isFinite(at) && Number.isFinite(start) && Number.isFinite(end) && start<=at && at<end
-      && end-start<=86400000+3600000 && end>start && /^\d{4}-\d{2}-\d{2}$/.test(entry.trading_day_date),
-    409,'OBSERVED_SESSION_TRADE_MAPPING_CONFLICT');
-    seen.add(String(entry.trade_id));
-    const key=`${observation.calendar.revision}:${entry.trading_day_date}`;
-    const interval={start_utc:entry.session_start_utc,end_utc:entry.session_end_utc};
-    requireThat(!sessions.has(key) || objectHash(sessions.get(key))===objectHash(interval),409,'OBSERVED_SESSION_IDENTITY_CONFLICT');
-    sessions.set(key,interval);
-  }
-  return observation;
-}
-
-export function sessionEvidence(bundle,rows) {
-  const sessions=new Map(),entries=new Map(),missing=[],conflicts=[];
-  for(const run of bundle.cohort.eligible_runs) {
-    const proof=bundle.execution_sessions?.[run.run_id];
-    if(!proof){missing.push(run.run_id);continue;}
-    try {
-      requireThat(!proof.proof_error,409,proof.proof_error || 'OBSERVED_SESSION_PROOF_CONFLICT');
-      requireThat(proof.native_contract_verified===true && proof.native_contract_receipt_hash?.match(/^sha256:[a-f0-9]{64}$/),
-        409,'SUPPORTED_NATIVE_SESSION_PRODUCER_CONTRACT_REQUIRED');
-      requireThat(proof.context?.run_id===run.run_id,409,'OBSERVED_SESSION_RUN_IDENTITY_CONFLICT');
-      checkSessionObservation(proof.observation,proof.context,rows.filter(row=>row.run_id===run.run_id),proof.calendar_binding);
-      requireThat(proof.source_receipt_ref && proof.source_receipt_hash?.match(/^sha256:[a-f0-9]{64}$/),409,'OBSERVED_SESSION_PRODUCER_RECEIPT_REQUIRED');
-      for(const entry of proof.observation.entries) {
-        entries.set(`${run.run_id}:${entry.trade_id}`,entry);
-        const key=`${proof.observation.calendar.revision}:${entry.trading_day_date}`;
-        const interval={start:Date.parse(entry.session_start_utc),end:Date.parse(entry.session_end_utc)};
-        requireThat(!sessions.has(key) || objectHash(sessions.get(key))===objectHash(interval),409,'OBSERVED_SESSION_IDENTITY_CONFLICT');
-        sessions.set(key,interval);
-      }
-    }catch(error){conflicts.push({run_id:run.run_id,reason:error.code || 'OBSERVED_SESSION_PROOF_CONFLICT'});}
-  }
-  const intervals=[...sessions.values()].sort((a,b)=>a.start-b.start);
-  if(intervals.some((entry,i)=>i>0 && entry.start<intervals[i-1].end))conflicts.push({reason:'OBSERVED_SESSION_OVERLAP'});
-  return {verified:missing.length===0 && conflicts.length===0,observed_session_count:sessions.size,
-    verification_status:missing.length===0 && conflicts.length===0?'OBSERVED_NATIVE_MAPPING_VERIFIED':'UNVERIFIED',
-    missing_run_ids:missing,conflicts,entries,statistical_independence_verified:false,
-    basis:'UNION_OF_EXACT_PRODUCER_OBSERVED_DISJOINT_TRADING_DAY_INTERVALS_NOT_CALENDAR_DATE_FLOORS'};
-}
-
-export function readObservedSessionProofs(backend,runIds) {
-  // No native adapter is installed in this source revision. Neither caller
-  // assertions, fabricated events nor new fields on old contexts can replace it.
-  return Object.fromEntries(runIds.map(run_id=>[run_id,{
-    context:JSON.parse(backend.one('ow_runs',run_id).context_json),
-    proof_error:NATIVE_SESSION_INTEGRATION.reason,integration:NATIVE_SESSION_INTEGRATION
-  }]));
-}
-
 export function coverageOverlaps(coverage) {
   const conflicts=[],runs=Object.entries(coverage || {});
   for(let i=0;i<runs.length;i++)for(let j=i+1;j<runs.length;j++) {
@@ -149,24 +77,30 @@ export function coverageOverlaps(coverage) {
   return conflicts;
 }
 
-export function remediationV5(sufficiency) {
-  const actions=[];
-  if(sufficiency.reasons?.includes('APPROVED_AGGREGATE_TRADE_FLOOR_NOT_MET'))actions.push('Obtain further qualified DISCOVERY executions against the unchanged approved aggregate trade floor.');
-  if(sufficiency.session_proof_missing_run_ids?.length || sufficiency.session_conflicts?.length)actions.push('The exact instance TELEMETRY owner must supply native chart trading-day/UTC mappings, session intervals and chart-settings proof for every retained closed trade through the reviewed native logger contract. Current chart timezone or signal labels alone are insufficient.');
-  if(sufficiency.session_conflicts?.some(item=>['NATIVE_SESSION_ADAPTER_INTEGRATION_DUE','SUPPORTED_NATIVE_SESSION_PRODUCER_CONTRACT_REQUIRED'].includes(item.reason)))actions.push(`${NATIVE_SESSION_INTEGRATION.next_action} The v543 source audit proves it cannot supply these native facts. Calendar revision/hash must be pinned from that native receipt/configuration, not added to immutable run-context2.1. This is an integration-due core, not a completed native-session repair.`);
-  if(sufficiency.reasons?.includes('DECLARED_COVERAGE_OVERLAP_OBSERVATION_DUPLICATION_NOT_PROVEN'))actions.push('Resolve exact overlap/duplicate-observation provenance prospectively. All executed rows and contradictions remain in accounting; overlapping coverage cannot supply aggregate support by repeated counting.');
-  if(sufficiency.reasons?.includes('APPROVED_AGGREGATE_SESSION_FLOOR_NOT_MET'))actions.push('After exact observed session mapping is verified, obtain additional qualified discovery sessions if the union still falls below the approved session floor.');
-  if(sufficiency.missing_distinct_block_count)actions.push(`Obtain ${sufficiency.missing_distinct_block_count} additional complete, predeclared qualified calendar discovery block(s), then rerun Research; operational contract segments are not independent periods.`);
-  if(sufficiency.incomplete_blocks?.length || sufficiency.missing_coverage_run_ids?.length)actions.push('Verify or complete the already declared discovery coverage; do not discard retained child strata or move boundaries after seeing outcomes.');
-  if(sufficiency.sample_shortfalls?.length)actions.push('The Research engineering owner must author and test a prospective sampling/protocol revision for the frozen calendar-block sample shortfall. Later months cannot increase a frozen block count. Existing engineering authorization covers this design work; preserve every contradiction and the approved 50/20 policy, and do not tune from holdout results.');
-  return {status:actions.length?'QUALIFIED_EVIDENCE_OR_PROTOCOL_WORK_REQUIRED':'NOT_REQUIRED',
-    requires_design_review:Boolean(sufficiency.sample_shortfalls?.length),policy_change_authorized:false,
-    protocol_engineering_authorized:true,additional_discovery_can_resolve_fixed_sample_shortfalls:false,
-    missing_distinct_coverage_count:sufficiency.missing_distinct_block_count || 0,
-    frozen_sample_shortfalls:sufficiency.sample_shortfalls || [],next_action:actions.join(' ') || 'The scoped entry-direction screen is assessed; no candidate testing is implied.'};
-}
 
-export function evaluateV5(bundle,rows,accounting) {
+export function remediationV6(sufficiency) {
+  const actions=[];
+  if(sufficiency.reasons?.includes('APPROVED_AGGREGATE_TRADE_FLOOR_NOT_MET'))
+    actions.push('Obtain further qualified DISCOVERY executions against the unchanged approved aggregate trade floor.');
+  if(sufficiency.session_proof_missing_run_ids?.length || sufficiency.session_conflicts?.length)
+    actions.push('Telemetry and Research owners must resolve the exact listed native mapping or recorded producer-build proof gaps. Use native ENTRY trading-day/settings/actual-fill/accepted-attempt joins; current disk pins, floored dates and signal labels are not past native proof. v543 evidence cannot be retro-upgraded: an unmapped frozen segment needs an exact-coverage fresh managed native-observation replay that legitimately supersedes it, or independently proven original native facts. Later months alone cannot repair that immutable gap. Preserve the old run and all contradictions.');
+  if(sufficiency.reasons?.includes('APPROVED_AGGREGATE_SESSION_FLOOR_NOT_MET'))
+    actions.push('Obtain further qualified discovery ENTRY trading-day units under the same verified native configuration until the approved union floor is met; never sum reruns or exit-only dates.');
+  if(sufficiency.reasons?.includes('DECLARED_COVERAGE_OVERLAP_OBSERVATION_DUPLICATION_NOT_PROVEN'))
+    actions.push('Resolve overlapping observation provenance prospectively; retain all recorded rows and contradictions without double-counting support.');
+  if(sufficiency.reasons?.includes('NO_RECORDED_DIRECTION_GROUPS'))
+    actions.push('Research engineering owner: verify recorded entry-direction availability; unknown labels do not supply a hypothesis.');
+  if(sufficiency.reasons?.includes('HISTORICAL_COVERAGE_NOT_PROVEN'))
+    actions.push('Research owner: recover exact declared discovery coverage, not result-selected boundaries.');
+  return {status:actions.length?'QUALIFIED_EVIDENCE_REQUIRED':'NOT_REQUIRED',requires_design_review:false,
+    policy_change_authorized:false,protocol_engineering_authorized:true,
+    additional_discovery_can_resolve_fixed_sample_shortfalls:false,missing_distinct_coverage_count:0,
+    frozen_sample_shortfalls:[],next_action:actions.join(' ') || 'The qualified direction hypothesis screen is assessed. Candidate validation remains separately not due.'};
+}
+// Older frozen snapshots retain their saved remediation verbatim.
+export const remediationV5=remediationV6;
+
+export function evaluateV6(bundle,rows,accounting) {
   const calendar=calendarBlocks(bundle),sessions=sessionEvidence(bundle,rows),policy=bundle.approved_evidence_policy;
   const approved=policy?.status==='APPROVED' && Number.isInteger(policy.minimum_comparable_trades)
     && policy.minimum_comparable_trades>0 && Number.isInteger(policy.minimum_independent_sessions)
@@ -177,56 +111,74 @@ export function evaluateV5(bundle,rows,accounting) {
   if(!sessions.verified)reasons.push('OBSERVED_EXECUTION_SESSION_PROOF_REQUIRED');
   const overlaps=coverageOverlaps(bundle.research_coverage);
   if(overlaps.length)reasons.push('DECLARED_COVERAGE_OVERLAP_OBSERVATION_DUPLICATION_NOT_PROVEN');
-  if(approved && sessions.verified && sessions.observed_session_count<policy.minimum_independent_sessions)reasons.push('APPROVED_AGGREGATE_SESSION_FLOOR_NOT_MET');
+  if(approved && sessions.verified && sessions.observed_session_count<policy.minimum_independent_sessions)
+    reasons.push('APPROVED_AGGREGATE_SESSION_FLOOR_NOT_MET');
+  if(calendar.missing_run_ids.length)reasons.push('HISTORICAL_COVERAGE_NOT_PROVEN');
   const eligibility={status:reasons.length?'INSUFFICIENT':'SUFFICIENT',policy:policy || null,policy_hash:policy?objectHash(policy):null,
     observed_comparable_trades:rows.length,observed_session_count:sessions.verified?sessions.observed_session_count:null,
-    session_definition:sessions.basis,statistical_independence_verified:false,coverage_overlaps:overlaps,reasons:[...reasons]};
+    session_definition:sessions.basis,statistical_independence_verified:false,
+    full_market_session_coverage_verified:false,zero_trade_coverage_verified:false,
+    market_coverage_status:sessions.market_coverage_status,coverage_overlaps:overlaps,reasons:[...reasons]};
   const complete=calendar.blocks.filter(block=>block.complete);
-  if(calendar.missing_run_ids.length)reasons.push('HISTORICAL_COVERAGE_NOT_PROVEN');
-  if(calendar.blocks.some(block=>!block.complete))reasons.push('INCOMPLETE_PREDECLARED_CALENDAR_BLOCK');
-  if(complete.length<screeningPolicy.minimum_distinct_declared_periods)reasons.push('INSUFFICIENT_PREDECLARED_CALENDAR_BLOCKS');
   const assignment=row=>{
     const entry=sessions.entries.get(`${row.run_id}:${row.trade_id}`);
-    if(entry)return month(Date.parse(entry.entry_utc));
-    const possible=calendar.blocks.filter(block=>block.child_strata.some(child=>child.run_id===row.run_id));
-    return possible.length===1?possible[0].block_id:null;
+    // Native date is a Sierra date integer. This formats its calendar label,
+    // not the fill's UTC timestamp or a statistical independence claim.
+    if(entry)return nativeDateLabel(entry.trading_day_date).slice(0,7);
+    return null;
   };
-  if(rows.some(row=>{
-    const entry=sessions.entries.get(`${row.run_id}:${row.trade_id}`);
-    return entry && !calendar.blocks.some(block=>block.child_strata.some(child=>child.run_id===row.run_id
-      && Date.parse(child.start_utc)<=Date.parse(entry.entry_utc) && Date.parse(entry.entry_utc)<Date.parse(child.end_utc)));
-  }))reasons.push('OBSERVED_ENTRY_OUTSIDE_DECLARED_CHILD_COVERAGE');
-  const experiments=accounting.experiments.map(item=>{
+  const experiments=accounting.experiments.filter(item=>['long','short'].includes(item.value)).map(item=>{
     const selected=rows.filter(row=>row.direction===item.value);
     const blocks=calendar.blocks.map(block=>{const group=selected.filter(row=>assignment(row)===block.block_id);
       return {block_id:block.block_id,complete:block.complete,trades:group.length,net_profit_loss:sum(group),observed_exclusion_delta:-sum(group)};});
-    const sufficient=reasons.length===0
-      && calendar.blocks.every(block=>block.complete) && blocks.every(block=>block.trades>=10);
-    const supported=sufficient && item.runs.every(run=>run.observed_exclusion_delta>0);
-    return {...item,blocks,evidence_sufficient:sufficient,supported,reason:!sufficient?'INSUFFICIENT_V5_PROTOCOL_EVIDENCE'
-      :supported?'REPEATED_EXPLORATORY_DIRECTION_LOSS':'DIRECTION_LOSS_NOT_REPEATED_IN_EVERY_RETAINED_CHILD_STRATUM'};
+    const contradictory=item.runs.filter(run=>run.trades>0 && run.observed_exclusion_delta<=0);
+    const empty=item.runs.filter(run=>run.trades===0);
+    const diagnosticReasons=[
+      ...(complete.length<3?['FEWER_THAN_THREE_COMPLETE_CALENDAR_BLOCKS']:[]),
+      ...(calendar.blocks.some(block=>!block.complete)?['INCOMPLETE_CALENDAR_BLOCK']:[]),
+      ...(blocks.some(block=>block.trades<10)?['FEWER_THAN_TEN_DIRECTION_TRADES_IN_CALENDAR_BLOCK']:[]),
+      ...(contradictory.length?['CONTRADICTORY_RETAINED_CHILD_STRATA']:[]),
+      ...(empty.length?['UNOBSERVED_DIRECTION_IN_RETAINED_CHILD_STRATUM']:[]),
+      ...(!sessions.mapping_verified?['NATIVE_BLOCK_ASSIGNMENT_UNVERIFIED']:[])];
+    const hypothesis=item.observed_exclusion_delta>0;
+    const supported=reasons.length===0 && hypothesis && contradictory.length===0;
+    return {...item,blocks,evidence_sufficient:reasons.length===0,supported,hypothesis_generated:hypothesis,
+      contradictory_child_run_ids:contradictory.map(run=>run.run_id),unobserved_child_run_ids:empty.map(run=>run.run_id),
+      robustness:{status:contradictory.length?'CONTRADICTED':diagnosticReasons.length?'NOT_ESTABLISHED':'DESCRIPTIVE_CHECKS_MET',
+        reasons:diagnosticReasons,statistical_calibration:'NOT_CALIBRATED',candidate_acceptance:false},
+      reason:reasons.length?'APPROVED_AGGREGATE_EVIDENCE_NOT_VERIFIED':!hypothesis?'NO_AGGREGATE_DIRECTION_LOSS'
+        :contradictory.length?'CONTRADICTORY_RETAINED_CHILD_STRATA'
+        :'QUALIFIED_EXPLORATORY_HYPOTHESIS_NOT_CANDIDATE_ACCEPTANCE'};
   });
-  const shortfalls=experiments.flatMap(item=>item.blocks.filter(block=>block.trades<10).map(block=>({direction:item.value,
-    block_id:block.block_id,observed_trades:block.trades,required_trades:10})));
-  if(shortfalls.length)reasons.push('INSUFFICIENT_DIRECTION_SAMPLE_IN_CALENDAR_BLOCK');
   if(!experiments.length)reasons.push('NO_RECORDED_DIRECTION_GROUPS');
   const sufficiency={status:reasons.length?'INSUFFICIENT':'SUFFICIENT',assessment_complete:reasons.length===0,
-    scope:'RECORDED_ENTRY_DIRECTION_DISCOVERY_SCREEN_ONLY',reasons,distinct_declared_periods:complete.length,
-    missing_distinct_block_count:Math.max(0,3-complete.length),missing_coverage_run_ids:calendar.missing_run_ids,
-    incomplete_blocks:calendar.blocks.filter(block=>!block.complete).map(block=>block.block_id),sample_shortfalls:shortfalls,
-    session_proof_missing_run_ids:sessions.missing_run_ids,session_conflicts:sessions.conflicts,
-    evaluated_direction_values:experiments.filter(item=>item.evidence_sufficient).map(item=>item.value),
-    unevaluated_direction_values:experiments.filter(item=>!item.evidence_sufficient).map(item=>item.value)};
-  const proposals=experiments.filter(item=>item.supported),remediation=remediationV5(sufficiency);
-  return {...accounting,schema_version:RESEARCH_V5,screening_policy:screeningPolicy,
+    scope:'RECORDED_ENTRY_DIRECTION_DISCOVERY_SCREEN_ONLY',reasons,distinct_declared_periods:calendar.blocks.length,
+    missing_distinct_block_count:0,missing_coverage_run_ids:calendar.missing_run_ids,incomplete_blocks:[],
+    sample_shortfalls:[],session_proof_missing_run_ids:sessions.missing_run_ids,session_conflicts:sessions.conflicts,
+    evaluated_direction_values:reasons.length?[]:experiments.map(item=>item.value),
+    unevaluated_direction_values:reasons.length?experiments.map(item=>item.value):[]};
+  const proposals=experiments.filter(item=>item.supported),remediation=remediationV6(sufficiency);
+  const hypotheses=experiments.filter(item=>item.hypothesis_generated).map(item=>({dimension:item.dimension,value:item.value,
+    observed_exclusion_delta:item.observed_exclusion_delta,qualification:reasons.length?'DESCRIPTIVE_ONLY':'QUALIFIED_DISCOVERY',
+    contradictory_child_run_ids:item.contradictory_child_run_ids,robustness:item.robustness}));
+  return {...accounting,schema_version:RESEARCH_V6,screening_policy:screeningPolicy,
+    descriptive_excluded_history:bundle.descriptive_excluded_history || null,
     protocol:{version:PROTOCOL_VERSION,timezone:zone,boundary_selection:'PREDECLARED_CALENDAR_NOT_OUTCOME_SELECTED',
+      native_block_assignment:'NATIVE_TRADING_DAY_CALENDAR_LABEL_NOT_FILL_UTC',
+      hypothesis_generation:'RECORDED_ENTRY_DIRECTION_AGGREGATE_LOSS_DESCRIPTIVE_NO_MINIMUM_MONTH_GATE',
+      proposal_rule:'APPROVED_AGGREGATE_FLOOR_AND_NO_CONTRADICTORY_RETAINED_CHILD_STRATA',
+      robustness_role:'REPORT_3_COMPLETE_BLOCKS_10_DIRECTION_TRADES_PER_BLOCK_NOT_PLANNING_GATE',
+      candidate_acceptance:'SEPARATE_FROZEN_CANDIDATE_AND_REVIEWED_VALIDATION_NOT_EVALUATED',
       child_strata_retained:true,all_qualified_rows_retained:true,statistical_independence_verified:false},
-    approved_evidence_eligibility:eligibility,evidence_sufficiency:sufficiency,evidence_remediation:remediation,
+    approved_evidence_eligibility:eligibility,evidence_sufficiency:sufficiency,evidence_remediation:remediation,hypotheses,
+    native_session_evidence:{verification_status:sessions.verification_status,mapping_verified:sessions.mapping_verified,
+      mapped_entry_day_count:sessions.mapped_entry_day_count,session_config_hash:sessions.session_config_hash,
+      market_coverage_status:sessions.market_coverage_status,exit_audit:sessions.exit_audit},
     historical_periods:{...accounting.historical_periods,basis:'PREDECLARED_CALENDAR_BLOCKS_WITH_RETAINED_OPERATIONAL_CHILD_STRATA',
-      distinct_coverage_count:complete.length,blocks:calendar.blocks},experiments,proposals,
-    outcome:proposals.length?'EXPLORATORY_PROPOSAL':reasons.length?'INSUFFICIENT_EVIDENCE':'NO_SUPPORTED_CHANGE',
-    next_action:proposals.length?'The owned Brain planning worker must freeze the exact non-live direction hypothesis and prospective comparison protocol, assess current scoped capabilities and retain recoverable owner work. No candidate is approved or tested.'
-      :reasons.length?`Keep the baseline. This is insufficient evidence, not an evaluated no-change finding. ${remediation.next_action}`
-        :'Keep the baseline. The approved aggregate floor and prospective entry-direction screen were assessed; no supported direction exclusion was found. No candidate was built or tested.',
-    limitations:[...accounting.limitations,'V5 calendar blocks and the 3/10 discovery screen are prospective implementation policy, not statistically calibrated human-approved thresholds. Disjoint observed trading-day sessions do not prove statistical independence.']};
+      distinct_coverage_count:calendar.blocks.length,complete_calendar_block_count:complete.length,blocks:calendar.blocks},
+    experiments,proposals,outcome:proposals.length?'EXPLORATORY_PROPOSAL':reasons.length?'INSUFFICIENT_EVIDENCE':'NO_SUPPORTED_CHANGE',
+    next_action:proposals.length?'The existing owned Brain planning worker freezes this exact non-live hypothesis, retained contradictions and prospective comparison scope. Report unresolved 3/10 robustness checks in the plan; do not treat them as aggregate eligibility or invent candidate acceptance. No candidate is approved or tested.'
+      :reasons.length?`Keep the baseline. This is insufficient verified evidence, not an evaluated no-change finding. ${remediation.next_action}`
+        :'Keep the baseline. The qualified aggregate direction hypothesis screen found no contradiction-free direction exclusion. This is a scoped discovery no-change finding, not candidate validation or a conclusion about all improvements.',
+    limitations:[...accounting.limitations,'V6 prospectively separates approved 50/20/DQ0 eligibility from descriptive hypotheses, uncalibrated 3/10 robustness diagnostics and separately governed candidate acceptance. Native entry trading-day units do not prove IID or full market-session coverage. Frozen v4/v5 reports are not rewritten.']};
 }

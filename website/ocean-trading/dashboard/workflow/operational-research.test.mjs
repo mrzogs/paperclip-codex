@@ -7,7 +7,7 @@ import vm from 'node:vm';
 import { WorkflowStore } from './store.mjs';
 import { digest, objectHash, WorkflowError } from './common.mjs';
 import { OperationalLearning } from './operational-learning.mjs';
-import { LEGACY_RESEARCH_VERSION as RESEARCH_VERSION, OperationalResearch, evaluateResearchV4 as evaluateResearch } from './operational-research.mjs';
+import { LEGACY_RESEARCH_VERSION as RESEARCH_VERSION, OperationalResearch, evaluateResearchV4 as evaluateResearch, boundedResearchRecommendation } from './operational-research.mjs';
 
 function sample() {
   const rows=['a','b','c'].flatMap((run_id,index)=>Array.from({length:20},(_,i)=>({
@@ -456,6 +456,25 @@ test('completed cases are not version backfilled even when their trigger still q
   }finally{f.close();}
 });
 
+test('old v1 RETRY Brain422 attempts6 stays immutable superseded history behind completed v2 after two restarts',()=>{
+  const f=historicalFixture();try {
+    const oldId='old-v1-retry';
+    f.backend.db.prepare(`INSERT INTO ow_research_jobs(id,case_id,artifact_id,artifact_hash,analysis_version,state,attempts,
+      next_attempt_ms,created_at_utc,last_error) VALUES(?,?,?,?,?,'RETRY',6,0,?,?)`).run(oldId,'case','a',f.original.artifact_hash,
+      'ocean-cumulative-research/v1','2026-10-06T00:00:00Z','Brain422 recommendation.content >50000');
+    const before=f.backend.one('ow_research_jobs',oldId);
+    for(let i=0;i<2;i++) {
+      f.restart();f.worker.reconcile();assert.equal(f.worker.claim(),null);
+      const status=f.worker.statusForCase('case');
+      assert.equal(status.job_id,f.legacyId);assert.equal(status.state,'COMPLETED');
+      const old=status.skipped_version_backfill_jobs.find(job=>job.job_id===oldId);
+      assert.ok(old);assert.equal(old.actionable,false);assert.equal(old.effective_state,'HISTORICAL_SUPERSEDED');
+      assert.doesNotMatch(status.next_action,/retry Research automatically|Brain422/);
+      assert.deepEqual(f.backend.one('ow_research_jobs',oldId),before);f.assertPreserved();
+    }
+  }finally{f.close();}
+});
+
 function seedVersionBackfill(f,state='PENDING',snapshot=null) {
   // Isolated fixture reproduces a pre-fix backfill record, not a runtime DB repair.
   const id=`research-${digest(`case:a:${RESEARCH_VERSION}`).slice(-24)}`;
@@ -480,7 +499,7 @@ test('uncaptured pending/retry backfills never retry or hide the completed histo
     const status=f.worker.statusForCase('case');
     assert.equal(status.job_id,f.legacyId);assert.equal(status.state,'COMPLETED');assert.equal(status.last_error,null);
     assert.deepEqual(status.skipped_version_backfill_jobs,[{job_id:pending.id,analysis_version:RESEARCH_VERSION,state,input_hash:null,
-      reason:'COMPLETED_HISTORICAL_CASE_VERSION_BACKFILL'}]);
+      reason:'COMPLETED_HISTORICAL_CASE_VERSION_BACKFILL',effective_state:'HISTORICAL_SUPERSEDED',actionable:false}]);
     assert.equal(status.version_backfill_skipped,true);f.assertPreserved();
   }finally{f.close();}
   }
@@ -902,4 +921,18 @@ test('mock Brain crash-after-write resumes the exact persisted request and rejec
     f.backend.operationalLearning.call=async()=>({content:'{}'});
     await assert.rejects(f.worker.recordInBrain(resumed,evidence,result),/RESEARCH_BRAIN_RESPONSE_INVALID/);
   }finally{f.close();}
+});
+
+test('large cumulative evaluation uses bounded recommendation and exact immutable full-source hash references',()=>{
+  const {rows,bundle}=sample(),result=evaluateResearch(bundle,rows);
+  result.per_run=Array.from({length:2500},(_,i)=>({...result.per_run[i%3],run_id:`r-${i}`,diagnostic:'retained contradiction '.repeat(10)}));
+  result.native_session_evidence={exit_audit:Array.from({length:3000},(_,i)=>({trade_id:i,status:'MISSING_FINAL_EXIT_MAPPING'}))};
+  const before=JSON.stringify(result),job={id:'research-large-fixture',input_hash:digest('EXPLICIT_MOCK_FROZEN_INPUT')};
+  const content=boundedResearchRecommendation(job,result),parsed=JSON.parse(content);
+  assert.ok(before.length>50000);assert.ok(content.length<=50000);
+  assert.equal(parsed.representation,'BOUNDED_SUMMARY_WITH_FULL_FROZEN_SOURCE_REFERENCES');
+  assert.equal(parsed.source.job_id,job.id);assert.equal(parsed.source.input_hash,job.input_hash);
+  assert.equal(parsed.source.result_hash,objectHash(result));assert.equal(parsed.experiments_hash,objectHash(result.experiments));
+  assert.equal(JSON.stringify(result),before,'no full-source evidence was removed or clipped');
+  assert.equal(boundedResearchRecommendation(job,result),content,'restart rebuild is deterministic when no saved request exists');
 });
