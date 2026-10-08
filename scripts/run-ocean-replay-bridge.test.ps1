@@ -61,8 +61,14 @@ if (-not $source.Contains("`$evidencePlan.status -cne 'READY'") -or
 if (-not $source.Contains("schema_version='ocean-replay-bridge-health/v1'") -or
     -not $source.Contains('identity_fresh=($Status -ceq') -or
     -not $source.Contains('last_authenticated_run_identity=$LastAuthenticatedRunIdentity') -or
-    -not $source.Contains('last_failure=$lastFailure')) {
+    -not $source.Contains('last_failure=$lastFailure') -or
+    -not $source.Contains("'STALE_UNUSABLE'") -or
+    -not $source.Contains("throw 'BRIDGE_FAILURE_STATE_PUBLICATION_FAILED'")) {
   throw 'SEPARATE_BRIDGE_HEALTH_CONTRACT_REQUIRED'
+}
+if ($source.Contains("if (`$message -cmatch '^[A-Z][A-Z0-9_]{1,100}$')") -or
+    -not $source.Contains('$knownCodes -ccontains $message')) {
+  throw 'FAILURE_REASON_CODES_MUST_USE_FINITE_ALLOWLIST'
 }
 $failurePublisherStart = $source.IndexOf('function Publish-BridgeCycleFailure', [StringComparison]::Ordinal)
 $failureHealthWrite = $source.IndexOf('Write-BridgeHealth $status $lastIdentity $failure', $failurePublisherStart, [StringComparison]::Ordinal)
@@ -138,7 +144,7 @@ function Assert-BridgeThrows([ScriptBlock]$Action, [string]$Code) {
     Assert-BridgeTest ($state.run_id -ceq 'authenticated-run' -and $state.last_authenticated_run_identity.run_id -ceq 'authenticated-run' -and
       $state.last_authenticated_run_identity.run_state -ceq 'ACTIVE') 'LAST_AUTHENTICATED_IDENTITY_NOT_PRESERVED'
     $firstAuthenticatedObservation = [string]$state.last_authenticated_run_identity.observed_at_utc
-    try { throw 'SECOND_TRANSIENT_FAILURE' } catch { $secondFailure = $_ }
+    try { throw 'OWNER_LEASE_RECOVERY_WAIT' } catch { $secondFailure = $_ }
     Publish-BridgeCycleFailure $secondFailure $false
     $state = [IO.File]::ReadAllText($statePath) | ConvertFrom-Json
     $health = [IO.File]::ReadAllText($statePath + '.health.json') | ConvertFrom-Json
@@ -153,23 +159,72 @@ function Assert-BridgeThrows([ScriptBlock]$Action, [string]$Code) {
       $health.last_authenticated_run_identity.run_id -ceq 'recovered-run') 'SUCCESSFUL_CYCLE_DID_NOT_RECOVER_HEALTH'
     Assert-BridgeTest ([string]$health.last_failure.failure_id -ceq $latestFailureId -and
       [string]$health.last_failure.observed_at_utc -ceq $latestFailureObservedAt -and
-      $health.last_failure.reason_code -ceq 'SECOND_TRANSIENT_FAILURE') 'RECOVERY_ERASED_OR_REFRESHED_LAST_FAILURE'
+      $health.last_failure.reason_code -ceq 'OWNER_LEASE_RECOVERY_WAIT') 'RECOVERY_ERASED_OR_REFRESHED_LAST_FAILURE'
 
-    try { throw 'opaque failure {"token":"secret-value","password":"another-secret","client_secret":"third-secret","Authorization":"Bearer fourth-secret"}' } catch { $opaqueFailure = $_ }
+    try { throw 'UPPERCASE_SECRET_VALUE' } catch { $opaqueFailure = $_ }
     Publish-BridgeCycleFailure $opaqueFailure $false
     $health = [IO.File]::ReadAllText($statePath + '.health.json') | ConvertFrom-Json
     $serializedHealth = $health | ConvertTo-Json -Depth 30 -Compress
     Assert-BridgeTest ($health.reason_code -ceq 'BRIDGE_CYCLE_FAILED' -and
       $health.last_failure.message_sha256 -cmatch '^sha256:[a-f0-9]{64}$' -and
-      $serializedHealth -notmatch 'secret-value|another-secret|third-secret|fourth-secret|Authorization|password|client_secret') 'FAILURE_EVIDENCE_LEAKED_RAW_DETAIL'
+      $serializedHealth -notmatch 'UPPERCASE_SECRET_VALUE') 'FAILURE_EVIDENCE_LEAKED_RAW_DETAIL'
+
+    # A real Windows sharing lock can prevent replacement of the primary JSON.
+    # Health must then truthfully invalidate that unchanged ACTIVE projection.
+    Write-State ([ordered]@{status='ACTIVE';run_id='locked-run';run_state='ACTIVE';safety='OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED'})
+    $lockedPrimaryBytes = [IO.File]::ReadAllBytes($statePath)
+    $stateLock = [IO.File]::Open($statePath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+    $publicationError = $null
+    try {
+      try { throw 'OWNER_LEASE_RECOVERY_WAIT' } catch { $lockedFailure = $_ }
+      try { Publish-BridgeCycleFailure $lockedFailure $false } catch { $publicationError = $_.Exception.Message }
+    } finally { $stateLock.Dispose() }
+    $lockedAfterBytes = [IO.File]::ReadAllBytes($statePath)
+    $state = [IO.File]::ReadAllText($statePath) | ConvertFrom-Json
+    $health = [IO.File]::ReadAllText($statePath + '.health.json') | ConvertFrom-Json
+    Assert-BridgeTest ($publicationError -ceq 'BRIDGE_FAILURE_STATE_PUBLICATION_FAILED' -and
+      [Convert]::ToBase64String($lockedAfterBytes) -ceq [Convert]::ToBase64String($lockedPrimaryBytes) -and
+      $state.status -ceq 'ACTIVE' -and $state.identity_fresh) 'LOCKED_PRIMARY_WAS_CHANGED_OR_FAILURE_HIDDEN'
+    Assert-BridgeTest ($health.status -ceq 'DEGRADED' -and -not $health.identity_fresh -and
+      $health.primary_projection_status -ceq 'STALE_UNUSABLE' -and -not $health.primary_projection_usable -and
+      $health.last_failure.reason_code -ceq 'OWNER_LEASE_RECOVERY_WAIT' -and
+      $health.last_projection_failure.reason_code -ceq 'BRIDGE_STATE_PUBLICATION_FAILED') 'LOCKED_PRIMARY_NOT_INVALIDATED_BY_HEALTH'
+
+    Write-State ([ordered]@{status='ACTIVE';run_id='post-lock-recovered-run';run_state='ACTIVE';safety='OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED'})
+    $health = [IO.File]::ReadAllText($statePath + '.health.json') | ConvertFrom-Json
+    Assert-BridgeTest ($health.status -ceq 'HEALTHY' -and $health.primary_projection_status -ceq 'CURRENT' -and
+      $health.primary_projection_usable -and $health.last_projection_failure.reason_code -ceq 'BRIDGE_STATE_PUBLICATION_FAILED') 'LOCK_RECOVERY_NOT_CURRENT_OR_LOST_DIAGNOSTIC'
+
+    # If the health sidecar is locked, the writable primary must itself become
+    # fail-closed and retain a bounded publication diagnostic.
+    $healthBeforeBytes = [IO.File]::ReadAllBytes($statePath + '.health.json')
+    $healthLock = [IO.File]::Open($statePath + '.health.json',[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+    $healthPublicationError = $null
+    try {
+      try { throw 'OWNER_LEASE_RECOVERY_WAIT' } catch { $healthLockedFailure = $_ }
+      try { Publish-BridgeCycleFailure $healthLockedFailure $false } catch { $healthPublicationError = $_.Exception.Message }
+    } finally { $healthLock.Dispose() }
+    $healthAfterBytes = [IO.File]::ReadAllBytes($statePath + '.health.json')
+    $state = [IO.File]::ReadAllText($statePath) | ConvertFrom-Json
+    Assert-BridgeTest ($healthPublicationError -ceq 'BRIDGE_HEALTH_PUBLICATION_FAILED' -and
+      [Convert]::ToBase64String($healthAfterBytes) -ceq [Convert]::ToBase64String($healthBeforeBytes) -and
+      $state.status -ceq 'DEGRADED' -and -not $state.identity_fresh -and
+      $state.health_projection_status -ceq 'UNAVAILABLE' -and
+      $state.last_projection_failure.reason_code -ceq 'BRIDGE_HEALTH_PUBLICATION_FAILED') 'LOCKED_HEALTH_DID_NOT_FAIL_CLOSED_THROUGH_PRIMARY'
+
+    Write-State ([ordered]@{status='ACTIVE';run_id='post-health-lock-recovered-run';run_state='ACTIVE';safety='OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED'})
+    $health = [IO.File]::ReadAllText($statePath + '.health.json') | ConvertFrom-Json
+    Assert-BridgeTest ($health.status -ceq 'HEALTHY' -and $health.primary_projection_status -ceq 'CURRENT' -and
+      $health.primary_projection_usable -and $health.last_projection_failure.reason_code -ceq 'BRIDGE_HEALTH_PUBLICATION_FAILED') 'HEALTH_LOCK_RECOVERY_LOST_BOUNDED_DIAGNOSTIC'
 
     try { throw 'BRIDGE_CONFIG_CHANGED_RESTART_REQUIRED' } catch { $restartFailure = $_ }
     Publish-BridgeCycleFailure $restartFailure $true
     $state = [IO.File]::ReadAllText($statePath) | ConvertFrom-Json
     $health = [IO.File]::ReadAllText($statePath + '.health.json') | ConvertFrom-Json
     Assert-BridgeTest ($state.status -ceq 'RESTART_REQUIRED' -and $health.status -ceq 'RESTART_REQUIRED' -and
-      -not $state.identity_fresh -and $state.run_id -ceq 'recovered-run' -and $state.next_action -match 'Restart only ReplayBridge') 'RESTART_FAILURE_DID_NOT_PRESERVE_FAIL_CLOSED_IDENTITY'
-    Write-Output 'PASS: bridge health is separate, reason-specific, secret-redacted, identity-preserving and fail-closed across failure/recovery.'
+      -not $state.identity_fresh -and $state.run_id -ceq 'post-health-lock-recovered-run' -and $state.next_action -match 'Restart only ReplayBridge' -and
+      $health.primary_projection_status -ceq 'FAIL_CLOSED' -and -not $health.primary_projection_usable) 'RESTART_FAILURE_DID_NOT_PRESERVE_FAIL_CLOSED_IDENTITY'
+    Write-Output 'PASS: bridge health is separate, finite-code, secret-safe, lock-honest, identity-preserving and fail-closed across failure/recovery.'
   } finally {
     foreach ($path in @($statePath,($statePath + '.health.json'),($statePath + '.next'),($statePath + '.health.json.next'))) {
       if ([IO.Path]::GetFullPath([IO.Path]::GetDirectoryName($path)) -cne [IO.Path]::GetFullPath($stateRoot)) { throw 'HEALTH_TEST_CLEANUP_SCOPE_CONFLICT' }
@@ -325,8 +380,8 @@ try {
   function Get-LastAuthenticatedRunIdentity {
     return [ordered]@{run_id='mock-active-run';run_state='ACTIVE';observed_at_utc='2026-10-08T00:00:00.000Z';config_sha256=$script:ConfigHash}
   }
-  function Write-BridgeHealth([string]$Status, $LastAuthenticatedRunIdentity, $FailureEvidence = $null) {
-    $script:MockHealthStates += [pscustomobject]@{status=$Status;reason_code=$FailureEvidence.reason_code;identity=$LastAuthenticatedRunIdentity;failure=$FailureEvidence}
+  function Write-BridgeHealth([string]$Status, $LastAuthenticatedRunIdentity, $FailureEvidence = $null, [string]$ProjectionStatus = 'CURRENT', $ProjectionFailure = $null) {
+    $script:MockHealthStates += [pscustomobject]@{status=$Status;reason_code=$FailureEvidence.reason_code;identity=$LastAuthenticatedRunIdentity;failure=$FailureEvidence;projection_status=$ProjectionStatus;projection_failure=$ProjectionFailure}
     $script:MockPublicationOrder += 'health'
   }
   function Write-State($State) { $script:MockStates += $State; $script:MockPublicationOrder += 'state' }
@@ -351,8 +406,9 @@ try {
   Assert-BridgeThrows { & $main } 'BRIDGE_CONFIG_CHANGED_RESTART_REQUIRED'
   Assert-BridgeTest ($script:MockStates.Count -eq 1 -and $script:MockStates[0].status -ceq 'RESTART_REQUIRED' -and
     $script:MockStates[0].run_id -ceq 'mock-active-run') 'CONFIG_CHANGE_RETRIED_INFINITELY'
-  Assert-BridgeTest ($script:MockHealthStates.Count -eq 1 -and $script:MockHealthStates[0].status -ceq 'RESTART_REQUIRED' -and
-    ($script:MockPublicationOrder -join ',') -ceq 'health,state') 'RESTART_REASON_NOT_PUBLISHED_BEFORE_STATE'
+  Assert-BridgeTest ($script:MockHealthStates.Count -eq 2 -and $script:MockHealthStates[0].status -ceq 'RESTART_REQUIRED' -and
+    $script:MockHealthStates[0].projection_status -ceq 'UPDATE_PENDING' -and $script:MockHealthStates[1].projection_status -ceq 'FAIL_CLOSED' -and
+    ($script:MockPublicationOrder -join ',') -ceq 'health,state,health') 'RESTART_REASON_NOT_PUBLISHED_BEFORE_STATE'
   Assert-BridgeTest ($script:MockDisposed -and $null -eq $script:Credential.token) 'RESTART_DID_NOT_DISPOSE_CLIENT_OR_CLEAR_TOKEN'
   Assert-BridgeTest ($script:LeaseId -ceq 'mock-owned-lease') 'RESTART_MUTATED_SERVER_LEASE'
   Assert-BridgeTest ($script:MockMutexReleased -and $script:MockMutexDisposed) 'RESTART_SINGLETON_CLEANUP_FAILED'

@@ -288,7 +288,19 @@ function Get-LastAuthenticatedRunIdentity {
 
 function Get-BridgeFailureReason($FailureRecord) {
   $message = [string]$FailureRecord.Exception.Message
-  if ($message -cmatch '^[A-Z][A-Z0-9_]{1,100}$') { return $message }
+  $knownCodes = @(
+    'BRIDGE_CONFIG_CHANGED_RESTART_REQUIRED', 'BRIDGE_CONFIG_REJECTED', 'BRIDGE_CONFIG_SNAPSHOT_REQUIRED',
+    'BRIDGE_CONFIG_UNAVAILABLE_RESTART_REQUIRED', 'BRIDGE_IDENTITY_REJECTED', 'BRIDGE_PROBE_FAILED',
+    'BRIDGE_PROBE_FAILED_TIMEOUT', 'BRIDGE_SCOPE_REJECTED', 'CREDENTIAL_BINDING_REJECTED',
+    'EXACT_SIERRA_PROCESS_REQUIRED', 'EXPECTED_MODULE_HASH_MISMATCH', 'EXPECTED_MODULE_MISSING',
+    'EXPECTED_MODULE_NOT_LOADED', 'EXPECTED_SIERRA_PROCESS_NOT_RESPONDING', 'FAILED_ATTEMPT_NOT_RECONCILED',
+    'FAILURE_PROOF_NOT_READY', 'FAILURE_RUN_STATE_REJECTED', 'FOREIGN_OR_UNAVAILABLE_RUN_LEASE',
+    'LOCAL_PATH_REQUIRED', 'OPERATIONAL_HASH_REJECTED', 'OPERATIONAL_SOURCE_POLICY_REJECTED',
+    'OWNER_LEASE_RECOVERY_WAIT', 'REPLAY_EVIDENCE_ACTION_REJECTED', 'REPLAY_EVIDENCE_NOT_READY',
+    'REPLAY_EVIDENCE_PLAN_FAILED', 'REPLAY_EVIDENCE_PLAN_FAILED_TIMEOUT', 'ROUTE_REJECTED',
+    'TELEMETRY_BINDING_NOT_VERIFIED', 'TELEMETRY_VERSION_REJECTED'
+  )
+  if ($knownCodes -ccontains $message) { return $message }
   if ($message -match '(?i)database is locked|sqlite.*busy|busy.*sqlite') { return 'TRANSIENT_WORKFLOW_STATE_UNAVAILABLE' }
   if ($message -match '(?i)timed?\s*out|timeout') { return 'TRANSIENT_DEPENDENCY_TIMEOUT' }
   if ($message -match '(?i)actively refused|connection refused|unable to connect|no connection could be made') { return 'TRANSIENT_OCEAN_UNAVAILABLE' }
@@ -330,8 +342,31 @@ function Get-LastBridgeFailure {
   } catch { return $null }
 }
 
-function Write-BridgeHealth([string]$Status, $LastAuthenticatedRunIdentity, $FailureEvidence = $null) {
+function Get-LastBridgeProjectionFailure {
+  $candidates = @()
+  foreach ($path in @((Get-BridgeHealthPath), [string]$Config.state_file)) {
+    if (-not [IO.File]::Exists($path)) { continue }
+    try {
+      $projection = [IO.File]::ReadAllText($path) | ConvertFrom-Json
+      if ($projection.config_sha256 -ceq $script:ConfigHash -and $projection.last_projection_failure) {
+        $observedAt = [DateTimeOffset]::Parse([string]$projection.last_projection_failure.observed_at_utc, [Globalization.CultureInfo]::InvariantCulture)
+        $candidates += [pscustomobject]@{observed_at=$observedAt;failure=$projection.last_projection_failure}
+      }
+    } catch { continue }
+  }
+  if (-not $candidates.Count) { return $null }
+  return ($candidates | Sort-Object observed_at -Descending | Select-Object -First 1).failure
+}
+
+function Write-BridgeHealth(
+  [string]$Status,
+  $LastAuthenticatedRunIdentity,
+  $FailureEvidence = $null,
+  [string]$ProjectionStatus = 'CURRENT',
+  $ProjectionFailure = $null
+) {
   $lastFailure = if ($FailureEvidence) { $FailureEvidence } else { Get-LastBridgeFailure }
+  $lastProjectionFailure = if ($ProjectionFailure) { $ProjectionFailure } else { Get-LastBridgeProjectionFailure }
   $health = [ordered]@{
     schema_version='ocean-replay-bridge-health/v1'
     status=$Status
@@ -339,6 +374,9 @@ function Write-BridgeHealth([string]$Status, $LastAuthenticatedRunIdentity, $Fai
     identity_fresh=($Status -ceq 'HEALTHY')
     last_authenticated_run_identity=$LastAuthenticatedRunIdentity
     last_failure=$lastFailure
+    primary_projection_status=$ProjectionStatus
+    primary_projection_usable=($Status -ceq 'HEALTHY' -and $ProjectionStatus -ceq 'CURRENT')
+    last_projection_failure=$lastProjectionFailure
     updated_at_utc=[DateTimeOffset]::UtcNow.ToString('o')
     pid=$PID
     config_sha256=$script:ConfigHash
@@ -347,6 +385,7 @@ function Write-BridgeHealth([string]$Status, $LastAuthenticatedRunIdentity, $Fai
 }
 
 function Write-State($State, [switch]$SuppressHealthyReceipt) {
+  $previousProjectionFailure = Get-LastBridgeProjectionFailure
   $State.updated_at_utc = [DateTimeOffset]::UtcNow.ToString('o')
   $State.pid = $PID
   $State.config_sha256 = $script:ConfigHash
@@ -356,7 +395,7 @@ function Write-State($State, [switch]$SuppressHealthyReceipt) {
     $identity = if ([string]::IsNullOrWhiteSpace([string]$State.run_id)) { $null } else {
       [ordered]@{run_id=[string]$State.run_id;run_state=[string]$State.run_state;observed_at_utc=[string]$State.updated_at_utc;config_sha256=$script:ConfigHash}
     }
-    Write-BridgeHealth 'HEALTHY' $identity
+    Write-BridgeHealth 'HEALTHY' $identity $null 'CURRENT' $previousProjectionFailure
   }
 }
 
@@ -368,7 +407,12 @@ function Publish-BridgeCycleFailure($FailureRecord, [bool]$RestartRequired) {
 
   # Health is published first so a crash during state projection cannot erase
   # the reason for the failed cycle or present preserved identity as fresh.
-  Write-BridgeHealth $status $lastIdentity $failure
+  $healthPublicationFailure = $null
+  try {
+    Write-BridgeHealth $status $lastIdentity $failure 'UPDATE_PENDING'
+  } catch {
+    $healthPublicationFailure = Get-BridgeFailureEvidence $_ 'BRIDGE_HEALTH_PUBLICATION_FAILED'
+  }
   $state = [ordered]@{
     status=$status
     error=$reason
@@ -381,7 +425,29 @@ function Publish-BridgeCycleFailure($FailureRecord, [bool]$RestartRequired) {
   if ($RestartRequired) {
     $state.next_action = 'Restart only ReplayBridge through the existing Ocean service lifecycle; revalidate current config and protected identity. Existing run leases expire normally; no binding is hot-swapped.'
   }
-  Write-State $state -SuppressHealthyReceipt
+  if ($healthPublicationFailure) {
+    $state.health_projection_status = 'UNAVAILABLE'
+    $state.last_projection_failure = $healthPublicationFailure
+  }
+  try {
+    Write-State $state -SuppressHealthyReceipt
+  } catch {
+    $projectionFailure = Get-BridgeFailureEvidence $_ 'BRIDGE_STATE_PUBLICATION_FAILED'
+    if (-not $healthPublicationFailure) {
+      Write-BridgeHealth $status $lastIdentity $failure 'STALE_UNUSABLE' $projectionFailure
+    }
+    throw 'BRIDGE_FAILURE_STATE_PUBLICATION_FAILED'
+  }
+  if ($healthPublicationFailure) { throw 'BRIDGE_HEALTH_PUBLICATION_FAILED' }
+  try {
+    Write-BridgeHealth $status $lastIdentity $failure 'FAIL_CLOSED'
+  } catch {
+    $projectionFailure = Get-BridgeFailureEvidence $_ 'BRIDGE_HEALTH_PUBLICATION_FAILED'
+    $state.health_projection_status = 'UNAVAILABLE'
+    $state.last_projection_failure = $projectionFailure
+    Write-State $state -SuppressHealthyReceipt
+    throw 'BRIDGE_HEALTH_PUBLICATION_FAILED'
+  }
 }
 
 function Invoke-BridgeCycle {
