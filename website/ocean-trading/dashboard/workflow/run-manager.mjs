@@ -149,7 +149,7 @@ export class RunManager {
         requireThat(isOperationalCompletionProducer(actor,plan,data.outcome),403,'WAYNE_BROWSER_ONLY');
         requireThat(isOperationalCompletionReady(run,plan,this.summary(run)),409,'OPERATIONAL_COMPLETION_NOT_READY');
       }
-      return this.b.store.transaction(()=>{
+      const commit=()=>{
         if(failureProof) {
           const previous=this.summary(run).progress;
           this.db.prepare('INSERT INTO ow_run_progress(run_id,payload_json) VALUES(?,?)').run(run.id,JSON.stringify({
@@ -160,7 +160,9 @@ export class RunManager {
         this.db.prepare("UPDATE ow_runs SET state='COMPLETING',revision=revision+1 WHERE id=?").run(run.id);
         this.b.event(run.id,'run-manager.end',actor,{outcome:data.outcome,...(failureProof?{failure_proof:failureProof}:{})});
         return this.read(actor,run.id);
-      });
+      };
+      // The generic API already owns the transaction, including its inbox receipt.
+      return this.db.isTransaction?commit():this.b.store.transaction(commit);
     }
     return this.telemetry(action,actor,data);
   }
@@ -354,7 +356,7 @@ export class RunManager {
       this.db.prepare('UPDATE ow_runs SET state=?,revision=revision+1 WHERE id=?').run(status,run.id);this.db.prepare('DELETE FROM ow_run_leases WHERE id=?').run(run.id);
       this.b.event(run.id,'run-manager.finish',actor,{completion});return this.read(actor,run.id);
     };
-    return failureProof?this.b.store.transaction(commit):commit();
+    return failureProof && !this.db.isTransaction?this.b.store.transaction(commit):commit();
   }
   evidence(run,plan,context,data) {
     id(data.event_id);id(data.legacy_trade_id);id(data.trade_id);bounded(data.symbol);utc(data.entry_time_utc);utc(data.exit_time_utc);

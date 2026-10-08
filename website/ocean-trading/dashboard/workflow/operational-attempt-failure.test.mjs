@@ -173,6 +173,50 @@ test('failure end/finish are atomic on ledger event failure and can recover with
   f.b.event=event;assert.equal(finish().state,'FAILED');
 });
 
+test('backend mutation owns the human end transaction and replay receipt',t=>{
+  const f=fixture(t),human={id:'mock-browser',role:'HUMAN'};
+  const end={message_id:'test-nested-end',data:{run_id:f.context.run_id,expected_revision:2,outcome:'CANCELLED'}};
+  assert.equal(f.b.mutate('run-manager.end',human,end).state,'COMPLETING');
+  assert.equal(f.b.mutate('run-manager.end',human,end).state,'COMPLETING');
+  assert.equal(f.db.prepare("SELECT COUNT(*) n FROM ow_events WHERE action='run-manager.end'").get().n,1);
+  assert.equal(f.db.isTransaction,false);
+  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_inbox').get().n,1);
+});
+
+test('backend mutation owns the failed finish transaction and replay receipt',t=>{
+  const f=fixture(t),lease=f.b.runs.perform('claim',f.actor,{run_id:f.context.run_id,expected_revision:2});
+  f.end(lease);
+  const finish={message_id:'test-nested-finish',data:{run_id:f.context.run_id,lease_id:lease.lease_id,expected_revision:3}};
+  assert.equal(f.b.mutate('run-manager.finish',f.actor,finish).state,'FAILED');
+  assert.equal(f.b.mutate('run-manager.finish',f.actor,finish).state,'FAILED');
+  assert.equal(f.db.isTransaction,false);
+  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_coverage_receipts').get().n,1);
+  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_inbox').get().n,1);
+});
+
+test('outer mutation receipt failure rolls back the entire end and finish transition',t=>{
+  const f=fixture(t),human={id:'mock-browser',role:'HUMAN'},lease=f.b.runs.perform('claim',f.actor,{run_id:f.context.run_id,expected_revision:2});
+  const end={message_id:'test-rollback-end',data:{run_id:f.context.run_id,expected_revision:2,outcome:'CANCELLED'}};
+  f.db.exec("CREATE TRIGGER mock_receipt_failure BEFORE INSERT ON ow_inbox BEGIN SELECT RAISE(ABORT,'MOCK_RECEIPT_FAILURE'); END;");
+  assert.throws(()=>f.b.mutate('run-manager.end',human,end),/MOCK_RECEIPT_FAILURE/);
+  assert.equal(f.b.one('ow_runs',f.context.run_id).state,'ACTIVE');
+  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_run_progress').get().n,0);
+  assert.equal(f.db.prepare("SELECT COUNT(*) n FROM ow_events WHERE action='run-manager.end'").get().n,0);
+  assert.equal(f.db.isTransaction,false);
+  f.db.exec('DROP TRIGGER mock_receipt_failure');
+  f.end(lease);
+  const finish={message_id:'test-rollback-finish',data:{run_id:f.context.run_id,lease_id:lease.lease_id,expected_revision:3}};
+  f.db.exec("CREATE TRIGGER mock_receipt_failure BEFORE INSERT ON ow_inbox BEGIN SELECT RAISE(ABORT,'MOCK_RECEIPT_FAILURE'); END;");
+  assert.throws(()=>f.b.mutate('run-manager.finish',f.actor,finish),/MOCK_RECEIPT_FAILURE/);
+  assert.equal(f.b.one('ow_runs',f.context.run_id).state,'COMPLETING');
+  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_coverage_receipts').get().n,0);
+  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_run_leases').get().n,1);
+  assert.equal(f.db.prepare("SELECT COUNT(*) n FROM ow_events WHERE action='run-manager.finish'").get().n,0);
+  assert.equal(f.db.isTransaction,false);
+  f.db.exec('DROP TRIGGER mock_receipt_failure');
+  assert.equal(f.b.mutate('run-manager.finish',f.actor,finish).state,'FAILED');
+});
+
 test('a new logger attempt after frozen end blocks stale failure finalization',t=>{
   const f=fixture(t),lease=f.b.runs.perform('claim',f.actor,{run_id:f.context.run_id,expected_revision:2});f.end(lease);
   f.sql.exec("INSERT INTO replay_run_attempts(run_id,attempt_number,attempt_started_utc,start_command_id) VALUES('mock-failed-u',4,'2026-10-08T17:00:00Z','new-start')");
