@@ -121,7 +121,7 @@ test('insufficient coverage creates owned evidence work, not proposal/approval/c
     assert.equal(status.loop_stage,'EVIDENCE_REQUIRED');
     const child=status.continuations[0];assert.equal(child.kind,'EVIDENCE_FOLLOW_UP');
     assert.equal(child.tasks[0].kind,'QUALIFIED_EVIDENCE_FOLLOW_UP');
-    assert.match(child.next_action,/new qualified, governed non-live discovery evidence.*new Research evaluation/);
+    assert.match(child.next_action,/genuinely distinct, qualified non-live discovery coverage.*new Research evaluation/);
     assertNoAuthority(f);
   }finally{f.close();}
 });
@@ -232,7 +232,7 @@ test('fully assessed no-change is terminal only for the recorded screen; partial
     const f=fixture(options);try {
       const status=f.complete();
       if(options.noChange) {assert.equal(status.report.outcome,'NO_SUPPORTED_CHANGE');assert.equal(f.children().length,0);assert.deepEqual(status.continuations,[]);}
-      else {assert.equal(status.report.evidence_sufficiency.assessment_complete,false);assert.equal(f.children().length,1);
+      else {assert.equal(status.report.evidence_sufficiency.assessment_complete,false);assert.equal(f.children().length,2);
         const payload=JSON.parse(f.children()[0].payload_json);
         const frozen=JSON.parse(Buffer.from(f.backend.one('ow_artifacts',payload.lineage_artifact_id).content).toString());
         assert.equal(frozen.support.requirement.value,'short');}
@@ -623,5 +623,31 @@ test('returned plan retains immutable history but loses current support when its
     assert.equal(view.planning.plan_work.blocked_reason,'PROPOSAL_CURRENT_SOURCE_OWNER_REQUIRED');
     assert.deepEqual(f.backend.one('ow_artifacts',artifact.id),artifact);assert.equal(returnedCount(f),1);
     assert.equal(plans(f).queue(f.actor).items[0].status,'BLOCKED');assertSealed(f,before);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('frozen sample debt remains owned design-review work after a third coverage arrives; supported direction can still plan',()=>{
+  const f=fixture({insufficient:true,partial:true});try{
+    const first=f.complete(),before=sealed(f),child=f.children()[0];
+    assert.equal(first.report.outcome,'INSUFFICIENT_EVIDENCE');assert.equal(first.loop_stage,'RESEARCH_DESIGN_REVIEW_REQUIRED');
+    const original=f.backend.readCase(f.human,child.id);
+    assert.equal(original.planning.evidence_remediation.requires_design_review,true);
+    assert.match(original.next_action,/Owner brain.*long in r2 \(9\/10\).*Adding later runs cannot/);
+    assert.equal(original.blockers[0].owner_id,'brain');assert.match(original.blockers[0].action,/prospective sampling-unit\/protocol review for Wayne/);
+    thirdCoverage(f);f.seed('third-fixed-sample');const next=f.complete();
+    assert.equal(next.report.outcome,'EXPLORATORY_PROPOSAL');assert.equal(next.report.historical_periods.distinct_coverage_count,3);
+    assert.equal(next.continuations.length,2);assert.equal(next.loop_stage,'PROPOSAL_PLANNING');
+    assert.equal(next.continuations.filter(item=>item.kind==='PROPOSAL_PLANNING').length,1);
+    const view=f.backend.readCase(f.human,child.id);
+    assert.equal(view.work_status,'READY');assert.equal(view.tasks[0].status,'NOT_RUN');
+    assert.equal(view.planning.progress.status,'STILL_INSUFFICIENT');
+    assert.equal(view.planning.evidence_remediation.missing_distinct_coverage_count,0);
+    assert.equal(view.planning.evidence_remediation.requires_design_review,true);
+    assert.match(view.next_action,/Adding later runs cannot increase those frozen counts/);
+    f.restart();f.worker.reconcile();f.worker.reconcile();
+    assert.equal(returnedCount(f),1,'only the separately supported direction has a planning draft');
+    assert.equal(f.backend.one('ow_cases',child.id).work_status,'READY');
+    assert.equal(f.backend.readCase(f.human,child.id).blockers.find(row=>row.id.endsWith(':sample-design')).state,'OPEN');
+    assertSealed(f,before);assertNoAuthority(f);
   }finally{f.close();}
 });

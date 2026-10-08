@@ -13,6 +13,23 @@ const screeningPolicy = Object.freeze({ minimum_distinct_declared_periods:3, min
   positive_net_exclusion_required_in_every_retained_run:true,
   basis:'EXISTING_DIRECTION_DISCOVERY_SCREEN_NOT_STATISTICALLY_CALIBRATED' });
 
+export function evidenceRemediation(sufficiency) {
+  const fixed=sufficiency.sample_shortfalls || [],missing=sufficiency.missing_coverage_run_ids || [];
+  const missingPeriods=Math.max(0,screeningPolicy.minimum_distinct_declared_periods-Number(sufficiency.distinct_declared_periods || 0));
+  const noDirections=sufficiency.reasons?.includes('NO_RECORDED_DIRECTION_GROUPS')===true;
+  const actions=[];
+  if(missing.length)actions.push(`Verify original requested coverage and provenance for retained runs ${missing.join(', ')}; missing proof is not permission to relabel or discard history.`);
+  if(missingPeriods)actions.push(`Obtain ${missingPeriods} additional genuinely distinct, qualified non-live discovery coverage(s) and a new Research evaluation. This can resolve the period shortfall, not fixed retained-run sample counts.`);
+  if(fixed.length)actions.push(`Research design review required for ${fixed.map(item=>`${item.direction} in ${item.run_id} (${item.observed_trades}/${item.required_trades})`).join(', ')}. Adding later runs cannot increase those frozen counts. The Research owner must document a prospective sampling-unit/protocol review for Wayne, including why the existing every-retained-run rule is or is not suitable. Keep all recorded trades, contradictory history and current floors; do not change policy or create a candidate from this review without separate authorization.`);
+  if(noDirections)actions.push('Review source entry-direction availability before designing another screen; do not invent direction or exit labels. No direction has been assessed.');
+  return {status:fixed.length || noDirections?'RESEARCH_DESIGN_REVIEW_REQUIRED':actions.length?'QUALIFIED_EVIDENCE_REQUIRED':'NOT_REQUIRED',
+    requires_design_review:fixed.length>0 || noDirections,
+    additional_discovery_can_resolve_fixed_sample_shortfalls:false,
+    missing_distinct_coverage_count:missingPeriods,missing_coverage_run_ids:missing,
+    frozen_sample_shortfalls:fixed,policy_change_authorized:false,
+    next_action:actions.join(' ') || 'The recorded direction screen has no evidence shortfall. This does not imply candidate testing.'};
+}
+
 function totals(rows) {
   const sum = field => round(rows.reduce((total,row) => total + Number(row[field]),0));
   return {
@@ -105,16 +122,18 @@ export function evaluateResearch(bundle, rows) {
     ...(sampleShortfalls.length?['INSUFFICIENT_DIRECTION_SAMPLE_IN_RETAINED_RUN']:[]),
   ];
   const assessmentComplete=insufficiencyReasons.length===0;
+  const sufficiency={status:assessmentComplete?'SUFFICIENT':'INSUFFICIENT',assessment_complete:assessmentComplete,
+    scope:'RECORDED_ENTRY_DIRECTION_DISCOVERY_SCREEN_ONLY',reasons:insufficiencyReasons,
+    evaluated_direction_values:experiments.filter(item=>item.evidence_sufficient).map(item=>item.value),
+    unevaluated_direction_values:experiments.filter(item=>!item.evidence_sufficient).map(item=>item.value),
+    missing_coverage_run_ids:coverageByRun.filter(run=>run.coverage===null).map(run=>run.run_id),
+    distinct_declared_periods:periodIds.size,sample_shortfalls:sampleShortfalls};
+  const remediation=evidenceRemediation(sufficiency);
   const result={
     schema_version:RESEARCH_VERSION,
     outcome:proposals.length?'EXPLORATORY_PROPOSAL':assessmentComplete?'NO_SUPPORTED_CHANGE':'INSUFFICIENT_EVIDENCE',
     screening_policy:screeningPolicy,
-    evidence_sufficiency:{status:assessmentComplete?'SUFFICIENT':'INSUFFICIENT',assessment_complete:assessmentComplete,
-      scope:'RECORDED_ENTRY_DIRECTION_DISCOVERY_SCREEN_ONLY',reasons:insufficiencyReasons,
-      evaluated_direction_values:experiments.filter(item=>item.evidence_sufficient).map(item=>item.value),
-      unevaluated_direction_values:experiments.filter(item=>!item.evidence_sufficient).map(item=>item.value),
-      missing_coverage_run_ids:coverageByRun.filter(run=>run.coverage===null).map(run=>run.run_id),
-      distinct_declared_periods:periodIds.size,sample_shortfalls:sampleShortfalls},
+    evidence_sufficiency:sufficiency,evidence_remediation:remediation,
     eligible_run_ids:eligibleIds,
     evidence_hash:objectHash(rows), cohort_hash:objectHash(bundle.cohort),
     accounting_basis:'Recorded simulated execution gross P&L, logger-recorded fees and net (gross minus fees); wins use recorded net P&L > 0.',
@@ -147,10 +166,10 @@ export function evaluateResearch(bundle, rows) {
       'Evidence sufficiency applies only to the recorded entry-direction discovery screen, not all possible improvements or candidate validation. Its existing thresholds are not independently statistically calibrated.',
     ],
     next_action:proposals.length
-      ?`Review the exploratory direction proposal before freezing a separate candidate; test it on independent evidence.${assessmentComplete?'':' Other recorded direction groups remain unassessed; resolve the reported evidence shortfalls before judging those groups.'} No actual candidate exists and no trading change has been made.`
+      ?`Review the exploratory direction proposal before freezing a separate candidate; test it on independent evidence.${assessmentComplete?'':` Other recorded direction groups remain unassessed. ${remediation.next_action}`} No actual candidate exists and no trading change has been made.`
       :assessmentComplete
         ?'Keep the current baseline. The recorded direction screen met its evidence floor, but no supported direction filter was found across every qualified historical coverage. This does not evaluate all possible improvements. No actual candidate exists. No approval is pending.'
-        :'Keep the current baseline. Research recorded insufficient evidence, not an evaluated no-change finding. Prove requested coverage for every retained run and collect new qualified non-live discovery evidence until at least three distinct declared coverages and ten trades per recorded direction in every retained run are available; resolve the report shortfalls. No actual candidate exists. No approval is pending.',
+        :`Keep the current baseline. Research recorded insufficient evidence, not an evaluated no-change finding. ${remediation.next_action} No actual candidate exists. No approval is pending.`,
     authority,
   };
   return result;
@@ -160,6 +179,7 @@ export class OperationalResearch {
   constructor(backend) { this.backend=backend;this.db=backend.db;this.running=false;this.stopped=false;
     this.version=RESEARCH_VERSION;this.continuations=new OperationalContinuation(this); }
   stop() {this.stopped=true;}
+  remediation(sufficiency){return evidenceRemediation(sufficiency);}
   historicalCompletion(caseId,artifactId=null) {
     return this.db.prepare(`SELECT * FROM ow_research_jobs WHERE case_id=? AND state='COMPLETED'
       AND result_artifact_id IS NOT NULL AND (? IS NULL OR artifact_id=?) ORDER BY rowid DESC LIMIT 1`)
@@ -272,7 +292,8 @@ export class OperationalResearch {
       skipped_version_backfill_jobs:skipped,
       continuations,
       loop_stage:openContinuations.length?openContinuations.some(item=>item.blocked_reason || item.work_status==='BLOCKED')?'BLOCKED_CONTINUATION'
-        :openContinuations.some(item=>item.kind==='EVIDENCE_FOLLOW_UP')?'EVIDENCE_REQUIRED':'PROPOSAL_PLANNING'
+        :openContinuations.some(item=>item.kind==='PROPOSAL_PLANNING')?'PROPOSAL_PLANNING'
+        :openContinuations.some(item=>item.evidence_remediation?.requires_design_review)?'RESEARCH_DESIGN_REVIEW_REQUIRED':'EVIDENCE_REQUIRED'
         :evidenceReassessed.length?evidenceReassessed.some(item=>item.progress.outcome==='EXPLORATORY_PROPOSAL')?'PROPOSAL_PLANNING':'DIRECTION_SCREEN_NO_SUPPORTED_CHANGE'
         :continuationWarning?'BLOCKED_CONTINUATION':null,
       next_action:superseded?supersededAction:completedCase && job.state==='COMPLETED' && (job.analysis_version!==RESEARCH_VERSION || skipped.length>0)

@@ -181,6 +181,46 @@ test('nine direction trades in one retained run is insufficient, not negative ev
   assert.deepEqual(result.evidence_sufficiency.evaluated_direction_values,['long']);
   assert.deepEqual(result.evidence_sufficiency.unevaluated_direction_values,['short']);
   assert.equal(result.experiments.find(item=>item.value==='short').reason,'INSUFFICIENT_DIRECTION_SAMPLE_IN_RETAINED_RUN');
+  assert.equal(result.evidence_remediation.status,'RESEARCH_DESIGN_REVIEW_REQUIRED');
+  assert.equal(result.evidence_remediation.additional_discovery_can_resolve_fixed_sample_shortfalls,false);
+  assert.match(result.next_action,/Adding later runs cannot increase those frozen counts/);
+  assert.match(result.next_action,/prospective sampling-unit\/protocol review for Wayne/);
+});
+
+test('adding a third qualified period resolves period count but never a frozen retained-segment sample shortfall',()=>{
+  const {rows,bundle}=sample();
+  rows.find(row=>row.run_id==='a' && row.direction==='short').direction='long';
+  for(const row of rows){row.gross_currency_value=10;row.net_profit_loss=9;}
+  const later=rows.filter(row=>row.run_id==='c'),original=rows.filter(row=>row.run_id!=='c');
+  bundle.cohort.eligible_runs=bundle.cohort.eligible_runs.filter(run=>run.run_id!=='c');
+  bundle.cohort.aggregate.observed_sample_count=original.length;
+  const before=objectHash(original),two=evaluateResearch(bundle,original);
+  assert.equal(two.outcome,'INSUFFICIENT_EVIDENCE');assert.equal(two.evidence_remediation.missing_distinct_coverage_count,1);
+  assert.equal(two.evidence_remediation.requires_design_review,true);
+  bundle.cohort.eligible_runs.push({run_id:'c',observed_sample_count:later.length});
+  bundle.cohort.aggregate.observed_sample_count=original.length+later.length;
+  const three=evaluateResearch(bundle,[...original,...later]);
+  assert.equal(three.outcome,'INSUFFICIENT_EVIDENCE');assert.equal(three.evidence_remediation.missing_distinct_coverage_count,0);
+  assert.deepEqual(three.evidence_sufficiency.sample_shortfalls,two.evidence_sufficiency.sample_shortfalls);
+  assert.equal(three.evidence_remediation.requires_design_review,true);assert.equal(three.evidence_remediation.policy_change_authorized,false);
+  assert.deepEqual(three.eligible_run_ids,['a','b','c']);assert.equal(three.aggregate.trades,60);
+  assert.equal(objectHash(original),before);assert.equal(three.screening_policy.minimum_direction_trades_per_retained_run,10);
+  assert.match(three.next_action,/short in a \(9\/10\)/);assert.doesNotMatch(three.next_action,/collect.*until.*ten/);
+});
+
+test('period-only missing evidence is collectable while missing coverage proof requires exact source repair',()=>{
+  const {rows,bundle}=sample();
+  bundle.cohort.eligible_runs=bundle.cohort.eligible_runs.filter(run=>run.run_id!=='c');
+  const retained=rows.filter(row=>row.run_id!=='c');bundle.cohort.aggregate.observed_sample_count=retained.length;
+  const result=evaluateResearch(bundle,retained);
+  assert.equal(result.evidence_remediation.status,'QUALIFIED_EVIDENCE_REQUIRED');
+  assert.equal(result.evidence_remediation.requires_design_review,false);
+  assert.equal(result.evidence_remediation.missing_distinct_coverage_count,1);
+  assert.match(result.next_action,/additional genuinely distinct, qualified non-live discovery/);
+  delete bundle.research_coverage.a;
+  const missing=evaluateResearch(bundle,retained);
+  assert.deepEqual(missing.evidence_remediation.missing_coverage_run_ids,['a']);
+  assert.match(missing.next_action,/Verify original requested coverage and provenance for retained runs a/);
 });
 
 test('a supported direction survives an explicitly partial screen without declaring every group evaluated',()=>{

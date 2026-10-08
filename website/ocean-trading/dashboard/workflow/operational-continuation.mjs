@@ -78,13 +78,16 @@ export class OperationalContinuation {
         requirement:source.report.evidence_sufficiency}];
     }
     requireThat(source.report.proposals?.length>0,409,'CONTINUATION_SUPPORTED_PROPOSAL_REQUIRED');
-    return source.report.proposals.map(proposal=>{
+    const items=source.report.proposals.map(proposal=>{
       requireThat(proposal.dimension==='direction' && proposal.supported===true && proposal.proposal_eligible===true
         && proposal.lookahead_safe===true && proposal.evidence_sufficient===true
         && source.report.experiments.some(item=>objectHash(item)===objectHash(proposal)),
       409,'CONTINUATION_SUPPORTED_PROPOSAL_REQUIRED');
       return {kind:'PROPOSAL_PLANNING',task_kind:'PROPOSAL_PLAN_REVIEW',requirement:proposal};
     });
+    if(source.report.evidence_sufficiency.assessment_complete!==true)items.push({kind:'EVIDENCE_FOLLOW_UP',
+      task_kind:'QUALIFIED_EVIDENCE_FOLLOW_UP',requirement:source.report.evidence_sufficiency});
+    return items;
   }
   ownerCurrent(owner,row) {
     if(owner===this.backend.config.browser?.subject_id)return this.backend.auth?.human?.state==='CONFIGURED';
@@ -95,10 +98,10 @@ export class OperationalContinuation {
       && ['read','artifact.write','event.write'].every(scope=>identity.scopes?.includes(scope))
       && this.backend.store.identityCurrent(identity) && !this.backend.auth?.bindingErrors?.has(owner));
   }
-  action(kind,owner) {
+  action(kind,owner,requirement=null) {
     return kind==='PROPOSAL_PLANNING'
       ?`Owner ${owner}: review the supported direction rule and freeze an exact non-live development/test/comparison plan with a scoped recipient through the operational proposal work queue. Returned drafts remain planning work until execution contracts are verified; no candidate has been built or tested.`
-      :`Owner ${owner}: resolve the frozen coverage/direction-sample shortfalls through new qualified, governed non-live discovery evidence and a new Research evaluation. Insufficient evidence is not an evaluated no-change finding. Keep the baseline; no proposal or approval is due.`;
+      :`Owner ${owner}: ${requirement?this.research.remediation(requirement).next_action:'Review the frozen evidence shortfalls before collecting further evidence.'} Insufficient evidence is not an evaluated no-change finding. Keep the baseline; no approval is due for unassessed directions.`;
   }
   ensure(job,actor) {
     const source=this.source(job);
@@ -119,7 +122,7 @@ export class OperationalContinuation {
           :this.backend.config.browser?.subject_id || source.row.owner_id;
         this.db.prepare("INSERT INTO ow_cases VALUES(?,?,?,?,1,'RESEARCH','READY',?,NULL,?,?,?)")
           .run(caseId,source.row.strategy_id,source.row.instance_id,source.row.run_id,source.row.baseline_hash,
-            owner,this.action(item.kind,owner),JSON.stringify(payload));
+            owner,this.action(item.kind,owner,item.requirement),JSON.stringify(payload));
         this.backend.writeArtifact(actor,{artifact_id:artifactId,case_id:caseId,run_id:source.row.run_id,
           recipient_id:source.recipient,kind:item.kind==='PROPOSAL_PLANNING'?'RECOMMENDATION':'EVIDENCE',
           media_type:'application/json',content:JSON.stringify(frozen),content_hash:digest(JSON.stringify(frozen)),
@@ -185,13 +188,13 @@ export class OperationalContinuation {
         dependency_ids:[payload.lineage_artifact_id]});
       const nextAction=resolved
         ?`Evidence follow-up was reassessed by ${source.reference.case_id}: ${source.report.outcome}. Open that Research case for the current owned action. This is not candidate testing.`
-        :`Owner ${row.owner_id}: new qualified Research ${source.reference.case_id} still reports evidence shortfalls. Review its frozen report and continue the governed evidence action; no candidate or approval is due.`;
+        :`Owner ${row.owner_id}: new qualified Research ${source.reference.case_id} still reports evidence shortfalls. ${this.research.remediation(source.report.evidence_sufficiency).next_action} No candidate or approval is due for unassessed directions.`;
       this.db.prepare('UPDATE ow_cases SET work_status=?,waiting_on=?,revision=revision+1 WHERE id=?')
         .run(resolved?'COMPLETED':workStatus,nextAction,row.id);
       if(resolved) {
         this.db.prepare("UPDATE ow_tasks SET status='COMPLETED',artifact_id=? WHERE case_id=? AND kind=?")
           .run(progressId,row.id,payload.task_kind);
-        this.db.prepare("UPDATE ow_blockers SET state='RESOLVED' WHERE case_id=? AND id=?").run(row.id,`${row.id}:proof`);
+        this.db.prepare("UPDATE ow_blockers SET state='RESOLVED' WHERE case_id=? AND id IN (?,?)").run(row.id,`${row.id}:proof`,`${row.id}:sample-design`);
       }
       this.backend.event(row.id,'operational.research.evidence.progress',actor,{source:source.reference,
         progress_artifact_id:progressId,status:resolved?'REASSESSED':'STILL_INSUFFICIENT',outcome:source.report.outcome,
@@ -203,10 +206,11 @@ export class OperationalContinuation {
     if(payload.origin!==CONTINUATION_ORIGIN)return null;
     const progressRow=this.db.prepare("SELECT payload_json FROM ow_events WHERE entity_id=? AND action='operational.research.evidence.progress' ORDER BY id DESC LIMIT 1").get(row.id);
     const progress=progressRow?JSON.parse(progressRow.payload_json).payload:null;
-    let reason=null,source=null;
+    let reason=null,source=null,evidenceRemediation=null;
     try {
       const artifact=this.backend.artifactFor(row,payload.lineage_artifact_id);
       const frozen=JSON.parse(Buffer.from(artifact.content).toString('utf8'));
+      if(payload.kind==='EVIDENCE_FOLLOW_UP')evidenceRemediation=this.research.remediation(frozen.support.requirement);
       requireThat(frozen.schema_version===VERSION && frozen.support_hash===payload.support_hash
         && objectHash(frozen.support)===payload.support_hash
         && objectHash(frozen.authority)===objectHash(noAuthority)
@@ -244,6 +248,7 @@ export class OperationalContinuation {
           && (progress.status!=='REASSESSED' || (latest.report.evidence_sufficiency.assessment_complete===true
             && task.status==='COMPLETED' && task.artifact_id===progressArtifact.id)),
         409,'CONTINUATION_PROGRESS_PROOF_CONFLICT');
+        evidenceRemediation=this.research.remediation(latest.report.evidence_sufficiency);
       }
     }catch(error){reason=errorCode(error);}
     const planWork=this.plans.forCase(row);
@@ -256,9 +261,11 @@ export class OperationalContinuation {
       blocked_reason:reason,qualified_for_planning:!reason,
       progress,
       plan_work:planWork,
+      evidence_remediation:evidenceRemediation,
       next_action:reason?`Owner ${row.owner_id}: resolve ${reason} before this continuation can support current planning. Preserve its recorded disposition and frozen evidence; no approval or candidate execution is due.`
         :row.work_status==='COMPLETED' && progress?.status==='REASSESSED'?progress.next_action
         :terminal.has(row.work_status)?`Planning is ${row.work_status.toLowerCase()}; owner ${row.owner_id} retains the recorded disposition. Restart does not reopen it. No candidate testing or approval is implied.`
+        :evidenceRemediation?`Owner ${row.owner_id}: ${progress?.status==='STILL_INSUFFICIENT'?`new qualified Research ${progress.source.case_id} still reports evidence shortfalls. `:''}${evidenceRemediation.next_action} Insufficient evidence is not an evaluated no-change finding. Keep the baseline; no approval is due for unassessed directions.`
         :planWork?.returned?planWork.next_action:row.waiting_on || this.action(payload.kind,row.owner_id),
       scope:'OWNED_PLANNING_ONLY',candidate_testing:'NOT_DUE',approval_due:false,authority:noAuthority};
   }
@@ -270,6 +277,12 @@ export class OperationalContinuation {
   refresh(row,actor) {
     if(terminal.has(row.work_status))return;
     const status=this.forCase(row),blockerId=`${row.id}:proof`;
+    const designId=`${row.id}:sample-design`,design=this.db.prepare('SELECT * FROM ow_blockers WHERE id=?').get(designId);
+    if(status.evidence_remediation?.requires_design_review){
+      const action=`Owner ${row.owner_id}: ${status.evidence_remediation.next_action}`;
+      if(!design)this.db.prepare("INSERT INTO ow_blockers VALUES(?,?,?,?,'OPEN')").run(designId,row.id,row.owner_id,action);
+      else if(design.action!==action || design.state!=='OPEN')this.db.prepare("UPDATE ow_blockers SET action=?,state='OPEN' WHERE id=?").run(action,designId);
+    }else if(design?.state==='OPEN')this.db.prepare("UPDATE ow_blockers SET state='RESOLVED' WHERE id=?").run(designId);
     const blocker=this.db.prepare('SELECT * FROM ow_blockers WHERE id=?').get(blockerId);
     if(status.blocked_reason) {
       if(!blocker)this.db.prepare("INSERT INTO ow_blockers VALUES(?,?,?,?,'OPEN')")
