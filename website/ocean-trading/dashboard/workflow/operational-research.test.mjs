@@ -630,6 +630,45 @@ test('Research UI preserves completed status while distinguishing historical sup
   assert.equal(objectHash(sealedReport),sealedHash);
 });
 
+test('READY Replay footer records Research not due and preflight action without inventing source readiness',()=>{
+  const source=fs.readFileSync(new URL('../public/workflow/ui.js',import.meta.url),'utf8');
+  const pageSource=source.slice(source.indexOf('function runPage('),source.indexOf('function caseProgress('));
+  const page=vm.runInNewContext(`${pageSource}; runPage`,{
+    section:(title,body)=>`${title}\n${body}`,facts:rows=>rows.map(([name,value])=>`${name}: ${value}`).join('\n'),
+    esc:String,badge:String,link:(_type,id)=>id,human:String,heading:()=>'',button:()=>'',
+    table:()=>'',hash:String,date:String,timeline:()=>'',empty:String,
+  });
+  const data={state:'READY',strategy_name:'fixture',events:[],context:{run_id:'fixture',strategy_id:'fixture',
+    expected_environment:'REPLAY',evidence_purpose:'HISTORICAL_BUILD',observed_source_state:{environment:'UNKNOWN',quality:'UNKNOWN'}},
+    manager:{namespace:'OPERATIONAL',completion_current:false,context_status:'CURRENT'},
+    learning:{stage:'NOT_DUE',eligible:false,continuation_case_id:null,next_action:null}};
+  const before=objectHash(data);
+  const ready=page(data);
+  assert.match(ready,/Research continuation: NOT_DUE/);
+  assert.match(ready,/Next action: Verify source preflight and the exact run release before starting this managed replay/);
+  assert.match(ready,/Replay execution is not yet verified/);
+  assert.doesNotMatch(ready,/Not required|Await the learning result/);
+  assert.equal(objectHash(data),before);
+  const blocked=page({...data,learning:{...data.learning,next_action:'Confirm effective chart timezone before source preflight'}});
+  assert.match(blocked,/Next action: Confirm effective chart timezone before source preflight/);
+  assert.doesNotMatch(blocked,/Next action: Verify source preflight/);
+  const linked=page({...data,learning:{...data.learning,continuation_case_id:'preserved-case',
+    research:{state:'RETRY',effective_state:'BLOCKED_PROVENANCE',next_action:'Provenance owner action required'}}});
+  assert.match(linked,/Research continuation: preserved-case/);
+  assert.match(linked,/Next action: Provenance owner action required/);
+  const historical=page({...data,state:'COMPLETED',learning:{...data.learning,continuation_case_id:'historical-case',
+    next_action:'Historical report preserved; not current qualified support'}});
+  assert.match(historical,/Research continuation: historical-case/);
+  assert.match(historical,/Next action: Historical report preserved; not current qualified support/);
+  const due=page({...data,state:'COMPLETED',learning:{...data.learning,eligible:true,conclusion_type:'RECOMMENDATION',
+    next_action:'Persist Research continuation'}});
+  assert.match(due,/Research continuation: PENDING/);
+  const active=page({...data,state:'ACTIVE'});
+  assert.match(active,/Next action: Await the learning result/);
+  const testOnly=page({...data,manager:{...data.manager,namespace:'TEST'}});
+  assert.match(testOnly,/Next action: Await the learning result/);
+});
+
 test('queue mutation rolls back with its caller transaction; unapproved authority is rejected',()=>{
   const f=queueFixture();try {
     assert.throws(()=>f.backend.store.transaction(()=>{f.worker.enqueue('case','a');throw Error('crash before ACK');}));
