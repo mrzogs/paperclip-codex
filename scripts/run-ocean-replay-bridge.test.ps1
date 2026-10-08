@@ -60,11 +60,12 @@ if (-not $source.Contains("`$evidencePlan.status -cne 'READY'") -or
 }
 if (-not $source.Contains("schema_version='ocean-replay-bridge-health/v1'") -or
     -not $source.Contains('identity_fresh=($Status -ceq') -or
-    -not $source.Contains('last_authenticated_run_identity=$LastAuthenticatedRunIdentity')) {
+    -not $source.Contains('last_authenticated_run_identity=$LastAuthenticatedRunIdentity') -or
+    -not $source.Contains('last_failure=$lastFailure')) {
   throw 'SEPARATE_BRIDGE_HEALTH_CONTRACT_REQUIRED'
 }
 $failurePublisherStart = $source.IndexOf('function Publish-BridgeCycleFailure', [StringComparison]::Ordinal)
-$failureHealthWrite = $source.IndexOf('Write-BridgeHealth $status $reason $lastIdentity $detail', $failurePublisherStart, [StringComparison]::Ordinal)
+$failureHealthWrite = $source.IndexOf('Write-BridgeHealth $status $lastIdentity $failure', $failurePublisherStart, [StringComparison]::Ordinal)
 $failureStateWrite = $source.IndexOf('Write-State $state -SuppressHealthyReceipt', $failurePublisherStart, [StringComparison]::Ordinal)
 if ($failurePublisherStart -lt 0 -or $failureHealthWrite -lt $failurePublisherStart -or $failureStateWrite -le $failureHealthWrite -or
     $source.Contains("Write-State ([ordered]@{status='DEGRADED';error=")) {
@@ -132,25 +133,35 @@ function Assert-BridgeThrows([ScriptBlock]$Action, [string]$Code) {
     $health = [IO.File]::ReadAllText($statePath + '.health.json') | ConvertFrom-Json
     Assert-BridgeTest ($health.status -ceq 'DEGRADED' -and $health.reason_code -ceq 'TRANSIENT_WORKFLOW_STATE_UNAVAILABLE' -and
       -not $health.identity_fresh -and $state.status -ceq 'DEGRADED' -and -not $state.identity_fresh) 'TRANSIENT_FAILURE_NOT_FAIL_CLOSED'
+    Assert-BridgeTest ($health.last_failure.reason_code -ceq 'TRANSIENT_WORKFLOW_STATE_UNAVAILABLE' -and
+      $health.last_failure.message_sha256 -cmatch '^sha256:[a-f0-9]{64}$' -and $health.last_failure.observed_at_utc) 'TRANSIENT_FAILURE_EVIDENCE_NOT_STRUCTURED'
     Assert-BridgeTest ($state.run_id -ceq 'authenticated-run' -and $state.last_authenticated_run_identity.run_id -ceq 'authenticated-run' -and
       $state.last_authenticated_run_identity.run_state -ceq 'ACTIVE') 'LAST_AUTHENTICATED_IDENTITY_NOT_PRESERVED'
     $firstAuthenticatedObservation = [string]$state.last_authenticated_run_identity.observed_at_utc
     try { throw 'SECOND_TRANSIENT_FAILURE' } catch { $secondFailure = $_ }
     Publish-BridgeCycleFailure $secondFailure $false
     $state = [IO.File]::ReadAllText($statePath) | ConvertFrom-Json
-    Assert-BridgeTest ($state.last_authenticated_run_identity.observed_at_utc -ceq $firstAuthenticatedObservation -and
+    $health = [IO.File]::ReadAllText($statePath + '.health.json') | ConvertFrom-Json
+    $latestFailureId = [string]$health.last_failure.failure_id
+    $latestFailureObservedAt = [string]$health.last_failure.observed_at_utc
+    Assert-BridgeTest ([string]$state.last_authenticated_run_identity.observed_at_utc -ceq $firstAuthenticatedObservation -and
       $state.last_authenticated_run_identity.run_id -ceq 'authenticated-run') 'REPEATED_FAILURE_REFRESHED_STALE_IDENTITY'
 
     Write-State ([ordered]@{status='ACTIVE';run_id='recovered-run';run_state='ACTIVE';safety='OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED'})
     $health = [IO.File]::ReadAllText($statePath + '.health.json') | ConvertFrom-Json
     Assert-BridgeTest ($health.status -ceq 'HEALTHY' -and $health.identity_fresh -and
       $health.last_authenticated_run_identity.run_id -ceq 'recovered-run') 'SUCCESSFUL_CYCLE_DID_NOT_RECOVER_HEALTH'
+    Assert-BridgeTest ([string]$health.last_failure.failure_id -ceq $latestFailureId -and
+      [string]$health.last_failure.observed_at_utc -ceq $latestFailureObservedAt -and
+      $health.last_failure.reason_code -ceq 'SECOND_TRANSIENT_FAILURE') 'RECOVERY_ERASED_OR_REFRESHED_LAST_FAILURE'
 
-    try { throw 'opaque failure bearer secret-value token=another-secret' } catch { $opaqueFailure = $_ }
+    try { throw 'opaque failure {"token":"secret-value","password":"another-secret","client_secret":"third-secret","Authorization":"Bearer fourth-secret"}' } catch { $opaqueFailure = $_ }
     Publish-BridgeCycleFailure $opaqueFailure $false
     $health = [IO.File]::ReadAllText($statePath + '.health.json') | ConvertFrom-Json
-    Assert-BridgeTest ($health.reason_code -ceq 'BRIDGE_CYCLE_FAILED' -and $health.failure_detail -notmatch 'secret-value|another-secret' -and
-      $health.failure_detail -match '\[REDACTED\]') 'FAILURE_DETAIL_NOT_BOUNDED_OR_REDACTED'
+    $serializedHealth = $health | ConvertTo-Json -Depth 30 -Compress
+    Assert-BridgeTest ($health.reason_code -ceq 'BRIDGE_CYCLE_FAILED' -and
+      $health.last_failure.message_sha256 -cmatch '^sha256:[a-f0-9]{64}$' -and
+      $serializedHealth -notmatch 'secret-value|another-secret|third-secret|fourth-secret|Authorization|password|client_secret') 'FAILURE_EVIDENCE_LEAKED_RAW_DETAIL'
 
     try { throw 'BRIDGE_CONFIG_CHANGED_RESTART_REQUIRED' } catch { $restartFailure = $_ }
     Publish-BridgeCycleFailure $restartFailure $true
@@ -314,8 +325,8 @@ try {
   function Get-LastAuthenticatedRunIdentity {
     return [ordered]@{run_id='mock-active-run';run_state='ACTIVE';observed_at_utc='2026-10-08T00:00:00.000Z';config_sha256=$script:ConfigHash}
   }
-  function Write-BridgeHealth([string]$Status, [string]$ReasonCode, $LastAuthenticatedRunIdentity, [string]$FailureDetail = $null) {
-    $script:MockHealthStates += [pscustomobject]@{status=$Status;reason_code=$ReasonCode;identity=$LastAuthenticatedRunIdentity;failure_detail=$FailureDetail}
+  function Write-BridgeHealth([string]$Status, $LastAuthenticatedRunIdentity, $FailureEvidence = $null) {
+    $script:MockHealthStates += [pscustomobject]@{status=$Status;reason_code=$FailureEvidence.reason_code;identity=$LastAuthenticatedRunIdentity;failure=$FailureEvidence}
     $script:MockPublicationOrder += 'health'
   }
   function Write-State($State) { $script:MockStates += $State; $script:MockPublicationOrder += 'state' }

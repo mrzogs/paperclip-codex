@@ -295,23 +295,50 @@ function Get-BridgeFailureReason($FailureRecord) {
   return 'BRIDGE_CYCLE_FAILED'
 }
 
-function Get-BridgeFailureDetail($FailureRecord) {
+function Get-BridgeFailureEvidence($FailureRecord, [string]$ReasonCode) {
   $message = [string]$FailureRecord.Exception.Message
-  if ([string]::IsNullOrWhiteSpace($message)) { return $null }
-  $message = [Regex]::Replace($message, '(?i)(bearer\s+)[^\s,;]+', '$1[REDACTED]')
-  $message = [Regex]::Replace($message, '(?i)(token\s*[=:]\s*)[^\s,;]+', '$1[REDACTED]')
-  if ($message.Length -gt 512) { $message = $message.Substring(0,512) }
-  return $message
+  $bytes = [Text.Encoding]::UTF8.GetBytes($message)
+  $hash = [Security.Cryptography.SHA256]::Create()
+  try { $messageHash = 'sha256:' + ([BitConverter]::ToString($hash.ComputeHash($bytes))).Replace('-','').ToLowerInvariant() }
+  finally { $hash.Dispose() }
+  $summary = switch ($ReasonCode) {
+    'TRANSIENT_WORKFLOW_STATE_UNAVAILABLE' { 'SQLite workflow state was temporarily busy or locked.' }
+    'TRANSIENT_DEPENDENCY_TIMEOUT' { 'A bounded bridge dependency call timed out.' }
+    'TRANSIENT_OCEAN_UNAVAILABLE' { 'The local Ocean workflow service was temporarily unavailable.' }
+    default {
+      if ($ReasonCode -cmatch '^[A-Z][A-Z0-9_]{1,100}$' -and $ReasonCode -cne 'BRIDGE_CYCLE_FAILED') { 'The bridge returned the recorded stable failure code.' }
+      else { 'An unclassified bridge cycle failure occurred; correlate the fingerprint with protected upstream logs.' }
+    }
+  }
+  return [ordered]@{
+    failure_id=$messageHash
+    observed_at_utc=[DateTimeOffset]::UtcNow.ToString('o')
+    reason_code=$ReasonCode
+    exception_type=[string]$FailureRecord.Exception.GetType().FullName
+    message_sha256=$messageHash
+    diagnostic_summary=$summary
+  }
 }
 
-function Write-BridgeHealth([string]$Status, [string]$ReasonCode, $LastAuthenticatedRunIdentity, [string]$FailureDetail = $null) {
+function Get-LastBridgeFailure {
+  $path = Get-BridgeHealthPath
+  if (-not [IO.File]::Exists($path)) { return $null }
+  try {
+    $health = [IO.File]::ReadAllText($path) | ConvertFrom-Json
+    if ($health.config_sha256 -cne $script:ConfigHash -or -not $health.last_failure) { return $null }
+    return $health.last_failure
+  } catch { return $null }
+}
+
+function Write-BridgeHealth([string]$Status, $LastAuthenticatedRunIdentity, $FailureEvidence = $null) {
+  $lastFailure = if ($FailureEvidence) { $FailureEvidence } else { Get-LastBridgeFailure }
   $health = [ordered]@{
     schema_version='ocean-replay-bridge-health/v1'
     status=$Status
-    reason_code=$ReasonCode
+    reason_code=if ($FailureEvidence) { [string]$FailureEvidence.reason_code } else { $null }
     identity_fresh=($Status -ceq 'HEALTHY')
     last_authenticated_run_identity=$LastAuthenticatedRunIdentity
-    failure_detail=$FailureDetail
+    last_failure=$lastFailure
     updated_at_utc=[DateTimeOffset]::UtcNow.ToString('o')
     pid=$PID
     config_sha256=$script:ConfigHash
@@ -329,19 +356,19 @@ function Write-State($State, [switch]$SuppressHealthyReceipt) {
     $identity = if ([string]::IsNullOrWhiteSpace([string]$State.run_id)) { $null } else {
       [ordered]@{run_id=[string]$State.run_id;run_state=[string]$State.run_state;observed_at_utc=[string]$State.updated_at_utc;config_sha256=$script:ConfigHash}
     }
-    Write-BridgeHealth 'HEALTHY' $null $identity
+    Write-BridgeHealth 'HEALTHY' $identity
   }
 }
 
 function Publish-BridgeCycleFailure($FailureRecord, [bool]$RestartRequired) {
   $reason = Get-BridgeFailureReason $FailureRecord
-  $detail = Get-BridgeFailureDetail $FailureRecord
+  $failure = Get-BridgeFailureEvidence $FailureRecord $reason
   $lastIdentity = Get-LastAuthenticatedRunIdentity
   $status = if ($RestartRequired) { 'RESTART_REQUIRED' } else { 'DEGRADED' }
 
   # Health is published first so a crash during state projection cannot erase
   # the reason for the failed cycle or present preserved identity as fresh.
-  Write-BridgeHealth $status $reason $lastIdentity $detail
+  Write-BridgeHealth $status $lastIdentity $failure
   $state = [ordered]@{
     status=$status
     error=$reason
