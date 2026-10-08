@@ -14,7 +14,7 @@ const schema=execFileSync('git',['show','b1fb6e642d6a40cb9dac1c295895c2c48d28b2f
 if(digest(schema)!=='sha256:ca4bee67d0e3ba6237e70891ed0cb3475f89d4744438fdf5bf3ab87baec428ef')throw Error('MOCK_SCHEMA_PIN_CHANGED');
 const encode=value=>Object.entries(value).map(([key,v])=>`${key}=${v}\n`).join('');
 
-export async function currentFixture() {
+export async function currentFixture({logicalVersion,sessionObservationMode}={}) {
   const f=await exportFixture({large:false}),b=f.backend,db=b.db;
   const workflowDb=db.prepare('PRAGMA database_list').get().file,root=path.dirname(workflowDb);
   const runId='mock-current-u25',instance={execution_instance_id:'i',strategy_id:'s',account_alias:'Sim1',telemetry_producer_id:'strategy'};
@@ -31,7 +31,7 @@ export async function currentFixture() {
     expected_strategy_module_sha256:digest('mock-strategy'),expected_telemetry_module_path:path.join(root,'mock-logger.dll'),
     expected_telemetry_module_sha256:digest('mock-logger'),source_preflight_status_path:path.join(root,'vwap-replay-status.txt')};
   const context={schema_version:'2.1.0',run_id:runId,revision:1,strategy_id:'s',execution_instance_id:'i',
-    strategy_version:config.expected_strategy_version,expected_environment:'REPLAY',candidate_id:null,
+    strategy_version:logicalVersion || config.expected_strategy_version,expected_environment:'REPLAY',candidate_id:null,
     strategy_code_hash:digest('mock-code'),strategy_config_hash:digest('mock-config'),dataset_manifest_id:'mock-discovery',
     dataset_manifest_revision:1,dataset_manifest_hash:digest('mock-manifest'),dataset_partition:'DISCOVERY',
     strategy_profile_id:'mock-profile6',strategy_profile_version:'v0.1.3',evidence_purpose:'HISTORICAL_BUILD',
@@ -64,7 +64,7 @@ export async function currentFixture() {
   insert('replay_run_context',{run_id:runId,candidate_id:config.managed_candidate_id,dataset_id:'mock-discovery:1',dataset_role:'DISCOVERY',
     strategy_profile_id:context.strategy_profile_id,strategy_profile_version:context.strategy_profile_version,
     strategy_code_hash:context.strategy_code_hash,strategy_config_hash:context.strategy_config_hash,context_hash:context.context_hash,
-    session_name:'All',session_timezone:'Europe/London'});
+    session_name:'All',session_timezone:'Europe/London',...(sessionObservationMode?{session_observation_mode:sessionObservationMode}:{})});
   insert('replay_run_attempts',{attempt_id:26,run_id:runId,attempt_number:1,attempt_started_utc:started.toISOString(),start_command_id:startId});
   const start={commandId:startId,action:'start',expectedSymbol:config.expected_symbol,tradeAccount:'Sim1',
     startDateTime:'2025-08-18 00:00:00',tradeStartDateTime:'2025-09-01 00:00:00',endDateTime:'2025-09-13 00:00:00',
@@ -73,7 +73,8 @@ export async function currentFixture() {
     telemetryContextHash:context.context_hash,telemetryCandidateId:config.managed_candidate_id,telemetryDatasetId:'mock-discovery:1',
     telemetryDatasetRole:'DISCOVERY',telemetryStrategyProfileId:context.strategy_profile_id,telemetryStrategyProfileVersion:context.strategy_profile_version,
     telemetryStrategyCodeHash:context.strategy_code_hash,telemetryStrategyConfigHash:context.strategy_config_hash,
-    telemetrySessionName:'All',telemetrySessionTimezone:'Europe/London'};
+    telemetrySessionName:'All',telemetrySessionTimezone:'Europe/London',
+    ...(sessionObservationMode?{telemetrySessionObservationMode:sessionObservationMode}:{})};
   const commandFile=path.join(root,'vwap-replay-command.txt');fs.writeFileSync(commandFile,encode(start));
   const hook={commandId:startId,action:'start',status:'running',controllerLifecycleActive:'true',chartNumber:1,
     symbol:config.expected_symbol,secondsPerBar:300,chartDataType:2,isReplayRunning:'true',replayStatus:1,

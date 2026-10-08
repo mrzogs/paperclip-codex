@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
-import { digest, objectHash } from './common.mjs';
+import { digest, objectHash, sealedHash } from './common.mjs';
 import { readCurrentReplayExecution } from './replay-run-bridge-probe.mjs';
 import { currentFixture, changeJson } from './current-execution.test-fixtures.mjs';
 
@@ -17,6 +17,47 @@ test('actual persisted RunManager/HTTP view verifies exact open attempt without 
     assert.equal((await response.json()).manager.execution.status,'CURRENT_RUNNING_VERIFIED');
     assert.deepEqual(f.snapshot(),before);assert.deepEqual(f.runSnapshot(),runs);assert.deepEqual(f.nativeSnapshot(),attempts);
     f.nativeFiles.forEach((file,index)=>assert.deepEqual(fs.readFileSync(file),files[index]));
+  }finally{await f.close();}
+});
+
+test('persisted logical v011 context with pinned physical v238 and native session mode verifies without rewriting either identity',async()=>{
+  const f=await currentFixture({logicalVersion:'v0.1.1',sessionObservationMode:'sierra_trading_day_v1'});try{
+    const before=f.snapshot(),runs=f.runSnapshot(),attempts=f.nativeSnapshot(),files=f.nativeFiles.map(file=>fs.readFileSync(file));
+    assert.equal(f.context.strategy_version,'v0.1.1');assert.equal(f.config.expected_strategy_version,'v0.6.238');
+    assert.equal(f.sql.prepare('SELECT strategy_version FROM replay_runs WHERE run_id=?').get(f.runId).strategy_version,'v0.6.238');
+    const view=f.read();assert.equal(view.context_status,'CURRENT');assert.equal(view.execution.status,'CURRENT_RUNNING_VERIFIED');
+    assert.equal(view.execution.context_hash,f.context.context_hash);assert.equal(view.execution.phase,'WARMUP');
+    assert.equal(view.execution.completed_coverage_granted,false);
+    const response=await f.request(`view/runs/${f.runId}`);assert.equal(response.status,200);
+    const manager=(await response.json()).manager;assert.equal(manager.context.strategy_version,'v0.1.1');
+    assert.equal(manager.execution.status,'CURRENT_RUNNING_VERIFIED');assert.equal(manager.completion,null);
+    assert.deepEqual(f.snapshot(),before);assert.deepEqual(f.runSnapshot(),runs);assert.deepEqual(f.nativeSnapshot(),attempts);
+    f.nativeFiles.forEach((file,index)=>assert.deepEqual(fs.readFileSync(file),files[index]));
+  }finally{await f.close();}
+});
+
+for(const [name,mutate] of [
+  ['different physical replay version',f=>f.sql.prepare("UPDATE replay_runs SET strategy_version='v0.6.237'").run()],
+  ['start command claims logical instead of pinned physical version',f=>fs.writeFileSync(f.commandFile,
+    fs.readFileSync(f.commandFile,'utf8').replace('telemetryStrategyVersion=v0.6.238','telemetryStrategyVersion=v0.1.1'))],
+  ['different native observation mode',f=>f.sql.prepare("UPDATE replay_run_context SET session_observation_mode=NULL").run()],
+])test(`distinct logical/physical versions do not excuse ${name}`,async()=>{
+  const f=await currentFixture({logicalVersion:'v0.1.1',sessionObservationMode:'sierra_trading_day_v1'});try{
+    mutate(f);const view=f.read();assert.equal(view.execution.status,'CURRENT_EXECUTION_UNVERIFIED');
+    assert.equal(view.execution.completed_coverage_granted,false);assert.equal(view.completion,null);
+  }finally{await f.close();}
+});
+
+test('a resealed caller logical version cannot replace the exact released logical context',async()=>{
+  const f=await currentFixture({logicalVersion:'v0.1.1'});try{
+    const caller=f.caller(),context={...caller.context,strategy_version:'v0.1.2'};
+    context.context_hash=sealedHash(context,'context_hash');
+    const storedPlan={...caller.storedPlan,context_hash:context.context_hash,
+      operational_review:{...caller.storedPlan.operational_review,context}};
+    storedPlan.plan_hash=sealedHash(storedPlan,'plan_hash');
+    const plan={...caller.plan,...storedPlan};
+    const view=readCurrentReplayExecution(f.configFile,{...caller,context,storedPlan,plan});
+    assert.equal(view.status,'CURRENT_EXECUTION_UNVERIFIED');assert.equal(view.completed_coverage_granted,false);
   }finally{await f.close();}
 });
 

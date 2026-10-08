@@ -383,11 +383,12 @@ export function readCurrentReplayExecution(configFile, { run, plan, context, sto
     next_action:'Verify fresh exact run/attempt/controller execution proof; the service heartbeat and historical activation are not current replay proof. No completed coverage is granted.' });
   try {
     const configBytes=fs.readFileSync(configFile),config=readReplayBridgeConfig(configFile);
+    // Logical version belongs to the sealed released context. The physical
+    // version is independently pinned by telemetry and the exact start below.
     if(config.schema_version!==OPERATIONAL_CONFIG_SCHEMA || !plan.operational_review
       || !['READY','ACTIVE','COMPLETING'].includes(run.state) || context.expected_environment!=='REPLAY'
       || run.id!==context.run_id || run.strategy_id!==config.strategy_id || run.instance_id!==config.instance_id
       || context.strategy_id!==config.strategy_id || context.execution_instance_id!==config.instance_id
-      || context.strategy_version!==config.expected_strategy_version
       || plan.symbol!==config.expected_symbol || plan.instance?.account_alias!==config.account_alias
       || plan.instance?.execution_instance_id!==config.instance_id
       || plan.operational_review.factual_binding_hash!==config.factual_binding_hash

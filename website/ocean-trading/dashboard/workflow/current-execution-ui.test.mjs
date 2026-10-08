@@ -13,7 +13,8 @@ fs.mkdirSync(evidence,{recursive:true});
 const settled=page=>page.waitForFunction(()=>document.querySelector('#content')?.getAttribute('aria-busy')==='false');
 
 test('actual authenticated Chrome shows current native warmup/scored/end phases without asserting coverage; stale proof expires during outage',async()=>{
-  const f=await currentFixture(),browser=await chromium.launch({channel:'chrome',headless:true});try{
+  const f=await currentFixture({logicalVersion:'v0.1.1',sessionObservationMode:'sierra_trading_day_v1'}),
+    browser=await chromium.launch({channel:'chrome',headless:true});try{
     const context=await browser.newContext({viewport:{width:1440,height:1000}}),[name,value]=f.cookie.split('=');
     await context.addCookies([{name,value,url:f.base}]);const page=await context.newPage(),errors=[];
     page.on('pageerror',error=>errors.push(error.message));
