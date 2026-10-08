@@ -171,6 +171,15 @@ function recordedProducerVerification(backend,workflowRun,run,attempt,observatio
   }catch(error) {return {...metadata,verified:false,reason:error.code || 'NATIVE_LOGGER_APPROVED_PHYSICAL_BINDING_REQUIRED'};}
 }
 
+export function nativeSourceReceiptHash(proof) {
+  const source=Object.fromEntries(['run','managed_context','attempt','receipts','observations','trades','links','fills'].map(key=>[key,proof[key]]));
+  const verification=proof.producer_verification;
+  // Catalog-wide metadata describes the reader, not unchanged historical facts.
+  const producer_verification=Object.fromEntries(['verified','reason','basis','reviewed_build','recorded_hashes',
+    'factual_binding_hash','binding_hash'].map(key=>[key,verification[key] ?? null]));
+  return objectHash({source,producer_verification});
+}
+
 export function readObservedSessionProofs(backend,runIds,rows=[]) {
   const proofs={};let database,transaction=false;
   try {
@@ -201,7 +210,7 @@ export function readObservedSessionProofs(backend,runIds,rows=[]) {
         const producer_verification=recordedProducerVerification(backend,workflowRun,run,attempt,observations,qualification,trades);
         const source={run,managed_context,attempt,receipts,observations,trades,links,fills};
         const proof={schema_version:SESSION_SCHEMA,context,...source,producer_verification,
-          source_receipt_hash:objectHash({source,producer_verification}),source_record_refs:['replay_run_context','replay_run_attempts','telemetry_run_receipts',
+          source_receipt_hash:nativeSourceReceiptHash({...source,producer_verification}),source_record_refs:['replay_run_context','replay_run_attempts','telemetry_run_receipts',
             'ocean_exchange_session_observations_v1','trade_exchange_session_links','trades','trade_legs','fills']};
         checkNativeSessionProof(proof,context,rows.filter(row=>row.run_id===run_id));proofs[run_id]=proof;
       }catch(error){proofs[run_id]={context,proof_error:error.code || 'NATIVE_SESSION_TABLE_OR_FIELD_REQUIRED'};}

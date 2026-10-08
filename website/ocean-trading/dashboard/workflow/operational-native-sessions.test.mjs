@@ -5,9 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
-import { digest } from './common.mjs';
+import { digest, objectHash } from './common.mjs';
 import { mockNativeProof } from './operational-native-sessions.test-fixtures.mjs';
-import { readObservedSessionProofs, sessionEvidence, NATIVE_LOGGER_BUILD } from './operational-native-sessions.mjs';
+import { readObservedSessionProofs, sessionEvidence, NATIVE_LOGGER_BUILD, NATIVE_LOGGER_BUILDS, nativeSourceReceiptHash } from './operational-native-sessions.mjs';
 import { OperationalLearning } from './operational-learning.mjs';
 import { OperationalResearch } from './operational-research.mjs';
 
@@ -183,6 +183,22 @@ test('past approved v545 native proof survives a routine current logger upgrade;
       UPDATE replay_runs SET study_name='Sierra Trade Telemetry Logger v0.5.46'`);
     assert.equal(read().producer_verification.verified,false);
     assert.equal(read().producer_verification.reason,'NATIVE_LOGGER_REVIEWED_PRODUCER_BUILD_CONFLICT');
+  }finally{f.close();}
+});
+
+test('appending another reviewed release does not change the matched historical evidence or reassessment fingerprint',()=>{
+  const f=fixture({producerPin:true});try {
+    const proof=readObservedSessionProofs(f.backend,['r'],f.rows).r;
+    assert.equal(proof.producer_verification.verified,true);
+    assert.equal(nativeSourceReceiptHash(proof),proof.source_receipt_hash);
+    const appendedCatalog=[...NATIVE_LOGGER_BUILDS,{...NATIVE_LOGGER_BUILD,version:'EXPLICIT_MOCK_REVIEWED_FUTURE',module_sha256:digest('mock future')}];
+    const futureReader=structuredClone(proof);
+    futureReader.producer_verification.reviewed_build_catalog_hash=objectHash(appendedCatalog);
+    assert.notEqual(futureReader.producer_verification.reviewed_build_catalog_hash,proof.producer_verification.reviewed_build_catalog_hash);
+    assert.equal(nativeSourceReceiptHash(futureReader),proof.source_receipt_hash,
+      'reconcileFollowUps must not observe a new historical evidence fingerprint merely from catalog growth');
+    futureReader.producer_verification.reviewed_build={...NATIVE_LOGGER_BUILD,source_commit:'changed matched proof'};
+    assert.notEqual(nativeSourceReceiptHash(futureReader),proof.source_receipt_hash,'actual matched proof changes remain consequential');
   }finally{f.close();}
 });
 
