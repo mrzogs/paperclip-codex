@@ -782,7 +782,17 @@ test('G08 run browser template labels prior outcomes as historical without claim
   assert.match(historical,/not current qualified support/);
   assert.match(historical,/Next action: Resolve physical strategy binding and raw STTL2 identity conflict/);
   assert.doesNotMatch(historical,/Overall learning loop: COMPLETE|Conclusion: NO_SUPPORTED_CHANGE|Keep current baseline\./);
+  assert.match(historical,/6\. Candidate validation: NOT_DUE/);
   assert.equal(objectHash(data),before,'Rendering must not alter the retained report or run');
+  for(const status of ['PASSED','FAILED','IN_PROGRESS']) {
+    const prior={...data,learning:{...data.learning,research:{...data.learning.research,
+      report:{...data.learning.research.report,candidate_validation:{status}}}}};
+    const priorHash=objectHash(prior),rendered=page(prior);
+    assert.match(rendered,/6\. Candidate validation: HISTORICAL/);
+    assert.ok(rendered.includes(`Prior candidate validation ${status} retained; not current qualified validation support.`));
+    assert.ok(!rendered.includes(`6. Candidate validation: ${status}`));
+    assert.equal(objectHash(prior),priorHash);
+  }
   const current=page({...data,learning:{...data.learning,eligible:true,current_provenance_qualified:true,
     loop_stage:'COMPLETE',current_qualification_status:'CURRENT',historical_result:null,
     next_action:'Keep current baseline. Qualified direction screen found no supported change.',
@@ -792,6 +802,12 @@ test('G08 run browser template labels prior outcomes as historical without claim
   assert.match(current,/5\. Research evaluation: COMPLETED/);
   assert.match(current,/Qualified direction screen found no supported change/);
   assert.doesNotMatch(current,/Prior outcome \(historical\)|Not currently qualified|Research evaluation: HISTORICAL/);
+  const currentValidation=page({...data,learning:{...data.learning,loop_stage:'COMPLETE',
+    current_qualification_status:'CURRENT',historical_result:null,research:{...data.learning.research,
+      historical:false,qualified_for_new_support:true,
+      report:{...data.learning.research.report,candidate_validation:{status:'PASSED'}}}}});
+  assert.match(currentValidation,/6\. Candidate validation: PASSED/);
+  assert.doesNotMatch(currentValidation,/Prior candidate validation|Candidate validation: HISTORICAL/);
   const callbackOnly=page({...data,learning:{...data.learning,research:null,
     historical_result:{conclusion_type:'NO_CHANGE',research_outcome:null}}});
   assert.match(callbackOnly,/Prior outcome \(historical\): NO_CHANGE/);
