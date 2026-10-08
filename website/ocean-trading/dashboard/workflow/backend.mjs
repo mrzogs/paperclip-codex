@@ -18,6 +18,7 @@ import { identityReadback } from './provider-lifecycle.mjs';
 import { OperationalResults } from './operational-results.mjs';
 import { OperationalLearning } from './operational-learning.mjs';
 import { OperationalResearch } from './operational-research.mjs';
+import { REPORT_REFERENCE_VERSION, readResearchReport } from './operational-research-report.mjs';
 import { CONTINUATION_ORIGIN } from './operational-continuation.mjs';
 import { PaperForwardPreparation } from './paper-forward-preparation.mjs';
 import {
@@ -832,6 +833,23 @@ export class WorkflowBackend {
     const manifest = JSON.parse(artifact.manifest_json);
     return { manifest, content: Buffer.from(artifact.content), preview_text: manifest.media_type === "image/png" ? null : Buffer.from(artifact.content).toString("utf8").replace(/[<>&]/g, (ch) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[ch])) };
   }
+  fullResearchReport(actor, artifactId) {
+    // Reuse the raw artifact's exact scope and producer/recipient authorization.
+    // This is a read of sealed history, not current proposal qualification.
+    const raw=this.download(actor,artifactId),artifact=this.one('ow_artifacts',artifactId);
+    requireThat(artifact.kind==='OUTCOME',409,'RESEARCH_OUTCOME_REQUIRED');
+    const jobs=this.db.prepare("SELECT * FROM ow_research_jobs WHERE result_artifact_id=? AND state='COMPLETED'").all(artifactId);
+    requireThat(jobs.length===1 && jobs[0].case_id===artifact.case_id,409,'RESEARCH_COMPLETED_REPORT_REQUIRED');
+    const job=jobs[0],report=readResearchReport(job,artifact);
+    requireThat(report.schema_version===job.analysis_version,409,'RESEARCH_EXPORT_SOURCE_CONFLICT');
+    const referenced=JSON.parse(raw.content.toString('utf8')).schema_version===REPORT_REFERENCE_VERSION;
+    // Inline history exports its original bytes, including original formatting.
+    const content=referenced?Buffer.from(JSON.stringify(report,null,2),'utf8'):raw.content;
+    return {metadata:{schema_version:'ocean-full-research-report/v1',read_only:true,job_id:job.id,case_id:job.case_id,
+      representation:referenced?'RESTORED_IMMUTABLE_REPORT':'ORIGINAL_INLINE_REPORT',analysis_version:job.analysis_version,
+      source_artifact:{artifact_id:artifact.id,content_hash:raw.manifest.content_hash,bytes:raw.content.length,input_hash:job.input_hash},
+      report_manifest:{media_type:'application/json',content_hash:digest(content),bytes:content.length}},content};
+  }
   async handle(request, response, requestUrl) {
     const pathname = requestUrl.pathname;
     if (!pathname.startsWith("/api/workflow/") && pathname !== "/api/workflow") return false;
@@ -875,6 +893,16 @@ export class WorkflowBackend {
         else if(local==='proposals/work' && request.method==='GET')result=this.operationalResearch.continuations.plans.queue(actor);
         else if(/^proposals\/[A-Za-z0-9_.:-]+\/work$/.test(local) && request.method==='GET')result=this.operationalResearch.continuations.plans.read(actor,local.split('/')[1]);
         else if(['proposals/claim','proposals/progress','proposals/plans'].includes(local) && request.method==='POST')result=this.operationalResearch.continuations.plans.perform(local.slice(10),actor,await jsonBody(request));
+        else if(/^artifacts\/[A-Za-z0-9_.:-]+\/research-report(?:\/download)?$/.test(local) && request.method==='GET') {
+          const artifactId=local.split('/')[1],report=this.fullResearchReport(actor,artifactId);
+          if(local.endsWith('/download')) {
+            response.setHeader('Content-Type','application/octet-stream');
+            response.setHeader('Content-Security-Policy',"sandbox; default-src 'none'");
+            response.setHeader('Content-Disposition',`attachment; filename="${artifactId}-research-report.json"`);
+            response.end(report.content);return true;
+          }
+          result=report.metadata;
+        }
         else if(/^artifacts\/[A-Za-z0-9_.:-]+(?:\/download)?$/.test(local) && request.method==='GET') {
           const artifactId=local.split('/')[1];const artifact=this.download(actor,artifactId);
           if(local.endsWith('/download')) {
@@ -967,6 +995,15 @@ export class WorkflowBackend {
           const handoff = this.readHandoff(actor, route.split("/")[1]);
           if (route.endsWith("/download")) { response.setHeader("Content-Type", "application/octet-stream"); response.setHeader("Content-Security-Policy", "sandbox; default-src 'none'"); response.setHeader("Content-Disposition", `attachment; filename="${handoff.handoff_id}.md"`); response.end(handoff.instruction_md); }
           else response.end(JSON.stringify(handoff));
+        }
+        else if (/^artifacts\/[A-Za-z0-9_.:-]+\/research-report(?:\/download)?$/.test(route)) {
+          const artifactId=route.split('/')[1],report=this.fullResearchReport(actor,artifactId);
+          if(route.endsWith('/download')) {
+            response.setHeader('Content-Type','application/octet-stream');
+            response.setHeader('Content-Security-Policy',"sandbox; default-src 'none'");
+            response.setHeader('Content-Disposition',`attachment; filename="${artifactId}-research-report.json"`);
+            response.end(report.content);
+          } else response.end(JSON.stringify(report.metadata));
         }
         else if (/^artifacts\/[A-Za-z0-9_.:-]+(?:\/download)?$/.test(route)) {
           const artifactId = route.split("/")[1]; const artifact = this.download(actor, artifactId);

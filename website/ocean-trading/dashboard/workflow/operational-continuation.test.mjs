@@ -564,8 +564,10 @@ test('actual source UI links owned progress and labels planning work without off
       table:(_headers,rows)=>rows.flat().join('\n'),esc:String,badge:String,human:String,link:(_type,id)=>id,
       heading:()=>'',button:(_action,label)=>`BUTTON:${label}`,hash:String,date:String,empty:String,timeline:()=>'',
       caseProgress:()=>'',approvalTable:()=>'',handoffList:()=>''};
-    const panel=vm.runInNewContext(source.slice(source.indexOf('function researchPanel('),source.indexOf('function casePage('))+';researchPanel',helpers);
+    const fullReportLink=source.slice(source.indexOf('const fullReportLink ='),source.indexOf('\n',source.indexOf('const fullReportLink =')));
+    const panel=vm.runInNewContext(fullReportLink+'\n'+source.slice(source.indexOf('function researchPanel('),source.indexOf('function casePage('))+';researchPanel',helpers);
     assert.match(panel(research),/Owned continuation work/);assert.match(panel(research),new RegExp(child.id));assert.match(panel(research),/Owner brain/);
+    assert.ok(panel(research).includes(`/improvement/artifacts/${research.result_artifact_id}#full-research-report`));
     const page=vm.runInNewContext(source.slice(source.indexOf('function casePage('),source.indexOf('function approvalPage('))+';casePage',
       {...helpers,researchPanel:()=>''});
     const data=readWorkflowView(f.backend,f.human,`view/cases/${child.id}`),html=page(data);

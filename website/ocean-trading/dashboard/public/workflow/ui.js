@@ -21,13 +21,15 @@ const operationalId = prefix => `${prefix}-${crypto.randomUUID()}`;
 const icon = name => `<i data-lucide='${name}'></i>`;
 const badge = value => `<span class='badge ${/FAIL|BLOCK|REJECT|MISMATCH|REVOK|EXPIRED/.test(value) ? 'bad' : /PENDING|REVIEW|PAUSED|NOT_RUN|UNKNOWN|STALE/.test(value) ? 'warn' : /PASS|APPROVED|COMPLETE|ACKNOWLEDGED/.test(value) ? 'good' : 'neutral'}'>${esc(human(value))}</span>`;
 const link = (collection, key, label = key) => `<a data-route href='/improvement/${collection}/${encodeURIComponent(key)}'>${esc(label)}</a>`;
+const fullReportLink = key => `<a data-route href='/improvement/artifacts/${encodeURIComponent(key)}#full-research-report'>View full Research report</a>`;
 const empty = message => `<p class='empty'>${esc(message)}</p>`;
 const facts = entries => `<dl class='facts'>${entries.map(([key, value]) => `<div><dt>${esc(key)}</dt><dd>${value}</dd></div>`).join('')}</dl>`;
 const hash = value => value ? `<code>${esc(value)}</code>` : '<span class="muted">Not recorded</span>';
 const table = (headers, rows) => rows.length ? `<div class='table-wrap'><table><thead><tr>${headers.map(value => `<th scope='col'>${esc(value)}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr>${row.map(value => `<td>${value}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` : empty('No records in this view.');
 const section = (title, body, extra = '') => `<section><div class='section-heading'><h2>${esc(title)}</h2>${extra}</div>${body}</section>`;
 const button = (action, label, attrs = '', symbol = '') => `<button data-action='${action}' ${attrs}>${symbol ? icon(symbol) : ''}${esc(label)}</button>`;
-const route = () => { const parts = location.pathname.replace(/\/$/, '').split('/'); return { view: parts[2] || 'dashboard', key: parts[3] || null }; };
+const route = () => { const parts = location.pathname.replace(/\/$/, '').split('/'); return { view: parts[2] || 'dashboard', key: parts[3] || null,
+  fullResearchReport:parts[2]==='artifacts' && location.hash==='#full-research-report' }; };
 function onboardingHref(questionnaireId = null) {
   const url = new URL(location.href);
   if (questionnaireId) url.searchParams.set('onboarding', questionnaireId);
@@ -452,7 +454,7 @@ function researchPanel(research) {
     ...(research.skipped_version_backfill_jobs?.length?[
       ['Superseded queue history',`${research.skipped_version_backfill_jobs.length} preserved jobs; not current actionable retries`],
     ]:[]),
-    ['Result',research.result_artifact_id?link('artifacts',research.result_artifact_id,'View full Research report'):'Pending'],
+    ['Result',research.result_artifact_id?fullReportLink(research.result_artifact_id):'Pending'],
   ]) + (report?facts([
     [research.historical || !research.qualified_for_new_support ? 'Preserved report history (not current qualified support)' : 'Currently qualified history',`${report.eligible_run_ids?.length || 0} runs / ${report.aggregate?.trades || 0} closed trades`],
     ['Simulated execution gross P/L',esc(report.aggregate.gross_profit_loss)],['Recorded fees',esc(report.aggregate.fees)],
@@ -531,15 +533,36 @@ function collectionPage(view, data) {
   return heading(titles[view], `${data.total} records`, view === 'runs' ? button('prepare-run','Start New Run','', 'plus') : '') + `<div class='toolbar'><label for='filter'>Filter this page</label><input type='search' id='filter' value='${state.filter ? esc(state.filter) : ''}' autocomplete='off'></div>${operational}${setup}${rows}${pager(data)}`;
 }
 async function renderArtifact(data, generation) {
+  if(route().fullResearchReport)return renderResearchReport(data,generation);
   const response = await request(`artifacts/${route().key}/download`, { binary:true });
   const buffer = await response.arrayBuffer();
   if (generation !== state.generation) return;
   const actualHash = `sha256:${[...new Uint8Array(await crypto.subtle.digest('SHA-256', buffer))].map(value => value.toString(16).padStart(2,'0')).join('')}`;
   if (actualHash !== data.manifest.content_hash) throw Object.assign(new Error(), { code:'ARTIFACT_HASH_MISMATCH' });
-  let body;
+  let body,fullReport='';
   if (data.manifest.media_type === 'image/png') { const url = URL.createObjectURL(new Blob([buffer], { type:'image/png' })); state.imageUrls.push(url); body = `<img class='artifact-image' src='${url}' alt='Registered evidence ${esc(data.manifest.artifact_id)}'>`; }
-  else body = `<pre>${esc(new TextDecoder().decode(buffer))}</pre>`;
-  return heading(data.manifest.artifact_id, 'Immutable evidence', button('download-artifact','Download evidence','', 'download')) + facts([['Producer',esc(data.manifest.producer_id)], ['Strategy',link('strategies',data.manifest.strategy_id)], ['Run',link('runs',data.manifest.run_id)], ['Created',esc(date(data.manifest.created_at_utc))], ['Content hash',hash(data.manifest.content_hash)], ['Media / bytes',`${esc(data.manifest.media_type)} / ${data.manifest.bytes}`]]) + section('Evidence', body);
+  else {
+    const text=new TextDecoder().decode(buffer);body=`<pre>${esc(text)}</pre>`;
+    if(data.manifest.media_type==='application/json') {
+      try{const schema=JSON.parse(text).schema_version;
+        if(schema==='ocean-frozen-research-report-reference/v1' || /^ocean-cumulative-research\/v\d+$/.test(schema || ''))fullReport=fullReportLink(data.manifest.artifact_id);
+      }catch{}
+    }
+  }
+  return heading(data.manifest.artifact_id, 'Immutable evidence', fullReport+button('download-artifact',fullReport?'Download raw artifact':'Download evidence','', 'download')) + facts([['Producer',esc(data.manifest.producer_id)], ['Strategy',link('strategies',data.manifest.strategy_id)], ['Run',link('runs',data.manifest.run_id)], ['Created',esc(date(data.manifest.created_at_utc))], ['Content hash',hash(data.manifest.content_hash)], ['Media / bytes',`${esc(data.manifest.media_type)} / ${data.manifest.bytes}`]]) + section('Evidence', body);
+}
+async function renderResearchReport(data,generation) {
+  if(data.schema_version!=='ocean-full-research-report/v1')throw Object.assign(new Error(),{code:'RESEARCH_EXPORT_SOURCE_CONFLICT'});
+  const id=data.source_artifact.artifact_id,response=await request(`artifacts/${id}/research-report/download`,{binary:true});
+  const buffer=await response.arrayBuffer();if(generation!==state.generation)return;
+  const actualHash=`sha256:${[...new Uint8Array(await crypto.subtle.digest('SHA-256',buffer))].map(value=>value.toString(16).padStart(2,'0')).join('')}`;
+  if(actualHash!==data.report_manifest.content_hash || buffer.byteLength!==data.report_manifest.bytes)
+    throw Object.assign(new Error(),{code:'RESEARCH_FULL_REPORT_HASH_CONFLICT'});
+  return heading('Research report',id,button('download-research-report','Download full report','','download')+link('artifacts',id,'View raw artifact'))
+    + facts([['Job',esc(data.job_id)],['Case',link('cases',data.case_id)],['Representation',esc(human(data.representation))],
+      ['Full report hash',hash(data.report_manifest.content_hash)],['Full report bytes',esc(data.report_manifest.bytes)],
+      ['Raw artifact hash',hash(data.source_artifact.content_hash)],['Frozen input hash',hash(data.source_artifact.input_hash)]])
+    + section('Full Research report',`<pre>${esc(new TextDecoder().decode(buffer))}</pre>`);
 }
 async function refresh(force = false) {
   clearTimeout(state.timer);
@@ -554,7 +577,7 @@ async function refresh(force = false) {
     if (!state.csrf) { signIn(); return; }
     state.signedIn = true; document.querySelector('#logout').hidden = false;
     const current = route();
-    const endpoint = current.view === 'artifacts' ? `artifacts/${current.key}` : `view/${current.view}${current.key ? `/${current.key}` : current.view === 'dashboard' ? '' : `/page/${state.offset}`}`;
+    const endpoint = current.view === 'artifacts' ? `artifacts/${current.key}${current.fullResearchReport?'/research-report':''}` : `view/${current.view}${current.key ? `/${current.key}` : current.view === 'dashboard' ? '' : `/page/${state.offset}`}`;
     const [data, dashboard] = await Promise.all([current.view === 'onboarding-guide' ? Promise.resolve({}) : request(endpoint, { signal:controller.signal }), current.view === 'dashboard' ? Promise.resolve(null) : request('view/dashboard', { signal:controller.signal })]);
     if (generation !== state.generation) return;
     const count = (dashboard || data).counts?.action_required || 0;
@@ -807,6 +830,7 @@ async function act(action,element) {
   if (action === 'upload') { uploadDialog(); return; }
   if (action === 'next' || action === 'previous') { state.offset = Math.max(0,state.offset + (action === 'next' ? 50 : -50)); state.filter = ''; await refresh(true); return; }
   if (action === 'download-artifact') { await download(`artifacts/${route().key}/download`,`${route().key}.${state.data.manifest.media_type === 'image/png' ? 'png' : 'txt'}`); return; }
+  if (action === 'download-research-report') { await download(`artifacts/${route().key}/research-report/download`,`${route().key}-research-report.json`); return; }
   if (['view-handoff','download-handoff','copy-handoff'].includes(action)) {
     const handoff = await request(`handoffs/${element.dataset.id}`);
     if (action === 'view-handoff') openModal('Approved handoff',`<pre>${esc(handoff.instruction_md)}</pre>`);
