@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { PROVENANCE_ACTION } from './operational-learning.mjs';
 import { digest, objectHash, requireThat } from './common.mjs';
+import { OperationalContinuation } from './operational-continuation.mjs';
 
 // New physical/raw provenance gates apply only to new jobs, never relabel history.
 export const RESEARCH_VERSION = 'ocean-cumulative-research/v4';
@@ -156,7 +157,8 @@ export function evaluateResearch(bundle, rows) {
 }
 
 export class OperationalResearch {
-  constructor(backend) { this.backend=backend;this.db=backend.db;this.running=false;this.stopped=false; }
+  constructor(backend) { this.backend=backend;this.db=backend.db;this.running=false;this.stopped=false;
+    this.version=RESEARCH_VERSION;this.continuations=new OperationalContinuation(this); }
   stop() {this.stopped=true;}
   historicalCompletion(caseId,artifactId=null) {
     return this.db.prepare(`SELECT * FROM ow_research_jobs WHERE case_id=? AND state='COMPLETED'
@@ -194,6 +196,7 @@ export class OperationalResearch {
       AND c.stage='RESEARCH' AND c.work_status NOT IN ('PAUSED','CANCELLED','COMPLETED')`).all()) {
       this.backend.store.transaction(()=>this.enqueue(row.id,row.artifact_id));
     }
+    this.continuations.reconcile();
   }
   qualification(job) {
     try {
@@ -245,6 +248,13 @@ export class OperationalResearch {
     const superseded=currentQualification.superseded===true;
     const historical=superseded || (job.state==='COMPLETED' && (job.analysis_version!==RESEARCH_VERSION || skipped.length>0));
     const supersededAction='This uncaptured Research case is retained as superseded history: its trigger is outside the current exact-coverage cohort. No completion is claimed and automatic retry is not due. Continue Research on the current eligible case; recorded job state and historical artifacts remain unchanged.';
+    const continuations=this.continuations.links(caseId);
+    const openContinuations=continuations.filter(item=>item && (item.blocked_reason || !['COMPLETED','CANCELLED'].includes(item.work_status)));
+    const continuationAction=openContinuations.map(item=>`${item.case_id}: ${item.next_action}`).join(' ');
+    const evidenceReassessed=continuations.filter(item=>!item?.blocked_reason && item?.progress?.status==='REASSESSED');
+    const continuationFailure=this.db.prepare("SELECT payload_json FROM ow_events WHERE entity_id=? AND action='operational.research.continuation.blocked' ORDER BY id DESC LIMIT 1").get(caseId);
+    const continuationWarning=job.state==='COMPLETED' && !historical && currentQualification.verified
+      && !continuations.length && continuationFailure ? JSON.parse(continuationFailure.payload_json).payload.next_action : null;
     return {job_id:job.id,state:job.state,attempts:job.attempts,analysis_version:job.analysis_version,
       result_artifact_id:job.result_artifact_id,result_hash:job.result_hash,last_error:job.last_error,
       input_hash:job.input_hash,
@@ -260,12 +270,17 @@ export class OperationalResearch {
         :!currentQualification.verified?PROVENANCE_ACTION:null,
       version_backfill_skipped:completedCase && (job.analysis_version!==RESEARCH_VERSION || skipped.length>0),
       skipped_version_backfill_jobs:skipped,
+      continuations,
+      loop_stage:openContinuations.length?openContinuations.some(item=>item.blocked_reason || item.work_status==='BLOCKED')?'BLOCKED_CONTINUATION'
+        :openContinuations.some(item=>item.kind==='EVIDENCE_FOLLOW_UP')?'EVIDENCE_REQUIRED':'PROPOSAL_PLANNING'
+        :evidenceReassessed.length?evidenceReassessed.some(item=>item.progress.outcome==='EXPLORATORY_PROPOSAL')?'PROPOSAL_PLANNING':'DIRECTION_SCREEN_NO_SUPPORTED_CHANGE'
+        :continuationWarning?'BLOCKED_CONTINUATION':null,
       next_action:superseded?supersededAction:completedCase && job.state==='COMPLETED' && (job.analysis_version!==RESEARCH_VERSION || skipped.length>0)
         ?`Historical Research is completed and preserved. Completed cases are not version backfilled; new evidence cases use v4. No current version backfill is queued for this case and no candidate or approval is created. ${PROVENANCE_ACTION}`
         :completedCase && job.state!=='COMPLETED'
           ?'This completed case has a retained historical queue entry but no completed Research report. Version backfill will not run; the entry is not current pending work and no completion is claimed.'
         :!currentQualification.verified?PROVENANCE_ACTION
-        :report?.next_action || (job.state==='RETRY'?'Ocean will retry Research automatically; no human approval is pending.':'Ocean Research is queued and will resume after a website restart.')};
+        :continuationAction || evidenceReassessed.map(item=>item.next_action).join(' ') || continuationWarning || report?.next_action || (job.state==='RETRY'?'Ocean will retry Research automatically; no human approval is pending.':'Ocean Research is queued and will resume after a website restart.')};
   }
   claim() {
     return this.backend.store.transaction(()=>{
@@ -388,6 +403,10 @@ export class OperationalResearch {
         candidate_hash:null,dependency_ids:[job.artifact_id]});
       this.db.prepare(`UPDATE ow_research_jobs SET state='COMPLETED',lease_id=NULL,lease_until_ms=NULL,last_error=NULL,
         result_artifact_id=?,result_hash=?,completed_at_utc=? WHERE id=?`).run(artifactId,digest(content),report.completed_at_utc,job.id);
+      const completedJob=this.backend.one('ow_research_jobs',job.id);
+      this.continuations.ensure(completedJob,actor);
+      const continuationSource=this.continuations.source(completedJob);
+      if(continuationSource)this.continuations.reconcileEvidence(continuationSource,actor);
       this.db.prepare("UPDATE ow_cases SET work_status='COMPLETED',revision=revision+1,waiting_on=NULL WHERE id=?").run(row.id);
       this.backend.event(row.id,'operational.research.complete',actor,{job_id:job.id,result_artifact_id:artifactId,
         result_hash:digest(content),outcome:result.outcome,next_action:result.next_action,automatic_strategy_change:false});

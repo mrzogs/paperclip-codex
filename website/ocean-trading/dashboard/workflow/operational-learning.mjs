@@ -904,7 +904,7 @@ export class OperationalLearning {
     return {
       stage,
       loop_stage: stage === 'COMPLETE' && details?.conclusion_type === 'RECOMMENDATION'
-        ? research?.state === 'COMPLETED' ? 'COMPLETE' : research?.effective_state || research?.state || 'PENDING_RESEARCH' : stage,
+        ? research?.loop_stage || (research?.state === 'COMPLETED' ? 'COMPLETE' : research?.effective_state || research?.state || 'PENDING_RESEARCH') : stage,
       research,
       eligible: classification.eligible,
       reasons: classification.reasons,

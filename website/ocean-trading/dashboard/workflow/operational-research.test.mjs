@@ -243,27 +243,50 @@ function queueFixture() {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'ocean-research-'));
   const file=path.join(root,'workflow.sqlite');let store=new WorkflowStore(file);
   const db=store.db;const hash=digest('baseline');
+  const mockContext=run_id=>({run_id,context_hash:digest(`context-${run_id}`),strategy_profile_id:'p',strategy_profile_version:'1',
+    strategy_code_hash:hash,strategy_config_hash:digest('config'),dataset_manifest_id:'dataset',dataset_manifest_revision:1,
+    dataset_manifest_hash:digest('dataset'),execution_instance_id:'i'});
   db.prepare('INSERT INTO ow_profiles VALUES(?,?,?,?,?)').run('p','s','1',hash,'{}');
   db.prepare('INSERT INTO ow_strategies VALUES(?,?,?,?,?)').run('s','p',1,hash,'{}');
   db.prepare('INSERT INTO ow_instances VALUES(?,?,?)').run('i','s','{}');
-  db.prepare('INSERT INTO ow_runs VALUES(?,?,?,1,?,?)').run('r','s','i','COMPLETED','{}');
+  db.prepare('INSERT INTO ow_runs VALUES(?,?,?,1,?,?)').run('r','s','i','COMPLETED',JSON.stringify(mockContext('r')));
   db.prepare("INSERT INTO ow_cases VALUES(?,?,?,?,1,'RESEARCH','READY',?,NULL,'brain',NULL,?)")
-    .run('case','s','i','r',hash,JSON.stringify({origin:'OPERATIONAL_LEARNING'}));
+    .run('case','s','i','r',hash,JSON.stringify({origin:'OPERATIONAL_LEARNING',registry_revision:1,
+      registry_reconciliation_id:'mock-registry',registry_record_sha256:digest('registry')}));
   const content=JSON.stringify({schema_version:'ocean-operational-learning-recommendation/v1',
     authority:{automatic_strategy_change:false,candidate_approved:false,paper_authorized:false,live_authorized:false}});
   db.prepare('INSERT INTO ow_artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?,?)')
     .run('a','s','r','case','brain','strategy','RECOMMENDATION',null,hash,'[]',JSON.stringify({content_hash:digest(content)}),Buffer.from(content));
-  const backend={db,store,one:(table,id)=>backend.db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id),
-    artifactFor:(_,id)=>backend.one('ow_artifacts',id),event(){},
+  const identity={identity_id:'brain',role:'BRAIN',namespace:'OPERATIONAL',strategy_ids:['s'],instance_ids:['i'],
+    scopes:['read','artifact.write','event.write'],expires_at_utc:new Date(Date.now()+3600000).toISOString()};
+  store.registerIdentity(identity);
+  const actor={id:'brain',role:'BRAIN',namespace:'OPERATIONAL'};
+  const backend={db,store,config:{identities:[identity],browser:{subject_id:'wayne-ocean-ui'}},auth:{human:{state:'CONFIGURED'}},
+    one:(table,id)=>backend.db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id),
+    baseline:row=>{assert.equal(row.baseline_hash,backend.one('ow_strategies','s').baseline_hash);},
+    artifactFor:(_,id)=>backend.one('ow_artifacts',id),event(entity,action,actor,payload){
+      backend.db.prepare('INSERT INTO ow_events(entity_id,action,actor_id,actor_role,created_at_utc,payload_json) VALUES(?,?,?,?,?,?)')
+        .run(entity,action,actor.id,actor.role || 'BRAIN',new Date().toISOString(),JSON.stringify({payload}));
+    },
     // Explicit mock-only qualification; these queue fixtures do not prove physical execution.
-    operationalLearning:{enabled:true,classification:()=>({eligible:true,reasons:[],telemetry:{bypassed:true,proof_basis:'EXPLICIT_MOCK_ONLY'}}),cohort:run=>({cohort:{eligible_runs:[{run_id:run.id}]}})},
+    operationalLearning:{enabled:true,brainActor:()=>actor,classification:()=>({eligible:true,reasons:[],telemetry:{bypassed:true,proof_basis:'EXPLICIT_MOCK_ONLY'}}),cohort:run=>({cohort:{eligible_runs:[{run_id:run.id}]}})},
     writeArtifact(_actor,data) {
       backend.db.prepare('INSERT INTO ow_artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(data.artifact_id,'s',data.run_id,
         data.case_id,'brain',data.recipient_id,data.kind,null,hash,JSON.stringify(data.dependency_ids),
         JSON.stringify({content_hash:data.content_hash}),Buffer.from(data.content));
     }};
   let worker=new OperationalResearch(backend);
-  return {backend,file,get worker(){return worker;},restart(){store.close();store=new WorkflowStore(file);backend.store=store;backend.db=store.db;worker=new OperationalResearch(backend);},
+  return {backend,file,actor,get worker(){return worker;},captureForCompletion(job,{rows,bundle}) {
+    for(const item of bundle.cohort.eligible_runs) {
+      if(item.run_id==='a') {item.run_id='r';for(const row of rows)if(row.run_id==='a')row.run_id='r';
+        bundle.research_coverage.r=bundle.research_coverage.a;delete bundle.research_coverage.a;}
+      if(!backend.one('ow_runs',item.run_id))backend.db.prepare('INSERT INTO ow_runs VALUES(?,?,?,1,?,?)')
+        .run(item.run_id,'s','i','COMPLETED',JSON.stringify(mockContext(item.run_id)));
+      item.context_hash=mockContext(item.run_id).context_hash;
+    }
+    worker.evidence=()=>({rows,bundle,row:backend.one('ow_cases','case'),context:mockContext('r'),completion_hash:digest('completion'),recipient:'strategy'});
+    return worker.capture(job).result;
+  },restart(){store.close();store=new WorkflowStore(file);backend.store=store;backend.db=store.db;worker=new OperationalResearch(backend);},
     close(){store.close();fs.rmSync(root,{recursive:true,force:true});}};
 }
 
@@ -349,7 +372,7 @@ test('v4 jobs and results append without claiming, relabelling or rewriting v2 h
       const appended=f.worker.enqueue('case','a');
       assert.equal(appended.analysis_version,RESEARCH_VERSION);assert.notEqual(appended.id,legacyId);
       const job=f.worker.claim();assert.equal(job.id,appended.id);assert.equal(job.analysis_version,RESEARCH_VERSION);
-      const {rows,bundle}=sample();const status=f.worker.complete(job,evaluateResearch(bundle,rows),{id:'brain'},'strategy');
+      const result=f.captureForCompletion(job,sample());const status=f.worker.complete(job,result,f.actor,'strategy');
       assert.equal(status.report.schema_version,RESEARCH_VERSION);assert.notEqual(status.result_artifact_id,legacyArtifact);
       f.restart();
       assert.deepEqual(f.backend.one('ow_research_jobs',legacyId),original);
@@ -695,14 +718,15 @@ test('captured Research input is immutable and reused after restart without rere
 test('insufficient evidence is a completed finding, not endless RETRY or invented candidate/test work',()=>{
   const f=queueFixture();try {
     const {rows,bundle}=sample();delete bundle.research_coverage.b;
-    const result=evaluateResearch(bundle,rows);
     f.worker.enqueue('case','a');const job=f.worker.claim();
-    const status=f.worker.complete(job,result,{id:'brain'},'strategy');
+    const result=f.captureForCompletion(job,{rows,bundle});
+    const status=f.worker.complete(job,result,f.actor,'strategy');
     assert.equal(status.state,'COMPLETED');assert.equal(status.report.outcome,'INSUFFICIENT_EVIDENCE');
-    assert.match(status.next_action,/insufficient evidence, not an evaluated no-change finding/);
+    assert.match(status.next_action,/Insufficient evidence is not an evaluated no-change finding/);
     assert.equal(status.report.candidate_validation.status,'NOT_DUE');
     assert.equal(f.backend.one('ow_cases','case').candidate_hash,null);
-    assert.equal(f.backend.db.prepare('SELECT COUNT(*) n FROM ow_tasks').get().n,0);
+    assert.equal(f.backend.db.prepare('SELECT COUNT(*) n FROM ow_tasks').get().n,1,'owned evidence task is not a candidate test');
+    assert.equal(status.continuations[0].kind,'EVIDENCE_FOLLOW_UP');
     assert.equal(f.backend.db.prepare('SELECT COUNT(*) n FROM ow_approval_requests').get().n,0);
     const artifact=f.backend.one('ow_artifacts',status.result_artifact_id);
     const completed=f.backend.one('ow_research_jobs',job.id);
