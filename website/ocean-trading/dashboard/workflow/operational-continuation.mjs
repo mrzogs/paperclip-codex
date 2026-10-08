@@ -1,4 +1,4 @@
-import { digest, objectHash, requireThat } from './common.mjs';
+import { digest, exactKeys, id, noSecrets, objectHash, requireThat } from './common.mjs';
 import { OperationalProposalPlan } from './operational-proposal-plan.mjs';
 import { REASSESSMENT_ORIGIN, RESEARCH_V6, directionExclusionExposure, requireDirectionExclusionExposure } from './operational-research-protocol.mjs';
 import { readResearchReport } from './operational-research-report.mjs';
@@ -6,6 +6,8 @@ import { readResearchReport } from './operational-research-report.mjs';
 export const CONTINUATION_ORIGIN = 'OPERATIONAL_RESEARCH_CONTINUATION';
 const VERSION = 'ocean-research-planning-continuation/v1';
 const LINK = 'operational.research.continuation.link';
+const RISK_RETURN = 'operational.research.risk-review.recorded';
+const RISK_VERSION = 'ocean-risk-review-disposition/v1';
 const noAuthority = Object.freeze({ automatic_strategy_change:false, candidate_approved:false, paper_authorized:false, live_authorized:false });
 const terminal = new Set(['COMPLETED','CANCELLED','PAUSED','FAILED']);
 const errorCode = error => String(error.code || 'CONTINUATION_PROOF_REQUIRED').slice(0,200);
@@ -124,10 +126,74 @@ export class OperationalContinuation {
       && this.backend.store.identityCurrent(identity) && !this.backend.auth?.bindingErrors?.has(owner));
   }
   action(kind,owner,requirement=null) {
-    if(kind==='RISK_DISABLE_REVIEW')return `Owner ${owner}: review the frozen ${requirement.value} direction loss observation and retained child-stratum contradictions against the unchanged baseline. Excluding ${requirement.excluded_trades} of ${requirement.baseline_trades} recorded trades leaves zero exposure; this is risk-disable review context, not a profitable entry filter. Preserve the source report and record any separately governed disposition before considering a disable. Keep the baseline unchanged; no strategy disable, candidate, execution or human approval is authorized or claimed.`;
+    if(kind==='RISK_DISABLE_REVIEW')return `Owner ${owner}: review the frozen ${requirement.value} direction loss observation and retained child-stratum contradictions against the unchanged baseline. Excluding ${requirement.excluded_trades} of ${requirement.baseline_trades} recorded trades leaves zero exposure; this is risk-disable review context, not a profitable entry filter. Record KEEP_BASELINE or EVIDENCE_LIMITED with review notes through the owner-only operational risk-reviews/dispositions route. Preserve the source report. Keep the baseline unchanged; no strategy disable, candidate, execution or human approval is authorized or claimed.`;
     return kind==='PROPOSAL_PLANNING'
       ?`Owner ${owner}: review the supported direction rule and freeze an exact non-live development/test/comparison plan with a scoped recipient through the operational proposal work queue. Returned drafts remain planning work until execution contracts are verified; no candidate has been built or tested.`
       :`Owner ${owner}: ${requirement?this.research.remediation(requirement).next_action:'Review the frozen evidence shortfalls before collecting further evidence.'} Insufficient evidence is not an evaluated no-change finding. Keep the baseline; no approval is due for unassessed directions.`;
+  }
+  riskIdentity(actor,row,scope='read') {
+    requireThat(actor.id===row.owner_id,403,'RISK_REVIEW_EXACT_OWNER_REQUIRED');
+    if(actor.role==='HUMAN')requireThat(actor.id===this.backend.config.browser?.subject_id,403,'WAYNE_BROWSER_ONLY');
+    else requireThat(actor.role==='BRAIN' && actor.namespace==='OPERATIONAL',403,'RISK_REVIEW_OPERATIONAL_BRAIN_REQUIRED');
+    this.backend.authorize(actor,scope,row.strategy_id,row.instance_id);
+    requireThat(this.ownerCurrent(row.owner_id,row),403,'RISK_REVIEW_CURRENT_OWNER_REQUIRED');
+  }
+  riskWork(actor,caseId,scope='read') {
+    const row=this.backend.one('ow_cases',id(caseId)),payload=JSON.parse(row.payload_json);
+    requireThat(payload.origin===CONTINUATION_ORIGIN && payload.kind==='RISK_DISABLE_REVIEW',403,'OWNED_RISK_REVIEW_REQUIRED');
+    this.riskIdentity(actor,row,scope);
+    const view=this.forCase(row);
+    requireThat(!view.blocked_reason,409,view.blocked_reason);
+    const artifact=this.backend.artifactFor(row,payload.lineage_artifact_id,'EVIDENCE');
+    return {row,payload,view,frozen:JSON.parse(Buffer.from(artifact.content).toString('utf8'))};
+  }
+  riskQueue(actor) {
+    requireThat(actor.role==='HUMAN' || (actor.role==='BRAIN' && actor.namespace==='OPERATIONAL'),403,'RISK_REVIEW_OPERATIONAL_BRAIN_REQUIRED');
+    const items=[];
+    for(const row of this.db.prepare("SELECT * FROM ow_cases WHERE owner_id=? AND json_extract(payload_json,'$.origin')=? AND json_extract(payload_json,'$.kind')='RISK_DISABLE_REVIEW' ORDER BY rowid").all(actor.id,CONTINUATION_ORIGIN)) {
+      if(terminal.has(row.work_status))continue;
+      this.riskIdentity(actor,row);const view=this.forCase(row);
+      items.push({case_id:row.id,revision:row.revision,support_hash:view.support_hash,status:view.work_status,
+        blocked_reason:view.blocked_reason,next_action:view.next_action,risk_review:view.risk_review});
+    }
+    return {namespace:'OPERATIONAL',owner_id:actor.id,items,authority:noAuthority};
+  }
+  recordRiskDisposition(actor,input) {
+    exactKeys(input,['message_id','data']);id(input.message_id);noSecrets(input,this.backend.environment);
+    const data=input.data;exactKeys(data,['case_id','expected_revision','support_hash','disposition','review_notes']);
+    requireThat(['KEEP_BASELINE','EVIDENCE_LIMITED'].includes(data.disposition),422,'RISK_REVIEW_DISPOSITION_REQUIRED');
+    requireThat(typeof data.review_notes==='string' && data.review_notes.trim().length>0 && data.review_notes.length<=4000,
+      422,'RISK_REVIEW_NOTES_REQUIRED');
+    const hash=objectHash(data),key=`risk-review:${input.message_id}`;
+    return this.backend.store.transaction(()=>{
+      const work=this.riskWork(actor,data.case_id,'event.write'),{row,payload,frozen}=work;
+      this.backend.authorize(actor,'artifact.write',row.strategy_id,row.instance_id);
+      requireThat(data.support_hash===payload.support_hash,409,'RISK_REVIEW_SUPPORT_CONFLICT');
+      const previous=this.db.prepare('SELECT * FROM ow_inbox WHERE producer_id=? AND message_id=?').get(actor.id,key);
+      if(previous){requireThat(previous.payload_hash===hash,409,'DUPLICATE_CONFLICT');return JSON.parse(previous.result_json);}
+      this.backend.expect(row,data.expected_revision);
+      requireThat(row.work_status==='READY',409,'RISK_REVIEW_DISPOSITION_HELD');
+      const nextAction=`Owner ${actor.id}: risk review recorded ${data.disposition} for the frozen source only. Keep the baseline unchanged. ${data.disposition==='EVIDENCE_LIMITED'?'Retain the evidence limitations; this review does not resolve or complete any separate evidence follow-up. ':''}No strategy disable, candidate testing, execution or approval is authorized.`;
+      const content=JSON.stringify({schema_version:RISK_VERSION,case_id:row.id,support_hash:payload.support_hash,
+        source:frozen.source,observation:frozen.support.requirement,reviewer_id:actor.id,
+        disposition:data.disposition,review_notes:data.review_notes,next_action:nextAction,
+        disable_authorized:false,authority:noAuthority});
+      const contentHash=digest(content),artifactId=`test-risk-disposition-${contentHash.slice(7)}`,operationalActor={...actor,namespace:'OPERATIONAL'};
+      this.backend.writeArtifact(operationalActor,{artifact_id:artifactId,case_id:row.id,run_id:row.run_id,
+        recipient_id:this.source(this.backend.one('ow_research_jobs',frozen.source.job_id)).recipient,
+        kind:'EVIDENCE',media_type:'application/json',content,content_hash:contentHash,candidate_hash:null,
+        dependency_ids:[payload.lineage_artifact_id]});
+      const returned={artifact_id:artifactId,content_hash:contentHash,support_hash:payload.support_hash,
+        source:frozen.source,reviewer_id:actor.id,disposition:data.disposition,authority:noAuthority};
+      this.backend.event(row.id,RISK_RETURN,operationalActor,returned);
+      const updated=this.db.prepare("UPDATE ow_tasks SET status='COMPLETED',artifact_id=? WHERE case_id=? AND kind='RISK_DISABLE_REVIEW' AND required=1").run(artifactId,row.id);
+      requireThat(updated.changes===1,409,'RISK_REVIEW_REQUIRED_TASK_CONFLICT');
+      this.db.prepare("UPDATE ow_cases SET work_status='COMPLETED',revision=revision+1,waiting_on=? WHERE id=?").run(nextAction,row.id);
+      const result={...returned,case_id:row.id,revision:row.revision+1,risk_review_complete:true,
+        disable_authorized:false,candidate_testing:'NOT_DUE',approval_due:false,next_action:nextAction};
+      this.db.prepare('INSERT INTO ow_inbox VALUES(?,?,?,?)').run(actor.id,key,hash,JSON.stringify(result));
+      return result;
+    });
   }
   ensure(job,actor) {
     const source=this.source(job);
@@ -232,7 +298,7 @@ export class OperationalContinuation {
     if(payload.origin!==CONTINUATION_ORIGIN)return null;
     const progressRow=this.db.prepare("SELECT payload_json FROM ow_events WHERE entity_id=? AND action='operational.research.evidence.progress' ORDER BY id DESC LIMIT 1").get(row.id);
     const progress=progressRow?JSON.parse(progressRow.payload_json).payload:null;
-    let reason=null,source=null,evidenceRemediation=null,riskReview=null;
+    let reason=null,source=null,evidenceRemediation=null,riskReview=null,riskDisposition=null;
     try {
       const artifact=this.backend.artifactFor(row,payload.lineage_artifact_id);
       const frozen=JSON.parse(Buffer.from(artifact.content).toString('utf8'));
@@ -261,6 +327,26 @@ export class OperationalContinuation {
       const task=this.db.prepare('SELECT * FROM ow_tasks WHERE case_id=? AND kind=?').get(row.id,payload.task_kind);
       requireThat(task?.required===1,409,'CONTINUATION_REQUIRED_TASK_MISSING');
       requireThat(this.ownerCurrent(row.owner_id,row),409,'CONTINUATION_PLANNING_OWNER_REQUIRED');
+      if(payload.kind==='RISK_DISABLE_REVIEW') {
+        const recorded=this.db.prepare('SELECT * FROM ow_events WHERE entity_id=? AND action=? ORDER BY id DESC LIMIT 1').get(row.id,RISK_RETURN);
+        if(recorded) {
+          const ref=JSON.parse(recorded.payload_json).payload,returned=this.backend.artifactFor(row,ref.artifact_id,'EVIDENCE');
+          const value=JSON.parse(Buffer.from(returned.content).toString('utf8'));
+          requireThat(value.schema_version===RISK_VERSION && value.case_id===row.id && value.support_hash===payload.support_hash
+            && ref.support_hash===payload.support_hash && recorded.actor_id===row.owner_id
+            && digest(Buffer.from(returned.content))===ref.content_hash
+            && objectHash(value.source)===objectHash(frozen.source) && objectHash(ref.source)===objectHash(frozen.source)
+            && objectHash(value.observation)===objectHash(riskReview)
+            && value.reviewer_id===row.owner_id && ref.reviewer_id===row.owner_id && returned.producer_id===row.owner_id
+            && ref.disposition===value.disposition && ['KEEP_BASELINE','EVIDENCE_LIMITED'].includes(value.disposition)
+            && typeof value.review_notes==='string' && value.review_notes.trim().length>0 && value.review_notes.length<=4000
+            && value.disable_authorized===false && objectHash(value.authority)===objectHash(noAuthority)
+            && objectHash(ref.authority)===objectHash(noAuthority) && row.work_status==='COMPLETED'
+            && task.status==='COMPLETED' && task.artifact_id===returned.id,
+          409,'RISK_REVIEW_RETURN_PROOF_CONFLICT');
+          riskDisposition={...value,artifact_id:returned.id,content_hash:ref.content_hash};
+        } else requireThat(row.work_status!=='COMPLETED',409,'RISK_REVIEW_RETURN_PROOF_REQUIRED');
+      }
       if(progress) {
         const progressArtifact=this.backend.artifactFor(row,progress.progress_artifact_id,'EVIDENCE');
         const recorded=JSON.parse(Buffer.from(progressArtifact.content).toString('utf8'));
@@ -291,10 +377,11 @@ export class OperationalContinuation {
       progress,
       plan_work:planWork,
       evidence_remediation:evidenceRemediation,
-      ...(payload.kind==='RISK_DISABLE_REVIEW'?{risk_review:riskReview}:{}),
+      ...(payload.kind==='RISK_DISABLE_REVIEW'?{risk_review:riskReview,risk_disposition:riskDisposition}:{}),
       next_action:reason==='ZERO_RETAINED_EXPOSURE_STRATEGY_DISABLE'
         ?`Owner ${row.owner_id}: retain this frozen proposal as risk-disable review context, not a profitable entry-filter candidate. Zero retained exposure cannot support new planning or execution. Preserve the original report and disposition; candidate testing is NOT_DUE and no disable or approval is authorized.`
         :reason?`Owner ${row.owner_id}: resolve ${reason} before this continuation can support current planning. Preserve its recorded disposition and frozen evidence; no approval or candidate execution is due.`
+        :riskDisposition?riskDisposition.next_action
         :row.work_status==='COMPLETED' && progress?.status==='REASSESSED'?progress.next_action
         :terminal.has(row.work_status)?`${payload.kind==='RISK_DISABLE_REVIEW'?'Risk review':'Planning'} is ${row.work_status.toLowerCase()}; owner ${row.owner_id} retains the recorded disposition. Restart does not reopen it. No ${payload.kind==='RISK_DISABLE_REVIEW'?'strategy disable, ':''}candidate testing or approval is implied.`
         :payload.kind==='RISK_DISABLE_REVIEW'?this.action(payload.kind,row.owner_id,riskReview)

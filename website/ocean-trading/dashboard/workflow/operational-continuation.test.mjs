@@ -407,6 +407,100 @@ test('risk review cancellation is preserved rather than reopened or treated as a
   }finally{f.close();}
 });
 
+function riskInput(f,caseId,message='risk-return',disposition='KEEP_BASELINE') {
+  const row=f.backend.one('ow_cases',caseId);
+  return {message_id:message,data:{case_id:caseId,expected_revision:row.revision,
+    support_hash:JSON.parse(row.payload_json).support_hash,disposition,
+    review_notes:'Reviewed the frozen zero-retained-exposure observation and its recorded child strata. No disable is authorized.'}};
+}
+
+test('real isolated HTTP risk-owner disposition closes only the risk task and replays byte-identically after restart',async()=>{
+  const {createServer}=await import('node:http');
+  const f=fixture({prospective:true,oneDirection:'short'});let server;
+  try {
+    const status=f.complete(),before=sealed(f),{child,artifact}=assertRiskReview(f,status);
+    const pins=()=>Object.fromEntries(['ow_strategies','ow_profiles','ow_instances','ow_runs'].map(table=>[table,f.backend.db.prepare(`SELECT * FROM ${table} ORDER BY id`).all()]));
+    const originalPins=pins();let actor=f.actor;
+    Object.assign(f.backend,{authFailureWindowMs:300000,authFailureThreshold:3,
+      authFailureTotals:{401:0,403:0},authFailureBuckets:new Map()});
+    // Authentication identity is an explicit fixture. Actual HTTP body parser,
+    // scoped handler, authorization, transactions and SQLite execute unchanged.
+    f.backend.auth.authenticate=()=>actor;
+    server=createServer((request,response)=>void f.backend.handle(request,response,new URL(request.url,'http://127.0.0.1')));
+    await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+    const url=`http://127.0.0.1:${server.address().port}/api/workflow/operational/v1/`;
+    const invoke=async(route,input)=>{const response=await fetch(url+route,{signal:AbortSignal.timeout(5000),
+      ...(input?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(input)}:{})});
+      return {status:response.status,body:await response.json()};};
+    const queued=await invoke('risk-reviews/work');assert.equal(queued.status,200);assert.equal(queued.body.items[0].case_id,child.id);
+    const input=riskInput(f,child.id),returned=await invoke('risk-reviews/dispositions',input);
+    assert.equal(returned.status,200);assert.equal(returned.body.risk_review_complete,true);assert.equal(returned.body.disable_authorized,false);
+    const view=f.backend.readCase(f.human,child.id);assert.equal(view.work_status,'COMPLETED');
+    assert.equal(view.tasks[0].status,'COMPLETED');assert.equal(view.tasks[0].artifact_id,returned.body.artifact_id);
+    assert.equal(view.planning.risk_disposition.disposition,'KEEP_BASELINE');assert.equal(view.planning.qualified_for_planning,false);
+    assert.match(view.next_action,/risk review recorded KEEP_BASELINE.*No strategy disable/);
+    assert.equal(f.worker.statusForCase('source').loop_stage,'RISK_REVIEW_RECORDED');
+    assert.deepEqual((await invoke('risk-reviews/work')).body.items,[]);
+    const receipt=f.backend.one('ow_artifacts',returned.body.artifact_id),closed=f.backend.one('ow_cases',child.id);
+    assert.equal(receipt.kind,'EVIDENCE');assert.deepEqual(JSON.parse(receipt.dependencies_json),[artifact.id]);
+    assert.deepEqual((await invoke('risk-reviews/dispositions',input)).body,returned.body);
+    f.restart();f.worker.reconcile();f.worker.reconcile();
+    assert.deepEqual((await invoke('risk-reviews/dispositions',input)).body,returned.body);
+    assert.deepEqual(f.backend.one('ow_cases',child.id),closed);assert.deepEqual(f.backend.one('ow_artifacts',receipt.id),receipt);
+    assert.deepEqual(f.backend.one('ow_artifacts',artifact.id),artifact);assert.deepEqual(pins(),originalPins);
+    const changed=structuredClone(input);changed.data.review_notes='Different disposition notes';
+    assert.equal((await invoke('risk-reviews/dispositions',changed)).body.error.code,'DUPLICATE_CONFLICT');
+    assert.equal((await invoke('risk-reviews/dispositions',{...input,message_id:'new-stale'})).body.error.code,'REVISION_CONFLICT');
+    assert.equal((await invoke('risk-reviews/dispositions',riskInput(f,child.id,'new-closed'))).body.error.code,'RISK_REVIEW_DISPOSITION_HELD');
+    actor={...f.actor,id:'different-owner'};assert.equal((await invoke('risk-reviews/dispositions',input)).body.error.code,'RISK_REVIEW_EXACT_OWNER_REQUIRED');
+    actor=f.actor;f.setProof(false);
+    assert.equal((await invoke('risk-reviews/dispositions',input)).body.error.code,'CONTINUATION_CURRENT_PROVENANCE_REQUIRED');
+    assertSealed(f,before);assertNoAuthority(f);
+  }finally{if(server)await new Promise(resolve=>server.close(resolve));f.close();}
+});
+
+test('risk completion refuses TEST, wrong role/scope/support, authority fields, held state and missing return proof',()=>{
+  const f=fixture({prospective:true,oneDirection:'short'});try {
+    f.complete();const child=f.children()[0],input=riskInput(f,child.id),c=f.worker.continuations;
+    for(const actor of [{...f.actor,namespace:'TEST'},{...f.actor,role:'STRATEGY'},f.human,
+      {...f.actor,scopes:['read','event.write']},{...f.actor,strategyIds:['other']},{...f.actor,instanceIds:['other']}])
+      assert.throws(()=>c.recordRiskDisposition(actor,input),/RISK_REVIEW_OPERATIONAL_BRAIN_REQUIRED|EXACT_OWNER_REQUIRED|WRONG_ACTION_SCOPE|WRONG_STRATEGY_SCOPE|WRONG_INSTANCE_SCOPE/);
+    for(const data of [{...input.data,support_hash:digest('different')},{...input.data,disposition:'DISABLE_APPROVED'},
+      {...input.data,review_notes:''},{...input.data,disable_authorized:true},{...input.data,human_approved:true}])
+      assert.throws(()=>c.recordRiskDisposition(f.actor,{...input,data}),/SUPPORT_CONFLICT|DISPOSITION_REQUIRED|NOTES_REQUIRED|UNKNOWN_OR_AUTHORITY_FIELD/);
+    f.backend.config.identities[0].revoked=true;
+    assert.throws(()=>c.recordRiskDisposition(f.actor,input),/CURRENT_OWNER_REQUIRED/);delete f.backend.config.identities[0].revoked;
+    f.backend.db.prepare("UPDATE ow_cases SET work_status='CANCELLED' WHERE id=?").run(child.id);
+    assert.throws(()=>c.recordRiskDisposition(f.actor,input),/DISPOSITION_HELD/);
+    f.backend.db.prepare("UPDATE ow_cases SET work_status='COMPLETED' WHERE id=?").run(child.id);
+    assert.equal(f.backend.readCase(f.human,child.id).planning.blocked_reason,'RISK_REVIEW_RETURN_PROOF_REQUIRED');
+    assert.throws(()=>c.recordRiskDisposition(f.actor,input),/RETURN_PROOF_REQUIRED/);
+    assertNoAuthority(f);
+  }finally{f.close();}
+  const f2=fixture();try {
+    f2.complete();const child=f2.children()[0];
+    assert.throws(()=>f2.worker.continuations.recordRiskDisposition(f2.actor,riskInput(f2,child.id)),/OWNED_RISK_REVIEW_REQUIRED/);
+  }finally{f2.close();}
+});
+
+test('risk return failure rolls back all closure evidence and evidence-limited review never closes the separate evidence task',()=>{
+  const f=fixture({prospective:true,oneDirection:'long',insufficient:true});try {
+    const status=f.complete(),before=sealed(f),{child,artifact}=assertRiskReview(f,status);
+    const evidence=f.children().find(row=>JSON.parse(row.payload_json).kind==='EVIDENCE_FOLLOW_UP');
+    const input=riskInput(f,child.id,'evidence-limited-risk','EVIDENCE_LIMITED'),event=f.backend.event.bind(f.backend);
+    f.backend.event=(entity,action,...args)=>{if(action==='operational.research.risk-review.recorded')throw Error('risk closure crash');return event(entity,action,...args);};
+    assert.throws(()=>f.worker.continuations.recordRiskDisposition(f.actor,input),/risk closure crash/);
+    assert.equal(f.backend.one('ow_cases',child.id).work_status,'READY');
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_artifacts WHERE id LIKE 'test-risk-disposition-%'").get().n,0);
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_inbox WHERE message_id LIKE 'risk-review:%'").get().n,0);
+    f.backend.event=event;f.restart();const returned=f.worker.continuations.recordRiskDisposition(f.actor,input);
+    assert.equal(returned.risk_review_complete,true);assert.equal(returned.disable_authorized,false);
+    f.restart();f.worker.reconcile();assert.deepEqual(f.worker.continuations.recordRiskDisposition(f.actor,input),returned);
+    assert.deepEqual(f.backend.one('ow_cases',evidence.id),evidence);assert.equal(f.worker.statusForCase('source').loop_stage,'EVIDENCE_REQUIRED');
+    assert.deepEqual(f.backend.one('ow_artifacts',artifact.id),artifact);assertSealed(f,before);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
 test('old immutable zero-exposure proposal/report survives but cannot authorize a new planning draft',()=>{
   const f=fixture({oneDirection:'short'});try {
     // Explicit disposable mock of the pre-G21 continuation producer. It seals
@@ -746,6 +840,10 @@ test('isolated Chrome links the actual owned risk review, retains it across rest
     f.restart();f.worker.reconcile();await page.reload();await settled();
     assert.equal(await page.getByRole('heading',{name:'Risk review scope',exact:true}).count(),1);
     assert.match(await page.locator('#content').innerText(),/Owner brain: review/);
+    f.worker.continuations.recordRiskDisposition(f.actor,riskInput(f,child.id,'browser-fixture-return'));
+    await page.reload();await settled();
+    assert.match(await page.locator('#content').innerText(),/risk review recorded KEEP_BASELINE/);
+    assert.equal(await page.locator('#content [data-action]').count(),0);
     await page.locator('dt').filter({hasText:'Source Research'}).locator('..').getByRole('link').click();await settled();
     assert.equal(new URL(page.url()).pathname,'/improvement/cases/source');
     assert.match(await page.locator('#content').innerText(),/Owned continuation work/);

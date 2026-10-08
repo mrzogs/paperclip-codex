@@ -421,6 +421,7 @@ export class OperationalResearch {
         :openContinuations.some(item=>item.kind==='EVIDENCE_FOLLOW_UP')?'EVIDENCE_REQUIRED'
         :openContinuations.some(item=>item.kind==='RISK_DISABLE_REVIEW')?'RISK_DISABLE_REVIEW_REQUIRED':'EVIDENCE_REQUIRED'
         :evidenceReassessed.length?evidenceReassessed.some(item=>item.progress.outcome==='EXPLORATORY_PROPOSAL')?'PROPOSAL_PLANNING':'DIRECTION_SCREEN_NO_SUPPORTED_CHANGE'
+        :continuations.some(item=>!item.blocked_reason && item.risk_disposition)?'RISK_REVIEW_RECORDED'
         :continuationWarning?'BLOCKED_CONTINUATION':null,
       next_action:superseded?supersededAction:completedCase && job.state==='COMPLETED' && (job.analysis_version!==this.version || backfillSkipped)
         ?`Historical Research is completed and preserved. Completed cases are not version backfilled; new evidence cases use ${this.version}. No current version backfill is queued for this case and no candidate or approval is created. ${PROVENANCE_ACTION}`

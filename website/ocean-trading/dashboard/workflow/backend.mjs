@@ -893,6 +893,8 @@ export class WorkflowBackend {
         else if(local==='proposals/work' && request.method==='GET')result=this.operationalResearch.continuations.plans.queue(actor);
         else if(/^proposals\/[A-Za-z0-9_.:-]+\/work$/.test(local) && request.method==='GET')result=this.operationalResearch.continuations.plans.read(actor,local.split('/')[1]);
         else if(['proposals/claim','proposals/progress','proposals/plans'].includes(local) && request.method==='POST')result=this.operationalResearch.continuations.plans.perform(local.slice(10),actor,await jsonBody(request));
+        else if(local==='risk-reviews/work' && request.method==='GET')result=this.operationalResearch.continuations.riskQueue(actor);
+        else if(local==='risk-reviews/dispositions' && request.method==='POST')result=this.operationalResearch.continuations.recordRiskDisposition(actor,await jsonBody(request));
         else if(/^artifacts\/[A-Za-z0-9_.:-]+\/research-report(?:\/download)?$/.test(local) && request.method==='GET') {
           const artifactId=local.split('/')[1],report=this.fullResearchReport(actor,artifactId);
           if(local.endsWith('/download')) {
