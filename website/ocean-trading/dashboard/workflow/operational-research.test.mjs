@@ -776,6 +776,8 @@ test('G08 run browser template labels prior outcomes as historical without claim
   assert.match(historical,/Overall learning loop: QUALIFICATION_REQUIRED/);
   assert.match(historical,/Conclusion: Not currently qualified/);
   assert.match(historical,/Prior outcome \(historical\): NO_SUPPORTED_CHANGE/);
+  assert.match(historical,/2\. Evidence qualified: QUALIFICATION_REQUIRED: PHYSICAL_STRATEGY_BINDING_CONFLICT; RAW_STTL2_IDENTITY_CONFLICT/);
+  assert.doesNotMatch(historical,/2\. Evidence qualified: NOT_DUE/);
   assert.match(historical,/3\. Cumulative Brain analysis: HISTORICAL/);
   assert.match(historical,/4\. Result returned to Ocean: HISTORICAL/);
   assert.match(historical,/5\. Research evaluation: HISTORICAL/);
@@ -799,6 +801,7 @@ test('G08 run browser template labels prior outcomes as historical without claim
     research:{...data.learning.research,historical:false,qualified_for_new_support:true}}});
   assert.match(current,/Overall learning loop: COMPLETE/);
   assert.match(current,/Conclusion: NO_SUPPORTED_CHANGE/);
+  assert.match(current,/2\. Evidence qualified: COMPLETE/);
   assert.match(current,/5\. Research evaluation: COMPLETED/);
   assert.match(current,/Qualified direction screen found no supported change/);
   assert.doesNotMatch(current,/Prior outcome \(historical\)|Not currently qualified|Research evaluation: HISTORICAL/);
@@ -812,6 +815,18 @@ test('G08 run browser template labels prior outcomes as historical without claim
     historical_result:{conclusion_type:'NO_CHANGE',research_outcome:null}}});
   assert.match(callbackOnly,/Prior outcome \(historical\): NO_CHANGE/);
   assert.doesNotMatch(callbackOnly,/Overall learning loop: COMPLETE|Conclusion: NO_CHANGE/);
+  for(const [state,reason] of [['READY','RUN_NOT_COMPLETED'],['FAILED','RUN_NOT_COMPLETED'],
+    ['COMPLETED','LEARNER_PERMISSION_DENIED']]) {
+    const notDue={...data,state,learning:{...data.learning,stage:'NOT_DUE',loop_stage:'NOT_DUE',
+      current_qualification_status:'NOT_VERIFIED',historical_result:null,research:null,reasons:[reason]}};
+    const notDueHash=objectHash(notDue),rendered=page(notDue);
+    assert.match(rendered,/2\. Evidence qualified: NOT_DUE/);
+    assert.doesNotMatch(rendered,/2\. Evidence qualified: QUALIFICATION_REQUIRED|2\. Evidence qualified: COMPLETE/);
+    assert.equal(objectHash(notDue),notDueHash);
+  }
+  const currentEvidence=page({...data,learning:{...data.learning,eligible:true,current_provenance_qualified:true}});
+  assert.match(currentEvidence,/2\. Evidence qualified: COMPLETE/,'Current evidence can qualify while its prior result stays historical');
+  assert.match(currentEvidence,/3\. Cumulative Brain analysis: HISTORICAL/);
 });
 
 test('queue mutation rolls back with its caller transaction; unapproved authority is rejected',()=>{
