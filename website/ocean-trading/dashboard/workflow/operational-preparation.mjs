@@ -1,4 +1,4 @@
-import {exactKeys,future,id,noSecrets,objectHash,requireThat,sealedHash} from './common.mjs';
+import {API_VERSION,exactKeys,future,id,noSecrets,objectHash,requireThat,sealedHash} from './common.mjs';
 import {PURPOSES,interval,subtract,intersect,merge} from './run-manager.mjs';
 
 export const RELEASE_SCOPES=['STRATEGY_ONBOARDING','DATASET_RELEASE','RUN_RELEASE'];
@@ -148,6 +148,32 @@ export class OperationalPreparation {
       return {...receipt,idempotent:false};
     });
   }
+  sourceObservation(source){
+    const modern=this.db.prepare("SELECT actor_id,payload_json FROM ow_events WHERE entity_id=? AND action='operational.source-observed' ORDER BY id DESC LIMIT 1").get(source.run.id);
+    if(modern){
+      requireThat(modern.actor_id===source.plan.instance.telemetry_producer_id,409,'AUTHENTICATED_SOURCE_PRODUCER_REQUIRED');
+      return;
+    }
+    // Older operational runs retained the validated activation, not a resolver
+    // event. Recheck its frozen proof at event time; a new run still needs a fresh handshake.
+    const legacy=this.db.prepare("SELECT entity_id,action,actor_id,actor_role,created_at_utc,payload_json FROM ow_events WHERE entity_id=? AND action='run-manager.activate' ORDER BY id DESC LIMIT 1").get(source.run.id);
+    requireThat(legacy && legacy.actor_id===source.plan.instance.telemetry_producer_id && legacy.actor_role==='TELEMETRY',409,'AUTHENTICATED_SOURCE_PRODUCER_REQUIRED');
+    let event;try{event=parse(legacy);}catch{requireThat(false,409,'AUTHENTICATED_SOURCE_PRODUCER_REQUIRED');}
+    requireThat(event?.schema_version===API_VERSION && event.namespace==='OPERATIONAL' && event.operational_action_allowed===true
+      && ['entity_id','action','actor_id','actor_role','created_at_utc'].every(key=>event[key]===legacy[key]),409,'AUTHENTICATED_SOURCE_PRODUCER_REQUIRED');
+    exactKeys(event.payload,['observed_handshake']);
+    const h=event.payload.observed_handshake;exactKeys(h,['instance','source_state','plan_hash','context_hash']);
+    this.b.validate('source-state',h.source_state);
+    const observed=h.source_state,at=Date.parse(observed.observed_at_utc),recorded=Date.parse(legacy.created_at_utc);
+    requireThat(h.instance && objectHash(h.instance)===objectHash(source.plan.instance)
+      && h.plan_hash===source.plan.plan_hash && h.context_hash===source.context.context_hash
+      && h.context_hash===source.plan.context_hash && source.context.run_id===source.run.id
+      && observed.environment===source.context.expected_environment && observed.quality==='VERIFIED'
+      && observed.simulation===true && observed.replay===(source.context.expected_environment==='REPLAY')
+      && observed.account_alias===source.plan.instance.account_alias && observed.source_schema_version
+      && Number.isFinite(at) && Number.isFinite(recorded) && recorded-at<=120000 && at-recorded<=5000,
+      409,'SOURCE_HANDSHAKE_MISMATCH');
+  }
   reprocess(actor,input){
     human(actor);
     exactKeys(input,['source_run_id','run_id','processing_id','expected_revision','confirmed','reason']);
@@ -168,8 +194,7 @@ export class OperationalPreparation {
     requireThat(summary.progress && ['source_market','strategy_execution','processing_review'].every(axis=>!subtract([review.interval],summary.progress.axes[axis]).length),409,'THREE_AXIS_SOURCE_COVERAGE_REQUIRED');
     requireThat(!subtract([review.interval],completion.observed_coverage).length && !subtract(completion.observed_coverage,[review.interval]).length,409,'SOURCE_COVERAGE_MISMATCH');
     requireThat(!this.db.prepare('SELECT id FROM ow_run_leases WHERE id=?').get(input.source_run_id),409,'SOURCE_RUN_LEASE_STILL_PRESENT');
-    const sourceObserved=this.db.prepare("SELECT actor_id,payload_json FROM ow_events WHERE entity_id=? AND action='operational.source-observed' ORDER BY id DESC LIMIT 1").get(input.source_run_id);
-    requireThat(sourceObserved && sourceObserved.actor_id===source.plan.instance.telemetry_producer_id,409,'AUTHENTICATED_SOURCE_PRODUCER_REQUIRED');
+    this.sourceObservation(source);
     requireThat(!this.db.prepare("SELECT id FROM ow_runs WHERE instance_id=? AND state IN ('READY','ACTIVE','COMPLETING')").get(source.run.instance_id),409,'INSTANCE_ALREADY_RESERVED');
     const processingConflict=this.db.prepare('SELECT id,payload_json FROM ow_run_plans').all().find(row=>parse(row).processing_id===input.processing_id);
     requireThat(!processingConflict,409,'PROCESSING_ID_ALREADY_USED');
