@@ -1296,11 +1296,17 @@ test('candidate completion survives restart and registration requires an approve
       expected_revision:work.revision,plan_artifact_id:work.dispatch.plan_artifact_id,dispatch_hash:work.dispatch.dispatch_hash,
       completion_hash:completed.completion.completion_hash,handoff_id:'test-missing-handoff'}}),/ENTITY_NOT_FOUND/);
 
-    let row=f.backend.transition(f.human,{case_id:child.id,expected_revision:work.revision,action:'advance',to_stage:'DEVELOPMENT_REVIEW',
-      artifact_id:returned.artifact_id,artifact_ids:null,decision_id:null,owner_id:null,next_action:null});
-    const request=f.backend.requestApproval(f.human,{request_id:'test-candidate-review',case_id:child.id,expected_revision:row.revision,
+    const transitionData={case_id:child.id,expected_revision:work.revision,action:'advance',to_stage:'DEVELOPMENT_REVIEW',
+      artifact_id:returned.artifact_id,artifact_ids:null,decision_id:null,owner_id:null,next_action:null};
+    assert.throws(()=>f.backend.mutate('case.transition',strategy,{message_id:'test-candidate-review-wrong-actor',data:transitionData}),/OPERATIONAL_PLANNING_MUTATION_NOT_ENABLED/);
+    assert.throws(()=>f.backend.mutate('case.transition',f.human,{message_id:'test-candidate-review-wrong-stage',data:{...transitionData,to_stage:'CANDIDATE_DEVELOPMENT'}}),/OPERATIONAL_PLANNING_MUTATION_NOT_ENABLED/);
+    let row=f.backend.mutate('case.transition',f.human,{message_id:'test-candidate-review-transition',data:transitionData});
+    const approvalData={request_id:'test-candidate-review',case_id:child.id,expected_revision:row.revision,
       gate:'DEVELOPMENT',artifact_id:returned.artifact_id,recipient_id:'strategy',authorized_tests:['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'],
-      expires_at_utc:new Date(Date.now()+3600000).toISOString()});
+      expires_at_utc:new Date(Date.now()+3600000).toISOString()};
+    assert.throws(()=>f.backend.mutate('approval.request',f.human,{message_id:'test-candidate-review-missing-holdout',data:{...approvalData,
+      authorized_tests:['BACKTEST','ROBUSTNESS','WALK_FORWARD']}}),/OPERATIONAL_PLANNING_MUTATION_NOT_ENABLED/);
+    const request=f.backend.mutate('approval.request',f.human,{message_id:'test-candidate-review-request',data:approvalData});
     const decision=f.backend.decide(f.human,{decision_id:'test-candidate-decision',request_id:request.request_id,case_id:child.id,
       expected_revision:request.revision,snapshot_hash:request.snapshot_hash,decision:'APPROVED',reason:'Approve exact Replay-only validation; Paper, Live and promotion remain disabled.'});
     row=f.backend.transition(f.human,{case_id:child.id,expected_revision:decision.revision,action:'advance',to_stage:'DEVELOPMENT_HANDOFF',
