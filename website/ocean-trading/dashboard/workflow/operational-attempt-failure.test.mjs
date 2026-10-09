@@ -327,6 +327,15 @@ test('exact delayed stop retains contradictory hook error, proves failed-only ze
   files.filter(file=>file!==f.controllerFile).forEach(file=>assert.deepEqual(fs.readFileSync(file),originals[files.indexOf(file)]));
 });
 
+test('delayed stop accepts a correlated controller query issued before the logger end acknowledgement',t=>{
+  const f=delayedFixture(t),stop=new Date('2026-10-08T16:52:05Z'),request=new Date('2026-10-08T16:52:06Z'),
+    receipt=new Date('2026-10-08T16:52:11.500Z');
+  fs.utimesSync(f.stopFile,stop,stop);fs.utimesSync(f.requestFile,request,request);fs.utimesSync(f.controllerFile,receipt,receipt);
+  const proof=f.read();
+  assert.equal(proof.logger_attempt.attempt_ended_utc,'2026-10-08 16:52:11');
+  assert.equal(proof.delayed_stop_verification.basis,'EXACT_LOGGER_STOP_ACK_AND_CORRELATED_INACTIVE_CONTROLLER');
+});
+
 for(const [name,mutate,code] of [
   ['wrong context',f=>f.sql.exec("UPDATE replay_run_context SET context_hash='wrong'"),'FAILURE_RECORDED_CONTEXT_CONFLICT'],
   ['missing logger ACK',f=>f.sql.exec('UPDATE replay_run_attempts SET stop_command_id=NULL'),'FAILURE_LATEST_LOGGER_STOP_ACK_REQUIRED'],

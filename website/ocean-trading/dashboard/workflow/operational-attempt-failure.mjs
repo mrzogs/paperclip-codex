@@ -144,8 +144,8 @@ export function readAttemptFailure(config, { run, context, plan }) {
       requireThat(latest?.attempt_id===attempt.attempt_id
         && delayed.stop.modified>=at(attempt.attempt_started_utc)-1000 && delayed.stop.modified<=ended+1000
         && hookModified>=delayed.stop.modified-1000 && hookModified<=observed+5000
-        && delayed.request.modified>=ended-1000 && delayed.request.modified<=delayed.receipt.modified+1000
-        && delayed.receipt.modified>=ended-1000 && delayed.receipt.modified<=observed+5000,
+        && delayed.request.modified>=delayed.stop.modified-1000 && delayed.request.modified<=delayed.receipt.modified+1000
+        && delayed.receipt.modified>=delayed.request.modified-1000 && delayed.receipt.modified<=observed+5000,
       409,'FAILURE_DELAYED_STOP_BOUNDARY_CONFLICT');
     }
     requireThat(receipt && receipt.instance_id === replay.instance_id && receipt.strategy_id === run.strategy_id
