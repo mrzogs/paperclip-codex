@@ -396,6 +396,14 @@ export class RunManager {
   }
   read(actor,runId) {
     const {run,plan,context}=this.load(actor,runId);const lease=this.db.prepare('SELECT * FROM ow_run_leases WHERE id=?').get(runId);
+    // Expose persisted intent, not new authority: finish still checks producer,
+    // live lease, revision and drain, and COMPLETED still requires full coverage.
+    const ending=run.state==='COMPLETING'?this.db.prepare("SELECT id,actor_role,payload_json FROM ow_events WHERE entity_id=? AND action='run-manager.end' ORDER BY id DESC LIMIT 1").get(runId):null;
+    const endRequest=ending?{event_id:ending.id,actor_role:ending.actor_role,outcome:parse(ending).payload.outcome}:null;
+    if(endRequest && ['FAILED','CANCELLED'].includes(endRequest.outcome))requireThat(
+      context.run_id===run.id && context.strategy_id===run.strategy_id && context.execution_instance_id===run.instance_id
+      && sealedHash(context,'context_hash')===context.context_hash && plan.context_hash===context.context_hash,
+      409,'TERMINAL_RUN_CONTEXT_REJECTED');
     let contextStatus='CURRENT';try{this.current(plan);}catch(e){contextStatus=e.code||'RECONCILIATION_REQUIRED';}
     const namespace=this.namespace(actor,plan);
     let execution={status:'CURRENT_EXECUTION_UNVERIFIED',heartbeat_basis:'BRIDGE_SERVICE_LEASE_NOT_PHYSICAL_REPLAY',
@@ -420,7 +428,7 @@ export class RunManager {
       }catch(error){execution={...execution,status:'FAILURE_RECONCILIATION_UNVERIFIED',reason:error.code || 'FAILURE_SOURCE_READ_FAILED',
         next_owner:'Scoped ReplayBridge telemetry producer',next_action:'Verify the exact current runner failure, terminal logger attempt and physical stop before reconciliation. No completed coverage is granted.'};}
     }
-    return {api_version:RUN_API,namespace,actual_ingestion:namespace==='OPERATIONAL'?'SCOPED_EVENT_ONLY':'OFF',run_id:run.id,state:run.state,revision:run.revision,context,plan,context_status:contextStatus,execution,lease:lease?{owner_id:lease.owner_id,heartbeat_utc:lease.heartbeat_utc,expires_ms:lease.expires_ms,expired:lease.expires_ms<=Date.now()}:null,...this.summary(run,plan),reservation_is_actual_sierra_start:false};
+    return {api_version:RUN_API,namespace,actual_ingestion:namespace==='OPERATIONAL'?'SCOPED_EVENT_ONLY':'OFF',run_id:run.id,state:run.state,revision:run.revision,context,plan,context_status:contextStatus,end_request:endRequest,execution,lease:lease?{owner_id:lease.owner_id,heartbeat_utc:lease.heartbeat_utc,expires_ms:lease.expires_ms,expired:lease.expires_ms<=Date.now()}:null,...this.summary(run,plan),reservation_is_actual_sierra_start:false};
   }
   runReadiness(strategy,versions,instances,settings,permissions) {
     const currentVersions=versions.filter(version=>version.strategy_id===strategy.strategy_id && !version.blocked);
