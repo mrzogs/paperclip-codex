@@ -7,7 +7,7 @@ if (-not $source.Contains("Import-Module -Name (Join-Path `$PSHOME 'Modules\Micr
   throw 'OWN_ENGINE_UTILITY_MODULE_REQUIRED'
 }
 
-if ($source -cnotmatch 'run-manager/\(claim\|renew\|activate\|pin\|evidence\|progress\|end\|finish\)') {
+if ($source -cnotmatch 'run-manager/\(claim\|renew\|activate\|reconcile\|pin\|evidence\|progress\|end\|finish\)') {
   throw 'FINISH_ROUTE_NOT_ALLOWED'
 }
 if (-not $source.Contains("if (`$context.state -eq 'COMPLETING') {") -or
@@ -52,6 +52,31 @@ if (-not $source.Contains('Test-OperationalPhysicalBinding') -or
     $source.Contains('EXPECTED_CHARTBOOK_NOT_OPEN')) {
   throw 'OPERATIONAL_PHYSICAL_BINDING_REQUIRED'
 }
+if (-not $source.Contains("`$evidencePlan.status -cne 'READY'") -or
+    -not $source.Contains("`$context = Invoke-Mutation 'reconcile'") -or
+    -not $source.Contains('completion_receipt=$evidencePlan.completion_receipt') -or
+    -not $source.Contains('evidence_image_sha256=[string]$evidencePlan.evidence_image.sha256')) {
+  throw 'SEALED_POST_RUN_RECONCILIATION_REQUIRED'
+}
+if (-not $source.Contains("schema_version='ocean-replay-bridge-health/v1'") -or
+    -not $source.Contains('identity_fresh=($Status -ceq') -or
+    -not $source.Contains('last_authenticated_run_identity=$LastAuthenticatedRunIdentity') -or
+    -not $source.Contains('last_failure=$lastFailure') -or
+    -not $source.Contains("'STALE_UNUSABLE'") -or
+    -not $source.Contains("throw 'BRIDGE_FAILURE_STATE_PUBLICATION_FAILED'")) {
+  throw 'SEPARATE_BRIDGE_HEALTH_CONTRACT_REQUIRED'
+}
+if ($source.Contains("if (`$message -cmatch '^[A-Z][A-Z0-9_]{1,100}$')") -or
+    -not $source.Contains('$knownCodes -ccontains $message')) {
+  throw 'FAILURE_REASON_CODES_MUST_USE_FINITE_ALLOWLIST'
+}
+$failurePublisherStart = $source.IndexOf('function Publish-BridgeCycleFailure', [StringComparison]::Ordinal)
+$failureHealthWrite = $source.IndexOf('Write-BridgeHealth $status $lastIdentity $failure', $failurePublisherStart, [StringComparison]::Ordinal)
+$failureStateWrite = $source.IndexOf('Write-State $state -SuppressHealthyReceipt', $failurePublisherStart, [StringComparison]::Ordinal)
+if ($failurePublisherStart -lt 0 -or $failureHealthWrite -lt $failurePublisherStart -or $failureStateWrite -le $failureHealthWrite -or
+    $source.Contains("Write-State ([ordered]@{status='DEGRADED';error=")) {
+  throw 'FAILURE_REASON_MUST_PRECEDE_FAIL_CLOSED_STATE_PROJECTION'
+}
 if (-not $source.Contains('$process.StandardOutput.ReadToEndAsync()') -or
     -not $source.Contains('$process.StandardError.ReadToEndAsync()') -or
     $source.IndexOf('$process.StandardOutput.ReadToEndAsync()', [StringComparison]::Ordinal) -ge
@@ -89,6 +114,192 @@ function Assert-BridgeThrows([ScriptBlock]$Action, [string]$Code) {
   $observed = $null
   try { & $Action } catch { $observed = $_.Exception.Message }
   Assert-BridgeTest ($observed -ceq $Code) ('EXPECTED_' + $Code)
+}
+
+# Verify the state/health split with disposable files only. The last known run
+# identity survives failures for diagnostics, but is explicitly stale and the
+# top-level state fails closed until a successful authenticated cycle recovers.
+& {
+  $stateRoot = Join-Path ([IO.Path]::GetTempPath()) ('ocean-bridge-health-test-' + [Guid]::NewGuid().ToString('N'))
+  $null = [IO.Directory]::CreateDirectory($stateRoot)
+  $statePath = Join-Path $stateRoot 'bridge-state.json'
+  $Config = [pscustomobject]@{state_file=$statePath}
+  $script:ConfigHash = 'sha256:' + ('a' * 64)
+  $script:Namespace = 'OPERATIONAL'
+  try {
+    Write-State ([ordered]@{status='ACTIVE';run_id='authenticated-run';run_state='ACTIVE';safety='OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED'})
+    $state = [IO.File]::ReadAllText($statePath) | ConvertFrom-Json
+    $health = [IO.File]::ReadAllText($statePath + '.health.json') | ConvertFrom-Json
+    Assert-BridgeTest ($state.identity_fresh -and $health.status -ceq 'HEALTHY' -and $health.identity_fresh -and
+      $health.last_authenticated_run_identity.run_id -ceq 'authenticated-run') 'HEALTHY_IDENTITY_NOT_PUBLISHED'
+
+    try { throw 'database is locked by a transient SQLite writer' } catch { $transientFailure = $_ }
+    Publish-BridgeCycleFailure $transientFailure $false
+    $state = [IO.File]::ReadAllText($statePath) | ConvertFrom-Json
+    $health = [IO.File]::ReadAllText($statePath + '.health.json') | ConvertFrom-Json
+    Assert-BridgeTest ($health.status -ceq 'DEGRADED' -and $health.reason_code -ceq 'TRANSIENT_WORKFLOW_STATE_UNAVAILABLE' -and
+      -not $health.identity_fresh -and $state.status -ceq 'DEGRADED' -and -not $state.identity_fresh) 'TRANSIENT_FAILURE_NOT_FAIL_CLOSED'
+    Assert-BridgeTest ($health.last_failure.reason_code -ceq 'TRANSIENT_WORKFLOW_STATE_UNAVAILABLE' -and
+      $health.last_failure.message_sha256 -cmatch '^sha256:[a-f0-9]{64}$' -and $health.last_failure.observed_at_utc) 'TRANSIENT_FAILURE_EVIDENCE_NOT_STRUCTURED'
+    Assert-BridgeTest ($state.run_id -ceq 'authenticated-run' -and $state.last_authenticated_run_identity.run_id -ceq 'authenticated-run' -and
+      $state.last_authenticated_run_identity.run_state -ceq 'ACTIVE') 'LAST_AUTHENTICATED_IDENTITY_NOT_PRESERVED'
+    $firstAuthenticatedObservation = [string]$state.last_authenticated_run_identity.observed_at_utc
+    try { throw 'OWNER_LEASE_RECOVERY_WAIT' } catch { $secondFailure = $_ }
+    Publish-BridgeCycleFailure $secondFailure $false
+    $state = [IO.File]::ReadAllText($statePath) | ConvertFrom-Json
+    $health = [IO.File]::ReadAllText($statePath + '.health.json') | ConvertFrom-Json
+    $latestFailureId = [string]$health.last_failure.failure_id
+    $latestFailureObservedAt = [string]$health.last_failure.observed_at_utc
+    Assert-BridgeTest ([string]$state.last_authenticated_run_identity.observed_at_utc -ceq $firstAuthenticatedObservation -and
+      $state.last_authenticated_run_identity.run_id -ceq 'authenticated-run') 'REPEATED_FAILURE_REFRESHED_STALE_IDENTITY'
+
+    Write-State ([ordered]@{status='ACTIVE';run_id='recovered-run';run_state='ACTIVE';safety='OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED'})
+    $health = [IO.File]::ReadAllText($statePath + '.health.json') | ConvertFrom-Json
+    Assert-BridgeTest ($health.status -ceq 'HEALTHY' -and $health.identity_fresh -and
+      $health.last_authenticated_run_identity.run_id -ceq 'recovered-run') 'SUCCESSFUL_CYCLE_DID_NOT_RECOVER_HEALTH'
+    Assert-BridgeTest ([string]$health.last_failure.failure_id -ceq $latestFailureId -and
+      [string]$health.last_failure.observed_at_utc -ceq $latestFailureObservedAt -and
+      $health.last_failure.reason_code -ceq 'OWNER_LEASE_RECOVERY_WAIT') 'RECOVERY_ERASED_OR_REFRESHED_LAST_FAILURE'
+
+    try { throw 'UPPERCASE_SECRET_VALUE' } catch { $opaqueFailure = $_ }
+    Publish-BridgeCycleFailure $opaqueFailure $false
+    $health = [IO.File]::ReadAllText($statePath + '.health.json') | ConvertFrom-Json
+    $serializedHealth = $health | ConvertTo-Json -Depth 30 -Compress
+    Assert-BridgeTest ($health.reason_code -ceq 'BRIDGE_CYCLE_FAILED' -and
+      $health.last_failure.message_sha256 -cmatch '^sha256:[a-f0-9]{64}$' -and
+      $serializedHealth -notmatch 'UPPERCASE_SECRET_VALUE') 'FAILURE_EVIDENCE_LEAKED_RAW_DETAIL'
+
+    # A real Windows sharing lock can prevent replacement of the primary JSON.
+    # Health must then truthfully invalidate that unchanged ACTIVE projection.
+    Write-State ([ordered]@{status='ACTIVE';run_id='locked-run';run_state='ACTIVE';safety='OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED'})
+    $lockedPrimaryBytes = [IO.File]::ReadAllBytes($statePath)
+    $stateLock = [IO.File]::Open($statePath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+    $publicationError = $null
+    try {
+      try { throw 'OWNER_LEASE_RECOVERY_WAIT' } catch { $lockedFailure = $_ }
+      try { Publish-BridgeCycleFailure $lockedFailure $false } catch { $publicationError = $_.Exception.Message }
+    } finally { $stateLock.Dispose() }
+    $lockedAfterBytes = [IO.File]::ReadAllBytes($statePath)
+    $state = [IO.File]::ReadAllText($statePath) | ConvertFrom-Json
+    $health = [IO.File]::ReadAllText($statePath + '.health.json') | ConvertFrom-Json
+    Assert-BridgeTest ($publicationError -ceq 'BRIDGE_FAILURE_STATE_PUBLICATION_FAILED' -and
+      [Convert]::ToBase64String($lockedAfterBytes) -ceq [Convert]::ToBase64String($lockedPrimaryBytes) -and
+      $state.status -ceq 'ACTIVE' -and $state.identity_fresh) 'LOCKED_PRIMARY_WAS_CHANGED_OR_FAILURE_HIDDEN'
+    Assert-BridgeTest ($health.status -ceq 'DEGRADED' -and -not $health.identity_fresh -and
+      $health.primary_projection_status -ceq 'STALE_UNUSABLE' -and -not $health.primary_projection_usable -and
+      $health.last_failure.reason_code -ceq 'OWNER_LEASE_RECOVERY_WAIT' -and
+      $health.last_projection_failure.reason_code -ceq 'BRIDGE_STATE_PUBLICATION_FAILED') 'LOCKED_PRIMARY_NOT_INVALIDATED_BY_HEALTH'
+
+    Write-State ([ordered]@{status='ACTIVE';run_id='post-lock-recovered-run';run_state='ACTIVE';safety='OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED'})
+    $health = [IO.File]::ReadAllText($statePath + '.health.json') | ConvertFrom-Json
+    Assert-BridgeTest ($health.status -ceq 'HEALTHY' -and $health.primary_projection_status -ceq 'CURRENT' -and
+      $health.primary_projection_usable -and $health.last_projection_failure.reason_code -ceq 'BRIDGE_STATE_PUBLICATION_FAILED') 'LOCK_RECOVERY_NOT_CURRENT_OR_LOST_DIAGNOSTIC'
+
+    # If the health sidecar is locked, the writable primary must itself become
+    # fail-closed and retain a bounded publication diagnostic.
+    $healthBeforeBytes = [IO.File]::ReadAllBytes($statePath + '.health.json')
+    $healthLock = [IO.File]::Open($statePath + '.health.json',[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+    $healthPublicationError = $null
+    try {
+      try { throw 'OWNER_LEASE_RECOVERY_WAIT' } catch { $healthLockedFailure = $_ }
+      try { Publish-BridgeCycleFailure $healthLockedFailure $false } catch { $healthPublicationError = $_.Exception.Message }
+    } finally { $healthLock.Dispose() }
+    $healthAfterBytes = [IO.File]::ReadAllBytes($statePath + '.health.json')
+    $state = [IO.File]::ReadAllText($statePath) | ConvertFrom-Json
+    Assert-BridgeTest ($healthPublicationError -ceq 'BRIDGE_HEALTH_PUBLICATION_FAILED' -and
+      [Convert]::ToBase64String($healthAfterBytes) -ceq [Convert]::ToBase64String($healthBeforeBytes) -and
+      $state.status -ceq 'DEGRADED' -and -not $state.identity_fresh -and
+      $state.health_projection_status -ceq 'UNAVAILABLE' -and
+      $state.last_projection_failure.reason_code -ceq 'BRIDGE_HEALTH_PUBLICATION_FAILED') 'LOCKED_HEALTH_DID_NOT_FAIL_CLOSED_THROUGH_PRIMARY'
+
+    Write-State ([ordered]@{status='ACTIVE';run_id='post-health-lock-recovered-run';run_state='ACTIVE';safety='OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED'})
+    $health = [IO.File]::ReadAllText($statePath + '.health.json') | ConvertFrom-Json
+    Assert-BridgeTest ($health.status -ceq 'HEALTHY' -and $health.primary_projection_status -ceq 'CURRENT' -and
+      $health.primary_projection_usable -and $health.last_projection_failure.reason_code -ceq 'BRIDGE_HEALTH_PUBLICATION_FAILED') 'HEALTH_LOCK_RECOVERY_LOST_BOUNDED_DIAGNOSTIC'
+
+    try { throw 'BRIDGE_CONFIG_CHANGED_RESTART_REQUIRED' } catch { $restartFailure = $_ }
+    Publish-BridgeCycleFailure $restartFailure $true
+    $state = [IO.File]::ReadAllText($statePath) | ConvertFrom-Json
+    $health = [IO.File]::ReadAllText($statePath + '.health.json') | ConvertFrom-Json
+    Assert-BridgeTest ($state.status -ceq 'RESTART_REQUIRED' -and $health.status -ceq 'RESTART_REQUIRED' -and
+      -not $state.identity_fresh -and $state.run_id -ceq 'post-health-lock-recovered-run' -and $state.next_action -match 'Restart only ReplayBridge' -and
+      $health.primary_projection_status -ceq 'FAIL_CLOSED' -and -not $health.primary_projection_usable) 'RESTART_FAILURE_DID_NOT_PRESERVE_FAIL_CLOSED_IDENTITY'
+    Write-Output 'PASS: bridge health is separate, finite-code, secret-safe, lock-honest, identity-preserving and fail-closed across failure/recovery.'
+  } finally {
+    foreach ($path in @($statePath,($statePath + '.health.json'),($statePath + '.next'),($statePath + '.health.json.next'))) {
+      if ([IO.Path]::GetFullPath([IO.Path]::GetDirectoryName($path)) -cne [IO.Path]::GetFullPath($stateRoot)) { throw 'HEALTH_TEST_CLEANUP_SCOPE_CONFLICT' }
+      if ([IO.File]::Exists($path)) { [IO.File]::Delete($path) }
+    }
+    [IO.Directory]::Delete($stateRoot)
+  }
+}
+
+# Exercise the physical guard with mock processes and disposable non-binary files.
+& {
+  function Get-Process([string]$Name, [string]$ErrorAction) {
+    Assert-BridgeTest ($Name -ceq 'SierraChart_64') 'PHYSICAL_PROCESS_MOCK_SCOPE_CONFLICT'
+    return $script:PhysicalProcesses
+  }
+  function New-MockPhysicalProcess([string]$Path, $Modules, [bool]$Responding = $true) {
+    return [pscustomobject]@{Path=$Path;Modules=@($Modules | ForEach-Object { [pscustomobject]@{FileName=$_} });Responding=$Responding}
+  }
+  $physicalRoot = Join-Path ([IO.Path]::GetTempPath()) ('ocean-bridge-path-test-' + [Guid]::NewGuid().ToString('N'))
+  $null = [IO.Directory]::CreateDirectory($physicalRoot)
+  $strategyPath = Join-Path $physicalRoot 'mock-strategy.dll'
+  $telemetryPath = Join-Path $physicalRoot 'mock-telemetry.dll'
+  try {
+    [IO.File]::WriteAllText($strategyPath, 'MOCK_ONLY_NOT_A_DLL')
+    [IO.File]::WriteAllText($telemetryPath, 'MOCK_ONLY_NOT_A_LOGGER')
+    $physicalConfig = [pscustomobject]@{
+      schema_version='ocean-replay-run-bridge/v4'
+      expected_sierra_exe=(Join-Path $physicalRoot 'SierraChart_64.exe')
+      expected_strategy_module_path=$strategyPath; expected_telemetry_module_path=$telemetryPath
+      expected_strategy_module_sha256=('sha256:' + (Get-FileHash -LiteralPath $strategyPath -Algorithm SHA256).Hash.ToLowerInvariant())
+      expected_telemetry_module_sha256=('sha256:' + (Get-FileHash -LiteralPath $telemetryPath -Algorithm SHA256).Hash.ToLowerInvariant())
+    }
+    $paths = @($strategyPath,$telemetryPath)
+    Assert-BridgeTest (Test-BridgeWindowsPath $physicalConfig.expected_sierra_exe $physicalConfig.expected_sierra_exe.ToUpperInvariant()) 'WINDOWS_PATH_CASE_REJECTED'
+    Assert-BridgeTest (Test-BridgeWindowsPath (Join-Path $physicalRoot '.\SierraChart_64.exe') $physicalConfig.expected_sierra_exe) 'WINDOWS_PATH_NOT_NORMALIZED'
+    Assert-BridgeTest (-not (Test-BridgeWindowsPath '' $physicalConfig.expected_sierra_exe)) 'EMPTY_WINDOWS_PATH_ACCEPTED'
+    Assert-BridgeTest (-not (Test-BridgeWindowsPath 'SierraChart_64.exe' $physicalConfig.expected_sierra_exe)) 'RELATIVE_WINDOWS_PATH_ACCEPTED'
+
+    $script:PhysicalProcesses = @(New-MockPhysicalProcess $physicalConfig.expected_sierra_exe $paths)
+    Test-OperationalPhysicalBinding $physicalConfig
+    $casePaths = @($paths | ForEach-Object { $_.ToUpperInvariant() })
+    $caseProcess = New-MockPhysicalProcess $physicalConfig.expected_sierra_exe.ToUpperInvariant() $casePaths
+    $script:PhysicalProcesses = @($caseProcess)
+    Test-OperationalPhysicalBinding $physicalConfig
+
+    $script:PhysicalProcesses = @(New-MockPhysicalProcess (Join-Path $physicalRoot 'other-root\SierraChart_64.exe') $paths)
+    Assert-BridgeThrows { Test-OperationalPhysicalBinding $physicalConfig } 'EXACT_SIERRA_PROCESS_REQUIRED'
+    $script:PhysicalProcesses = @($caseProcess,$caseProcess)
+    Assert-BridgeThrows { Test-OperationalPhysicalBinding $physicalConfig } 'EXACT_SIERRA_PROCESS_REQUIRED'
+    $script:PhysicalProcesses = @()
+    Assert-BridgeThrows { Test-OperationalPhysicalBinding $physicalConfig } 'EXACT_SIERRA_PROCESS_REQUIRED'
+    $script:PhysicalProcesses = @(New-MockPhysicalProcess '' $paths)
+    Assert-BridgeThrows { Test-OperationalPhysicalBinding $physicalConfig } 'EXACT_SIERRA_PROCESS_REQUIRED'
+
+    $script:PhysicalProcesses = @(New-MockPhysicalProcess $physicalConfig.expected_sierra_exe @($strategyPath))
+    Assert-BridgeThrows { Test-OperationalPhysicalBinding $physicalConfig } 'EXPECTED_MODULE_NOT_LOADED'
+    $wrongModule = Join-Path $physicalRoot 'other-root\mock-telemetry.dll'
+    $script:PhysicalProcesses = @(New-MockPhysicalProcess $physicalConfig.expected_sierra_exe @($strategyPath,$wrongModule))
+    Assert-BridgeThrows { Test-OperationalPhysicalBinding $physicalConfig } 'EXPECTED_MODULE_NOT_LOADED'
+    $script:PhysicalProcesses = @($caseProcess)
+    $correctHash = $physicalConfig.expected_strategy_module_sha256
+    $physicalConfig.expected_strategy_module_sha256 = 'sha256:' + ('0' * 64)
+    Assert-BridgeThrows { Test-OperationalPhysicalBinding $physicalConfig } 'EXPECTED_MODULE_HASH_MISMATCH'
+    $physicalConfig.expected_strategy_module_sha256 = $correctHash
+    $script:PhysicalProcesses = @(New-MockPhysicalProcess $physicalConfig.expected_sierra_exe $paths $false)
+    Assert-BridgeThrows { Test-OperationalPhysicalBinding $physicalConfig } 'EXPECTED_SIERRA_PROCESS_NOT_RESPONDING'
+    Write-Output 'PASS: 14 mock Windows-path/physical-guard cases; exact count, root, loaded modules and DLL hashes retained.'
+  } finally {
+    foreach ($path in @($strategyPath,$telemetryPath)) {
+      if ([IO.Path]::GetFullPath([IO.Path]::GetDirectoryName($path)) -cne [IO.Path]::GetFullPath($physicalRoot)) { throw 'PHYSICAL_TEST_CLEANUP_SCOPE_CONFLICT' }
+      [IO.File]::Delete($path)
+    }
+    [IO.Directory]::Delete($physicalRoot)
+    $script:PhysicalProcesses = $null
+  }
 }
 
 # Only disposable mock config files are used; no credential, DB, service or
@@ -153,22 +364,27 @@ try {
   [IO.File]::WriteAllText($ConfigPath, '{invalid json')
   Assert-BridgeThrows { Invoke-BridgeCycle } 'BRIDGE_CONFIG_CHANGED_RESTART_REQUIRED'
   [IO.File]::Delete($ConfigPath)
-  if ([IO.Path]::GetFullPath($mockReader) -cne (Join-Path ([IO.Path]::GetFullPath($tempRoot)) 'read-config.mjs')) { throw 'TEST_CLEANUP_SCOPE_CONFLICT' }
-  [IO.File]::Delete($mockReader)
   Assert-BridgeThrows { Invoke-BridgeCycle } 'BRIDGE_CONFIG_UNAVAILABLE_RESTART_REQUIRED'
   Assert-BridgeTest ($script:MockCycles -eq 3) 'INVALID_OR_MISSING_CONFIG_ENTERED_CYCLE'
 
   # Execute the real outer loop with isolated state/client/credential mocks.
   # A config change between startup and the cycle must escape its retry catch.
   Write-MockBridgeConfig
-  $script:MockStates = @(); $script:MockDisposed = $false
+  $script:MockStates = @(); $script:MockHealthStates = @(); $script:MockPublicationOrder = @(); $script:MockDisposed = $false
   function Read-ProtectedCredential($Config) { return [pscustomobject]@{identity_id='mock-telemetry';token='mock-only'} }
   function New-BridgeClient($Binding) {
     $client = [pscustomobject]@{}
     $client | Add-Member ScriptMethod Dispose { $script:MockDisposed = $true }
     return $client
   }
-  function Write-State($State) { $script:MockStates += $State }
+  function Get-LastAuthenticatedRunIdentity {
+    return [ordered]@{run_id='mock-active-run';run_state='ACTIVE';observed_at_utc='2026-10-08T00:00:00.000Z';config_sha256=$script:ConfigHash}
+  }
+  function Write-BridgeHealth([string]$Status, $LastAuthenticatedRunIdentity, $FailureEvidence = $null, [string]$ProjectionStatus = 'CURRENT', $ProjectionFailure = $null) {
+    $script:MockHealthStates += [pscustomobject]@{status=$Status;reason_code=$FailureEvidence.reason_code;identity=$LastAuthenticatedRunIdentity;failure=$FailureEvidence;projection_status=$ProjectionStatus;projection_failure=$ProjectionFailure}
+    $script:MockPublicationOrder += 'health'
+  }
+  function Write-State($State) { $script:MockStates += $State; $script:MockPublicationOrder += 'state' }
   $realCycle = ($ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Invoke-BridgeCycle'}, $false))[0].Body.GetScriptBlock()
   function Invoke-BridgeCycle {
     $script:MockConfig.identity_id = 'changed-mock-identity'
@@ -177,16 +393,39 @@ try {
   }
   $Once = $true
   $script:LeaseId = 'mock-owned-lease'; $script:LeaseRunId = 'mock-active-run'
-  $main = [ScriptBlock]::Create($source.Substring($source.LastIndexOf('$Config = Read-BridgeConfig', [StringComparison]::Ordinal)))
+  $mainTries = @($ast.EndBlock.Statements | Where-Object { $_ -is [Management.Automation.Language.TryStatementAst] })
+  Assert-BridgeTest ($mainTries.Count -eq 1) 'SINGLETON_OUTER_TRY_NOT_FOUND'
+  $script:MockMutexCanAcquire = $true
+  $script:MockMutexReleased = $false; $script:MockMutexDisposed = $false
+  $bridgeMutex = [pscustomobject]@{}
+  $bridgeMutex | Add-Member ScriptMethod WaitOne { param($timeout) return $script:MockMutexCanAcquire }
+  $bridgeMutex | Add-Member ScriptMethod ReleaseMutex { $script:MockMutexReleased = $true }
+  $bridgeMutex | Add-Member ScriptMethod Dispose { $script:MockMutexDisposed = $true }
+  $bridgeMutexAcquired = $false
+  $main = [ScriptBlock]::Create($mainTries[0].Extent.Text)
   Assert-BridgeThrows { & $main } 'BRIDGE_CONFIG_CHANGED_RESTART_REQUIRED'
   Assert-BridgeTest ($script:MockStates.Count -eq 1 -and $script:MockStates[0].status -ceq 'RESTART_REQUIRED' -and
     $script:MockStates[0].run_id -ceq 'mock-active-run') 'CONFIG_CHANGE_RETRIED_INFINITELY'
+  Assert-BridgeTest ($script:MockHealthStates.Count -eq 2 -and $script:MockHealthStates[0].status -ceq 'RESTART_REQUIRED' -and
+    $script:MockHealthStates[0].projection_status -ceq 'UPDATE_PENDING' -and $script:MockHealthStates[1].projection_status -ceq 'FAIL_CLOSED' -and
+    ($script:MockPublicationOrder -join ',') -ceq 'health,state,health') 'RESTART_REASON_NOT_PUBLISHED_BEFORE_STATE'
   Assert-BridgeTest ($script:MockDisposed -and $null -eq $script:Credential.token) 'RESTART_DID_NOT_DISPOSE_CLIENT_OR_CLEAR_TOKEN'
   Assert-BridgeTest ($script:LeaseId -ceq 'mock-owned-lease') 'RESTART_MUTATED_SERVER_LEASE'
+  Assert-BridgeTest ($script:MockMutexReleased -and $script:MockMutexDisposed) 'RESTART_SINGLETON_CLEANUP_FAILED'
+
+  $script:MockMutexCanAcquire = $false
+  $script:MockMutexReleased = $false; $script:MockMutexDisposed = $false
+  $script:MockDisposed = $false
+  $bridgeMutexAcquired = $false
+  & $main
+  Assert-BridgeTest ($script:MockStates.Count -eq 1 -and -not $script:MockMutexReleased -and
+    $script:MockMutexDisposed) 'DUPLICATE_BRIDGE_IGNORED_SINGLETON_GUARD'
 } finally {
   # No recursive cleanup or computed paths outside the unique fixture directory.
   if ([IO.Path]::GetFullPath($ConfigPath) -cne (Join-Path ([IO.Path]::GetFullPath($tempRoot)) 'bridge.json')) { throw 'TEST_CLEANUP_SCOPE_CONFLICT' }
   [IO.File]::Delete($ConfigPath)
+  if ([IO.Path]::GetFullPath($mockReader) -cne (Join-Path ([IO.Path]::GetFullPath($tempRoot)) 'read-config.mjs')) { throw 'TEST_CLEANUP_SCOPE_CONFLICT' }
+  [IO.File]::Delete($mockReader)
   [IO.Directory]::Delete($tempRoot)
 }
 
