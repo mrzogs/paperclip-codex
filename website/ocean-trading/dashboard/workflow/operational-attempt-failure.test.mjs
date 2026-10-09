@@ -336,6 +336,18 @@ test('delayed stop accepts a correlated controller query issued before the logge
   assert.equal(proof.delayed_stop_verification.basis,'EXACT_LOGGER_STOP_ACK_AND_CORRELATED_INACTIVE_CONTROLLER');
 });
 
+test('inactive controller status and exact normal logger stop use the ordinary failure boundary',t=>{
+  const f=delayedFixture(t);
+  f.rewriteHook({status:'stopped',isReplayRunning:false,replayStatus:0,controllerLifecycleActive:false,
+    detail:'StopChartReplay called.; transition_confirmed=true'});
+  fs.unlinkSync(f.stopFile);fs.unlinkSync(f.requestFile);fs.unlinkSync(f.controllerFile);
+  const proof=f.read();
+  assert.equal(proof.delayed_stop_verification,undefined);
+  assert.equal(proof.logger_attempt.stop_command_id,f.stopId);
+  assert.equal(proof.retained_trade_count,0);assert.equal(proof.retained_fill_count,0);
+  assert.equal(proof.completed_coverage_granted,false);assert.equal(proof.full_requested_coverage_verified,false);
+});
+
 for(const [name,mutate,code] of [
   ['wrong context',f=>f.sql.exec("UPDATE replay_run_context SET context_hash='wrong'"),'FAILURE_RECORDED_CONTEXT_CONFLICT'],
   ['missing logger ACK',f=>f.sql.exec('UPDATE replay_run_attempts SET stop_command_id=NULL'),'FAILURE_LATEST_LOGGER_STOP_ACK_REQUIRED'],

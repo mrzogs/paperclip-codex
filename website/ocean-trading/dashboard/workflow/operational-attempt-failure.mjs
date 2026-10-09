@@ -100,7 +100,9 @@ export function readAttemptFailure(config, { run, context, plan }) {
   requireThat(start.commandId?.endsWith('-start') && status.commandId === stopId && status.action === 'stop'
     && Number(status.chartNumber) === config.expected_chart_number
     && status.symbol === plan.symbol, 409, 'FAILURE_EXACT_HOOK_STOP_NOT_VERIFIED');
-  const delayed=controller.action==='status'?delayedStopSources(config,controller,status,stopId,plan.symbol):null;
+  const delayed=controller.action==='status' && status.status==='error'
+    ? delayedStopSources(config,controller,status,stopId,plan.symbol)
+    : null;
   const hookModified=delayed?fs.statSync(config.source_preflight_status_path).mtimeMs:null;
   if(delayed) {
     const originalStatus=decodeRunnerFields(originalStatusBytes);
