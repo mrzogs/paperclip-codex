@@ -323,7 +323,24 @@ function Invoke-PinnedBridgeCycle {
   }
 
   $reconciliation = $null
-  if ($context.state -in @('ACTIVE','COMPLETING')) {
+  # A recorded human failure/cancellation needs no success artifacts. Finish
+  # only the existing drained request; never synthesize progress or coverage.
+  $terminalDrain = $context.state -ceq 'COMPLETING' -and $context.end_request.outcome -cin @('FAILED','CANCELLED')
+  if ($terminalDrain) {
+    if ($context.end_request.actor_role -cne 'HUMAN' -or $context.namespace -cne $script:Namespace -or
+        $context.run_id -cne $runId -or $context.context.run_id -cne $runId -or
+        $context.context.strategy_id -cne $Config.strategy_id -or $context.context.execution_instance_id -cne $Config.instance_id -or
+        $context.context.expected_environment -cne 'REPLAY' -or $context.context.context_hash -cnotmatch '^sha256:[a-f0-9]{64}$' -or
+        $context.plan.context_hash -cne $context.context.context_hash -or $context.plan.instance.execution_instance_id -cne $Config.instance_id -or
+        $context.plan.instance.telemetry_producer_id -cne $script:Credential.identity_id) { throw 'TERMINAL_RUN_CONTEXT_REJECTED' }
+    if (-not $context.lease -or $context.lease.owner_id -cne $script:Credential.identity_id -or
+        $context.lease.expired -ne $false -or $context.lease.expires_ms -le [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) {
+      throw 'TERMINAL_RUN_LEASE_REJECTED'
+    }
+    if ($null -eq $context.open_pins -or $context.open_pins -ne 0 -or -not $context.progress -or
+        $null -eq $context.progress.pending_events -or $context.progress.pending_events -ne 0) { throw 'TERMINAL_RUN_NOT_DRAINED' }
+    $reconciliation = [ordered]@{status='DRAINED_NON_COMPLETED';outcome=$context.end_request.outcome;action_count=0;full_requested_coverage_verified=$false}
+  } elseif ($context.state -in @('ACTIVE','COMPLETING')) {
     $evidencePlan = Get-EvidencePlan $runId
     if ($evidencePlan.status -ceq 'READY') {
       Submit-EvidencePlan $evidencePlan $leaseId
@@ -359,6 +376,7 @@ function Invoke-PinnedBridgeCycle {
       lease_id=$leaseId
       expected_revision=[int]$context.revision
     }
+    if ($terminalDrain -and $context.state -cne $reconciliation.outcome) { throw 'TERMINAL_FINISH_OUTCOME_CONFLICT' }
     $script:LeaseId = $null
     $script:LeaseRunId = $null
   }
@@ -370,7 +388,8 @@ function Invoke-PinnedBridgeCycle {
     $null = Invoke-OceanRequest 'POST' '/api/workflow/health' $healthBody
   }
   $safety = if ($script:Namespace -ceq 'OPERATIONAL') { 'OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED' } else { 'TEST_ONLY_SCOPED_REPLAY_EVIDENCE' }
-  Write-State ([ordered]@{status='ACTIVE';run_id=$runId;run_state=$context.state;lease_id=$leaseId;telemetry=$probe.telemetry;reconciliation=$reconciliation;safety=$safety})
+  $status = if ($terminalDrain) { 'TERMINAL_REQUEST_FINISHED' } else { 'ACTIVE' }
+  Write-State ([ordered]@{status=$status;run_id=$runId;run_state=$context.state;lease_id=$leaseId;telemetry=$probe.telemetry;reconciliation=$reconciliation;safety=$safety})
 }
 
 function Complete-VerifiedFailedAttempt {
