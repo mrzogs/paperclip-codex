@@ -29,7 +29,7 @@ function fixture({insufficient=false,noChange=false,partial=false,prospective=fa
   const actor={id:'brain',role:'BRAIN',namespace:'OPERATIONAL',strategyIds:['s'],instanceIds:['i'],scopes:identity.scopes};
   const human={id:'wayne-ocean-ui',role:'HUMAN'};
   Object.assign(backend,{db:store.db,store,config:{identities:[identity,recipient],browser:{subject_id:human.id}},environment:{},
-    auth:{human:{state:'CONFIGURED'},bindingErrors:new Map()},validate:kind=>assert.equal(kind,'artifact-manifest'),runs:{managed:()=>false}});
+    auth:{human:{state:'CONFIGURED'},bindingErrors:new Map()},validate:kind=>assert.ok(['artifact-manifest','approval-decision','handoff'].includes(kind)),runs:{managed:()=>false}});
   store.registerIdentity(identity);store.registerIdentity(recipient);
   const approvedPolicy={status:'APPROVED',policy_version:'1.0.0',minimum_comparable_trades:50,
     minimum_independent_sessions:20,maximum_data_quality_issues:0,contradictory_evidence_tolerance:0};
@@ -1132,6 +1132,11 @@ function planInput(claim,message='plan-return'){
     plan:{...claim.template,planning_notes:'Checked source-bound direction exclusion; execution contracts remain unavailable.'}}};
 }
 const returnedCount=f=>f.backend.db.prepare("SELECT COUNT(*) n FROM ow_events WHERE action='operational.proposal.plan.returned'").get().n;
+const candidateBuild=()=>({candidate_version:'v0.6.239-short-exclusion-candidate',candidate_hash:digest('candidate-binary'),
+  source_hash:digest('candidate-source'),binary_hash:digest('candidate-binary'),source_commit:'a'.repeat(40),
+  pull_request_url:'https://github.com/example/strategy/pull/13',build_receipt_hash:digest('candidate-build-receipt'),
+  change_summary:'Disable short entries only; preserve inherited long-entry, exit, sizing and risk behaviour.',
+  verification:{build_status:'PASS',tests_status:'PASS',short_entries_enabled:false,non_live_only:true}});
 
 test('exact operational owner returns an immutable plan with verified scoped dispatch, never candidate PASS',()=>{
   const f=fixture();try{
@@ -1267,6 +1272,54 @@ test('operational plan HTTP route delegates only exact owned planning mutations 
     assert.equal(candidateClaim.status,'IN_PROGRESS');assert.equal(candidateClaim.dispatch.actual_execution_allowed,false);
     assert.throws(()=>f.backend.mutate('approval.request',f.actor,{message_id:'test-no-approval',data:{case_id:child.id}}),/OPERATIONAL_PLANNING_MUTATION_NOT_ENABLED/);
     assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('candidate completion survives restart and registration requires an approved acknowledged Replay-only handoff',()=>{
+  const f=fixture();try{
+    f.complete();const before=sealed(f),child=f.children()[0],planClaim=claimPlan(f);
+    const returned=plans(f).perform('plans',f.actor,planInput(planClaim));
+    const strategy={id:'strategy',role:'STRATEGY',namespace:'OPERATIONAL',strategyIds:['s'],instanceIds:['i'],
+      scopes:['read','artifact.write','case.transition','event.write']};
+    let work=f.backend.operationalCandidateDispatch.read(strategy,child.id);
+    const claim=f.backend.operationalCandidateDispatch.perform('claim',strategy,{message_id:'candidate-claim',data:{case_id:child.id,
+      expected_revision:work.revision,plan_artifact_id:work.dispatch.plan_artifact_id,dispatch_hash:work.dispatch.dispatch_hash}});
+    const completionInput={message_id:'candidate-complete',data:{case_id:child.id,expected_revision:claim.revision,
+      plan_artifact_id:claim.dispatch.plan_artifact_id,dispatch_hash:claim.dispatch.dispatch_hash,lease_id:claim.lease_id,candidate:candidateBuild()}};
+    const completed=f.backend.operationalCandidateDispatch.perform('complete',strategy,completionInput);
+    assert.equal(completed.status,'BUILT_PENDING_REVIEW');assert.equal(completed.completion.candidate_hash,candidateBuild().candidate_hash);
+    assert.equal(f.backend.readCase(f.human,child.id).candidate_dispatch.status,'BUILT_PENDING_REVIEW');
+    assert.equal(f.backend.readCase(f.human,child.id).tasks.find(task=>task.kind==='CANDIDATE_DISPATCH_ENGINEERING').status,'COMPLETED');
+    f.restart();assert.deepEqual(f.backend.operationalCandidateDispatch.perform('complete',strategy,completionInput),completed);
+    work=f.backend.operationalCandidateDispatch.read(strategy,child.id);assert.equal(work.status,'BUILT_PENDING_REVIEW');
+    assert.throws(()=>f.backend.operationalCandidateDispatch.perform('register',strategy,{message_id:'early-register',data:{case_id:child.id,
+      expected_revision:work.revision,plan_artifact_id:work.dispatch.plan_artifact_id,dispatch_hash:work.dispatch.dispatch_hash,
+      completion_hash:completed.completion.completion_hash,handoff_id:'test-missing-handoff'}}),/ENTITY_NOT_FOUND/);
+
+    let row=f.backend.transition(f.human,{case_id:child.id,expected_revision:work.revision,action:'advance',to_stage:'DEVELOPMENT_REVIEW',
+      artifact_id:returned.artifact_id,artifact_ids:null,decision_id:null,owner_id:null,next_action:null});
+    const request=f.backend.requestApproval(f.human,{request_id:'test-candidate-review',case_id:child.id,expected_revision:row.revision,
+      gate:'DEVELOPMENT',artifact_id:returned.artifact_id,recipient_id:'strategy',authorized_tests:['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'],
+      expires_at_utc:new Date(Date.now()+3600000).toISOString()});
+    const decision=f.backend.decide(f.human,{decision_id:'test-candidate-decision',request_id:request.request_id,case_id:child.id,
+      expected_revision:request.revision,snapshot_hash:request.snapshot_hash,decision:'APPROVED',reason:'Approve exact Replay-only validation; Paper, Live and promotion remain disabled.'});
+    row=f.backend.transition(f.human,{case_id:child.id,expected_revision:decision.revision,action:'advance',to_stage:'DEVELOPMENT_HANDOFF',
+      artifact_id:null,artifact_ids:null,decision_id:decision.decision_id,owner_id:null,next_action:null});
+    let handoff=f.backend.createHandoff(f.human,{handoff_id:'test-candidate-handoff',case_id:child.id,decision_id:decision.decision_id,
+      gate:'DEVELOPMENT',recipient_id:'strategy',authorized_test:'BACKTEST'});
+    handoff=f.backend.handoffEvent(f.human,{handoff_id:handoff.handoff_id,expected_revision:handoff.revision,state:'READY',result_artifact_id:null,reason:null});
+    handoff=f.backend.handoffEvent(f.human,{handoff_id:handoff.handoff_id,expected_revision:handoff.revision,state:'DISPATCHED',result_artifact_id:null,reason:null});
+    handoff=f.backend.handoffEvent(strategy,{handoff_id:handoff.handoff_id,expected_revision:handoff.revision,state:'ACKNOWLEDGED',result_artifact_id:null,reason:null});
+    const current=f.backend.operationalCandidateDispatch.read(strategy,child.id);
+    const registered=f.backend.operationalCandidateDispatch.perform('register',strategy,{message_id:'candidate-register',data:{case_id:child.id,
+      expected_revision:row.revision,plan_artifact_id:current.dispatch.plan_artifact_id,dispatch_hash:current.dispatch.dispatch_hash,
+      completion_hash:completed.completion.completion_hash,handoff_id:handoff.handoff_id}});
+    assert.equal(registered.status,'REGISTERED');assert.equal(registered.stage,'HISTORICAL_VALIDATION');
+    const view=f.backend.readCase(f.human,child.id);assert.equal(view.candidate_dispatch.status,'REGISTERED');
+    assert.equal(view.candidate_hash,candidateBuild().candidate_hash);assert.deepEqual(view.tasks.filter(task=>['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'].includes(task.kind)).map(task=>task.status),['NOT_RUN','NOT_RUN','NOT_RUN','NOT_RUN']);
+    assert.equal(f.backend.one('ow_artifacts',registered.candidate_artifact_id).kind,'CANDIDATE');
+    assert.equal(view.candidate_dispatch.registration.authority.paper_authorized,false);
+    f.restart();assert.equal(f.backend.readCase(f.human,child.id).candidate_dispatch.status,'REGISTERED');assertSealed(f,before);
   }finally{f.close();}
 });
 

@@ -166,9 +166,10 @@ try {
   });
   await check('GOV-05: empty filter and paginated history preserve server totals',async()=>{
     await navigate('/improvement/strategies');
+    const strategyLinks=await page.locator('tbody a').count();assert.ok(strategyLinks>=2);
     await page.locator('#filter').fill('definitely-no-matching-strategy');
     assert.equal(await page.locator('tbody a').count(),0);
-    await page.locator('#filter').fill(''); assert.equal(await page.locator('tbody a').count(),2);
+    await page.locator('#filter').fill(''); assert.equal(await page.locator('tbody a').count(),strategyLinks);
     await navigate('/improvement/history');
     const first=await page.locator('#content .timeline').innerText();
     await page.getByRole('button',{name:'Next page',exact:true}).click();
