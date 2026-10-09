@@ -990,6 +990,9 @@ test('mock Brain crash-after-write resumes the exact persisted request and rejec
     };
     assert.equal((await f.worker.recordInBrain(resumed,evidence,result)).record_id,'mock-record');
     assert.equal(objectHash(calls[0]),objectHash(calls[1]));
+    assert.match(calls[0].case_id,/^CASE-OPERATIONAL-[A-F0-9]{24}-0001$/);
+    const correlation={...calls[0].correlation};delete correlation.input_sha256;
+    assert.equal(calls[0].correlation.input_sha256,objectHash({...calls[0],correlation}));
     assert.ok(calls[0].proposed_recommendation.content.length<=50000);
     assert.equal(calls[0].excluded_evidence[0].diagnostic.length,60000);
     assert.deepEqual(calls[0].cohort,bundle.cohort,'protected wire cohort is unchanged');
@@ -997,6 +1000,40 @@ test('mock Brain crash-after-write resumes the exact persisted request and rejec
     assert.throws(()=>f.backend.db.prepare("UPDATE ow_research_jobs SET brain_request_json='{}'").run(),/immutable Research request/);
     f.backend.operationalLearning.call=async()=>({content:'{}'});
     await assert.rejects(f.worker.recordInBrain(resumed,evidence,result),/RESEARCH_BRAIN_RESPONSE_INVALID/);
+  }finally{f.close();}
+});
+
+test('legacy frozen Research request retries with a valid Brain case ID without rewriting the sealed snapshot',async()=>{
+  const f=queueFixture();try {
+    const {rows,bundle}=sample();bundle.policy={project:'project',strategy_name:'Strategy'};
+    const evidence={bundle,row:{strategy_id:'s',run_id:'r'},context:{strategy_version:'1'},completion_hash:digest('completion')};
+    const result=evaluateResearch(bundle,rows);
+    const registry={record_sha256:digest('registry'),reconciliation_id:'registry-1'};
+    f.backend.operationalLearning={enabled:true,cohort:run=>({cohort:{eligible_runs:[{run_id:run.id}]}}),classification:()=>({eligible:true,reasons:[],telemetry:{bypassed:true,proof_basis:'EXPLICIT_MOCK_ONLY'}}),path:'/protected-learning',token:()=> 'isolated-test-token',verifyIdentity:async()=>{},registry:async()=>registry};
+    f.worker.enqueue('case','a');const job=f.worker.claim();
+    f.backend.operationalLearning.call=async()=>{throw Error('capture sealed request');};
+    await assert.rejects(f.worker.recordInBrain(job,evidence,result),/capture sealed request/);
+    const row=f.backend.one('ow_research_jobs',job.id),original=row.brain_request_json;
+    const legacy=JSON.parse(original);legacy.case_id='research-evidence-legacy';
+    delete legacy.correlation.input_sha256;legacy.correlation.input_sha256=objectHash(legacy);
+    const legacyJson=JSON.stringify(legacy);
+    f.backend.db.exec('DROP TRIGGER ow_research_request_no_rewrite');
+    f.backend.db.prepare('UPDATE ow_research_jobs SET brain_request_json=?,brain_request_hash=? WHERE id=?').run(legacyJson,digest(legacyJson),job.id);
+    let firstSent=null;f.backend.operationalLearning.call=async(_path,_token,input)=>{firstSent=input;throw Error('fetch failed');};
+    await assert.rejects(f.worker.recordInBrain(job,evidence,result),/fetch failed/);
+    assert.match(firstSent.case_id,/^CASE-OPERATIONAL-[A-F0-9]{24}-0001$/);
+    f.worker.fail(job,Error('fetch failed'));f.restart();
+    f.backend.db.prepare('UPDATE ow_research_jobs SET next_attempt_ms=0').run();
+    const resumed=f.worker.claim();let sent=null;
+    f.backend.operationalLearning.call=async(_path,_token,input)=>{
+      sent=input;const content=JSON.stringify({registry_record_sha256:input.registry_record_sha256,registry_reconciliation_id:input.registry_reconciliation_id});
+      return {schema_version:'ocean-operational-learning-result/v1',record_id:'mock-record',relative_path:'mock/record.json',content,
+        content_sha256:digest(content),correlation:input.correlation,source_record_ids:['a','b','c','protected-holdout']};
+    };
+    assert.equal((await f.worker.recordInBrain(resumed,evidence,result)).record_id,'mock-record');
+    assert.match(sent.case_id,/^CASE-OPERATIONAL-[A-F0-9]{24}-0001$/);
+    assert.equal(objectHash(sent),objectHash(firstSent));
+    assert.equal(f.backend.one('ow_research_jobs',job.id).brain_request_json,legacyJson);
   }finally{f.close();}
 });
 
