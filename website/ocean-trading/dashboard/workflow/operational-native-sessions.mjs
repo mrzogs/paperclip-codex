@@ -10,7 +10,10 @@ export const SESSION_DEFINITION='UNION_OF_NATIVE_ENTRY_TRADING_DAY_UNITS_KEYED_B
 export const NATIVE_LOGGER_BUILDS=Object.freeze([Object.freeze({version:'v0.5.45',
   module_sha256:'c3dea9e08b2b4ed2c827a2e0ad37f85f09f8939b0c9e70945021eecda07b038a',
   source_commit:'b1fb6e642d6a40cb9dac1c295895c2c48d28b2f4',
-  contract:'schema14-native-session-producer-pin',runtime_deployment_authorized:false})]);
+  contract:'schema14-native-session-producer-pin',runtime_deployment_authorized:false}),Object.freeze({version:'v0.5.46',
+  module_sha256:'51b7302398456de3022d98f669141cdf752b46fc13acde48be6ccc19c97210ad',
+  source_commit:'123abc72c65b01946a0ca13ec862e30050315e7a',
+  contract:'schema14-native-session-producer-pin-v238-candidate-binding',runtime_deployment_authorized:false})]);
 export const NATIVE_LOGGER_BUILD=NATIVE_LOGGER_BUILDS[0];
 const settings=['chart_timezone','start_time1','end_time1','start_time2','end_time2','use_second_start_end_times','trading_day_starts_previous_date'];
 const sha=value=>createHash('sha256').update(value).digest('hex');
