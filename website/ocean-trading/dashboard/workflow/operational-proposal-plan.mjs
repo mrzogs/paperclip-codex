@@ -70,11 +70,14 @@ export class OperationalProposalPlan {
     const routes=this.b.operationalCandidateCapabilities();
     const versions=this.db.prepare('SELECT id,payload_json FROM ow_run_versions WHERE strategy_id=? ORDER BY id').all(row.strategy_id)
       .map(version=>({id:version.id,content_hash:objectHash(JSON.parse(version.payload_json)),kind:JSON.parse(version.payload_json).kind}));
+    const dispatchReady=routes.operational_candidate_test_dispatch && versions.some(version=>version.kind==='BASELINE');
     return [{contract:'OWNED_NON_LIVE_PLAN',status:'VERIFIED',required_now:true,owner_id:row.owner_id,
       evidence:{route:'/api/workflow/operational/v1/proposals/plans',source_report_hash:work.frozen.source.report_hash}},
-    {contract:'SCOPED_CANDIDATE_TEST_DISPATCH',status:routes.operational_candidate_test_dispatch?'VERIFIED':'UNSUPPORTED_BY_THIS_ROUTE',
+    {contract:'SCOPED_CANDIDATE_TEST_DISPATCH',status:dispatchReady?'VERIFIED':routes.operational_candidate_test_dispatch?'PROVIDER_BASELINE_NOT_REGISTERED':'UNSUPPORTED_BY_THIS_ROUTE',
       required_now:true,owner_id:row.owner_id,evidence:{...routes,registered_versions:versions},
-      action:'Implement and test a separately scoped non-live candidate registration/test-dispatch contract using the existing run/version lifecycle, exact frozen plan/recipient and reviewed provider proof. The generic version/handoff lifecycle is TEST-only and grants no operational execution.'},
+      action:routes.operational_candidate_test_dispatch
+        ?'Register and verify the current provider baseline in the existing run/version lifecycle before dispatching candidate work.'
+        :'Implement and test a separately scoped non-live candidate registration/test-dispatch contract using the existing run/version lifecycle, exact frozen plan/recipient and reviewed provider proof. The generic version/handoff lifecycle is TEST-only and grants no operational execution.'},
     {contract:'CANDIDATE_IMPLEMENTATION_AND_PHYSICAL_PIN',status:'NOT_YET_DUE',required_now:false,owner_id:source.recipient,
       evidence:{candidate_hash:row.candidate_hash},action:'Only after an exact reviewed engineering plan and due governed development decision, build the candidate and record its own source/module/config pins; baseline provider pins are not candidate proof.'},
     {contract:'GOVERNED_DEVELOPMENT_DECISION',status:'NOT_YET_DUE',required_now:false,owner_id:source.recipient,

@@ -15,9 +15,10 @@ import { CONTINUATION_ORIGIN } from './operational-continuation.mjs';
 import { readWorkflowView } from './ui-api.mjs';
 import { digest, objectHash } from './common.mjs';
 import { consumePlanningOnce } from '../../../../scripts/consume-ocean-proposal-planning.mjs';
+import { OperationalCandidateDispatch } from './operational-candidate-dispatch.mjs';
 
 function fixture({insufficient=false,noChange=false,partial=false,prospective=false,oneDirection=null,rowsPerRun=20,
-  ownerScopes=['read','artifact.write','event.write']}={}) {
+  ownerScopes=['read','artifact.write','event.write'],registerBaseline=true}={}) {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'ocean-planning-'));
   const filename=path.join(root,'workflow.sqlite');let store=new WorkflowStore(filename);
   const backend=Object.create(WorkflowBackend.prototype);
@@ -36,6 +37,7 @@ function fixture({insufficient=false,noChange=false,partial=false,prospective=fa
     ...(prospective?{evidence_policy:approvedPolicy}:{})}));
   backend.db.prepare('INSERT INTO ow_strategies VALUES(?,?,?,?,?)').run('s','p',1,baseline,JSON.stringify({strategy_name:'Isolated planning fixture'}));
   backend.db.prepare('INSERT INTO ow_instances VALUES(?,?,?)').run('i','s',JSON.stringify(prospective?{telemetry_producer_id:'telemetry'}:{}));
+  if(registerBaseline)backend.db.prepare('INSERT INTO ow_run_versions VALUES(?,?,?)').run('baseline-fixture','s',JSON.stringify({kind:'BASELINE',version:'v1',code_hash:baseline}));
   const runs=['r1','r2','r3'];
   const contexts=Object.fromEntries(runs.map(run_id=>[run_id,{run_id,context_hash:digest(`context-${run_id}`),strategy_profile_id:'p',
     strategy_profile_version:'1',strategy_code_hash:baseline,strategy_config_hash:digest('config'),dataset_manifest_id:'discovery',
@@ -66,6 +68,7 @@ function fixture({insufficient=false,noChange=false,partial=false,prospective=fa
     classification:()=>({eligible:proof,reasons:proof?[]:['PHYSICAL_STRATEGY_DLL_HASH_CONFLICT'],
       telemetry:{bypassed:true,proof_basis:'EXPLICIT_MOCK_ONLY'}}),cohort:()=>bundle};
   backend.operationalResearch=new OperationalResearch(backend);
+  backend.operationalCandidateDispatch=new OperationalCandidateDispatch(backend);
   // Historical v4 continuation fixtures; prospective v5 has separate proof tests.
   backend.operationalResearch.version=version;
   const seed=(case_id,trigger='r1')=>{
@@ -90,7 +93,7 @@ function fixture({insufficient=false,noChange=false,partial=false,prospective=fa
   return {backend,actor,human,bundle,rows,seed,capture,complete,
     get worker(){return backend.operationalResearch;},setProof(value){proof=value;},
     children:()=>backend.db.prepare("SELECT * FROM ow_cases WHERE json_extract(payload_json,'$.origin')=?").all(CONTINUATION_ORIGIN),
-    restart(){store.close();store=new WorkflowStore(filename);backend.db=store.db;backend.store=store;backend.operationalResearch=new OperationalResearch(backend);backend.operationalResearch.version=version;},
+    restart(){store.close();store=new WorkflowStore(filename);backend.db=store.db;backend.store=store;backend.operationalResearch=new OperationalResearch(backend);backend.operationalResearch.version=version;backend.operationalCandidateDispatch=new OperationalCandidateDispatch(backend);},
     close(){store.close();fs.rmSync(root,{recursive:true,force:true});}};
 }
 
@@ -1130,7 +1133,7 @@ function planInput(claim,message='plan-return'){
 }
 const returnedCount=f=>f.backend.db.prepare("SELECT COUNT(*) n FROM ow_events WHERE action='operational.proposal.plan.returned'").get().n;
 
-test('exact operational owner returns an immutable plan with observed scoped capability debt, never candidate PASS',()=>{
+test('exact operational owner returns an immutable plan with verified scoped dispatch, never candidate PASS',()=>{
   const f=fixture();try{
     f.complete();const before=sealed(f),child=f.children()[0];
     const queue=plans(f).queue(f.actor);assert.equal(queue.items.length,1);assert.equal(queue.items[0].status,'READY');
@@ -1139,11 +1142,11 @@ test('exact operational owner returns an immutable plan with observed scoped cap
     assert.equal(plans(f).read(f.actor,child.id).status,'IN_PROGRESS');
     const input=planInput(claim),result=plans(f).perform('plans',f.actor,input);
     assert.equal(result.planning_complete,true);assert.equal(result.approval_due,false);assert.equal(result.candidate_testing,'NOT_DUE');
-    assert.deepEqual(result.missing_contracts,['SCOPED_CANDIDATE_TEST_DISPATCH']);assert.equal(plans(f).queue(f.actor).items.length,0);
+    assert.deepEqual(result.missing_contracts,[]);assert.equal(plans(f).queue(f.actor).items.length,0);
     const view=f.backend.readCase(f.human,child.id);
     assert.equal(view.planning.plan_work.status,'PLAN_RETURNED');assert.equal(view.tasks.find(task=>task.kind==='PROPOSAL_PLAN_REVIEW').status,'COMPLETED');
     assert.equal(view.stage,'RESEARCH');assert.equal(view.work_status,'READY');
-    assert.equal(view.blockers.length,1);assert.ok(view.blockers.every(row=>row.owner_id==='brain' && row.state==='OPEN'));
+    assert.equal(view.blockers.length,0);
     assert.match(view.next_action,/Source owner strategy.*plan authoring, not candidate execution/);
     const artifact=f.backend.artifactFor(f.backend.one('ow_cases',child.id),result.artifact_id,'RECOMMENDATION');
     assert.equal(artifact.producer_id,'brain');assert.equal(artifact.recipient_id,'strategy');
@@ -1254,6 +1257,14 @@ test('operational plan HTTP route delegates only exact owned planning mutations 
       expected_revision:work.revision,support_hash:work.support_hash}});
     const returned=await invoke('proposals/plans',planInput(claim,'http-return'));
     assert.equal(returned.planning_complete,true);assert.equal(returnedCount(f),1);
+    const strategy={id:'strategy',role:'STRATEGY',namespace:'OPERATIONAL',strategyIds:['s'],instanceIds:['i'],scopes:['read','artifact.write','event.write']};
+    f.backend.auth.authenticate=()=>strategy;
+    const candidateQueue=await invoke('candidates/work');assert.equal(candidateQueue.items[0].case_id,child.id);
+    const candidateWork=await invoke(`candidates/${child.id}/work`);
+    const candidateClaim=await invoke('candidates/claim',{message_id:'http-candidate-claim',data:{case_id:child.id,
+      expected_revision:candidateWork.revision,plan_artifact_id:candidateWork.dispatch.plan_artifact_id,
+      dispatch_hash:candidateWork.dispatch.dispatch_hash}});
+    assert.equal(candidateClaim.status,'IN_PROGRESS');assert.equal(candidateClaim.dispatch.actual_execution_allowed,false);
     assert.throws(()=>f.backend.mutate('approval.request',f.actor,{message_id:'test-no-approval',data:{case_id:child.id}}),/OPERATIONAL_PLANNING_MUTATION_NOT_ENABLED/);
     assertNoAuthority(f);
   }finally{f.close();}
@@ -1313,7 +1324,7 @@ test('persistent Research reconciliation actually executes the owner planning wo
     assert.equal(returnedCount(f),0);f.worker.reconcile();
     assert.equal(returnedCount(f),1);const view=f.backend.readCase(f.human,child.id);
     assert.equal(view.planning.plan_work.status,'PLAN_RETURNED');assert.equal(view.planning.plan_work.planning_complete,true);
-    assert.equal(view.blockers.length,1);assert.match(view.next_action,/Source owner strategy/);
+    assert.equal(view.blockers.length,0);assert.match(view.next_action,/Source owner strategy/);
     const recorded=f.backend.one('ow_cases',child.id);f.restart();for(let i=0;i<3;i++)f.worker.reconcile();
     assert.deepEqual(f.backend.one('ow_cases',child.id),recorded);assert.equal(returnedCount(f),1);
     f.backend.db.prepare('DELETE FROM ow_tasks WHERE case_id=?').run(child.id);f.worker.reconcile();
@@ -1422,7 +1433,7 @@ test('v6 default captures approved eligibility/session proof separately and pers
     assert.equal(plan.protocol.approved_aggregate_evidence_policy.minimum_independent_sessions,20);
     assert.equal(plan.execution.capabilities.find(item=>item.contract==='CANDIDATE_IMPLEMENTATION_AND_PHYSICAL_PIN').status,'NOT_YET_DUE');
     assert.equal(plan.execution.capabilities.find(item=>item.contract==='GOVERNED_DEVELOPMENT_DECISION').status,'NOT_YET_DUE');
-    assert.deepEqual(plan.execution.missing_contracts,['SCOPED_CANDIDATE_TEST_DISPATCH']);
+    assert.deepEqual(plan.execution.missing_contracts,[]);
     assert.equal(view.planning.plan_work.planning_complete,true);assert.equal(view.planning.candidate_testing,'NOT_DUE');
     assertSealed(f,before);assertNoAuthority(f);
   }finally{f.close();}
@@ -1455,11 +1466,11 @@ test('a capability revision between claim and return fails closed, preserves the
 
 test('observed supported scoped capability clears only its engineering debt, not due candidate/decision work',()=>{
   const f=fixture();try {
+    const implementation=f.backend.operationalCandidateCapabilities.bind(f.backend),catalog=implementation();
+    f.backend.operationalCandidateCapabilities=()=>({...catalog,operational_candidate_test_dispatch:false,
+      implementation_hash:digest('EXPLICIT_MOCK_ONLY_MISSING_SCOPED_ADAPTER')});
     f.complete();f.worker.reconcile();const child=f.children()[0],old=plans(f).forCase(child).returned;
-    const catalog=f.backend.operationalCandidateCapabilities();
-    // Explicit mock only: production source still has no operational candidate dispatch adapter.
-    f.backend.operationalCandidateCapabilities=()=>({...catalog,operational_candidate_test_dispatch:true,
-      implementation_hash:digest('EXPLICIT_MOCK_ONLY_SUPPORTED_SCOPED_ADAPTER')});
+    f.backend.operationalCandidateCapabilities=implementation;
     assert.equal(plans(f).forCase(child).status,'REVISION_DUE');f.worker.reconcile();
     const view=f.backend.readCase(f.human,child.id),current=view.planning.plan_work;
     const plan=JSON.parse(Buffer.from(f.backend.one('ow_artifacts',current.returned.artifact_id).content).toString());
@@ -1470,6 +1481,43 @@ test('observed supported scoped capability clears only its engineering debt, not
     assert.equal(view.blockers.filter(item=>item.state==='OPEN').length,0);
     assert.equal(view.tasks.find(item=>item.kind==='CANDIDATE_DISPATCH_ENGINEERING').status,'NOT_RUN');
     assert.equal(current.candidate_testing,'NOT_DUE');assert.equal(current.approval_due,false);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('exact strategy owner can claim and renew the frozen TEST-only candidate brief without creating authority',()=>{
+  const f=fixture();try {
+    f.complete();f.worker.reconcile();const child=f.children()[0];
+    const actor={id:'strategy',role:'STRATEGY',namespace:'OPERATIONAL',strategyIds:['s'],instanceIds:['i'],scopes:['read','artifact.write','event.write']};
+    const queue=f.backend.operationalCandidateDispatch.queue(actor);assert.equal(queue.items.length,1);
+    assert.equal(queue.items[0].case_id,child.id);assert.equal(queue.items[0].status,'READY');
+    const work=f.backend.operationalCandidateDispatch.read(actor,child.id);
+    assert.equal(work.dispatch.proposed_change.value,'short');assert.equal(work.dispatch.actual_execution_allowed,false);
+    assert.deepEqual(work.dispatch.protocol.tests.map(item=>item.kind),['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT']);
+    const input={message_id:'candidate-claim',data:{case_id:child.id,expected_revision:work.revision,
+      plan_artifact_id:work.dispatch.plan_artifact_id,dispatch_hash:work.dispatch.dispatch_hash}};
+    const claim=f.backend.operationalCandidateDispatch.perform('claim',actor,input);
+    assert.deepEqual(f.backend.operationalCandidateDispatch.perform('claim',actor,input),claim);
+    assert.equal(claim.status,'IN_PROGRESS');assert.equal(claim.dispatch.authority.candidate_approved,false);
+    assert.equal(f.backend.one('ow_cases',child.id).candidate_hash,null);
+    assert.equal(f.backend.db.prepare("SELECT status FROM ow_tasks WHERE case_id=? AND kind='CANDIDATE_DISPATCH_ENGINEERING'").get(child.id).status,'IN_PROGRESS');
+    const renewed=f.backend.operationalCandidateDispatch.perform('renew',actor,{message_id:'candidate-renew',data:{case_id:child.id,
+      expected_revision:claim.revision,plan_artifact_id:claim.dispatch.plan_artifact_id,dispatch_hash:claim.dispatch.dispatch_hash,
+      lease_id:claim.lease_id}});
+    assert.equal(renewed.lease_id,claim.lease_id);assert.ok(renewed.lease_until_ms>=claim.lease_until_ms);
+    assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('candidate dispatch denies the wrong namespace or recipient and blocks an unregistered provider baseline',()=>{
+  const f=fixture();try {
+    f.complete();f.worker.reconcile();const child=f.children()[0];
+    const actor={id:'strategy',role:'STRATEGY',namespace:'OPERATIONAL',strategyIds:['s'],instanceIds:['i'],scopes:['read','artifact.write','event.write']};
+    assert.throws(()=>f.backend.operationalCandidateDispatch.queue({...actor,namespace:'TEST'}),/CANDIDATE_OPERATIONAL_STRATEGY_REQUIRED/);
+    assert.throws(()=>f.backend.operationalCandidateDispatch.read({...actor,id:'other'},child.id),/CANDIDATE_EXACT_RECIPIENT_REQUIRED/);
+    const missing=fixture({registerBaseline:false});try {
+      missing.complete();missing.worker.reconcile();const blocked=missing.children()[0];
+      assert.throws(()=>missing.backend.operationalCandidateDispatch.read(actor,blocked.id),/CANDIDATE_DISPATCH_CAPABILITY_REQUIRED/);
+    }finally{missing.close();}
   }finally{f.close();}
 });
 
