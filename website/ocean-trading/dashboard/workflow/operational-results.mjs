@@ -23,7 +23,8 @@ export class OperationalResults {
   register(actor,input){
     exactKeys(input,['run_id','context_hash','content','content_sha256','correlation']);
     noSecrets(input,this.b.environment);
-    requireThat(typeof input.content==='string' && input.content.length>0 && input.content.length<=200000,422,'RESULT_CONTENT_REQUIRED');
+    requireThat(typeof input.content==='string' && input.content.length>0,422,'RESULT_CONTENT_REQUIRED');
+    requireThat(input.content.length<=200000,422,'RESULT_CONTENT_TOO_LARGE');
     requireThat(digest(input.content)===input.content_sha256,422,'RESULT_HASH_CONFLICT');
     correlation(input.correlation);
     const {run,context}=this.run(actor,input.run_id,input.context_hash,'artifact.write');

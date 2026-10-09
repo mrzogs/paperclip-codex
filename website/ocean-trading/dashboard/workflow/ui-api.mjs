@@ -50,7 +50,11 @@ export function readWorkflowView(backend, actor, route) {
   const strategyName = (value) => parse(backend.one('ow_strategies', value)).strategy_name;
   const operationalReleases = () => new OperationalPreparation(backend).list(actor).items;
   const caseRow = (value) => ({ ...backend.readCase(actor, value.id), strategy_name: strategyName(value.strategy_id), priority: value.stage === 'ROLLBACK_REVIEW' ? 'URGENT_REVIEW' : null });
-  const runRow = (value) => ({ ...backend.readRun(actor, value.id), strategy_name: strategyName(value.strategy_id) });
+  const runRow = (value) => ({
+    ...backend.readRun(actor, value.id),
+    strategy_name: strategyName(value.strategy_id),
+    learning: backend.operationalLearning?.statusForRun(value.id) || null,
+  });
   const artifactRow = (value) => ({ artifact_id: value.id, case_id: value.case_id, kind: value.kind, producer_id: value.producer_id, recipient_id: value.recipient_id, candidate_hash: value.candidate_hash, dependency_ids: JSON.parse(value.dependencies_json), manifest: JSON.parse(value.manifest_json) });
   const approvalRow = (value) => {
     backend.verifySnapshot(value);
@@ -79,6 +83,7 @@ export function readWorkflowView(backend, actor, route) {
       registration: readOnboardingRegistration(db, strategyId),
       activationEvents: readOnboardingActivationEvents(db, strategyId),
       runtimeProbe: backend.config.strategy_onboarding_runtime_probe,
+      improvementMonitorStatePath: backend.config.strategy_improvement_monitor_state,
     });
   };
   const mergeOnboarding = (row, value) => row && value.strategy_id === row.strategy_id ? { ...value, onboarding: row } : value;
@@ -89,7 +94,7 @@ export function readWorkflowView(backend, actor, route) {
       action_required: pending.filter(row => row.actionable).length + releaseRequests.filter(row => row.actionable).length,
       pending_gates: pending.length + releaseRequests.filter(row => row.state === 'PENDING').length,
       urgent_reviews: db.prepare("SELECT COUNT(*) AS n FROM ow_cases WHERE stage='ROLLBACK_REVIEW' AND work_status<>'CANCELLED'").get().n,
-      active_cases: db.prepare("SELECT COUNT(*) AS n FROM ow_cases WHERE stage<>'CLOSED' AND work_status NOT IN ('CANCELLED','BLOCKED','FAILED','PAUSED')").get().n,
+      active_cases: db.prepare("SELECT COUNT(*) AS n FROM ow_cases WHERE stage<>'CLOSED' AND work_status NOT IN ('COMPLETED','CANCELLED','BLOCKED','FAILED','PAUSED')").get().n,
       blocked_cases: db.prepare("SELECT COUNT(*) AS n FROM ow_cases WHERE work_status IN ('BLOCKED','FAILED')").get().n,
       active_runs: db.prepare("SELECT COUNT(*) AS n FROM ow_runs WHERE state IN ('READY','ACTIVE','COMPLETING')").get().n,
       pending_sync: db.prepare("SELECT COUNT(*) AS n FROM ow_outbox WHERE state<>'ACKNOWLEDGED'").get().n,

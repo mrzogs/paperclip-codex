@@ -1,4 +1,4 @@
-import {exactKeys,future,id,noSecrets,objectHash,requireThat,sealedHash} from './common.mjs';
+import {API_VERSION,exactKeys,future,id,noSecrets,objectHash,requireThat,sealedHash} from './common.mjs';
 import {PURPOSES,interval,subtract,intersect,merge} from './run-manager.mjs';
 
 export const RELEASE_SCOPES=['STRATEGY_ONBOARDING','DATASET_RELEASE','RUN_RELEASE'];
@@ -6,6 +6,12 @@ const human=actor=>requireThat(actor.role==='HUMAN' && actor.id==='wayne-ocean-u
 const parse=row=>JSON.parse(row.payload_json);
 const REVIEW_INPUT_KEYS=['context','manifest_key','factual_binding_hash','interval','prior_exposure','expires_at_utc'];
 const REVIEW_READBACK_KEYS=['schema_version','profile_hash','observed_profile_hash','manifest_hash','partition_index','review_hash'];
+
+export function onboardingLineageDecisionId(sourceDecisionId,reviewHash){
+  id(sourceDecisionId);
+  requireThat(/^sha256:[a-f0-9]{64}$/.test(reviewHash || ''),422,'OPERATIONAL_REVIEW_HASH_REQUIRED');
+  return `lineage:${objectHash([sourceDecisionId,reviewHash]).slice(7)}`;
+}
 
 // Provider-owned release contract. It does not add enum values to shared 2.1.0 decisions.
 export class OperationalPreparation {
@@ -81,14 +87,22 @@ export class OperationalPreparation {
     requireThat(setup && ['PASS','VERIFIED_REUSE'].includes(parse(setup).status),409,'S40_3_SETUP_RECEIPT_REQUIRED');
     const source=this.db.prepare('SELECT request_id,case_id,binding_json,payload_json FROM ow_decisions WHERE id=?').get(sourceDecisionId);
     requireThat(source,409,'SOURCE_ONBOARDING_DECISION_REQUIRED');
-    const payload=parse(source),binding=JSON.parse(source.binding_json),request=this.b.one('ow_approval_requests',source.request_id),row=this.b.one('ow_cases',source.case_id);
-    this.b.approved(row,'ONBOARDING',sourceDecisionId);
-    requireThat(payload.decision==='APPROVED' && payload.decided_by==='Wayne' && payload.decided_via==='AUTHORISED_OCEAN_UI' && binding.strategy_id===review.context.strategy_id && binding.baseline_hash===review.context.strategy_code_hash && request.artifact_id===binding.artifact_id,409,'SOURCE_ONBOARDING_DECISION_CONFLICT');
+    const payload=parse(source),binding=JSON.parse(source.binding_json),request=this.b.one('ow_approval_requests',source.request_id),row=this.b.one('ow_cases',source.case_id),current=this.b.one('ow_strategies',row.strategy_id);
+    this.b.verifySnapshot(request);
+    // Onboarding follows the unchanged baseline, not a later research candidate.
+    requireThat(current.baseline_hash===row.baseline_hash && request.state==='APPROVED' && future(payload.expires_at_utc) && !this.db.prepare('SELECT decision_id FROM ow_decision_revocations WHERE decision_id=?').get(sourceDecisionId),409,'SOURCE_ONBOARDING_APPROVAL_NOT_CURRENT');
+    requireThat(payload.decision==='APPROVED' && payload.decided_by==='Wayne' && payload.decided_via==='AUTHORISED_OCEAN_UI'
+      && payload.request_id===request.id && payload.snapshot_hash===request.snapshot_hash
+      && request.case_id===row.id && request.gate==='ONBOARDING' && request.baseline_hash===row.baseline_hash
+      && binding.case_id===row.id && binding.instance_id===row.instance_id && binding.gate==='ONBOARDING'
+      && binding.strategy_id===row.strategy_id && binding.strategy_id===review.context.strategy_id
+      && binding.baseline_hash===row.baseline_hash && binding.baseline_hash===review.context.strategy_code_hash
+      && request.artifact_id===binding.artifact_id,409,'SOURCE_ONBOARDING_DECISION_CONFLICT');
     const artifact=this.b.artifactFor(row,binding.artifact_id),text=Buffer.from(artifact.content).toString('utf8');
     requireThat(text.includes(review.context.strategy_version),409,'ONBOARDING_IDENTITY_EVIDENCE_MISMATCH');
     for(const value of [review.context.strategy_code_hash,review.context.strategy_config_hash,review.profile_hash,review.observed_profile_hash])requireThat(text.includes(value.slice(7)),409,'ONBOARDING_IDENTITY_EVIDENCE_MISMATCH');
     const lineage={schema_version:'ocean-onboarding-decision-lineage/v1',source_decision_id:sourceDecisionId,source_request_id:source.request_id,source_artifact_id:binding.artifact_id,source_snapshot_hash:request.snapshot_hash,source_decided_at_utc:payload.decided_at_utc,source_setup_task:'S40.3',strategy_id:review.context.strategy_id,strategy_version:review.context.strategy_version,strategy_code_hash:review.context.strategy_code_hash,strategy_config_hash:review.context.strategy_config_hash,workflow_profile_hash:review.profile_hash,observed_profile_hash:review.observed_profile_hash,factual_binding_hash:review.factual_binding_hash,governed_identity_hash:objectHash([review.context.strategy_id,review.context.strategy_version,review.context.strategy_code_hash,review.context.strategy_config_hash,review.profile_hash,review.observed_profile_hash]),preserved_scope:'STRATEGY_ONBOARDING_ONLY',dataset_release_preserved:false};
-    const decisionId=`lineage:${sourceDecisionId}`,decision={schema_version:'ocean-operational-decision/v1',decision_id:decisionId,scope:'STRATEGY_ONBOARDING',decision:'APPROVED',reason:'Preserved from the authenticated S40.3 onboarding decision after exact identity reconciliation.',review,decided_by:'Wayne',decided_via:'AUTHORISED_OCEAN_UI_LINEAGE',source_decision_id:sourceDecisionId,lineage,expires_at_utc:payload.expires_at_utc,decided_at_utc:payload.decided_at_utc};
+    const decisionId=onboardingLineageDecisionId(sourceDecisionId,review.review_hash),decision={schema_version:'ocean-operational-decision/v1',decision_id:decisionId,scope:'STRATEGY_ONBOARDING',decision:'APPROVED',reason:'Preserved from the authenticated S40.3 onboarding decision after exact identity reconciliation.',review,decided_by:'Wayne',decided_via:'AUTHORISED_OCEAN_UI_LINEAGE',source_decision_id:sourceDecisionId,lineage,expires_at_utc:payload.expires_at_utc,decided_at_utc:payload.decided_at_utc};
     const old=this.db.prepare('SELECT payload_json FROM ow_operational_decisions WHERE id=?').get(decisionId);
     if(old)requireThat(objectHash(parse(old))===objectHash(decision),409,'IMMUTABLE_ONBOARDING_LINEAGE_CONFLICT');
     else this.db.prepare('INSERT INTO ow_operational_decisions VALUES(?,?,?,?,?)').run(decisionId,review.context.strategy_id,review.review_hash,'STRATEGY_ONBOARDING',JSON.stringify(decision));
@@ -148,6 +162,32 @@ export class OperationalPreparation {
       return {...receipt,idempotent:false};
     });
   }
+  sourceObservation(source){
+    const modern=this.db.prepare("SELECT actor_id,payload_json FROM ow_events WHERE entity_id=? AND action='operational.source-observed' ORDER BY id DESC LIMIT 1").get(source.run.id);
+    if(modern){
+      requireThat(modern.actor_id===source.plan.instance.telemetry_producer_id,409,'AUTHENTICATED_SOURCE_PRODUCER_REQUIRED');
+      return;
+    }
+    // Older operational runs retained the validated activation, not a resolver
+    // event. Recheck its frozen proof at event time; a new run still needs a fresh handshake.
+    const legacy=this.db.prepare("SELECT entity_id,action,actor_id,actor_role,created_at_utc,payload_json FROM ow_events WHERE entity_id=? AND action='run-manager.activate' ORDER BY id DESC LIMIT 1").get(source.run.id);
+    requireThat(legacy && legacy.actor_id===source.plan.instance.telemetry_producer_id && legacy.actor_role==='TELEMETRY',409,'AUTHENTICATED_SOURCE_PRODUCER_REQUIRED');
+    let event;try{event=parse(legacy);}catch{requireThat(false,409,'AUTHENTICATED_SOURCE_PRODUCER_REQUIRED');}
+    requireThat(event?.schema_version===API_VERSION && event.namespace==='OPERATIONAL' && event.operational_action_allowed===true
+      && ['entity_id','action','actor_id','actor_role','created_at_utc'].every(key=>event[key]===legacy[key]),409,'AUTHENTICATED_SOURCE_PRODUCER_REQUIRED');
+    exactKeys(event.payload,['observed_handshake']);
+    const h=event.payload.observed_handshake;exactKeys(h,['instance','source_state','plan_hash','context_hash']);
+    this.b.validate('source-state',h.source_state);
+    const observed=h.source_state,at=Date.parse(observed.observed_at_utc),recorded=Date.parse(legacy.created_at_utc);
+    requireThat(h.instance && objectHash(h.instance)===objectHash(source.plan.instance)
+      && h.plan_hash===source.plan.plan_hash && h.context_hash===source.context.context_hash
+      && h.context_hash===source.plan.context_hash && source.context.run_id===source.run.id
+      && observed.environment===source.context.expected_environment && observed.quality==='VERIFIED'
+      && observed.simulation===true && observed.replay===(source.context.expected_environment==='REPLAY')
+      && observed.account_alias===source.plan.instance.account_alias && observed.source_schema_version
+      && Number.isFinite(at) && Number.isFinite(recorded) && recorded-at<=120000 && at-recorded<=5000,
+      409,'SOURCE_HANDSHAKE_MISMATCH');
+  }
   reprocess(actor,input){
     human(actor);
     exactKeys(input,['source_run_id','run_id','processing_id','expected_revision','confirmed','reason']);
@@ -168,8 +208,7 @@ export class OperationalPreparation {
     requireThat(summary.progress && ['source_market','strategy_execution','processing_review'].every(axis=>!subtract([review.interval],summary.progress.axes[axis]).length),409,'THREE_AXIS_SOURCE_COVERAGE_REQUIRED');
     requireThat(!subtract([review.interval],completion.observed_coverage).length && !subtract(completion.observed_coverage,[review.interval]).length,409,'SOURCE_COVERAGE_MISMATCH');
     requireThat(!this.db.prepare('SELECT id FROM ow_run_leases WHERE id=?').get(input.source_run_id),409,'SOURCE_RUN_LEASE_STILL_PRESENT');
-    const sourceObserved=this.db.prepare("SELECT actor_id,payload_json FROM ow_events WHERE entity_id=? AND action='operational.source-observed' ORDER BY id DESC LIMIT 1").get(input.source_run_id);
-    requireThat(sourceObserved && sourceObserved.actor_id===source.plan.instance.telemetry_producer_id,409,'AUTHENTICATED_SOURCE_PRODUCER_REQUIRED');
+    this.sourceObservation(source);
     requireThat(!this.db.prepare("SELECT id FROM ow_runs WHERE instance_id=? AND state IN ('READY','ACTIVE','COMPLETING')").get(source.run.instance_id),409,'INSTANCE_ALREADY_RESERVED');
     const processingConflict=this.db.prepare('SELECT id,payload_json FROM ow_run_plans').all().find(row=>parse(row).processing_id===input.processing_id);
     requireThat(!processingConflict,409,'PROCESSING_ID_ALREADY_USED');

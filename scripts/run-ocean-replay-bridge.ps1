@@ -4,6 +4,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Node callers may inherit another PowerShell engine's module search path.
+Import-Module -Name (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop
 Add-Type -AssemblyName System.Net.Http
 $Node = 'C:\Program Files\nodejs\node.exe'
 $RepositoryRoot = Split-Path -Parent $PSScriptRoot
@@ -15,9 +17,17 @@ $script:Sequence = 0
 $script:LeaseId = $null
 $script:LeaseRunId = $null
 $script:Namespace = $null
+$script:ConfigHash = $null
+
+function Get-BridgeConfigHash([byte[]]$Bytes) {
+  $hash = [Security.Cryptography.SHA256]::Create()
+  try { return 'sha256:' + ([BitConverter]::ToString($hash.ComputeHash($Bytes))).Replace('-','').ToLowerInvariant() }
+  finally { $hash.Dispose() }
+}
 
 function Read-BridgeConfig {
-  $value = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+  $bytes = [IO.File]::ReadAllBytes($ConfigPath)
+  $value = [Text.Encoding]::UTF8.GetString($bytes).TrimStart([char]0xFEFF) | ConvertFrom-Json
   if ($value.schema_version -notin @('ocean-replay-run-bridge/v3','ocean-replay-run-bridge/v4') -or $value.base_url -cne 'http://127.0.0.1:3102') { throw 'BRIDGE_CONFIG_REJECTED' }
   $operational = $value.schema_version -ceq 'ocean-replay-run-bridge/v4'
   foreach ($key in @('workflow_db','telemetry_db','handoff_path','expected_sierra_exe','state_file')) {
@@ -38,7 +48,26 @@ function Read-BridgeConfig {
   if ($value.expected_telemetry_version -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw 'TELEMETRY_VERSION_REJECTED' }
   if ((-not $operational -and $value.identity_id -cne ($value.instance_id + '-telemetry')) -or
       $value.identity_id -cnotmatch '^[A-Za-z0-9_.:-]+$' -or $value.credential_ref -cnotmatch '^OCEAN_[A-Z0-9_]+_TOKEN$') { throw 'BRIDGE_IDENTITY_REJECTED' }
+  $script:ConfigHash = Get-BridgeConfigHash $bytes
   return $value
+}
+
+function Open-BridgeConfigGuard {
+  if (-not $script:ConfigHash) { throw 'BRIDGE_CONFIG_SNAPSHOT_REQUIRED' }
+  $stream = $null
+  $hash = [Security.Cryptography.SHA256]::Create()
+  try {
+    # Keep the path stable and deny writes/deletion while child readers and
+    # lease mutations use the same startup configuration snapshot.
+    $stream = [IO.File]::Open($ConfigPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    $observed = 'sha256:' + ([BitConverter]::ToString($hash.ComputeHash($stream))).Replace('-','').ToLowerInvariant()
+    if ($observed -cne $script:ConfigHash) { throw 'BRIDGE_CONFIG_CHANGED_RESTART_REQUIRED' }
+    return $stream
+  } catch {
+    if ($stream) { $stream.Dispose() }
+    if ($_.Exception.Message -ceq 'BRIDGE_CONFIG_CHANGED_RESTART_REQUIRED') { throw }
+    throw 'BRIDGE_CONFIG_UNAVAILABLE_RESTART_REQUIRED'
+  } finally { $hash.Dispose() }
 }
 
 function Read-ProtectedCredential($Config) {
@@ -140,8 +169,11 @@ function Test-OperationalPhysicalBinding($BridgeConfig) {
     $expectedPath = [IO.Path]::GetFullPath($modulePath)
     if (-not ($modulePaths | Where-Object { $_ -ceq $expectedPath })) { throw 'EXPECTED_MODULE_NOT_LOADED' }
   }
-  $chartbookName = [IO.Path]::GetFileNameWithoutExtension([string]$BridgeConfig.expected_chartbook_path)
-  if ([string]$process.MainWindowTitle -cnotlike ('*' + $chartbookName + '*')) { throw 'EXPECTED_CHARTBOOK_NOT_OPEN' }
+  # Sierra's main-window title is mutable and commonly shows the active chart
+  # rather than the chartbook name. Exact process/module binding is verified
+  # here; chart number, symbol, bar period and stopped Replay state are proved
+  # by the fresh strategy-owned source preflight before release.
+  if (-not $process.Responding) { throw 'EXPECTED_SIERRA_PROCESS_NOT_RESPONDING' }
 }
 
 function Invoke-BoundedNode([string]$Script, [string[]]$Arguments, [int]$TimeoutMilliseconds, [string]$FailureCode) {
@@ -214,12 +246,20 @@ function Write-State($State) {
   New-Item -ItemType Directory -Force -Path $directory | Out-Null
   $State.updated_at_utc = [DateTimeOffset]::UtcNow.ToString('o')
   $State.pid = $PID
+  $State.config_sha256 = $script:ConfigHash
   $temp = $Config.state_file + '.next'
   [IO.File]::WriteAllText($temp, ($State | ConvertTo-Json -Depth 30))
   Move-Item -LiteralPath $temp -Destination $Config.state_file -Force
 }
 
 function Invoke-BridgeCycle {
+  $guard = Open-BridgeConfigGuard
+  try { Invoke-PinnedBridgeCycle }
+  finally { $guard.Dispose() }
+}
+
+function Invoke-PinnedBridgeCycle {
+  if (Complete-VerifiedFailedAttempt) { return }
   Test-OperationalPhysicalBinding $Config
   $probe = Get-Probe
   if (-not $probe.run) {
@@ -333,15 +373,51 @@ function Invoke-BridgeCycle {
   Write-State ([ordered]@{status='ACTIVE';run_id=$runId;run_state=$context.state;lease_id=$leaseId;telemetry=$probe.telemetry;reconciliation=$reconciliation;safety=$safety})
 }
 
+function Complete-VerifiedFailedAttempt {
+  if ($script:Namespace -cne 'OPERATIONAL') { return $false }
+  $failure = Get-EvidencePlan '--failure-only'
+  if ($failure.status -ceq 'NO_TERMINAL_FAILURE') { return $false }
+  if ($failure.status -cne 'TERMINAL_FAILURE_READY' -or $failure.failure_proof_hash -cnotmatch '^sha256:[a-f0-9]{64}$') { throw 'FAILURE_PROOF_NOT_READY' }
+  $runId = [string]$failure.run_id
+  $context = Get-RunContext $runId
+  if ($context.state -notin @('READY','ACTIVE','COMPLETING')) { throw 'FAILURE_RUN_STATE_REJECTED' }
+  if (-not $context.lease -or $context.lease.expired) {
+    $claimed = Invoke-Mutation 'claim' @{run_id=$runId;expected_revision=[int]$context.revision}
+    $script:LeaseId = [string]$claimed.lease_id; $script:LeaseRunId = $runId
+  } elseif ($context.lease.owner_id -cne $script:Credential.identity_id) { throw 'FOREIGN_OR_UNAVAILABLE_RUN_LEASE' }
+  elseif ($script:LeaseRunId -cne $runId -or -not $script:LeaseId) { throw 'OWNER_LEASE_RECOVERY_WAIT' }
+  $leaseId = $script:LeaseId
+  $context = Invoke-Mutation 'renew' @{run_id=$runId;lease_id=$leaseId}
+  if ($context.state -in @('READY','ACTIVE')) {
+    $context = Invoke-Mutation 'end' @{run_id=$runId;lease_id=$leaseId;expected_revision=[int]$context.revision;outcome='FAILED';failure_proof_hash=[string]$failure.failure_proof_hash}
+  }
+  if ($context.state -ceq 'COMPLETING') {
+    $context = Invoke-Mutation 'finish' @{run_id=$runId;lease_id=$leaseId;expected_revision=[int]$context.revision}
+  }
+  if ($context.state -cne 'FAILED') { throw 'FAILED_ATTEMPT_NOT_RECONCILED' }
+  $script:LeaseId = $null; $script:LeaseRunId = $null
+  Write-State ([ordered]@{status='FAILED_ATTEMPT_RECONCILED';run_id=$runId;run_state='FAILED';physical_execution='STOPPED';failure_proof_hash=$failure.failure_proof_hash;full_requested_coverage_verified=$false;next_action=$context.execution.next_action;safety='OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED'})
+  return $true
+}
+
 $Config = Read-BridgeConfig
 $script:Namespace = if ($Config.schema_version -ceq 'ocean-replay-run-bridge/v4') { 'OPERATIONAL' } else { 'TEST' }
-$script:Credential = Read-ProtectedCredential $Config
 try {
-  $script:Client = New-BridgeClient $script:Credential
+  $startupGuard = Open-BridgeConfigGuard
+  try {
+    $script:Credential = Read-ProtectedCredential $Config
+    $script:Client = New-BridgeClient $script:Credential
+  } finally { $startupGuard.Dispose() }
   do {
     try { Invoke-BridgeCycle }
     catch {
       $safety = if ($script:Namespace -ceq 'OPERATIONAL') { 'OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED' } else { 'TEST_ONLY_INGESTION_OFF' }
+      if ($_.Exception.Message -in @('BRIDGE_CONFIG_CHANGED_RESTART_REQUIRED','BRIDGE_CONFIG_UNAVAILABLE_RESTART_REQUIRED')) {
+        $code = $_.Exception.Message
+        Write-State ([ordered]@{status='RESTART_REQUIRED';error=$code;run_id=$script:LeaseRunId;safety=$safety;
+          next_action='Restart only ReplayBridge through the existing Ocean service lifecycle; revalidate current config and protected identity. Existing run leases expire normally; no binding is hot-swapped.'})
+        throw $code
+      }
       Write-State ([ordered]@{status='DEGRADED';error=$(if ($_.Exception.Message -cmatch '^[A-Z][A-Z0-9_]{1,100}$') {$_.Exception.Message} else {'BRIDGE_CYCLE_FAILED'});safety=$safety})
     }
     if (-not $Once) { Start-Sleep -Seconds ([int]$Config.poll_seconds) }

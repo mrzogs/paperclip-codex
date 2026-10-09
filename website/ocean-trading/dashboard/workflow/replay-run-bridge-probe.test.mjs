@@ -6,6 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import { sealedHash } from './common.mjs';
 
 const probe = fileURLToPath(new URL('./replay-run-bridge-probe.mjs', import.meta.url));
 
@@ -122,6 +123,13 @@ function createOperationalFixture() {
     expected_telemetry_version: 'v0.5.31',
     expected_chartbook_path: chartbook,
     expected_chart_number: 1,
+    expected_chartbook_sha256: `sha256:${'9'.repeat(64)}`,
+    time_basis: 'UTC source records; Sierra chart display time preserved',
+    session_calendar_revision: 'observed-mnq-maintenance-2100-2200z-20260928',
+    fill_model_version: 'Sierra Chart Replay native simulation',
+    managed_candidate_id: 'v0.6.234-managed-lineage',
+    expected_session_name: 'All',
+    expected_session_timezone: 'Europe/London',
     expected_bar_period_seconds: 300,
     expected_strategy_module_path: strategyModule,
     expected_strategy_module_sha256: `sha256:${'7'.repeat(64)}`,
@@ -131,6 +139,90 @@ function createOperationalFixture() {
   };
   fs.writeFileSync(fixture.configFile, JSON.stringify(config));
   return { ...fixture, runId, instanceId, config };
+}
+
+function updateDatabase(filename, sql) {
+  const db = new DatabaseSync(filename);
+  try { db.exec(sql); } finally { db.close(); }
+}
+
+function readProbe(fixture) {
+  return JSON.parse(execFileSync(process.execPath, [probe, fixture.configFile], { encoding: 'utf8', stdio: 'pipe' }));
+}
+
+function writeProducerStatus(fixture, overrides = {}) {
+  const values = {
+    commandId: 'managed-run-start-progress-1',
+    action: 'status',
+    status: 'status',
+    chartNumber: '1',
+    symbol: fixture.config.expected_symbol,
+    isReplayRunning: 'true',
+    replayStatus: '1',
+    chartDataType: '2',
+    secondsPerBar: '300',
+    detail: 'VWAP replay hook active.',
+    ...overrides,
+  };
+  fs.writeFileSync(fixture.config.source_preflight_status_path, Object.entries(values).map(([key, value]) => `${key}=${value}\n`).join(''));
+}
+
+function createManagedStatusFixture(t, overrides = {}) {
+  const fixture = createOperationalFixture();
+  t.after(() => {
+    assert.ok(path.resolve(fixture.directory).startsWith(path.resolve(os.tmpdir()) + path.sep));
+    fs.rmSync(fixture.directory, { recursive: true, force: true });
+  });
+  const context = {
+    schema_version: '2.1.0', run_id: fixture.runId, revision: 1,
+    strategy_id: fixture.config.strategy_id, execution_instance_id: fixture.instanceId,
+    expected_environment: 'REPLAY', candidate_id: null,
+    strategy_code_hash: `sha256:${'1'.repeat(64)}`,
+    strategy_config_hash: `sha256:${'2'.repeat(64)}`,
+    dataset_manifest_id: 'cicd-vwap-discovery', dataset_manifest_revision: 3,
+    dataset_partition: 'DISCOVERY', strategy_profile_id: 'cicd-vwap-source-bound',
+    strategy_profile_version: 'v0.1.3',
+  };
+  context.context_hash = sealedHash(context, 'context_hash');
+  const plan = {
+    selection: { strategy_id: context.strategy_id, instance_id: fixture.instanceId },
+    context_hash: context.context_hash,
+    operational_review: { context, factual_binding_hash: fixture.config.factual_binding_hash },
+  };
+  plan.plan_hash = sealedHash(plan, 'plan_hash');
+  const workflow = new DatabaseSync(fixture.workflowDb);
+  try {
+    workflow.exec('ALTER TABLE ow_runs ADD COLUMN context_json TEXT; CREATE TABLE ow_run_plans (id TEXT, payload_json TEXT)');
+    workflow.prepare('UPDATE ow_runs SET context_json=?').run(JSON.stringify(context));
+    workflow.prepare('INSERT INTO ow_run_plans VALUES (?,?)').run(fixture.runId, JSON.stringify(plan));
+    workflow.prepare('INSERT INTO ow_operational_releases VALUES (?,?,?)').run(fixture.runId, context.context_hash, '{}');
+  } finally { workflow.close(); }
+  const telemetry = new DatabaseSync(fixture.telemetryDb);
+  try {
+    telemetry.exec(`
+      ALTER TABLE replay_runs ADD COLUMN instance_id TEXT;
+      UPDATE replay_runs SET instance_id='Replay_Two_fixture';
+      ALTER TABLE account_snapshot ADD COLUMN instance_id TEXT;
+      UPDATE account_snapshot SET instance_id='Replay_Two_fixture';
+      ALTER TABLE instrument_snapshot ADD COLUMN instance_id TEXT;
+      ALTER TABLE instrument_snapshot ADD COLUMN trade_account TEXT;
+      ALTER TABLE instrument_snapshot ADD COLUMN chart_number INTEGER;
+      UPDATE instrument_snapshot SET instance_id='Replay_Two_fixture', trade_account='Sim1', chart_number=1;
+      UPDATE sierra_instance SET last_seen_utc=strftime('%Y-%m-%d %H:%M:%S','now');
+      CREATE TABLE replay_run_context (run_id TEXT, candidate_id TEXT, dataset_id TEXT, dataset_role TEXT,
+        strategy_profile_id TEXT, strategy_profile_version TEXT, strategy_code_hash TEXT,
+        strategy_config_hash TEXT, context_hash TEXT, session_name TEXT, session_timezone TEXT);
+    `);
+    telemetry.prepare('INSERT INTO replay_run_context VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(
+      fixture.runId, fixture.config.managed_candidate_id,
+      `${context.dataset_manifest_id}:${context.dataset_manifest_revision}`, context.dataset_partition,
+      context.strategy_profile_id, context.strategy_profile_version, context.strategy_code_hash,
+      context.strategy_config_hash, context.context_hash, fixture.config.expected_session_name,
+      fixture.config.expected_session_timezone,
+    );
+  } finally { telemetry.close(); }
+  writeProducerStatus(fixture, overrides);
+  return { ...fixture, context, plan };
 }
 
 test('probe verifies the exact TEST Replay binding without claiming trade evidence', t => {
@@ -252,4 +344,260 @@ test('v4 probe rejects a test namespace instance', t => {
     assert.match(String(error.stderr), /IDENTITY_SCOPE_REJECTED/);
     return true;
   });
+});
+
+for (const [name, flags, basis] of [
+  ['running', {}, 'CORRELATED_RUNNING_STATUS'],
+  ['inactive', { isReplayRunning: 'false', replayStatus: '0' }, 'CORRELATED_INACTIVE_STATUS'],
+]) {
+  test(`v4 probe accepts fresh ${name} producer status only with the released managed run`, t => {
+    const fixture = createManagedStatusFixture(t, flags);
+    const result = readProbe(fixture);
+    assert.equal(result.run.release_context_hash, fixture.context.context_hash);
+    assert.equal(result.telemetry.source_preflight.verification_basis, basis);
+    assert.equal(result.telemetry.source_preflight.verified, true);
+    assert.equal(result.telemetry.preflight_verified, true);
+    assert.equal(result.telemetry.run_verified, true);
+    assert.equal(result.telemetry.verified, true);
+    assert.equal(result.telemetry.reason, null);
+  });
+}
+
+test('v4 probe remains blocked during warmup and verifies the first matching managed telemetry row', t => {
+  const fixture = createManagedStatusFixture(t);
+  updateDatabase(fixture.telemetryDb, "UPDATE replay_runs SET run_id='previous-z25-run'; UPDATE replay_run_context SET run_id='previous-z25-run'; UPDATE instrument_snapshot SET symbol='MNQZ25_FUT_CME'");
+  assert.equal(readProbe(fixture).telemetry.preflight_verified, false);
+  updateDatabase(fixture.telemetryDb, `UPDATE replay_runs SET run_id='${fixture.runId}'; UPDATE replay_run_context SET run_id='${fixture.runId}'; UPDATE instrument_snapshot SET symbol='${fixture.config.expected_symbol}'`);
+  assert.equal(readProbe(fixture).telemetry.verified, true);
+});
+
+for (const [name, overrides] of [
+  ['unknown action', { action: 'unknown' }],
+  ['unknown status', { status: 'unknown' }],
+  ['error', { status: 'error' }],
+  ['unfinished preparation', { action: 'prepare_contract', status: 'status' }],
+  ['running flag with stopped state', { replayStatus: '0' }],
+  ['inactive flag with running state', { isReplayRunning: 'false' }],
+  ['unknown replay state', { replayStatus: '9' }],
+  ['paused state', { replayStatus: '2' }],
+  ['missing replay state', { replayStatus: '' }],
+  ['missing command', { commandId: '' }],
+  ['different contract', { symbol: 'MNQZ25_FUT_CME' }],
+  ['different chart', { chartNumber: '2' }],
+  ['different bar period', { secondsPerBar: '60' }],
+  ['historical chart', { chartDataType: '1' }],
+  ['unknown producer detail', { detail: 'unknown' }],
+  ['manual clear-only status', { detail: 'VWAP replay hook active; clear-only suppression released for manual replay.' }],
+]) {
+  test(`v4 probe rejects producer status with ${name}`, t => {
+    const fixture = createManagedStatusFixture(t, overrides);
+    const result = readProbe(fixture);
+    assert.equal(result.telemetry.source_preflight.verified, false);
+    assert.equal(result.telemetry.preflight_verified, false);
+    assert.equal(result.telemetry.verified, false);
+  });
+}
+
+for (const [name, sql] of [
+  ['previous run', "UPDATE replay_runs SET run_id='previous-z25-run'"],
+  ['different strategy', "UPDATE replay_runs SET strategy_id='other-strategy'"],
+  ['different strategy version', "UPDATE replay_runs SET strategy_version='v0.6.233'"],
+  ['different chartbook', "UPDATE replay_runs SET chartbook='other.Cht'"],
+  ['different chart number', 'UPDATE replay_runs SET chart_number=2'],
+  ['non-exact bar period', "UPDATE replay_runs SET bar_period='seconds=3000'"],
+  ['missing managed context', 'DELETE FROM replay_run_context'],
+  ['missing managed context table', 'DROP TABLE replay_run_context'],
+  ['different managed candidate', "UPDATE replay_run_context SET candidate_id='other-candidate'"],
+  ['different context hash', "UPDATE replay_run_context SET context_hash='sha256:wrong'"],
+  ['different code hash', "UPDATE replay_run_context SET strategy_code_hash='sha256:wrong'"],
+  ['different config hash', "UPDATE replay_run_context SET strategy_config_hash='sha256:wrong'"],
+  ['different dataset revision', "UPDATE replay_run_context SET dataset_id='cicd-vwap-discovery:2'"],
+  ['different dataset role', "UPDATE replay_run_context SET dataset_role='EVALUATION'"],
+  ['different profile', "UPDATE replay_run_context SET strategy_profile_id='other-profile'"],
+  ['different profile version', "UPDATE replay_run_context SET strategy_profile_version='v0.1.2'"],
+  ['different session', "UPDATE replay_run_context SET session_name='London'"],
+  ['different timezone', "UPDATE replay_run_context SET session_timezone='UTC'"],
+  ['different telemetry instance', "UPDATE replay_runs SET instance_id='other-instance'"],
+  ['different account instance', "UPDATE account_snapshot SET instance_id='other-instance'"],
+  ['different instrument instance', "UPDATE instrument_snapshot SET instance_id='other-instance'"],
+  ['different account', "UPDATE account_snapshot SET trade_account='Sim2'"],
+  ['real account', 'UPDATE account_snapshot SET is_simulated=0'],
+  ['different instrument account', "UPDATE instrument_snapshot SET trade_account='Sim2'"],
+  ['different instrument contract', "UPDATE instrument_snapshot SET symbol='MNQZ25_FUT_CME'"],
+  ['different instrument chart', 'UPDATE instrument_snapshot SET chart_number=2'],
+  ['stale account', "UPDATE account_snapshot SET snapshot_utc='2026-01-01 00:00:00'"],
+  ['future account', "UPDATE account_snapshot SET snapshot_utc='2099-01-01 00:00:00'"],
+  ['wrong executable', "UPDATE sierra_instance SET sierra_exe_path='other.exe'"],
+  ['wrong telemetry version', "UPDATE logger_health SET message='logger_started version=v0.5.30'"],
+  ['version prefix collision', "UPDATE logger_health SET message='logger_started version=v0.5.310'"],
+  ['schema below floor', 'UPDATE schema_version SET version=8'],
+]) {
+  test(`v4 probe rejects uncorrelated status with ${name}`, t => {
+    const fixture = createManagedStatusFixture(t);
+    updateDatabase(fixture.telemetryDb, sql);
+    assert.equal(readProbe(fixture).telemetry.verified, false);
+  });
+}
+
+for (const [name, mutate] of [
+  ['missing release', fixture => updateDatabase(fixture.workflowDb, 'DELETE FROM ow_operational_releases')],
+  ['release hash conflict', fixture => updateDatabase(fixture.workflowDb, "UPDATE ow_operational_releases SET context_hash='sha256:wrong'")],
+  ['changed context', fixture => {
+    const db = new DatabaseSync(fixture.workflowDb);
+    try { db.prepare('UPDATE ow_runs SET context_json=?').run(JSON.stringify({ ...fixture.context, execution_instance_id: 'other-instance' })); } finally { db.close(); }
+  }],
+  ['changed plan', fixture => {
+    const db = new DatabaseSync(fixture.workflowDb);
+    try { db.prepare('UPDATE ow_run_plans SET payload_json=?').run(JSON.stringify({ ...fixture.plan, context_hash: 'sha256:wrong' })); } finally { db.close(); }
+  }],
+  ['missing run plan', fixture => updateDatabase(fixture.workflowDb, 'DELETE FROM ow_run_plans')],
+  ['malformed context', fixture => updateDatabase(fixture.workflowDb, "UPDATE ow_runs SET context_json='not-json'")],
+  ['different factual binding', fixture => fs.writeFileSync(fixture.configFile, JSON.stringify({ ...fixture.config, factual_binding_hash: `sha256:${'5'.repeat(64)}` }))],
+  ['different execution identity', fixture => fs.writeFileSync(fixture.configFile, JSON.stringify({ ...fixture.config, instance_id: 'other-instance' }))],
+]) {
+  test(`v4 probe rejects lifecycle status with ${name}`, t => {
+    const fixture = createManagedStatusFixture(t);
+    mutate(fixture);
+    assert.equal(readProbe(fixture).telemetry.verified, false);
+  });
+}
+
+test('v4 probe uses current committed account evidence, not the instance configuration timestamp, as liveness', t => {
+  const fixture = createManagedStatusFixture(t);
+  updateDatabase(fixture.telemetryDb, "UPDATE sierra_instance SET last_seen_utc='2026-01-01 00:00:00'");
+  const result = readProbe(fixture);
+  assert.equal(result.telemetry.verified, true);
+  assert.equal(result.telemetry.source_preflight.verified, true);
+  updateDatabase(fixture.telemetryDb, "UPDATE account_snapshot SET snapshot_utc='2026-01-01 00:00:00'");
+  assert.equal(readProbe(fixture).telemetry.verified, false);
+});
+
+for (const [name, delta] of [['stale', -10 * 60 * 1000], ['future', 60 * 1000]]) {
+  test(`v4 probe rejects ${name} lifecycle status despite a matching released managed run`, t => {
+    const fixture = createManagedStatusFixture(t);
+    const timestamp = new Date(Date.now() + delta);
+    fs.utimesSync(fixture.config.source_preflight_status_path, timestamp, timestamp);
+    const result = readProbe(fixture);
+    assert.equal(result.telemetry.verified, false);
+    assert.equal(result.telemetry.source_preflight.reason, 'SOURCE_PREFLIGHT_STATUS_STALE');
+  });
+}
+
+test('v4 probe rejects a duplicate-key producer status instead of choosing a replay state', t => {
+  const fixture = createManagedStatusFixture(t);
+  fs.appendFileSync(fixture.config.source_preflight_status_path, 'replayStatus=0\n');
+  assert.throws(() => readProbe(fixture), error => {
+    assert.match(String(error.stderr), /SOURCE_PREFLIGHT_STATUS_MALFORMED/);
+    return true;
+  });
+});
+
+function createRunningStartFixture(t) {
+  const fixture = createManagedStatusFixture(t);
+  const started = new Date(Date.now() - 10 * 60 * 1000);
+  const startId = 'managed-frozen-start-command';
+  const context = fixture.context;
+  const start = {
+    commandId: startId, action: 'start', expectedSymbol: fixture.config.expected_symbol,
+    tradeAccount: fixture.config.account_alias, startDateTime: '2025-08-18 00:00:00',
+    tradeStartDateTime: '2025-09-01 00:00:00', endDateTime: '2025-09-13 00:00:00',
+    telemetryRunId: fixture.runId, telemetryStrategyId: fixture.config.strategy_id,
+    telemetryStrategyVersion: fixture.config.expected_strategy_version,
+    telemetryRunStartedUtc: started.toISOString(), telemetryDllSha256: fixture.config.expected_strategy_module_sha256,
+    telemetryContextHash: context.context_hash, telemetryCandidateId: fixture.config.managed_candidate_id,
+    telemetryDatasetId: `${context.dataset_manifest_id}:${context.dataset_manifest_revision}`,
+    telemetryDatasetRole: context.dataset_partition, telemetryStrategyProfileId: context.strategy_profile_id,
+    telemetryStrategyProfileVersion: context.strategy_profile_version, telemetryStrategyCodeHash: context.strategy_code_hash,
+    telemetryStrategyConfigHash: context.strategy_config_hash, telemetrySessionName: fixture.config.expected_session_name,
+    telemetrySessionTimezone: fixture.config.expected_session_timezone,
+  };
+  const db = new DatabaseSync(fixture.telemetryDb);
+  try {
+    db.exec(`ALTER TABLE replay_runs ADD COLUMN dll_hash TEXT;
+      CREATE TABLE replay_run_attempts (attempt_id INTEGER PRIMARY KEY,run_id TEXT,attempt_started_utc TEXT,
+        attempt_ended_utc TEXT,start_command_id TEXT,stop_command_id TEXT);`);
+    db.prepare('UPDATE replay_runs SET dll_hash=?').run(fixture.config.expected_strategy_module_sha256);
+    db.prepare('INSERT INTO replay_run_attempts VALUES (26,?,?,NULL,?,NULL)').run(fixture.runId,started.toISOString(),startId);
+  } finally { db.close(); }
+  const commandFile = path.join(path.dirname(fixture.config.source_preflight_status_path),'vwap-replay-command.txt');
+  fs.writeFileSync(commandFile,Object.entries(start).map(([key,value])=>`${key}=${value}\n`).join(''));
+  const detail = `StartChartReplay result=1; startDateTime=${start.startDateTime}; effectiveStartDateTime=${start.startDateTime}; endDateTime=${start.endDateTime}; tradeStartDateTime=${start.tradeStartDateTime}; transition_confirmed=true`;
+  writeProducerStatus(fixture,{commandId:startId,action:'start',status:'running',controllerLifecycleActive:'true',detail});
+  fs.utimesSync(commandFile,started,started);
+  fs.utimesSync(fixture.config.source_preflight_status_path,new Date(started.getTime()+1000),new Date(started.getTime()+1000));
+  const controllerRoot = path.join(path.dirname(fixture.config.expected_sierra_exe),'connector-control','patrading-tp');
+  fs.mkdirSync(controllerRoot,{recursive:true});
+  const controllerFile = path.join(controllerRoot,'replay-status.json');
+  const controllerCommandFile = path.join(controllerRoot,'replay-command.json');
+  const commandId = `oql-managed-status-${'a'.repeat(32)}`;
+  const request = {schema:'ocean-trading.sierra-replay-controller.command.v1',commandId,action:'status',chartNumber:1,
+    saveChartbook:false,expectedInstanceDataFolder:path.join(fixture.directory,'Data')};
+  const receipt = {schema:'ocean-trading.sierra-replay-controller.status.v1',controllerVersion:'v0.2.1-cicd-vwap-time-basis',
+    commandId,action:'status',status:'status',chartNumber:1,chartbookPath:fixture.config.expected_chartbook_path,
+    statusFilePath:controllerFile,instanceDataFolder:request.expectedInstanceDataFolder,
+    isReplayRunning:true,replayStatus:1,chartReplayStatus:1,error:null,currentChartDateTime:'2025-08-18 14:03:00'};
+  fs.writeFileSync(controllerCommandFile,JSON.stringify(request));
+  fs.writeFileSync(controllerFile,JSON.stringify(receipt));
+  return {...fixture,start,started,commandFile,controllerFile,controllerCommandFile,request,receipt};
+}
+
+test('v4 probe accepts a held exact start with a fresh controller and latest open logger attempt without writing runtime files',t=>{
+  const fixture=createRunningStartFixture(t);
+  const files=[fixture.commandFile,fixture.config.source_preflight_status_path,fixture.controllerFile,fixture.controllerCommandFile];
+  const before=files.map(file=>fs.readFileSync(file));
+  const result=readProbe(fixture);
+  assert.equal(result.telemetry.verified,true);
+  assert.equal(result.telemetry.source_preflight.verification_basis,'EXACT_START_ATTEMPT_AND_FRESH_CONTROLLER');
+  assert.equal(result.telemetry.source_preflight.managed_start_proof.attempt_id,26);
+  assert.equal(result.telemetry.source_preflight.managed_start_proof.context_hash,fixture.context.context_hash);
+  assert.match(result.telemetry.source_preflight.managed_start_proof.controller_receipt_sha256,/^sha256:[a-f0-9]{64}$/);
+  files.forEach((file,index)=>assert.deepEqual(fs.readFileSync(file),before[index]));
+});
+
+test('v4 running-start proof survives probe restart with identical retained start bytes',t=>{
+  const fixture=createRunningStartFixture(t);
+  const first=readProbe(fixture),second=readProbe(fixture);
+  assert.equal(first.telemetry.verified,true);
+  assert.deepEqual(second.telemetry.source_preflight.managed_start_proof,first.telemetry.source_preflight.managed_start_proof);
+});
+
+const rewriteJson=(file,change)=>fs.writeFileSync(file,JSON.stringify({...JSON.parse(fs.readFileSync(file,'utf8')),...change}));
+for(const [name,mutate] of [
+  ['missing attempt table',f=>updateDatabase(f.telemetryDb,'DROP TABLE replay_run_attempts')],
+  ['missing attempt',f=>updateDatabase(f.telemetryDb,'DELETE FROM replay_run_attempts')],
+  ['different latest run',f=>updateDatabase(f.telemetryDb,"UPDATE replay_run_attempts SET run_id='other-run'")],
+  ['newer attempt on another run',f=>updateDatabase(f.telemetryDb,"INSERT INTO replay_run_attempts VALUES(27,'other-run','2026-01-01',NULL,'other-start',NULL)")],
+  ['closed attempt',f=>updateDatabase(f.telemetryDb,"UPDATE replay_run_attempts SET attempt_ended_utc='2026-01-01'")],
+  ['stopped attempt',f=>updateDatabase(f.telemetryDb,"UPDATE replay_run_attempts SET stop_command_id='stop'")],
+  ['different start command',f=>updateDatabase(f.telemetryDb,"UPDATE replay_run_attempts SET start_command_id='other-command'")],
+  ['different recorded DLL',f=>updateDatabase(f.telemetryDb,"UPDATE replay_runs SET dll_hash='wrong-hash'")],
+  ['different context',f=>updateDatabase(f.telemetryDb,"UPDATE replay_run_context SET context_hash='wrong-hash'")],
+  ['different account',f=>updateDatabase(f.telemetryDb,"UPDATE account_snapshot SET trade_account='Sim2'")],
+  ['stale account',f=>updateDatabase(f.telemetryDb,"UPDATE account_snapshot SET snapshot_utc='2026-01-01'")],
+  ['different raw run',f=>fs.writeFileSync(f.commandFile,fs.readFileSync(f.commandFile,'utf8').replace(`telemetryRunId=${f.runId}`,'telemetryRunId=other-run'))],
+  ['different raw DLL',f=>fs.writeFileSync(f.commandFile,fs.readFileSync(f.commandFile,'utf8').replace(f.start.telemetryDllSha256,'sha256:wrong'))],
+  ['different raw account',f=>fs.writeFileSync(f.commandFile,fs.readFileSync(f.commandFile,'utf8').replace('tradeAccount=Sim1','tradeAccount=Sim2'))],
+  ['duplicate raw command field',f=>fs.appendFileSync(f.commandFile,'commandId=other-start\n')],
+  ['stale controller',f=>{const old=new Date(Date.now()-600000);fs.utimesSync(f.controllerFile,old,old)}],
+  ['future controller',f=>{const future=new Date(Date.now()+60000);fs.utimesSync(f.controllerFile,future,future)}],
+  ['stale controller command',f=>{const old=new Date(Date.now()-600000);fs.utimesSync(f.controllerCommandFile,old,old)}],
+  ['controller command mismatch',f=>rewriteJson(f.controllerFile,{commandId:'other-command'})],
+  ['controller stopped',f=>rewriteJson(f.controllerFile,{isReplayRunning:false,replayStatus:0,chartReplayStatus:0})],
+  ['controller paused',f=>rewriteJson(f.controllerFile,{replayStatus:2,chartReplayStatus:2})],
+  ['controller error',f=>rewriteJson(f.controllerFile,{error:'failure'})],
+  ['controller status unknown',f=>rewriteJson(f.controllerFile,{status:'unknown'})],
+  ['controller wrong chart',f=>rewriteJson(f.controllerFile,{chartNumber:2})],
+  ['request wrong chart',f=>rewriteJson(f.controllerCommandFile,{chartNumber:2})],
+  ['request mutation',f=>rewriteJson(f.controllerCommandFile,{action:'stop'})],
+  ['request save chartbook',f=>rewriteJson(f.controllerCommandFile,{saveChartbook:true})],
+  ['controller wrong root',f=>rewriteJson(f.controllerFile,{instanceDataFolder:path.join(f.directory,'other','Data')})],
+  ['controller wrong chartbook',f=>rewriteJson(f.controllerFile,{chartbookPath:path.join(f.directory,'other.Cht')})],
+  ['controller wrong channel',f=>rewriteJson(f.controllerFile,{statusFilePath:path.join(f.directory,'generic-status.json')})],
+  ['controller wrong version',f=>rewriteJson(f.controllerFile,{controllerVersion:'unreviewed'})],
+  ['controller outside replay window',f=>rewriteJson(f.controllerFile,{currentChartDateTime:'2025-10-01 00:00:00'})],
+  ['missing controller',f=>fs.unlinkSync(f.controllerFile)],
+])test(`v4 running-start correlation rejects ${name}`,t=>{
+  const fixture=createRunningStartFixture(t);
+  mutate(fixture);
+  assert.equal(readProbe(fixture).telemetry.verified,false);
 });

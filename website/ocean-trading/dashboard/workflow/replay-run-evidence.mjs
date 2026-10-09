@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { canonical } from './common.mjs';
+import { canonical, sealedHash } from './common.mjs';
+import { readAttemptFailure } from './operational-attempt-failure.mjs';
 
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -202,10 +203,51 @@ function loadTelemetry(config, runId, workflow, screenshotHash) {
 
 try {
   const configFile = process.argv[2];
-  const runId = process.argv[3];
-  if (!path.isAbsolute(configFile || '') || !RUN_ID.test(runId || '')) fail('CONFIG_AND_RUN_REQUIRED');
+  let runId = process.argv[3];
+  const failureOnly=runId==='--failure-only';
+  if (!path.isAbsolute(configFile || '') || (!failureOnly && !RUN_ID.test(runId || ''))) fail('CONFIG_AND_RUN_REQUIRED');
   const config = readJson(configFile);
+  if(failureOnly) {
+    if(config.schema_version!=='ocean-replay-run-bridge/v4') {
+      console.log(JSON.stringify({status:'NO_TERMINAL_FAILURE'}));process.exit(0);
+    }
+    const db=new DatabaseSync(config.workflow_db,{readOnly:true,timeout:2000});
+    try {
+      const pending=db.prepare(`SELECT r.id,e.payload_json FROM ow_runs r JOIN ow_events e ON e.entity_id=r.id
+        WHERE r.state='COMPLETING' AND r.strategy_id=? AND r.instance_id=? AND e.action='run-manager.end'
+        AND json_extract(e.payload_json,'$.payload.failure_proof') IS NOT NULL ORDER BY e.id DESC`).all(config.strategy_id,config.instance_id);
+      if(pending.length>1)fail('AMBIGUOUS_FAILED_DRAIN');
+      if(pending.length) {
+        const proof=JSON.parse(pending[0].payload_json).payload.failure_proof;
+        if(sealedHash(proof,'proof_hash')!==proof.proof_hash)fail('IMMUTABLE_FAILURE_PROOF_CONFLICT');
+        console.log(JSON.stringify({status:'TERMINAL_FAILURE_READY',run_id:pending[0].id,
+          failure_proof_hash:proof.proof_hash,failure_reason:proof.failure_reason}));process.exit(0);
+      }
+    }finally{db.close();}
+    const file=config.source_preflight_status_path && path.join(path.dirname(config.source_preflight_status_path),'managed-failure-stop.json');
+    if(!file || !fs.existsSync(file)) {console.log(JSON.stringify({status:'NO_TERMINAL_FAILURE'}));process.exit(0);}
+    runId=readJson(file).run_id;
+    if(!RUN_ID.test(runId || ''))fail('FAILURE_RUN_ID_REQUIRED');
+  }
   const workflow = loadWorkflow(config, runId);
+  if(failureOnly && !['READY','ACTIVE'].includes(workflow.run.state)) {
+    console.log(JSON.stringify({status:'NO_TERMINAL_FAILURE'}));process.exit(0);
+  }
+  if(config.schema_version==='ocean-replay-run-bridge/v4') {
+    // Failed attempts have no completion image/receipt. Check their independent
+    // retained stop boundary before waiting for artifacts which cannot arrive.
+    const review=workflow.plan.operational_review;
+    const runtime={...workflow.plan,instance:review?.context?{account_alias:config.account_alias}:workflow.plan.instance,symbol:config.expected_symbol};
+    const failure=readAttemptFailure(config,{...workflow,plan:runtime});
+    if(failure) {
+      console.log(JSON.stringify({schema_version:'ocean-replay-evidence-plan/v1',status:'TERMINAL_FAILURE_READY',
+        run_id:runId,failure_proof_hash:failure.proof_hash,failure_reason:failure.failure_reason,
+        logger_attempt_id:failure.logger_attempt.attempt_id,retained_trade_count:failure.retained_trade_count,
+        retained_fill_count:failure.retained_fill_count,full_requested_coverage_verified:false}));
+      process.exit(0);
+    }
+  }
+  if(failureOnly) {console.log(JSON.stringify({status:'NO_TERMINAL_FAILURE'}));process.exit(0);}
   const image = evidenceImage(config.workflow_db, runId);
   if (!image.ready) {
     console.log(JSON.stringify({ schema_version: 'ocean-replay-evidence-plan/v1', status: 'AWAITING_SIERRA_EVIDENCE_IMAGE', run_id: runId, evidence_image: image.path }));

@@ -1,6 +1,7 @@
 import { renderIcons } from './icons.js';
 import { openRunWizard } from './run-wizard.js?v=contract-aware-history-20261001-1';
 import { ONBOARDING_HELP } from './onboarding-help.js?v=simple-onboarding-20260930-1';
+import { buildReprocessRunId } from './reprocess-identity.js?v=repeat-safe-20261006-1';
 
 const content = document.querySelector('#content');
 const modal = document.querySelector('#modal');
@@ -20,13 +21,15 @@ const operationalId = prefix => `${prefix}-${crypto.randomUUID()}`;
 const icon = name => `<i data-lucide='${name}'></i>`;
 const badge = value => `<span class='badge ${/FAIL|BLOCK|REJECT|MISMATCH|REVOK|EXPIRED/.test(value) ? 'bad' : /PENDING|REVIEW|PAUSED|NOT_RUN|UNKNOWN|STALE/.test(value) ? 'warn' : /PASS|APPROVED|COMPLETE|ACKNOWLEDGED/.test(value) ? 'good' : 'neutral'}'>${esc(human(value))}</span>`;
 const link = (collection, key, label = key) => `<a data-route href='/improvement/${collection}/${encodeURIComponent(key)}'>${esc(label)}</a>`;
+const fullReportLink = key => `<a data-route href='/improvement/artifacts/${encodeURIComponent(key)}#full-research-report'>View full Research report</a>`;
 const empty = message => `<p class='empty'>${esc(message)}</p>`;
 const facts = entries => `<dl class='facts'>${entries.map(([key, value]) => `<div><dt>${esc(key)}</dt><dd>${value}</dd></div>`).join('')}</dl>`;
 const hash = value => value ? `<code>${esc(value)}</code>` : '<span class="muted">Not recorded</span>';
 const table = (headers, rows) => rows.length ? `<div class='table-wrap'><table><thead><tr>${headers.map(value => `<th scope='col'>${esc(value)}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr>${row.map(value => `<td>${value}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` : empty('No records in this view.');
 const section = (title, body, extra = '') => `<section><div class='section-heading'><h2>${esc(title)}</h2>${extra}</div>${body}</section>`;
 const button = (action, label, attrs = '', symbol = '') => `<button data-action='${action}' ${attrs}>${symbol ? icon(symbol) : ''}${esc(label)}</button>`;
-const route = () => { const parts = location.pathname.replace(/\/$/, '').split('/'); return { view: parts[2] || 'dashboard', key: parts[3] || null }; };
+const route = () => { const parts = location.pathname.replace(/\/$/, '').split('/'); return { view: parts[2] || 'dashboard', key: parts[3] || null,
+  fullResearchReport:parts[2]==='artifacts' && location.hash==='#full-research-report' }; };
 function onboardingHref(questionnaireId = null) {
   const url = new URL(location.href);
   if (questionnaireId) url.searchParams.set('onboarding', questionnaireId);
@@ -112,7 +115,7 @@ function onboardingHelpPage() {
     + `</div></div>`;
 }
 function caseTable(items) {
-  return table(['Case / strategy', 'Stage', 'Owner', 'Work status', 'Waiting on'], items.map(row => [link('cases', row.case_id) + `<div class='subline'>${esc(row.strategy_name)}</div>`, esc(human(row.stage)), esc(row.owner_id), badge(row.work_status), esc(row.waiting_on || 'Stage prerequisites')]));
+  return table(['Case / strategy', 'Stage', 'Owner', 'Work status', 'Next action'], items.map(row => [link('cases', row.case_id) + `<div class='subline'>${esc(row.strategy_name)}</div>`, esc(human(row.stage)), esc(row.owner_id), badge(row.work_status), esc(row.next_action || row.waiting_on || 'Stage prerequisites')]));
 }
 function runTable(items) {
   return table(['Run / strategy', 'State', 'Instance', 'Declared / observed', 'Purpose'], items.map(row => {
@@ -132,7 +135,7 @@ function operationalReleaseTable(items) {
 }
 function timeline(items) {
   if (!items.length) return empty('No history recorded.');
-  return `<ol class='timeline'>${items.map(event => `<li><span class='timestamp'>${esc(date(event.created_at_utc))}</span><p><strong>${esc(human(event.action.replaceAll('.', ' ')))}</strong> <span class='muted'>${esc(event.entity_id)}</span></p><p>${esc(event.actor_id)} <span class='muted'>${esc(event.actor_role)}</span></p>${event.payload?.reason || event.payload?.note ? `<p>${esc(event.payload.reason || event.payload.note)}</p>` : ''}<details><summary>Recorded details</summary><pre>${esc(JSON.stringify(event.payload, null, 2))}</pre></details></li>`).join('')}</ol>`;
+  return `<ol class='timeline'>${items.map(event => `<li><span class='timestamp'>${esc(date(event.created_at_utc))}</span><p><strong>${esc(human(event.action.replaceAll('.', ' ')))}</strong> <span class='muted subline'>${esc(event.entity_id)}</span></p><p>${esc(event.actor_id)} <span class='muted'>${esc(event.actor_role)}</span></p>${event.payload?.reason || event.payload?.note ? `<p>${esc(event.payload.reason || event.payload.note)}</p>` : ''}<details><summary>Recorded details</summary><pre>${esc(JSON.stringify(event.payload, null, 2))}</pre></details></li>`).join('')}</ol>`;
 }
 function pager(data) {
   return `<div class='pager'><span>${data.total ? data.offset + 1 : 0}-${Math.min(data.offset + data.page_size, data.total)} of ${data.total}</span><span class='spacer'></span><button class='icon' data-action='previous' title='Previous page' aria-label='Previous page' ${data.offset === 0 ? 'disabled' : ''}>${icon('chevron-left')}</button><button class='icon' data-action='next' title='Next page' aria-label='Next page' ${data.offset + data.page_size >= data.total ? 'disabled' : ''}>${icon('chevron-right')}</button></div>`;
@@ -251,6 +254,7 @@ function strategyOnboardingPage(data) {
   const delivery = onboarding.continuous_delivery || {};
   const program = delivery.priority_program || { state:'NOT_CONFIGURED', status:'UNKNOWN', workstreams:[] };
   const improvement = delivery.autonomous_improvement || { state:'NOT_CONFIGURED', status:'UNKNOWN', pipeline:[], blockers:[], next_action:null };
+  const eventMonitor = delivery.event_monitor || { status:'NOT_STARTED', disposition:'UNKNOWN', sources:[], observed_trade_count:0, eligible_trade_count:0, new_trade_count:0 };
   const improvementActive = improvement.state === 'AVAILABLE';
   const campaign = delivery.replay_campaign || { state:'NOT_CONFIGURED', status:'NOT_STARTED', completed_windows:[], failed_windows:[], next_action:'Ocean is preparing the sealed Replay campaign.' };
   const registration = onboarding.registration;
@@ -356,6 +360,10 @@ function strategyOnboardingPage(data) {
   const workstreamRows = (program.workstreams || []).map(item => [esc(item.id), esc(item.name), badge(item.status), esc(item.owner), esc(item.next_action || 'No separate action recorded')]);
   const pipelineRows = (improvement.pipeline || []).map(item => [esc(item.id), esc(item.name), badge(item.status), esc(item.acceptance)]);
   const blockerRows = (improvement.blockers || []).map(item => [esc(item.id), badge(item.status), esc(item.blocker), esc(item.resolution)]);
+  const eventMonitorSources = (eventMonitor.sources || []).map(item => [
+    esc(item.id), esc(item.environment), esc(item.account), String(item.observed_trade_count || 0),
+    String(item.eligible_trade_count || 0), '<code>'+esc(item.database_path || 'Not recorded')+'</code>',
+  ]);
   const campaignBody = facts([
     ['Foundation program', badge(program.status)], ['Improvement program', badge(improvement.status)], ['Replay campaign', badge(campaign.status)], ['Campaign source', badge(campaign.state)],
     ['Current window', esc(campaign.current_window_id || 'None')], ['Completed windows', String(campaign.completed_count || 0)],
@@ -364,7 +372,14 @@ function strategyOnboardingPage(data) {
     ['Promotion', esc(program.current_acceptance_assessment?.promotion_disposition || 'Not recorded')], ['Last observed', esc(date(campaign.observed_at_utc))],
     ['Improvement gates', improvement.acceptance_gates ? `${esc(improvement.acceptance_gates.complete)} / ${esc(improvement.acceptance_gates.total)} proven` : 'Not recorded'],
     ['Controller', esc(improvement.controller?.canonical_version || 'Not recorded')], ['Automatic approval', badge(improvement.automatic_approval || 'DISABLED')],
-  ]) + (pipelineRows.length ? table(['Phase','Capability','State','Acceptance evidence required'], pipelineRows) : empty('The autonomous improvement program record is not available.'))
+    ['Event monitor', badge(eventMonitor.status || 'NOT_STARTED')], ['Detector disposition', badge(eventMonitor.disposition || 'UNKNOWN')],
+    ['Database queries', String(eventMonitor.database_query_count || 0)], ['Last database interrogation', esc(date(eventMonitor.last_database_interrogation_at_utc))],
+    ['Observed VWAP trades', String(eventMonitor.observed_trade_count || 0)], ['Eligible causal trades', String(eventMonitor.eligible_trade_count || 0)],
+    ['New trades in last query', String(eventMonitor.new_trade_count || 0)], ['Codex polling', badge('NOT_REQUIRED')],
+  ]) + '<h3>Event-driven evidence monitor</h3><p class="section-note">The local website monitor checks the bound Replay Two and Paper Sim1 SQLite ledgers. It stores NO_CHANGE and insufficient-evidence results locally, and wakes the Ocean coordinator only for a new actionable INVESTIGATE result.</p>'
+    + (eventMonitorSources.length ? table(['Source','Environment','Account','Observed','Eligible','SQLite database'], eventMonitorSources) : empty('The event-driven evidence monitor has not completed its first database query.'))
+    + (eventMonitor.last_error ? '<p class="form-error">'+esc(eventMonitor.last_error)+'</p>' : '')
+    + (pipelineRows.length ? table(['Phase','Capability','State','Acceptance evidence required'], pipelineRows) : empty('The autonomous improvement program record is not available.'))
     + (blockerRows.length ? `<h3>Known blockers and resolutions</h3>${table(['ID','State','Blocker','Resolution'], blockerRows)}` : '')
     + (workstreamRows.length ? `<h3>Operational foundation</h3>${table(['Lane','Workstream','State','Owner','Exact next action'], workstreamRows)}` : '');
   return heading(onboarding.strategy_name, 'Strategy setup and testing', headingActions)
@@ -391,13 +406,47 @@ function runPage(data) {
   const canAbandonReprocess=data.manager?.namespace==='OPERATIONAL' && data.state==='READY' && data.manager.plan?.reprocess_of_run_id;
   const noNewCoverage=data.events.find(event=>event.action==='run-manager.no-new-coverage');
   const canConfirmNoNew=canReprocess && data.manager.plan?.reprocess_of_run_id && !noNewCoverage;
+  const learning=data.learning;
+  const historicalLearning=learning?.current_qualification_status==='QUALIFICATION_REQUIRED';
+  const candidateValidation=learning?.research?.report?.candidate_validation?.status || 'NOT_DUE';
+  const historicalCandidateValidation=historicalLearning && candidateValidation!=='NOT_DUE';
+  const evidenceReady=Boolean(data.manager?.completion_current && data.manager?.completion?.status==='COMPLETED');
+  const preparedReplay=data.state==='READY' && data.manager?.namespace==='OPERATIONAL'
+    && context.expected_environment==='REPLAY' && !evidenceReady;
+  const observedExecution=data.manager?.execution;
+  const execution=observedExecution?.status==='CURRENT_RUNNING_VERIFIED'
+    && (observedExecution.run_id!==context.run_id || observedExecution.context_hash!==context.context_hash
+      || !Number.isFinite(Date.parse(observedExecution.valid_until_utc)) || Date.parse(observedExecution.valid_until_utc)<=Date.now())
+    ?{status:'CURRENT_EXECUTION_UNVERIFIED',reason:'CURRENT_EXECUTION_PROOF_EXPIRED',
+      next_action:'Refresh fresh exact execution proof; the previous physical observation has expired. No completed coverage is granted.'}:observedExecution;
+  const runningExecution=execution?.status==='CURRENT_RUNNING_VERIFIED';
+  const failedExecution=execution?.status==='FAILED_STOP_VERIFIED' || ['FAILED','CANCELLED'].includes(data.state);
+  const learningNextAction=(failedExecution?execution?.next_action || 'Retain failed observations; reserve fresh governed coverage. Learning is not due without completed qualified evidence.':runningExecution && !evidenceReady?execution.next_action:null)
+    || learning?.next_action || learning?.research?.next_action
+    || (preparedReplay?'Verify source preflight and the exact run release before starting this managed replay. Replay execution is not yet verified.':'Await the learning result');
+  const learningStages=learning ? [
+    ['1. Evidence captured', evidenceReady ? 'COMPLETE' : failedExecution ? 'FAILED' : data.state==='COMPLETED' ? 'BLOCKED' : 'PENDING', evidenceReady ? `${data.manager.unique_canonical_count} unique trade record${data.manager.unique_canonical_count===1?'':'s'} plus covered no-trade intervals` : failedExecution ? 'Failed attempt observations are retained. They do not grant completed coverage or qualified learning evidence.' : 'Waiting for a current completion receipt and fully drained coverage.'],
+    ['2. Evidence qualified', learning.eligible ? 'COMPLETE' : historicalLearning ? 'QUALIFICATION_REQUIRED' : 'NOT_DUE', learning.eligible ? 'This operational run is eligible for cumulative strategy learning.' : (learning.reasons || []).map(human).join('; ') || 'This run is outside the learning policy.'],
+    ['3. Cumulative Brain analysis', historicalLearning ? 'HISTORICAL' : ['BRAIN_RECORDED','COMPLETE'].includes(learning.stage) ? 'COMPLETE' : failedExecution ? 'NOT_DUE' : learning.last_error ? 'FAILED' : learning.stage, historicalLearning ? `Preserved Brain record ${learning.brain_record_id || 'not recorded'}; not current qualified support.` : learning.brain_record_id ? `Obsidian Brain record ${learning.brain_record_id}` : failedExecution ? 'Not due: this failed attempt has no completed qualified coverage.' : learning.last_error ? human(learning.last_error) : 'Waiting for the Obsidian Brain to analyse this run with all eligible strategy evidence.'],
+    ['4. Result returned to Ocean', historicalLearning ? 'HISTORICAL' : learning.stage==='COMPLETE' ? 'COMPLETE' : failedExecution ? 'NOT_DUE' : learning.stage==='FAILED' ? 'FAILED' : 'PENDING', historicalLearning ? 'Prior immutable result retained; current evidence qualification is required. No current strategy disposition is claimed.' : learning.stage==='COMPLETE' ? `${human(learning.conclusion_type)} recorded; no strategy or trading permission was changed automatically.` : failedExecution ? 'No learning completion is claimed for this failed attempt.' : 'Waiting for the immutable Brain result and completion callback.'],
+    ['5. Research evaluation', historicalLearning && learning.research?.report ? 'HISTORICAL' : learning.research?.state || (failedExecution?'NOT_DUE':learning.conclusion_type==='RECOMMENDATION'?'PENDING':'NOT_DUE'), historicalLearning && learning.research?.report ? 'Preserved historical report; not current qualified support. ' + learningNextAction : learning.research?.report ? `${human(learning.research.report.outcome)}: ${learning.research.report.next_action}` : failedExecution ? learningNextAction : learning.next_action || 'Waiting for the persisted Research worker.'],
+    ['6. Candidate validation', historicalCandidateValidation?'HISTORICAL':candidateValidation, historicalCandidateValidation ? `Prior candidate validation ${human(candidateValidation)} retained; not current qualified validation support. A separate frozen candidate and independent evidence are required for current validation.` : 'Replay history is baseline discovery. A separate frozen candidate and independent evidence are required before validation can pass.'],
+  ] : [];
+  const learningBody=learning ? table(['Stage','Status','Evidence'],learningStages.map(([label,status,detail])=>[esc(label),badge(status),esc(detail)]))
+    + facts([['Overall learning loop',badge(learning.loop_stage || learning.stage)],['Conclusion',historicalLearning?'Not currently qualified':learning.research?.report ? badge(learning.research.report.outcome) : learning.conclusion_type?badge(learning.conclusion_type):'Not recorded'],
+      ...(historicalLearning?[['Prior outcome (historical)',badge(learning.historical_result?.research_outcome || learning.historical_result?.conclusion_type || 'Not recorded')]]:[]),
+      ['Brain record',learning.brain_record_id?esc(learning.brain_record_id):'Not recorded'],['Governance reconciliation',learning.registry_reconciliation_id?esc(learning.registry_reconciliation_id):'Not loaded'],['Research continuation',learning.continuation_case_id?link('cases',learning.continuation_case_id,learning.continuation_case_id):badge(learning.eligible && learning.conclusion_type==='RECOMMENDATION'?'PENDING':'NOT_DUE')],['Next action',esc(learningNextAction)],['Automatic strategy change','Disabled']])
+    + (learning.research?.continuations?.length ? section('Owned continuation work',continuationTable(learning.research.continuations)) : '')
+    : empty('Learning status is not available for this run.');
   return heading(context.run_id, data.strategy_name, badge(data.state) + (data.manager && ['READY','ACTIVE'].includes(data.state) ? button('end-run','End run','', 'square') : '') + (canAbandonReprocess ? button('abandon-reprocess','Discard reservation','', 'x') : '') + (canConfirmNoNew ? button('confirm-no-new-coverage','Confirm no new coverage','', 'check') : '') + (canReprocess ? button('reprocess-history','Reprocess Existing History','', 'refresh-cw') : '')) + (noNewCoverage ? section('Historical build decision',facts([['Outcome',badge('NO_NEW_COVERAGE')],['Decision',esc(noNewCoverage.payload.decision_id)],['Decision hash',hash(noNewCoverage.payload.decision_hash)],['Coverage hash',hash(noNewCoverage.payload.coverage_hash)],['New run','No']])) : '') + (data.manager ? section('Run control',facts([
-    ['Context',esc(human(data.manager.context_status))],['Last heartbeat',esc(date(data.manager.lease?.heartbeat_utc))],['Lease',data.manager.lease ? badge(data.manager.lease.expired?'EXPIRED':'CURRENT') : 'Awaiting telemetry'],['Unique evidence / processing',`${data.manager.unique_canonical_count} / ${data.manager.processing_count}`],['Open pins / pending events',`${data.manager.open_pins} / ${data.manager.progress?.pending_events ?? 'Unknown'}`],['Source / execution / processing coverage',data.manager.progress ? Object.entries(data.manager.progress.axes).map(([key,values])=>`${esc(human(key))}: ${values.length} observed intervals`).join('<br>') : 'Not observed'],['Completion receipt',data.manager.completion ? data.manager.completion_current?'Current':'New evidence needs review / new receipt':'Not recorded'],['Ingestion','Off / TEST only'],['Action required',data.manager.context_status!=='CURRENT'?esc(human(data.manager.context_status)):data.state==='READY'?'Await matching manual Sierra activity':data.state==='COMPLETING'?'Await telemetry drain and completion':'See observed progress'],
+    ['Context',esc(human(data.manager.context_status))],['Bridge service heartbeat',esc(date(data.manager.lease?.heartbeat_utc))],['Service lease (not replay execution)', ['COMPLETED','FAILED','CANCELLED'].includes(data.state) ? 'Terminal; lease not required' : data.manager.lease ? badge(data.manager.lease.expired?'EXPIRED':'CURRENT') : 'Awaiting telemetry'],['Physical execution',badge(execution?.status || 'UNVERIFIED')],
+    ...(runningExecution?[['Native replay phase',esc(human(execution.phase))],['Current chart time (native basis)',esc(execution.current_chart_datetime)],['Native trade-start boundary',esc(execution.trade_start_chart_datetime)],['Exact logger attempt',esc(execution.attempt_id)],['Physical observation',esc(date(execution.observed_at_utc))],['Proof valid until',esc(date(execution.valid_until_utc))]]:[]),
+    ['Retained terminal observations',execution?.retained_trade_count!==undefined?`${execution.retained_trade_count} trades / ${execution.retained_fill_count} fills; not completed coverage`:'No verified failure boundary'],['Unique evidence / processing',`${data.manager.unique_canonical_count} / ${data.manager.processing_count}`],['Open pins / pending events',`${data.manager.open_pins} / ${data.manager.progress?.pending_events ?? 'Unknown'}`],['Source / execution / processing coverage',data.manager.progress ? Object.entries(data.manager.progress.axes).map(([key,values])=>`${esc(human(key))}: ${values.length} observed intervals`).join('<br>') : 'Not observed'],['Terminal receipt',data.manager.completion ? `${human(data.manager.completion.status)}; ${data.manager.completion_current?'current':'new evidence needs review'}`:'Not recorded'],['Ingestion',data.manager.namespace==='OPERATIONAL'?'Scoped operational events only':'Off / TEST only'],['Action required',execution?.next_action?esc(execution.next_action):data.manager.context_status!=='CURRENT'?esc(human(data.manager.context_status)):data.state==='READY'?'Verify source preflight and the exact run release before replay start':data.state==='COMPLETING'?'Await telemetry drain and terminal reconciliation':data.state==='COMPLETED'?esc(learning?.next_action || 'Run complete'):'Verify current physical progress; the service heartbeat is not execution proof'],
   ])) : '') + facts([
     ['Strategy', link('strategies', context.strategy_id, data.strategy_name)], ['Instance', esc(context.execution_instance_id)], ['Purpose', esc(human(context.evidence_purpose))],
-    ['Declared environment', esc(context.expected_environment)], ['Observed environment', esc(observed.environment)], ['Source quality', badge(observed.quality)], ['Observation time', esc(date(observed.observed_at_utc))], ['Strategy version', esc(context.strategy_version)], ['Dataset scope', `${esc(context.dataset_manifest_id)} / revision ${esc(context.dataset_manifest_revision)}`], ['Scored interval', data.manager?.plan?.selection?.interval ? `${esc(data.manager.plan.selection.interval.start_utc)} to ${esc(data.manager.plan.selection.interval.end_utc)}` : 'Not recorded'],
-    ['Event receipts in history', esc(incoming.length)], ['Analysis complete in history', esc(incoming.filter(event => event.payload.analysis_complete === true).length)], ['Learner permission', esc(context.learner_permission)],
-  ]) + (observed.environment !== 'UNKNOWN' && context.expected_environment !== observed.environment ? `<p class='form-error'>Observed source does not match the declared environment.</p>` : '') + section('Pinned run context', `<pre>${esc(JSON.stringify(context, null, 2))}</pre>`) + section('Completion and coverage', completion ? `<pre>${esc(JSON.stringify(completion, null, 2))}</pre>` : empty('No completion receipt recorded.')) + section('Run history', timeline(data.events));
+    ['Declared environment', esc(context.expected_environment)], ['Activation environment (historical)', esc(observed.environment)], ['Activation source quality (historical)', badge(observed.quality)], ['Activation observation time', esc(date(observed.observed_at_utc))], ['Strategy version', esc(context.strategy_version)], ['Dataset scope', `${esc(context.dataset_manifest_id)} / revision ${esc(context.dataset_manifest_revision)}`], ['Scored interval', data.manager?.plan?.selection?.interval ? `${esc(data.manager.plan.selection.interval.start_utc)} to ${esc(data.manager.plan.selection.interval.end_utc)}` : 'Not recorded'],
+    ['Persisted service-event receipts', esc(data.receipt_counts ? data.receipt_counts.workflow + data.receipt_counts.trades : incoming.length)], ['Persisted analysis callbacks', esc(data.receipt_counts?.analysis_complete ?? incoming.filter(event => event.payload.analysis_complete === true).length)], ['Learner permission', esc(context.learner_permission)],
+  ]) + (observed.environment !== 'UNKNOWN' && context.expected_environment !== observed.environment ? `<p class='form-error'>Observed source does not match the declared environment.</p>` : '') + section('Learning loop',learningBody) + section('Pinned run context', `<pre>${esc(JSON.stringify(context, null, 2))}</pre>`) + section('Completion and coverage', completion ? `<pre>${esc(JSON.stringify(completion, null, 2))}</pre>` : empty('No completion receipt recorded.')) + section('Run history', timeline(data.events));
 }
 function caseProgress(data) {
   const phases = [['Research', ['DISCOVERY','EVIDENCE','RESEARCH']], ['Human review', ['DEVELOPMENT_REVIEW','DEVELOPMENT_HANDOFF']], ['Development', ['CANDIDATE_DEVELOPMENT']], ['Historical tests', ['HISTORICAL_VALIDATION']], ['Evaluation', ['CANDIDATE_EVALUATION','SHADOW_REVIEW','SHADOW_HANDOFF']], ['Shadow forward', ['FORWARD_VALIDATION','FORWARD_EVALUATION']], ['Deployment review', ['DEPLOYMENT_REVIEW','DEPLOYMENT_HANDOFF','ROLLBACK_REVIEW','ROLLBACK_HANDOFF']], ['Observation', ['POST_DEPLOYMENT_VALIDATION']], ['Retrospective', ['RETROSPECTIVE','CLOSED']]];
@@ -407,13 +456,83 @@ function caseProgress(data) {
 function handoffList(data) {
   return data.handoffs.length ? data.handoffs.map(handoff => `<div class='list-row'><div class='row-head'><strong>${esc(human(handoff.gate))} / ${esc(handoff.recipient_id)}</strong>${badge(handoff.state)}</div><p class='subline'>${esc(handoff.handoff_id)}</p>${handoff.delivery_error || handoff.blocked_reason ? `<p class='form-error'>${esc(human(handoff.delivery_error || handoff.blocked_reason))}</p>` : ''}<div class='actions'>${button('view-handoff', 'View approved MD', `data-id='${esc(handoff.handoff_id)}'`)}${button('download-handoff', 'Download', `data-id='${esc(handoff.handoff_id)}'`, 'download')}${button('copy-handoff', 'Copy instruction', `data-id='${esc(handoff.handoff_id)}'`, 'copy')}${handoff.state === 'READY' ? button('send-handoff', 'Mark sent', `data-id='${esc(handoff.handoff_id)}'`) : ''}${['FAILED','BLOCKED','CREATED'].includes(handoff.state) ? button('retry-handoff', handoff.state === 'CREATED' ? 'Prepare delivery' : 'Retry delivery', `data-id='${esc(handoff.handoff_id)}'`) : ''}${handoff.state === 'DISPATCHED' ? button('manual-confirmation', 'Record manual confirmation', `data-id='${esc(handoff.handoff_id)}'`) : ''}</div>${handoff.result_artifact_id ? `<p>${link('artifacts', handoff.result_artifact_id, 'Returned result')}</p>` : ''}</div>`).join('') : empty('No handoff registered.');
 }
+function researchPanel(research) {
+  if(!research)return '';
+  const report=research.report;
+  return section('Research evaluation',facts([
+    ['Job',esc(research.job_id)],['Status',badge(research.effective_state || research.state)],
+    ['Provenance',esc(research.qualification_warning || (research.qualified_for_new_support ? 'Currently qualified for new support' : 'Not qualified for new support'))],
+    ['Outcome',report?badge(report.outcome):'Not recorded'],
+    ['Next action',esc(research.next_action)],['Attempts',esc(research.attempts)],
+    ...(research.skipped_version_backfill_jobs?.length?[
+      ['Superseded queue history',`${research.skipped_version_backfill_jobs.length} preserved jobs; not current actionable retries`],
+    ]:[]),
+    ['Result',research.result_artifact_id?fullReportLink(research.result_artifact_id):'Pending'],
+  ]) + (report?facts([
+    [research.historical || !research.qualified_for_new_support ? 'Preserved report history (not current qualified support)' : 'Currently qualified history',`${report.eligible_run_ids?.length || 0} runs / ${report.aggregate?.trades || 0} closed trades`],
+    ['Simulated execution gross P/L',esc(report.aggregate.gross_profit_loss)],['Recorded fees',esc(report.aggregate.fees)],
+    ['Simulated execution net P/L',esc(report.aggregate.net_profit_loss)],['Net wins / losses / flat',`${report.aggregate.wins} / ${report.aggregate.losses} / ${report.aggregate.flat}`],
+    ['Accounting basis',esc(report.accounting_basis)],
+    ['Missing exit attribution',esc(report.missing_exit_attribution)],
+    ['Direction-screen evidence',report.evidence_sufficiency ? badge(report.evidence_sufficiency.status) : 'Not recorded in preserved report'],
+    ...(report.approved_evidence_eligibility?[
+      ['Approved aggregate evidence',badge(report.approved_evidence_eligibility.status)],
+      ['Verified native entry-day units',report.approved_evidence_eligibility.observed_session_count==null?'UNVERIFIED':esc(report.approved_evidence_eligibility.observed_session_count)],
+      ['Session scope',esc(report.approved_evidence_eligibility.session_definition || 'Preserved definition')],
+      ['Full market coverage / statistical IID','Not proven'],
+      ['Sampling protocol',esc(report.protocol.version)],
+      ...(report.hypotheses?[
+        ['Descriptive direction hypotheses',esc(report.hypotheses.length)],
+        ['3/10 robustness',esc(report.experiments.map(item=>`${item.value}: ${item.robustness?.status || 'Not recorded'}`).join('; '))],
+      ]:[]),
+    ]:[]),
+    ['Candidate validation',badge(report.candidate_validation.status)],
+    ...(report.descriptive_excluded_history?[
+      ['Excluded history (descriptive only)',`${report.descriptive_excluded_history.runs.length} runs / ${report.descriptive_excluded_history.recorded_trade_count} recorded trades; not blended into qualified totals`],
+      ['History exclusions',esc(report.descriptive_excluded_history.runs.map(run=>`${run.run_id}: ${run.exclusion_reason}`).join('; '))],
+      ['History can teach',esc(report.descriptive_excluded_history.can_teach)],
+      ['History cannot prove',esc(report.descriptive_excluded_history.cannot_teach)],
+    ]:[]),
+    ['Research Brain record',esc(report.brain_record?.record_id || 'Not recorded')],
+  ]):research.last_error?`<p class='form-error'>${esc(human(research.last_error))}</p>`:'')
+    + (research.continuations?.length?section('Owned continuation work',continuationTable(research.continuations)):''));
+}
+function continuationTable(items) {
+  return table(['Case','Work','Owner','Progress','Next action'],items.map(item=>[
+    link('cases',item.case_id),esc(human(item.kind)),esc(item.owner_id),badge(item.work_status)
+      + (item.progress?.source?.case_id?`<div>${link('cases',item.progress.source.case_id,'Latest Research')}</div>`:''),esc(item.next_action),
+  ]));
+}
 function casePage(data) {
-  const executable = !['PAUSED','FAILED','BLOCKED','CANCELLED'].includes(data.work_status) && data.stage !== 'CLOSED';
-  const statusControl = ['PAUSED','FAILED','BLOCKED'].includes(data.work_status) ? button('resume', data.work_status === 'PAUSED' ? 'Resume' : 'Retry', '', 'play') : executable ? button('pause', 'Pause', '', 'pause') : '';
+  const riskReview = data.planning?.kind === 'RISK_DISABLE_REVIEW';
+  const executable = !data.planning && !(data.namespace==='OPERATIONAL' && data.research) && !['COMPLETED','PAUSED','FAILED','BLOCKED','CANCELLED'].includes(data.work_status) && data.stage !== 'CLOSED';
+  const statusControl = data.planning ? '' : ['PAUSED','FAILED','BLOCKED'].includes(data.work_status) ? button('resume', data.work_status === 'PAUSED' ? 'Resume' : 'Retry', '', 'play') : executable ? button('pause', 'Pause', '', 'pause') : '';
   const prepare = data.approvals.find(row => row.state === 'APPROVED' && row.decision?.current_test_authority && ['DEVELOPMENT','SHADOW','PRODUCTION','ROLLBACK'].includes(row.gate) && !data.handoffs.some(handoff => handoff.decision_id === row.decision.decision.decision_id));
-  return heading(data.case_id, data.strategy_name, badge(data.work_status) + statusControl + (executable ? button('upload', 'Upload result', '', 'upload') : '')) + facts([
-    ['Stage', esc(human(data.stage))], ['Owner', esc(data.owner_id)], ['Waiting on', esc(data.waiting_on || 'Stage prerequisites')], ['Next action', esc(data.next_action)], ['Strategy', link('strategies', data.strategy_id, data.strategy_name)], ['Run', link('runs', data.run_id)], ['Baseline', hash(data.baseline_hash)], ['Candidate', data.candidate_hash ? hash(data.candidate_hash) : 'None registered'], ['Priority', esc(data.priority ? human(data.priority) : 'Not assigned')],
-  ]) + caseProgress(data) + (data.blockers.length ? section('Blockers', table(['Owner', 'Required action', 'State'], data.blockers.map(row => [esc(row.owner_id), esc(row.action), badge(row.state)]))) : '') + `<div class='columns'><div>${section('Approvals', approvalTable(data.approvals))}${prepare ? `<div class='actions'>${button('prepare-handoff', 'Prepare approved handoff', `data-request='${esc(prepare.request_id)}'`)}</div>` : ''}${section('Evidence and results', table(['Artifact', 'Producer / recipient', 'Created', 'Availability'], data.artifacts.map(row => [link('artifacts', row.artifact_id, human(row.kind)) + `<div class='subline'>${esc(row.artifact_id)}</div>`, `${esc(row.producer_id)}<div class='subline'>To ${esc(row.recipient_id)}</div>`, esc(date(row.manifest.created_at_utc)), badge(row.manifest.availability)])), `<span class='muted'>${data.artifacts_total} immutable artifacts</span>`)}${section('Historical validation', table(['Test', 'Result', 'Report'], (data.tasks.length ? data.tasks : ['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'].map(kind => ({ kind, status: 'NOT_PLANNED', artifact_id: null }))).map(task => [esc(human(task.kind)), badge(task.status), task.artifact_id ? link('artifacts', task.artifact_id, 'View report') : 'Not recorded'])))}${section('Handoffs', handoffList(data))}${data.outbox.length ? section('Pending sync', table(['Recipient','Delivery','Attempts','Error','Action'], data.outbox.map(row => [esc(row.recipient_id),badge(row.state),String(row.attempts),row.last_error ? esc(row.last_error) : 'None', ['FAILED','DEAD_LETTER'].includes(row.state) ? button('retry-outbox','Retry',`data-id='${esc(row.id)}'`) : '']))) : ''}</div><div>${section('Timeline', timeline(data.history))}</div></div>`;
+  return heading(data.case_id, data.strategy_name, badge(data.work_status) + statusControl + (executable ? button('upload', 'Upload result', '', 'upload') : '')) + researchPanel(data.research) + (data.planning?section(riskReview?'Risk review scope':'Planning scope',facts([
+    ['Purpose',esc(human(data.planning.kind))],['Authority',riskReview?'Review context only; no strategy disable, candidate development or test permission':'Planning only; no candidate development or test permission'],
+    ['Candidate testing',badge('NOT_DUE')],['Approval','Not due'],['Source Research',data.planning.source_case_id?link('cases',data.planning.source_case_id):'Proof required'],
+    ['Frozen lineage',link('artifacts',data.planning.lineage_artifact_id)],
+    ...(riskReview && data.planning.risk_review?[
+      ['Observation classification',esc(human(data.planning.risk_review.disposition))],
+      ['Recorded exposure',`${data.planning.risk_review.baseline_trades} baseline / ${data.planning.risk_review.excluded_trades} excluded / ${data.planning.risk_review.retained_trades} retained trades`],
+      ['Evidence assessment',badge(data.planning.risk_review.evidence_status)],
+    ]:[]),
+    ...(riskReview && data.planning.risk_disposition?[
+      ['Review disposition',esc(human(data.planning.risk_disposition.disposition))],
+      ['Review notes',esc(data.planning.risk_disposition.review_notes)],
+      ['Reviewer',esc(data.planning.risk_disposition.reviewer_id)],
+      ['Immutable review artifact',link('artifacts',data.planning.risk_disposition.artifact_id)
+        + `<div class='subline'>${hash(data.planning.risk_disposition.content_hash)}</div>`],
+    ]:[]),
+    ...(data.planning.plan_work?[
+      ['Plan work',badge(data.planning.plan_work.status)],
+      ['Returned plan',data.planning.plan_work.returned?.artifact_id?link('artifacts',data.planning.plan_work.returned.artifact_id):'Not returned'],
+      ['Plan authoring complete (not execution)',data.planning.plan_work.planning_complete===true?'Yes':'No'],
+    ]:[]),
+    ...(!riskReview?[['Latest Research',data.planning.progress?.source?.case_id?link('cases',data.planning.progress.source.case_id):'Await new qualified Research']]:[]),
+  ])):'') + facts([
+    ['Stage', esc(human(data.stage))], ['Owner', esc(data.owner_id)], ['Waiting on', esc(data.work_status==='COMPLETED'?'None':data.waiting_on || 'Stage prerequisites')], ['Next action', esc(data.next_action)], ['Strategy', link('strategies', data.strategy_id, data.strategy_name)], ['Run', link('runs', data.run_id)], ['Baseline', hash(data.baseline_hash)], ['Candidate', data.candidate_hash ? hash(data.candidate_hash) : 'None registered'], ['Priority', esc(data.priority ? human(data.priority) : 'Not assigned')],
+  ]) + caseProgress(data) + (data.blockers.length ? section('Blockers', table(['Owner', 'Required action', 'State'], data.blockers.map(row => [esc(row.owner_id), esc(row.action), badge(row.state)]))) : '') + `<div class='columns'><div>${section('Approvals', approvalTable(data.approvals))}${prepare ? `<div class='actions'>${button('prepare-handoff', 'Prepare approved handoff', `data-request='${esc(prepare.request_id)}'`)}</div>` : ''}${section('Evidence and results', table(['Artifact', 'Producer / recipient', 'Created', 'Availability'], data.artifacts.map(row => [link('artifacts', row.artifact_id, human(row.kind)) + `<div class='subline'>${esc(row.artifact_id)}</div>`, `${esc(row.producer_id)}<div class='subline'>To ${esc(row.recipient_id)}</div>`, esc(date(row.manifest.created_at_utc)), badge(row.manifest.availability)])), `<span class='muted'>${data.artifacts_total} immutable artifacts</span>`)}${section(riskReview?'Required risk review':data.planning?'Required planning work':'Historical validation', table(['Task', 'Status', 'Evidence'], (data.tasks.length ? data.tasks : ['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'].map(kind => ({ kind, status: (data.planning || data.research) && !data.candidate_hash ? 'NOT_DUE' : 'NOT_PLANNED', artifact_id: null }))).map(task => [esc(human(task.kind)), badge(task.status), task.artifact_id ? link('artifacts', task.artifact_id, data.planning?'View frozen lineage':'View report') : 'Not recorded'])))}${section('Handoffs', handoffList(data))}${data.outbox.length ? section('Delivery history', table(['Recipient','Delivery','Attempts','Error','Action'], data.outbox.map(row => [esc(row.recipient_id),badge(row.state),String(row.attempts),row.last_error ? esc(row.last_error) : 'None', ['FAILED','DEAD_LETTER'].includes(row.state) ? button('retry-outbox','Retry',`data-id='${esc(row.id)}'`) : '']))) : ''}</div><div>${section('Timeline', timeline(data.history))}</div></div>`;
 }
 function approvalPage(data) {
   const snapshot = data.snapshot;
@@ -440,15 +559,36 @@ function collectionPage(view, data) {
   return heading(titles[view], `${data.total} records`, view === 'runs' ? button('prepare-run','Start New Run','', 'plus') : '') + `<div class='toolbar'><label for='filter'>Filter this page</label><input type='search' id='filter' value='${state.filter ? esc(state.filter) : ''}' autocomplete='off'></div>${operational}${setup}${rows}${pager(data)}`;
 }
 async function renderArtifact(data, generation) {
+  if(route().fullResearchReport)return renderResearchReport(data,generation);
   const response = await request(`artifacts/${route().key}/download`, { binary:true });
   const buffer = await response.arrayBuffer();
   if (generation !== state.generation) return;
   const actualHash = `sha256:${[...new Uint8Array(await crypto.subtle.digest('SHA-256', buffer))].map(value => value.toString(16).padStart(2,'0')).join('')}`;
   if (actualHash !== data.manifest.content_hash) throw Object.assign(new Error(), { code:'ARTIFACT_HASH_MISMATCH' });
-  let body;
+  let body,fullReport='';
   if (data.manifest.media_type === 'image/png') { const url = URL.createObjectURL(new Blob([buffer], { type:'image/png' })); state.imageUrls.push(url); body = `<img class='artifact-image' src='${url}' alt='Registered evidence ${esc(data.manifest.artifact_id)}'>`; }
-  else body = `<pre>${esc(new TextDecoder().decode(buffer))}</pre>`;
-  return heading(data.manifest.artifact_id, 'Immutable evidence', button('download-artifact','Download evidence','', 'download')) + facts([['Producer',esc(data.manifest.producer_id)], ['Strategy',link('strategies',data.manifest.strategy_id)], ['Run',link('runs',data.manifest.run_id)], ['Created',esc(date(data.manifest.created_at_utc))], ['Content hash',hash(data.manifest.content_hash)], ['Media / bytes',`${esc(data.manifest.media_type)} / ${data.manifest.bytes}`]]) + section('Evidence', body);
+  else {
+    const text=new TextDecoder().decode(buffer);body=`<pre>${esc(text)}</pre>`;
+    if(data.manifest.media_type==='application/json') {
+      try{const schema=JSON.parse(text).schema_version;
+        if(schema==='ocean-frozen-research-report-reference/v1' || /^ocean-cumulative-research\/v\d+$/.test(schema || ''))fullReport=fullReportLink(data.manifest.artifact_id);
+      }catch{}
+    }
+  }
+  return heading(data.manifest.artifact_id, 'Immutable evidence', fullReport+button('download-artifact',fullReport?'Download raw artifact':'Download evidence','', 'download')) + facts([['Producer',esc(data.manifest.producer_id)], ['Strategy',link('strategies',data.manifest.strategy_id)], ['Run',link('runs',data.manifest.run_id)], ['Created',esc(date(data.manifest.created_at_utc))], ['Content hash',hash(data.manifest.content_hash)], ['Media / bytes',`${esc(data.manifest.media_type)} / ${data.manifest.bytes}`]]) + section('Evidence', body);
+}
+async function renderResearchReport(data,generation) {
+  if(data.schema_version!=='ocean-full-research-report/v1')throw Object.assign(new Error(),{code:'RESEARCH_EXPORT_SOURCE_CONFLICT'});
+  const id=data.source_artifact.artifact_id,response=await request(`artifacts/${id}/research-report/download`,{binary:true});
+  const buffer=await response.arrayBuffer();if(generation!==state.generation)return;
+  const actualHash=`sha256:${[...new Uint8Array(await crypto.subtle.digest('SHA-256',buffer))].map(value=>value.toString(16).padStart(2,'0')).join('')}`;
+  if(actualHash!==data.report_manifest.content_hash || buffer.byteLength!==data.report_manifest.bytes)
+    throw Object.assign(new Error(),{code:'RESEARCH_FULL_REPORT_HASH_CONFLICT'});
+  return heading('Research report',id,button('download-research-report','Download full report','','download')+link('artifacts',id,'View raw artifact'))
+    + facts([['Job',esc(data.job_id)],['Case',link('cases',data.case_id)],['Representation',esc(human(data.representation))],
+      ['Full report hash',hash(data.report_manifest.content_hash)],['Full report bytes',esc(data.report_manifest.bytes)],
+      ['Raw artifact hash',hash(data.source_artifact.content_hash)],['Frozen input hash',hash(data.source_artifact.input_hash)]])
+    + section('Full Research report',`<pre>${esc(new TextDecoder().decode(buffer))}</pre>`);
 }
 async function refresh(force = false) {
   clearTimeout(state.timer);
@@ -463,7 +603,7 @@ async function refresh(force = false) {
     if (!state.csrf) { signIn(); return; }
     state.signedIn = true; document.querySelector('#logout').hidden = false;
     const current = route();
-    const endpoint = current.view === 'artifacts' ? `artifacts/${current.key}` : `view/${current.view}${current.key ? `/${current.key}` : current.view === 'dashboard' ? '' : `/page/${state.offset}`}`;
+    const endpoint = current.view === 'artifacts' ? `artifacts/${current.key}${current.fullResearchReport?'/research-report':''}` : `view/${current.view}${current.key ? `/${current.key}` : current.view === 'dashboard' ? '' : `/page/${state.offset}`}`;
     const [data, dashboard] = await Promise.all([current.view === 'onboarding-guide' ? Promise.resolve({}) : request(endpoint, { signal:controller.signal }), current.view === 'dashboard' ? Promise.resolve(null) : request('view/dashboard', { signal:controller.signal })]);
     if (generation !== state.generation) return;
     const count = (dashboard || data).counts?.action_required || 0;
@@ -498,7 +638,16 @@ async function refresh(force = false) {
     }
   } finally { clearTimeout(timeout); if (state.controller === controller) state.controller = null; schedule(); }
 }
-function schedule() { clearTimeout(state.timer); if (!state.signedIn) return; state.timer = setTimeout(() => { if (!document.hidden) void refresh(); else schedule(); },5000); }
+function schedule() {
+  clearTimeout(state.timer);clearTimeout(state.executionTimer);if(!state.signedIn)return;
+  state.timer=setTimeout(()=>{if(!document.hidden)void refresh();else schedule();},5000);
+  const data=state.data,expiry=Date.parse(data?.manager?.execution?.valid_until_utc);
+  if(route().view!=='runs' || route().key!==data?.context?.run_id || !Number.isFinite(expiry))return;
+  const expire=()=>{if(state.data===data && route().view==='runs' && route().key===data.context.run_id && !modal.open) {
+    content.innerHTML=runPage(data);renderIcons();state.fingerprint=null;
+  }};
+  if(expiry<=Date.now())expire();else state.executionTimer=setTimeout(expire,expiry-Date.now()+1);
+}
 function openModal(title,body,submitLabel,submit) {
   modal.dataset.request = ''; modal.dataset.revision = '';
   document.querySelector('#modal-body').innerHTML = `<form id='modal-form'><div class='page-heading'><h2 id='modal-title'>${esc(title)}</h2><button type='button' class='icon' data-action='close-modal' aria-label='Close' title='Close'>${icon('x')}</button></div>${body}<p class='form-error' role='alert'></p><div class='footer'><button type='button' data-action='close-modal'>Close</button>${submit ? `<button type='submit' class='primary'>${esc(submitLabel)}</button>` : ''}</div></form>`;
@@ -686,7 +835,7 @@ async function act(action,element) {
     });
   }
   if(action==='reprocess-history'){
-    const data=state.data,context=data.context,manager=data.manager,runId=`reprocess-${context.run_id}-${crypto.randomUUID()}`,processingId=`processing-${crypto.randomUUID()}`;
+    const data=state.data,context=data.context,manager=data.manager,runId=buildReprocessRunId(context,manager),processingId=`processing-${crypto.randomUUID()}`;
     return openModal('Reprocess Existing History',facts([
       ['Original run',esc(context.run_id)],['Strategy',esc(context.strategy_id)],['Version',esc(context.strategy_version)],['Instance',esc(context.execution_instance_id)],['Dataset',`${esc(context.dataset_manifest_id)} / revision ${esc(context.dataset_manifest_revision)}`],['Interval',`${esc(manager.plan.selection.interval.start_utc)} to ${esc(manager.plan.selection.interval.end_utc)}`],['Code hash',hash(context.strategy_code_hash)],['Configuration hash',hash(context.strategy_config_hash)],['Canonical / processing counts',`${esc(manager.unique_canonical_count)} / ${esc(manager.processing_count)}`],['New processing ID',esc(processingId)],['Execution','READY only; Sierra is not started']
     ])+`<label class='check-line'><input id='reprocess-confirm' type='checkbox' required>I confirm the same governed interval, strategy, configuration and dataset for a new processing pass.</label><p class='subline'>The original run and canonical trade identity remain unchanged. Normal ingestion stays off and LIVE_REAL remains disabled.</p>`,'Create reprocess run',async form=>{
@@ -716,6 +865,7 @@ async function act(action,element) {
   if (action === 'upload') { uploadDialog(); return; }
   if (action === 'next' || action === 'previous') { state.offset = Math.max(0,state.offset + (action === 'next' ? 50 : -50)); state.filter = ''; await refresh(true); return; }
   if (action === 'download-artifact') { await download(`artifacts/${route().key}/download`,`${route().key}.${state.data.manifest.media_type === 'image/png' ? 'png' : 'txt'}`); return; }
+  if (action === 'download-research-report') { await download(`artifacts/${route().key}/research-report/download`,`${route().key}-research-report.json`); return; }
   if (['view-handoff','download-handoff','copy-handoff'].includes(action)) {
     const handoff = await request(`handoffs/${element.dataset.id}`);
     if (action === 'view-handoff') openModal('Approved handoff',`<pre>${esc(handoff.instruction_md)}</pre>`);

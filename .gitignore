@@ -36,6 +36,7 @@ server/src/**/*.js
 server/src/**/*.js.map
 server/src/**/*.d.ts
 server/src/**/*.d.ts.map
+!server/src/types/express.d.ts
 tmp/
 feedback-export-*
 diagnostics/
@@ -63,3 +64,5 @@ tests/release-smoke/playwright-report/
 .superpowers/
 .claude/worktrees/
 .herenow
+__pycache__/
+*.py[cod]

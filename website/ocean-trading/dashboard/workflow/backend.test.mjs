@@ -13,6 +13,7 @@ import { digest, objectHash, sealedHash } from "./common.mjs";
 const examples = JSON.parse(fs.readFileSync(new URL("./contracts/2.1.0/shared-contracts/examples/positive-examples.json", import.meta.url), "utf8"));
 const STRATEGY = "vwap_wave_pullback_balanced_nasdaq_v0434";
 const INSTANCE = "test-s20-instance";
+const OPERATIONAL_INSTANCE = "cicd-vwap-pull-back-strategy:replay-two:chart1";
 const EVIDENCE_TYPES = ["BACKTEST", "ROBUSTNESS", "WALK_FORWARD", "OOS_HOLDOUT"];
 const results = [];
 let sequence = 0;
@@ -20,6 +21,10 @@ const nextId = (kind) => `test-${kind}-${++sequence}`;
 const clone = (value) => structuredClone(value);
 
 async function app(overrides = {}) {
+  const operationalStrategy = overrides.operational_strategy === true;
+  delete overrides.operational_strategy;
+  const instanceId = INSTANCE;
+  const strategyRecipientId = operationalStrategy ? "cicd-vwap-pull-back-strategy:strategy:replay-two" : "ocean-test-strategy";
   const directory = fs.mkdtempSync(path.join(process.env.OCEAN_S20_PRIVATE_DIR || os.tmpdir(), "ocean-s20-"));
   const environment = {};
   const server = http.createServer((request, response) => void backend.handle(request, response, new URL(request.url, `http://${request.headers.host}`)));
@@ -28,7 +33,15 @@ async function app(overrides = {}) {
   const config = {
     db_file: path.join(directory, "ocean-workflow-test.sqlite"), test_only: true, contract_release: "2.1.0", allowed_origins: [base], lease_ms: 30000,
     python_executable: process.env.OCEAN_TRADING_PYTHON || "python", browser: { subject_id: "wayne-ocean-ui", credential_ref: "OCEAN_WAYNE_BROWSER_SECRET" },
-    identities: ["BRAIN", "TELEMETRY", "STRATEGY"].map((role) => issueOceanIdentity({ identity_id: `ocean-test-${role.toLowerCase()}`, role, namespace: "TEST", credential_ref: `OCEAN_${role}_TOKEN`, strategy_ids: [STRATEGY], instance_ids: [INSTANCE] }, environment, new Date(Date.now() + 3600000).toISOString())), ...overrides,
+    identities: ["BRAIN", "TELEMETRY", "STRATEGY"].map((role) => issueOceanIdentity({
+      identity_id: operationalStrategy && role === "STRATEGY" ? strategyRecipientId : `ocean-test-${role.toLowerCase()}`, role,
+      namespace: operationalStrategy && role === "STRATEGY" ? "OPERATIONAL" : "TEST",
+      audience: operationalStrategy && role === "STRATEGY" ? "Ocean workflow operational v1" : "Ocean workflow TEST",
+      factual_binding_hash: operationalStrategy && role === "STRATEGY" ? `sha256:${"a".repeat(64)}` : undefined,
+      credential_ref: `OCEAN_${role}_TOKEN`, strategy_ids: [STRATEGY], instance_ids: [operationalStrategy && role === "STRATEGY" ? OPERATIONAL_INSTANCE : INSTANCE],
+    }, environment, new Date(Date.now() + 3600000).toISOString())),
+    operational_factual_bindings: operationalStrategy ? [{ binding_hash:`sha256:${"a".repeat(64)}`, strategy_id:STRATEGY, instance:{ execution_instance_id:OPERATIONAL_INSTANCE } }] : [],
+    ...overrides,
   };
   issueTestBrowserSecret(environment, config.browser.credential_ref);
   let backend = new WorkflowBackend(config, environment);
@@ -51,7 +64,7 @@ async function app(overrides = {}) {
   const profile = { ...clone(examples["strategy-profile"]), strategy_id: STRATEGY, profile_id: "test-s20-profile" };
   profile.profile_hash = sealedHash(profile, "profile_hash");
   const registry = { ...clone(examples["strategy-registry"]), strategy_id: STRATEGY, profile_id: profile.profile_id, profile_version: profile.profile_version, profile_hash: profile.profile_hash, activation_status: "PENDING_ONBOARDING", activation_decision_id: null, production_version: null, execution_instances: [] };
-  const instance = { execution_instance_id: INSTANCE, strategy_id: STRATEGY, source_installation_id: "test-s20-installation", chartbook_id: "test-s20-chartbook", chart_id: "test-s20-chart", source_study_instance_id: "test-s20-study", telemetry_producer_id: "ocean-test-telemetry", version_binding: profile.baseline_version, config_hash: profile.strategy_config_hash, account_alias: "Sim1", capabilities: ["REPLAY"], status: "DRAFT", lease_run_id: null };
+  const instance = { execution_instance_id: instanceId, strategy_id: STRATEGY, source_installation_id: "test-s20-installation", chartbook_id: "test-s20-chartbook", chart_id: "test-s20-chart", source_study_instance_id: "test-s20-study", telemetry_producer_id: "ocean-test-telemetry", version_binding: profile.baseline_version, config_hash: profile.strategy_config_hash, account_alias: "Sim1", capabilities: ["REPLAY"], status: "DRAFT", lease_run_id: null };
   const dataset = { ...clone(examples["dataset-manifest"]), dataset_manifest_id: "test-s20-dataset" };
   dataset.manifest_hash = sealedHash(dataset, "manifest_hash");
   const post = async (route, data, options = {}) => { const result = await fetchJson(route, { data, ...options }); assert.equal(result.status, 200, `${route}: ${JSON.stringify(result.value)}`); return result.value; };
@@ -69,7 +82,7 @@ async function app(overrides = {}) {
   const artifact = async (caseId, kind, fields = {}, role = "BRAIN") => {
     const row = await getCase(caseId);
     const content = fields.content || JSON.stringify({ kind, status: "PASS", candidate_hash: row.candidate_hash, ...fields.payload });
-    const data = { artifact_id: nextId("artifact"), case_id: caseId, run_id: run.context.run_id, recipient_id: "ocean-test-strategy", kind, media_type: "application/json", content, content_hash: digest(content), candidate_hash: row.candidate_hash, dependency_ids: [], ...fields };
+    const data = { artifact_id: nextId("artifact"), case_id: caseId, run_id: run.context.run_id, recipient_id: strategyRecipientId, kind, media_type: "application/json", content, content_hash: digest(content), candidate_hash: row.candidate_hash, dependency_ids: [], ...fields };
     delete data.payload;
     return post("artifacts", data, { role });
   };
@@ -79,7 +92,7 @@ async function app(overrides = {}) {
     const recommendation = await artifact(row.case_id, "RECOMMENDATION"); await change(row.case_id, { action: "advance", to_stage: "DEVELOPMENT_REVIEW", artifact_id: recommendation.manifest.artifact_id });
     return { row: await getCase(row.case_id), recommendation };
   };
-  const requestApproval = async (caseId, artifactId, gate = "DEVELOPMENT", expiry = new Date(Date.now() + 3600000).toISOString()) => post("approvals", { request_id: nextId("request"), case_id: caseId, expected_revision: (await getCase(caseId)).revision, gate, artifact_id: artifactId, recipient_id: "ocean-test-strategy", authorized_tests: EVIDENCE_TYPES, expires_at_utc: expiry }, { role: "BRAIN" });
+  const requestApproval = async (caseId, artifactId, gate = "DEVELOPMENT", expiry = new Date(Date.now() + 3600000).toISOString()) => post("approvals", { request_id: nextId("request"), case_id: caseId, expected_revision: (await getCase(caseId)).revision, gate, artifact_id: artifactId, recipient_id: strategyRecipientId, authorized_tests: EVIDENCE_TYPES, expires_at_utc: expiry }, { role: "BRAIN" });
   const decide = async (request, action = "APPROVED", options = {}) => post("decisions", { decision_id: nextId("decision"), case_id: request.case_id, request_id: request.request_id, expected_revision: (await getCase(request.case_id)).revision, snapshot_hash: request.snapshot_hash, decision: action, reason: "S20 synthetic acceptance; no operational approval", ...options });
   return { base, server, environment, config, backend: () => backend, fetchJson, post, profile, registry, instance, dataset, contextInput, run, newCase, getCase, change, artifact, reviewCase, requestApproval, decide,
     restart: () => { backend.close(); backend = new WorkflowBackend(config, environment); },
@@ -223,6 +236,52 @@ await check("GOV-08: transactional outbox survives restart, expired leases, dupl
     await a.post("outbox/retry", { outbox_id: second.outbox_id }); const third = (await a.post("outbox/claim", { strategy_id: STRATEGY, instance_id: INSTANCE }, { role: "STRATEGY" })).items[0];
     const data = { outbox_id: third.outbox_id, lease_id: third.lease_id, payload_hash: third.payload_hash }; const messageId = nextId("ack-message");
     const one = await a.fetchJson("outbox/ack", { role: "STRATEGY", data, messageId }); const two = await a.fetchJson("outbox/ack", { role: "STRATEGY", data, messageId }); assert.equal(one.status, 200); assert.deepEqual(one.value, two.value);
+    assert.equal(a.backend().db.prepare("SELECT COUNT(*) AS n FROM ow_outbox WHERE state='ACKNOWLEDGED'").get().n, 1);
+  } finally { await a.close(); }
+});
+
+await check("GOV-08 operational recipient claims and acknowledges through the operational route", async () => {
+  const a = await app({ operational_strategy:true });
+  try {
+    const strategy = a.backend().db.prepare("SELECT baseline_hash,revision FROM ow_strategies WHERE id=?").get(STRATEGY);
+    const baseline = strategy.baseline_hash;
+    a.backend().db.prepare("INSERT INTO ow_instances(id,strategy_id,payload_json) VALUES(?,?,?)").run(OPERATIONAL_INSTANCE,STRATEGY,JSON.stringify({execution_instance_id:OPERATIONAL_INSTANCE,strategy_id:STRATEGY}));
+    a.backend().db.prepare("INSERT INTO ow_runs(id,strategy_id,instance_id,revision,state,context_json) VALUES(?,?,?,?,?,?)").run("operational-run",STRATEGY,OPERATIONAL_INSTANCE,1,"COMPLETED",JSON.stringify({run_id:"operational-run",strategy_id:STRATEGY,execution_instance_id:OPERATIONAL_INSTANCE}));
+    a.backend().db.prepare("INSERT INTO ow_cases(id,strategy_id,instance_id,run_id,revision,stage,work_status,baseline_hash,candidate_hash,owner_id,waiting_on,payload_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
+      .run("operational-case",STRATEGY,OPERATIONAL_INSTANCE,"operational-run",1,"RESEARCH","READY",baseline,null,"ocean-operational-brain","Stage prerequisites",JSON.stringify({registry_revision:strategy.revision,origin:'OPERATIONAL_LEARNING'}));
+    const content = JSON.stringify({ schema_version:'ocean-operational-learning-recommendation/v1',title:"Operational recommendation", authority:{ automatic_strategy_change:false,candidate_approved:false,paper_authorized:false,live_authorized:false } });
+    a.backend().writeArtifact({
+      id:"ocean-operational-brain", role:"BRAIN", namespace:"OPERATIONAL", scopes:["read","artifact.write"],
+      strategyIds:[STRATEGY], instanceIds:[OPERATIONAL_INSTANCE],
+    }, {
+      artifact_id:"test-operational-recommendation", case_id:"operational-case", run_id:"operational-run",
+      recipient_id:"cicd-vwap-pull-back-strategy:strategy:replay-two", kind:"RECOMMENDATION",
+      media_type:"application/json", content, content_encoding:"utf8", content_hash:digest(content),
+      candidate_hash:null, dependency_ids:[],
+    });
+    a.backend().event("operational-case", "operational.learning.continuation", {
+      id:"ocean-operational-brain", role:"BRAIN", namespace:"OPERATIONAL",
+    }, { artifact_id:"test-operational-recommendation" }, "cicd-vwap-pull-back-strategy:strategy:replay-two");
+    const data = { strategy_id:STRATEGY, instance_id:OPERATIONAL_INSTANCE };
+    assert.equal((await a.fetchJson("outbox/claim", { role:"STRATEGY", data })).status, 403);
+    const claimed = await a.post("operational/v1/outbox/claim", data, { role:"STRATEGY" });
+    assert.equal(claimed.items.length, 1);
+    const item = claimed.items[0];
+    const artifact = await a.fetchJson("operational/v1/artifacts/test-operational-recommendation", { role:"STRATEGY" });
+    assert.equal(artifact.status, 200);
+    assert.match(artifact.value.preview_text, /Operational recommendation/);
+    const caseReadback = await a.fetchJson("operational/v1/cases/operational-case", { role:"STRATEGY" });
+    assert.equal(caseReadback.status, 200);
+    assert.equal(caseReadback.value.pending_sync, 1);
+    const acknowledged = await a.post("operational/v1/outbox/ack", {
+      outbox_id:item.outbox_id, lease_id:item.lease_id, payload_hash:item.payload_hash,
+    }, { role:"STRATEGY" });
+    assert.equal(acknowledged.state, "ACKNOWLEDGED");
+    assert.match(acknowledged.research_job_id,/^research-/);
+    assert.equal(a.backend().db.prepare("SELECT COUNT(*) n FROM ow_research_jobs").get().n,1);
+    assert.equal(acknowledged.analysis_complete,false);
+    const ackAgain=await a.post('operational/v1/outbox/ack',{outbox_id:item.outbox_id,lease_id:item.lease_id,payload_hash:item.payload_hash},{role:'STRATEGY'});
+    assert.equal(ackAgain.research_job_id,acknowledged.research_job_id);
     assert.equal(a.backend().db.prepare("SELECT COUNT(*) AS n FROM ow_outbox WHERE state='ACKNOWLEDGED'").get().n, 1);
   } finally { await a.close(); }
 });
@@ -378,6 +437,43 @@ await check("GOV-01 GOV-03 CFG-02 CFG-04: unresolved/reference-forged credential
     assert.equal((await a.fetchJson(`cases/${row.case_id}/history`,{role:"BRAIN"})).value.items[0].namespace,"TEST");
     const python=a.backend().config.python_executable; a.backend().config.python_executable=path.join(a.directory,"missing-validator.exe");
     assert.equal((await a.fetchJson("profiles",{data:{profile:a.profile,file_sha256:digest(JSON.stringify(a.profile))}})).status,503); a.backend().config.python_executable=python;
+  } finally { await a.close(); }
+});
+
+await check("operational learning continuation is deterministic, restart-safe and non-authorising", async () => {
+  const a = await app();
+  try {
+    const actor={id:'ocean-operational-brain',role:'BRAIN',namespace:'OPERATIONAL',audience:'Ocean workflow operational v1',scopes:['read','artifact.write','event.write'],strategyIds:[STRATEGY],instanceIds:[INSTANCE]};
+    const data={
+      case_id:'CASE-OPERATIONAL-ABCDEF0123456789-0001',
+      artifact_id:'test-operational-learning-recommendation-abcdef0123456789',
+      run_id:a.run.context.run_id,
+      context_hash:a.run.context.context_hash,
+      result_id:`sha256:${'7'.repeat(64)}`,
+      brain_record_id:'OPERATIONAL-LEARNING-RESULT-ABCDEF0123456789',
+      registry_reconciliation_id:'registry-reconciliation-20261007100000-aaaaaaaa',
+      registry_record_sha256:`sha256:${'8'.repeat(64)}`,
+      recommendation:{title:'Investigate one bounded Research hypothesis',content:'No candidate, Paper, Live, or automatic strategy authority is granted.'},
+    };
+    const first=a.backend().createOperationalLearningContinuation(actor,data);
+    assert.equal(first.stage,'RESEARCH');
+    assert.equal(first.work_status,'READY');
+    assert.equal(a.backend().db.prepare('SELECT COUNT(*) n FROM ow_cases WHERE id=?').get(data.case_id).n,1);
+    assert.equal(a.backend().db.prepare('SELECT COUNT(*) n FROM ow_artifacts WHERE id=?').get(data.artifact_id).n,1);
+    assert.equal(a.backend().db.prepare("SELECT COUNT(*) n FROM ow_outbox WHERE entity_id=? AND state='PENDING'").get(data.case_id).n,1);
+    const row=a.backend().db.prepare('SELECT stage,work_status,candidate_hash,payload_json FROM ow_cases WHERE id=?').get(data.case_id);
+    const payload=JSON.parse(row.payload_json);
+    assert.equal(row.candidate_hash,null);
+    assert.equal(payload.automatic_strategy_change,false);
+    assert.equal(payload.candidate_approved,false);
+    assert.equal(payload.paper_authorized,false);
+    assert.equal(payload.live_authorized,false);
+    a.backend().createOperationalLearningContinuation(actor,data);
+    a.restart();
+    a.backend().createOperationalLearningContinuation(actor,data);
+    assert.equal(a.backend().db.prepare('SELECT COUNT(*) n FROM ow_cases WHERE id=?').get(data.case_id).n,1);
+    assert.equal(a.backend().db.prepare('SELECT COUNT(*) n FROM ow_artifacts WHERE id=?').get(data.artifact_id).n,1);
+    assert.equal(a.backend().db.prepare("SELECT COUNT(*) n FROM ow_outbox WHERE entity_id=?").get(data.case_id).n,1);
   } finally { await a.close(); }
 });
 
