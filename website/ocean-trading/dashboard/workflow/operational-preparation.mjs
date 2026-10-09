@@ -7,6 +7,12 @@ const parse=row=>JSON.parse(row.payload_json);
 const REVIEW_INPUT_KEYS=['context','manifest_key','factual_binding_hash','interval','prior_exposure','expires_at_utc'];
 const REVIEW_READBACK_KEYS=['schema_version','profile_hash','observed_profile_hash','manifest_hash','partition_index','review_hash'];
 
+export function onboardingLineageDecisionId(sourceDecisionId,reviewHash){
+  id(sourceDecisionId);
+  requireThat(/^sha256:[a-f0-9]{64}$/.test(reviewHash || ''),422,'OPERATIONAL_REVIEW_HASH_REQUIRED');
+  return `lineage:${objectHash([sourceDecisionId,reviewHash]).slice(7)}`;
+}
+
 // Provider-owned release contract. It does not add enum values to shared 2.1.0 decisions.
 export class OperationalPreparation {
   constructor(backend){this.b=backend;this.db=backend.db;}
@@ -81,14 +87,22 @@ export class OperationalPreparation {
     requireThat(setup && ['PASS','VERIFIED_REUSE'].includes(parse(setup).status),409,'S40_3_SETUP_RECEIPT_REQUIRED');
     const source=this.db.prepare('SELECT request_id,case_id,binding_json,payload_json FROM ow_decisions WHERE id=?').get(sourceDecisionId);
     requireThat(source,409,'SOURCE_ONBOARDING_DECISION_REQUIRED');
-    const payload=parse(source),binding=JSON.parse(source.binding_json),request=this.b.one('ow_approval_requests',source.request_id),row=this.b.one('ow_cases',source.case_id);
-    this.b.approved(row,'ONBOARDING',sourceDecisionId);
-    requireThat(payload.decision==='APPROVED' && payload.decided_by==='Wayne' && payload.decided_via==='AUTHORISED_OCEAN_UI' && binding.strategy_id===review.context.strategy_id && binding.baseline_hash===review.context.strategy_code_hash && request.artifact_id===binding.artifact_id,409,'SOURCE_ONBOARDING_DECISION_CONFLICT');
+    const payload=parse(source),binding=JSON.parse(source.binding_json),request=this.b.one('ow_approval_requests',source.request_id),row=this.b.one('ow_cases',source.case_id),current=this.b.one('ow_strategies',row.strategy_id);
+    this.b.verifySnapshot(request);
+    // Onboarding follows the unchanged baseline, not a later research candidate.
+    requireThat(current.baseline_hash===row.baseline_hash && request.state==='APPROVED' && future(payload.expires_at_utc) && !this.db.prepare('SELECT decision_id FROM ow_decision_revocations WHERE decision_id=?').get(sourceDecisionId),409,'SOURCE_ONBOARDING_APPROVAL_NOT_CURRENT');
+    requireThat(payload.decision==='APPROVED' && payload.decided_by==='Wayne' && payload.decided_via==='AUTHORISED_OCEAN_UI'
+      && payload.request_id===request.id && payload.snapshot_hash===request.snapshot_hash
+      && request.case_id===row.id && request.gate==='ONBOARDING' && request.baseline_hash===row.baseline_hash
+      && binding.case_id===row.id && binding.instance_id===row.instance_id && binding.gate==='ONBOARDING'
+      && binding.strategy_id===row.strategy_id && binding.strategy_id===review.context.strategy_id
+      && binding.baseline_hash===row.baseline_hash && binding.baseline_hash===review.context.strategy_code_hash
+      && request.artifact_id===binding.artifact_id,409,'SOURCE_ONBOARDING_DECISION_CONFLICT');
     const artifact=this.b.artifactFor(row,binding.artifact_id),text=Buffer.from(artifact.content).toString('utf8');
     requireThat(text.includes(review.context.strategy_version),409,'ONBOARDING_IDENTITY_EVIDENCE_MISMATCH');
     for(const value of [review.context.strategy_code_hash,review.context.strategy_config_hash,review.profile_hash,review.observed_profile_hash])requireThat(text.includes(value.slice(7)),409,'ONBOARDING_IDENTITY_EVIDENCE_MISMATCH');
     const lineage={schema_version:'ocean-onboarding-decision-lineage/v1',source_decision_id:sourceDecisionId,source_request_id:source.request_id,source_artifact_id:binding.artifact_id,source_snapshot_hash:request.snapshot_hash,source_decided_at_utc:payload.decided_at_utc,source_setup_task:'S40.3',strategy_id:review.context.strategy_id,strategy_version:review.context.strategy_version,strategy_code_hash:review.context.strategy_code_hash,strategy_config_hash:review.context.strategy_config_hash,workflow_profile_hash:review.profile_hash,observed_profile_hash:review.observed_profile_hash,factual_binding_hash:review.factual_binding_hash,governed_identity_hash:objectHash([review.context.strategy_id,review.context.strategy_version,review.context.strategy_code_hash,review.context.strategy_config_hash,review.profile_hash,review.observed_profile_hash]),preserved_scope:'STRATEGY_ONBOARDING_ONLY',dataset_release_preserved:false};
-    const decisionId=`lineage:${sourceDecisionId}`,decision={schema_version:'ocean-operational-decision/v1',decision_id:decisionId,scope:'STRATEGY_ONBOARDING',decision:'APPROVED',reason:'Preserved from the authenticated S40.3 onboarding decision after exact identity reconciliation.',review,decided_by:'Wayne',decided_via:'AUTHORISED_OCEAN_UI_LINEAGE',source_decision_id:sourceDecisionId,lineage,expires_at_utc:payload.expires_at_utc,decided_at_utc:payload.decided_at_utc};
+    const decisionId=onboardingLineageDecisionId(sourceDecisionId,review.review_hash),decision={schema_version:'ocean-operational-decision/v1',decision_id:decisionId,scope:'STRATEGY_ONBOARDING',decision:'APPROVED',reason:'Preserved from the authenticated S40.3 onboarding decision after exact identity reconciliation.',review,decided_by:'Wayne',decided_via:'AUTHORISED_OCEAN_UI_LINEAGE',source_decision_id:sourceDecisionId,lineage,expires_at_utc:payload.expires_at_utc,decided_at_utc:payload.decided_at_utc};
     const old=this.db.prepare('SELECT payload_json FROM ow_operational_decisions WHERE id=?').get(decisionId);
     if(old)requireThat(objectHash(parse(old))===objectHash(decision),409,'IMMUTABLE_ONBOARDING_LINEAGE_CONFLICT');
     else this.db.prepare('INSERT INTO ow_operational_decisions VALUES(?,?,?,?,?)').run(decisionId,review.context.strategy_id,review.review_hash,'STRATEGY_ONBOARDING',JSON.stringify(decision));

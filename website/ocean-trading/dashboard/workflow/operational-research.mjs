@@ -3,6 +3,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { PROVENANCE_ACTION, parseSttl2Identity } from './operational-learning.mjs';
 import { digest, objectHash, requireThat } from './common.mjs';
 import { OperationalContinuation } from './operational-continuation.mjs';
+import { researchReportContent, readResearchReport } from './operational-research-report.mjs';
 import { RESEARCH_V5, RESEARCH_V6, REASSESSMENT_ORIGIN, evaluateV6, readObservedSessionProofs, remediationV6 } from './operational-research-protocol.mjs';
 
 // New physical/raw provenance gates apply only to new jobs, never relabel history.
@@ -341,6 +342,10 @@ export class OperationalResearch {
     try {
       const row=this.backend.one('ow_cases',job.case_id);
       const ids=[row.run_id];
+      const source=!job.input_json && job.state!=='COMPLETED' && row.work_status!=='COMPLETED'
+        ? this.backend.operationalLearning.continuationSource?.(this.backend.one('ow_runs',row.run_id),
+          this.backend.artifactFor(row,job.artifact_id)) : null;
+      if(source)ids.push(...source.cohort.eligible_runs.map(run=>run.run_id));
       if(job.input_json && [this.version,LEGACY_RESEARCH_VERSION,RESEARCH_V5].includes(job.analysis_version)) {
         requireThat(digest(job.input_json)===job.input_hash,409,'RESEARCH_SNAPSHOT_HASH_CONFLICT');
         const snapshot=JSON.parse(job.input_json);
@@ -352,7 +357,7 @@ export class OperationalResearch {
       });
       // Uncaptured work must still belong to the cohort it would capture. Frozen
       // input and completed history keep their original membership semantics.
-      if(!excluded.length && !job.input_json && job.state!=='COMPLETED'
+      if(!source && !excluded.length && !job.input_json && job.state!=='COMPLETED'
         && row.work_status!=='COMPLETED' && job.analysis_version===this.version) {
         try {
           const source=this.backend.operationalLearning.cohort(this.backend.one('ow_runs',row.run_id));
@@ -365,7 +370,10 @@ export class OperationalResearch {
       }
       return {verified:excluded.length===0,excluded_runs:excluded};
     }catch(error) {
-      return {verified:false,excluded_runs:[],reason:String(error.code || error.message || 'RESEARCH_PROVENANCE_PROOF_REQUIRED').slice(0,300)};
+      const reason=String(error.code || error.message || 'RESEARCH_PROVENANCE_PROOF_REQUIRED').slice(0,300);
+      return {verified:false,excluded_runs:[],reason,
+        ...(reason.startsWith('OPERATIONAL_LEARNING_') ? {required_action:
+          `Owner ${this.backend.one('ow_cases',job.case_id).owner_id}: recover the exact original immutable analysis input and source lineage. Do not substitute newer history; separately version any new evidence reassessment.`} : {})};
     }
   }
   statusForCase(caseId) {
@@ -386,9 +394,7 @@ export class OperationalResearch {
       if(historical)job=historical;
     }
     const artifact=job.result_artifact_id?this.backend.one('ow_artifacts',job.result_artifact_id):null;
-    if(artifact)requireThat(digest(Buffer.from(artifact.content))===job.result_hash
-      && JSON.parse(artifact.manifest_json).content_hash===job.result_hash,409,'RESEARCH_RESULT_HASH_CONFLICT');
-    const report=artifact?JSON.parse(Buffer.from(artifact.content).toString('utf8')):null;
+    const report=artifact?readResearchReport(job,artifact):null;
     const currentQualification=this.qualification(job);
     const superseded=currentQualification.superseded===true;
     const historical=superseded || (job.state==='COMPLETED' && (job.analysis_version!==this.version || backfillSkipped));
@@ -412,20 +418,23 @@ export class OperationalResearch {
       effective_state:superseded?'HISTORICAL_SUPERSEDED':!currentQualification.verified && job.state!=='COMPLETED'?'BLOCKED_PROVENANCE':job.state,
       qualification_warning:superseded?supersededAction:historical
         ?'Preserved historical report: its original qualified-history label is not current physical/raw provenance proof. It cannot support new proposals without current qualification.'
-        :!currentQualification.verified?PROVENANCE_ACTION:null,
+        :!currentQualification.verified?currentQualification.required_action || PROVENANCE_ACTION:null,
       version_backfill_skipped:completedCase && (job.analysis_version!==this.version || backfillSkipped),
       skipped_version_backfill_jobs:skipped,
       continuations,
       loop_stage:openContinuations.length?openContinuations.some(item=>item.blocked_reason || item.work_status==='BLOCKED')?'BLOCKED_CONTINUATION'
         :openContinuations.some(item=>item.kind==='PROPOSAL_PLANNING')?'PROPOSAL_PLANNING'
-        :openContinuations.some(item=>item.evidence_remediation?.requires_design_review)?'RESEARCH_DESIGN_REVIEW_REQUIRED':'EVIDENCE_REQUIRED'
+        :openContinuations.some(item=>item.evidence_remediation?.requires_design_review)?'RESEARCH_DESIGN_REVIEW_REQUIRED'
+        :openContinuations.some(item=>item.kind==='EVIDENCE_FOLLOW_UP')?'EVIDENCE_REQUIRED'
+        :openContinuations.some(item=>item.kind==='RISK_DISABLE_REVIEW')?'RISK_DISABLE_REVIEW_REQUIRED':'EVIDENCE_REQUIRED'
         :evidenceReassessed.length?evidenceReassessed.some(item=>item.progress.outcome==='EXPLORATORY_PROPOSAL')?'PROPOSAL_PLANNING':'DIRECTION_SCREEN_NO_SUPPORTED_CHANGE'
+        :continuations.some(item=>!item.blocked_reason && item.risk_disposition)?'RISK_REVIEW_RECORDED'
         :continuationWarning?'BLOCKED_CONTINUATION':null,
       next_action:superseded?supersededAction:completedCase && job.state==='COMPLETED' && (job.analysis_version!==this.version || backfillSkipped)
         ?`Historical Research is completed and preserved. Completed cases are not version backfilled; new evidence cases use ${this.version}. No current version backfill is queued for this case and no candidate or approval is created. ${PROVENANCE_ACTION}`
         :completedCase && job.state!=='COMPLETED'
           ?'This completed case has a retained historical queue entry but no completed Research report. Version backfill will not run; the entry is not current pending work and no completion is claimed.'
-        :!currentQualification.verified?PROVENANCE_ACTION
+        :!currentQualification.verified?currentQualification.required_action || PROVENANCE_ACTION
         :continuationAction || evidenceReassessed.map(item=>item.next_action).join(' ') || continuationWarning || report?.next_action || (job.state==='RETRY'?'Ocean will retry Research automatically; no human approval is pending.':'Ocean Research is queued and will resume after a website restart.')};
   }
   claim() {
@@ -493,7 +502,8 @@ export class OperationalResearch {
     const artifact=this.backend.artifactFor(row,job.artifact_id,JSON.parse(row.payload_json).origin===REASSESSMENT_ORIGIN?'EVIDENCE':'RECOMMENDATION');
     requireThat(digest(Buffer.from(artifact.content))===job.artifact_hash,409,'RESEARCH_INPUT_HASH_CONFLICT');
     const run=this.backend.one('ow_runs',row.run_id);
-    const source=this.backend.operationalLearning.cohort(run);
+    const source=this.backend.operationalLearning.continuationSource?.(run,artifact)
+      || this.backend.operationalLearning.cohort(run);
     const bundle={...source,research_coverage:Object.fromEntries(source.cohort.eligible_runs.map(item=>[item.run_id,
       this.backend.operationalLearning.classification(this.backend.one('ow_runs',item.run_id))
         .summary?.completion?.requested_coverage || []]))};
@@ -587,7 +597,7 @@ export class OperationalResearch {
       requireThat(current.state==='RUNNING' && current.lease_id===job.lease_id && current.lease_until_ms>Date.now(),409,'RESEARCH_LEASE_EXPIRED');
       const report={...result,job_id:job.id,case_id:job.case_id,source_recommendation_id:job.artifact_id,
         source_recommendation_hash:job.artifact_hash,completed_at_utc:new Date().toISOString()};
-      const content=JSON.stringify(report,null,2);
+      const content=researchReportContent(current,report);
       const artifactId=`test-research-result-${job.id.slice('research-'.length)}`;
       const row=this.backend.one('ow_cases',job.case_id);
       this.backend.writeArtifact(actor,{artifact_id:artifactId,case_id:row.id,run_id:row.run_id,recipient_id:recipient,

@@ -752,6 +752,83 @@ test('READY Replay footer records Research not due and preflight action without 
   assert.match(testOnly,/Next action: Await the learning result/);
 });
 
+test('G08 run browser template labels prior outcomes as historical without claiming current completion and retains qualified positive completion',()=>{
+  const source=fs.readFileSync(new URL('../public/workflow/ui.js',import.meta.url),'utf8');
+  const pageSource=source.slice(source.indexOf('function runPage('),source.indexOf('function caseProgress('));
+  const page=vm.runInNewContext(`${pageSource}; runPage`,{
+    section:(title,body)=>`${title}\n${body}`,facts:rows=>rows.map(([name,value])=>`${name}: ${value}`).join('\n'),
+    esc:String,badge:String,link:(_type,id)=>id,human:String,heading:()=>'',button:()=>'',
+    table:(_columns,rows)=>rows.map(row=>row.join(': ')).join('\n'),hash:String,date:String,timeline:()=>'',empty:String,
+  });
+  const data={state:'COMPLETED',strategy_name:'isolated fixture',events:[],
+    context:{run_id:'isolated-historical-run',strategy_id:'fixture',expected_environment:'REPLAY',
+      evidence_purpose:'HISTORICAL_BUILD',observed_source_state:{environment:'REPLAY',quality:'VERIFIED'}},
+    manager:{namespace:'OPERATIONAL',completion_current:true,completion:{status:'COMPLETED'},context_status:'CURRENT',
+      unique_canonical_count:61,processing_count:61,open_pins:0},
+    learning:{stage:'COMPLETE',loop_stage:'QUALIFICATION_REQUIRED',current_qualification_status:'QUALIFICATION_REQUIRED',
+      current_provenance_qualified:false,eligible:false,conclusion_type:'NO_CHANGE',brain_record_id:'preserved-brain-record',
+      reasons:['PHYSICAL_STRATEGY_BINDING_CONFLICT','RAW_STTL2_IDENTITY_CONFLICT'],
+      historical_result:{research_outcome:'NO_SUPPORTED_CHANGE',conclusion_type:'NO_CHANGE'},
+      next_action:'Resolve physical strategy binding and raw STTL2 identity conflict; preserve the prior report.',
+      research:{state:'COMPLETED',historical:true,qualified_for_new_support:false,
+        report:{outcome:'NO_SUPPORTED_CHANGE',next_action:'Keep current baseline.'}}}};
+  const before=objectHash(data),historical=page(data);
+  assert.match(historical,/Overall learning loop: QUALIFICATION_REQUIRED/);
+  assert.match(historical,/Conclusion: Not currently qualified/);
+  assert.match(historical,/Prior outcome \(historical\): NO_SUPPORTED_CHANGE/);
+  assert.match(historical,/2\. Evidence qualified: QUALIFICATION_REQUIRED: PHYSICAL_STRATEGY_BINDING_CONFLICT; RAW_STTL2_IDENTITY_CONFLICT/);
+  assert.doesNotMatch(historical,/2\. Evidence qualified: NOT_DUE/);
+  assert.match(historical,/3\. Cumulative Brain analysis: HISTORICAL/);
+  assert.match(historical,/4\. Result returned to Ocean: HISTORICAL/);
+  assert.match(historical,/5\. Research evaluation: HISTORICAL/);
+  assert.match(historical,/not current qualified support/);
+  assert.match(historical,/Next action: Resolve physical strategy binding and raw STTL2 identity conflict/);
+  assert.doesNotMatch(historical,/Overall learning loop: COMPLETE|Conclusion: NO_SUPPORTED_CHANGE|Keep current baseline\./);
+  assert.match(historical,/6\. Candidate validation: NOT_DUE/);
+  assert.equal(objectHash(data),before,'Rendering must not alter the retained report or run');
+  for(const status of ['PASSED','FAILED','IN_PROGRESS']) {
+    const prior={...data,learning:{...data.learning,research:{...data.learning.research,
+      report:{...data.learning.research.report,candidate_validation:{status}}}}};
+    const priorHash=objectHash(prior),rendered=page(prior);
+    assert.match(rendered,/6\. Candidate validation: HISTORICAL/);
+    assert.ok(rendered.includes(`Prior candidate validation ${status} retained; not current qualified validation support.`));
+    assert.ok(!rendered.includes(`6. Candidate validation: ${status}`));
+    assert.equal(objectHash(prior),priorHash);
+  }
+  const current=page({...data,learning:{...data.learning,eligible:true,current_provenance_qualified:true,
+    loop_stage:'COMPLETE',current_qualification_status:'CURRENT',historical_result:null,
+    next_action:'Keep current baseline. Qualified direction screen found no supported change.',
+    research:{...data.learning.research,historical:false,qualified_for_new_support:true}}});
+  assert.match(current,/Overall learning loop: COMPLETE/);
+  assert.match(current,/Conclusion: NO_SUPPORTED_CHANGE/);
+  assert.match(current,/2\. Evidence qualified: COMPLETE/);
+  assert.match(current,/5\. Research evaluation: COMPLETED/);
+  assert.match(current,/Qualified direction screen found no supported change/);
+  assert.doesNotMatch(current,/Prior outcome \(historical\)|Not currently qualified|Research evaluation: HISTORICAL/);
+  const currentValidation=page({...data,learning:{...data.learning,loop_stage:'COMPLETE',
+    current_qualification_status:'CURRENT',historical_result:null,research:{...data.learning.research,
+      historical:false,qualified_for_new_support:true,
+      report:{...data.learning.research.report,candidate_validation:{status:'PASSED'}}}}});
+  assert.match(currentValidation,/6\. Candidate validation: PASSED/);
+  assert.doesNotMatch(currentValidation,/Prior candidate validation|Candidate validation: HISTORICAL/);
+  const callbackOnly=page({...data,learning:{...data.learning,research:null,
+    historical_result:{conclusion_type:'NO_CHANGE',research_outcome:null}}});
+  assert.match(callbackOnly,/Prior outcome \(historical\): NO_CHANGE/);
+  assert.doesNotMatch(callbackOnly,/Overall learning loop: COMPLETE|Conclusion: NO_CHANGE/);
+  for(const [state,reason] of [['READY','RUN_NOT_COMPLETED'],['FAILED','RUN_NOT_COMPLETED'],
+    ['COMPLETED','LEARNER_PERMISSION_DENIED']]) {
+    const notDue={...data,state,learning:{...data.learning,stage:'NOT_DUE',loop_stage:'NOT_DUE',
+      current_qualification_status:'NOT_VERIFIED',historical_result:null,research:null,reasons:[reason]}};
+    const notDueHash=objectHash(notDue),rendered=page(notDue);
+    assert.match(rendered,/2\. Evidence qualified: NOT_DUE/);
+    assert.doesNotMatch(rendered,/2\. Evidence qualified: QUALIFICATION_REQUIRED|2\. Evidence qualified: COMPLETE/);
+    assert.equal(objectHash(notDue),notDueHash);
+  }
+  const currentEvidence=page({...data,learning:{...data.learning,eligible:true,current_provenance_qualified:true}});
+  assert.match(currentEvidence,/2\. Evidence qualified: COMPLETE/,'Current evidence can qualify while its prior result stays historical');
+  assert.match(currentEvidence,/3\. Cumulative Brain analysis: HISTORICAL/);
+});
+
 test('queue mutation rolls back with its caller transaction; unapproved authority is rejected',()=>{
   const f=queueFixture();try {
     assert.throws(()=>f.backend.store.transaction(()=>{f.worker.enqueue('case','a');throw Error('crash before ACK');}));

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { digest, exactKeys, id, noSecrets, objectHash, requireThat } from './common.mjs';
 import { requireDirectionExclusionExposure } from './operational-research-protocol.mjs';
+import { readResearchReport } from './operational-research-report.mjs';
 
 export const PLAN_VERSION='ocean-operational-proposal-plan/v2';
 const origin='OPERATIONAL_RESEARCH_CONTINUATION';
@@ -95,7 +96,8 @@ export class OperationalProposalPlan {
       const lineage=JSON.parse(Buffer.from(this.b.artifactFor(row,payload.lineage_artifact_id,'RECOMMENDATION').content).toString('utf8'));
       const sourceRow=this.b.one('ow_cases',lineage.source.case_id);
       const reportArtifact=this.b.artifactFor(sourceRow,lineage.source.report_artifact_id,'OUTCOME');
-      const recipient=reportArtifact.recipient_id,report=JSON.parse(Buffer.from(reportArtifact.content).toString('utf8'));
+      const recipient=reportArtifact.recipient_id;
+      const report=readResearchReport(this.b.one('ow_research_jobs',lineage.source.job_id),reportArtifact);
       requireThat(this.sourceOwnerCurrent(recipient,row),409,'PROPOSAL_CURRENT_SOURCE_OWNER_REQUIRED');
       const current=this.template({row,payload,frozen:lineage,source:{recipient,report}});
       currentHash=current.execution.capability_hash;

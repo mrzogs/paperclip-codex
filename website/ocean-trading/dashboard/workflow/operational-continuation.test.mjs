@@ -9,19 +9,21 @@ import { WorkflowBackend } from './backend.mjs';
 import { LEGACY_RESEARCH_VERSION, RESEARCH_VERSION, OperationalResearch, evaluateResearch } from './operational-research.mjs';
 import { mockNativeProof } from './operational-native-sessions.test-fixtures.mjs';
 import { RESEARCH_V5 } from './operational-research-protocol.mjs';
+import { REPORT_REFERENCE_VERSION } from './operational-research-report.mjs';
 import { OperationalLearning } from './operational-learning.mjs';
 import { CONTINUATION_ORIGIN } from './operational-continuation.mjs';
 import { readWorkflowView } from './ui-api.mjs';
 import { digest, objectHash } from './common.mjs';
 import { consumePlanningOnce } from '../../../../scripts/consume-ocean-proposal-planning.mjs';
 
-function fixture({insufficient=false,noChange=false,partial=false,prospective=false,oneDirection=null}={}) {
+function fixture({insufficient=false,noChange=false,partial=false,prospective=false,oneDirection=null,rowsPerRun=20,
+  ownerScopes=['read','artifact.write','event.write']}={}) {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'ocean-planning-'));
   const filename=path.join(root,'workflow.sqlite');let store=new WorkflowStore(filename);
   const backend=Object.create(WorkflowBackend.prototype);
   const baseline=digest('baseline'),expiry=new Date(Date.now()+3600000).toISOString();
   const identity={identity_id:'brain',role:'BRAIN',namespace:'OPERATIONAL',strategy_ids:['s'],instance_ids:['i'],
-    scopes:['read','artifact.write','event.write'],expires_at_utc:expiry};
+    scopes:ownerScopes,expires_at_utc:expiry};
   const recipient={...identity,identity_id:'strategy',role:'STRATEGY'};
   const actor={id:'brain',role:'BRAIN',namespace:'OPERATIONAL',strategyIds:['s'],instanceIds:['i'],scopes:identity.scopes};
   const human={id:'wayne-ocean-ui',role:'HUMAN'};
@@ -40,14 +42,14 @@ function fixture({insufficient=false,noChange=false,partial=false,prospective=fa
     dataset_manifest_revision:1,dataset_manifest_hash:digest('dataset'),execution_instance_id:'i',expected_environment:'REPLAY'}]));
   for(const run of runs)backend.db.prepare('INSERT INTO ow_runs VALUES(?,?,?,1,?,?)').run(run,'s','i','COMPLETED',JSON.stringify(contexts[run]));
   const bundle={policy:{project:'fixture',strategy_name:'Isolated planning fixture'},excluded_evidence:[],
-    cohort:{eligible_runs:runs.map(run_id=>({run_id,context_hash:contexts[run_id].context_hash,observed_sample_count:20})),
-      aggregate:{observed_sample_count:60}},research_coverage:Object.fromEntries(runs.map((run,index)=>[run,[{
+    cohort:{eligible_runs:runs.map(run_id=>({run_id,context_hash:contexts[run_id].context_hash,observed_sample_count:rowsPerRun})),
+      aggregate:{observed_sample_count:rowsPerRun*runs.length}},research_coverage:Object.fromEntries(runs.map((run,index)=>[run,[{
         start_utc:`2025-0${index+1}-01T00:00:00Z`,end_utc:`2025-0${index+2}-01T00:00:00Z`}]]))};
   if(insufficient)bundle.research_coverage.r2=bundle.research_coverage.r1;
-  const rows=runs.flatMap((run_id,index)=>Array.from({length:20},(_,i)=>({run_id,trade_id:index*100+i,
-    entry_datetime:45000+index+i/24,direction:i<10?'long':'short',session_name:'UNKNOWN',regime_label:'UNKNOWN',
-    gross_currency_value:i<10 || (noChange && index===1)?20:-10,total_commission:1,
-    net_profit_loss:i<10 || (noChange && index===1)?19:-11,exit_causality:'unknown'})));
+  const rows=runs.flatMap((run_id,index)=>Array.from({length:rowsPerRun},(_,i)=>({run_id,trade_id:index*rowsPerRun+i,
+    entry_datetime:45000+index+i/24,direction:i<rowsPerRun/2?'long':'short',session_name:'UNKNOWN',regime_label:'UNKNOWN',
+    gross_currency_value:i<rowsPerRun/2 || (noChange && index===1)?20:-10,total_commission:1,
+    net_profit_loss:i<rowsPerRun/2 || (noChange && index===1)?19:-11,exit_causality:'unknown'})));
   if(partial)rows.find(row=>row.run_id==='r2' && row.direction==='long').direction='short';
   if(oneDirection)for(const row of rows)Object.assign(row,{direction:oneDirection,gross_currency_value:-10,net_profit_loss:-11});
   const version=prospective?RESEARCH_VERSION:LEGACY_RESEARCH_VERSION;
@@ -108,6 +110,176 @@ function assertNoAuthority(f) {
   assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_artifacts WHERE kind IN ('CANDIDATE','BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT')").get().n,0);
 }
 
+function assertRiskReview(f,status) {
+  const child=f.children().find(row=>JSON.parse(row.payload_json).kind==='RISK_DISABLE_REVIEW');
+  assert.ok(child);const view=f.backend.readCase(f.human,child.id);
+  assert.equal(view.namespace,'OPERATIONAL');assert.equal(view.owner_id,'brain');assert.equal(view.candidate_hash,null);
+  assert.equal(view.planning.scope,'OWNED_RISK_REVIEW_ONLY');assert.equal(view.planning.qualified_for_planning,false);
+  assert.equal(Boolean(view.planning.blocked_reason),false);assert.equal(view.planning.plan_work,null);
+  assert.equal(view.planning.risk_review.disposition,'RISK_DISABLE_REVIEW_REQUIRED');
+  assert.equal(view.planning.risk_review.retained_trades,0);assert.equal(view.planning.approval_due,false);
+  assert.equal(view.tasks[0].kind,'RISK_DISABLE_REVIEW');assert.equal(view.tasks[0].status,'NOT_RUN');
+  assert.match(view.next_action,/Owner brain: review the frozen .* direction loss observation/);
+  assert.match(view.next_action,/Keep the baseline unchanged; no strategy disable, candidate, execution or human approval/);
+  assert.match(status.next_action,new RegExp(child.id));
+  const payload=JSON.parse(child.payload_json),artifact=f.backend.one('ow_artifacts',payload.lineage_artifact_id);
+  const frozen=JSON.parse(Buffer.from(artifact.content).toString());
+  assert.equal(artifact.kind,'EVIDENCE');assert.equal(frozen.source.report_hash,status.result_hash);
+  assert.equal(frozen.source.input_hash,status.input_hash);assert.equal(objectHash(frozen.support),payload.support_hash);
+  assert.equal(frozen.support.requirement.experiment_hash,objectHash(status.report.experiments[0]));
+  assert.deepEqual(plans(f).queue(f.actor).items,[]);assert.equal(returnedCount(f),0);
+  assertNoAuthority(f);return {child,artifact,view};
+}
+
+test('actual completion of a large mock-native cumulative report survives restart without clipping evidence',t=>{
+  // Evidence/physical qualification are explicitly mocked; completion, artifact
+  // size enforcement, transactions, immutable input and restart use real software.
+  const f=fixture({prospective:true,rowsPerRun:500});try {
+    const {job,result}=f.capture(),input=f.backend.one('ow_research_jobs',job.id).input_json;
+    const bytes=Buffer.byteLength(JSON.stringify({...result,job_id:job.id,case_id:job.case_id,
+      source_recommendation_id:job.artifact_id,source_recommendation_hash:job.artifact_hash,
+      completed_at_utc:new Date().toISOString()},null,2));
+    assert.ok(bytes>128*1024);assert.equal(result.native_session_evidence.exit_audit.length,1500);
+    t.diagnostic(JSON.stringify({report_bytes:bytes,cap_bytes:128*1024,scored_rows:f.rows.length,
+      exit_audit_records:result.native_session_evidence.exit_audit.length,mocks:'EVIDENCE_AND_PHYSICAL_QUALIFICATION_ONLY'}));
+    result.brain_record={record_id:'EXPLICIT_MOCK_BRAIN_RECEIPT',content_hash:digest('mock-record')};
+    const status=f.worker.complete(job,result,f.actor,'strategy');
+    assert.equal(status.state,'COMPLETED');assert.deepEqual(status.report.native_session_evidence.exit_audit,result.native_session_evidence.exit_audit);
+    assert.equal(f.backend.one('ow_research_jobs',job.id).input_json,input);
+    const sealedResult=sealed(f),reference=JSON.parse(Buffer.from(sealedResult.artifact.content).toString());
+    assert.equal(reference.schema_version,REPORT_REFERENCE_VERSION);
+    assert.ok(Buffer.from(sealedResult.artifact.content).length<=128*1024);
+    assert.equal(reference.full_report.content_hash,digest(JSON.stringify(status.report,null,2)));
+    assert.equal(status.result_hash,digest(Buffer.from(sealedResult.artifact.content)));
+    t.diagnostic(JSON.stringify({full_report_bytes:reference.full_report.bytes,
+      outcome_artifact_bytes:Buffer.from(sealedResult.artifact.content).length,full_report_hash:reference.full_report.content_hash}));
+    assert.notEqual(reference.full_report.content_hash,status.result_hash,'artifact and full-report hashes have explicit separate meanings');
+    assert.equal(status.report.candidate_validation.status,'NOT_DUE');
+    const planning=f.worker.continuations.plans.read(f.actor,status.continuations[0].case_id);
+    assert.equal(planning.template.proposed_change.value,'short');
+    assert.equal(planning.template.source.report_hash,status.result_hash);
+    assert.deepEqual(f.worker.continuations.source(sealedResult.job).report,status.report);
+    assert.deepEqual(f.backend.readCase(f.human,'source').research.report,status.report);
+    f.restart();f.worker.reconcile();f.worker.reconcile();
+    assert.deepEqual(f.worker.statusForCase('source').report,status.report);assertSealed(f,sealedResult);assertNoAuthority(f);
+    assert.throws(()=>f.backend.writeArtifact(f.actor,{artifact_id:'test-oversized-unrelated',case_id:'source',run_id:'r1',
+      recipient_id:'strategy',kind:'OUTCOME',media_type:'application/json',content:JSON.stringify({data:'x'.repeat(128*1024)}),
+      content_hash:digest('irrelevant'),candidate_hash:null,dependency_ids:[]}),/UNSAFE_ARTIFACT_TYPE_OR_SIZE/);
+  }finally{f.close();}
+});
+
+test('large contradictory and insufficient reports retain full evidence and honest disposition after restart',()=>{
+  for(const options of [{noChange:true},{insufficient:true}]) {
+    const f=fixture({prospective:true,rowsPerRun:500,...options});try {
+      const {job,result}=f.capture(),status=f.worker.complete(job,result,f.actor,'strategy');
+      assert.equal(status.report.outcome,options.noChange?'NO_SUPPORTED_CHANGE':'INSUFFICIENT_EVIDENCE');
+      for(const key of Object.keys(result))assert.deepEqual(status.report[key],result[key]);
+      assert.equal(status.report.native_session_evidence.exit_audit.length,1500);
+      if(options.noChange) {
+        assert.deepEqual(status.report.experiments.find(item=>item.value==='short').contradictory_child_run_ids,['r2']);
+        assert.equal(f.children().length,0);
+      } else assert.equal(status.continuations[0].kind,'EVIDENCE_FOLLOW_UP');
+      const before=sealed(f);f.restart();f.worker.reconcile();
+      assert.deepEqual(f.worker.statusForCase('source').report,status.report);assertSealed(f,before);assertNoAuthority(f);
+    }finally{f.close();}
+  }
+});
+
+test('large completion rollback and renewed lease retry preserve full frozen input and older inline reports',()=>{
+  const f=fixture({prospective:true});try {
+    f.complete();const original=sealed(f);
+    assert.equal(JSON.parse(Buffer.from(original.artifact.content).toString()).schema_version,RESEARCH_VERSION);
+    f.bundle.excluded_evidence.push({run_id:'EXPLICIT_MOCK_EXCLUDED_HISTORY',exclusion_reason:'Retain contradiction '.repeat(7000)});
+    f.seed('large-later');const {job,result}=f.capture(),input=f.backend.one('ow_research_jobs',job.id).input_json;
+    const write=f.backend.writeArtifact.bind(f.backend);
+    f.backend.writeArtifact=(actor,data)=>{if(data.kind==='OUTCOME'){write(actor,data);throw Error('EXPLICIT_MOCK_CRASH_AFTER_OUTCOME_WRITE');}return write(actor,data);};
+    assert.throws(()=>f.worker.complete(job,result,f.actor,'strategy'),/EXPLICIT_MOCK_CRASH_AFTER_OUTCOME_WRITE/);
+    assert.equal(f.backend.one('ow_research_jobs',job.id).state,'RUNNING');
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_artifacts WHERE case_id='large-later' AND kind='OUTCOME'").get().n,0);
+    f.backend.writeArtifact=write;f.restart();
+    f.backend.db.prepare('UPDATE ow_research_jobs SET lease_until_ms=0 WHERE id=?').run(job.id);
+    const resumed=f.worker.claim();assert.notEqual(resumed.lease_id,job.lease_id);
+    assert.throws(()=>f.worker.complete(job,result,f.actor,'strategy'),/RESEARCH_LEASE_EXPIRED/);
+    const snapshot=f.worker.capture(resumed);assert.equal(f.backend.one('ow_research_jobs',job.id).input_json,input);
+    const status=f.worker.complete(resumed,snapshot.result,f.actor,'strategy');
+    assert.deepEqual(status.report.excluded_evidence,result.excluded_evidence);
+    assert.equal(status.report.excluded_evidence[0].exclusion_reason.length,'Retain contradiction '.repeat(7000).length);
+    assert.throws(()=>f.worker.complete(resumed,snapshot.result,f.actor,'strategy'),/RESEARCH_LEASE_EXPIRED/);
+    f.restart();f.worker.reconcile();f.worker.reconcile();
+    assert.deepEqual(f.worker.statusForCase('large-later').report,status.report);assertSealed(f,original);assertNoAuthority(f);
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_artifacts WHERE case_id='large-later' AND kind='OUTCOME'").get().n,1);
+  }finally{f.close();}
+});
+
+test('large report worker retries the exact mock Brain request after completion failure and resumes across restart',async()=>{
+  const f=fixture({prospective:true,rowsPerRun:500});try {
+    // Only the Brain transport/identity/registry and evidence facts are mocked.
+    // flushOnce/capture/recordInBrain/complete and SQLite remain production code.
+    const {job}=f.capture(),input=f.backend.one('ow_research_jobs',job.id).input_json;
+    f.worker.fail(job,Error('EXPLICIT_MOCK_PRE_BRAIN_INTERRUPTION'));
+    const calls=[];
+    Object.assign(f.backend.operationalLearning,{path:'/EXPLICIT_MOCK_ONLY',token:()=> 'mock-test-token',verifyIdentity:async()=>{},
+      registry:async()=>({record_sha256:digest('registry'),reconciliation_id:'registry'}),
+      call:async(_path,_token,request)=>{
+        calls.push(request);
+        const content=JSON.stringify({registry_record_sha256:request.registry_record_sha256,
+          registry_reconciliation_id:request.registry_reconciliation_id});
+        return {schema_version:'ocean-operational-learning-result/v1',record_id:'EXPLICIT_MOCK_RESEARCH_RECORD',
+          relative_path:'EXPLICIT_MOCK_ONLY/result.json',content,content_sha256:digest(content),
+          correlation:request.correlation,source_record_ids:['r1','r2','r3']};
+      }});
+    const write=f.backend.writeArtifact.bind(f.backend);
+    f.backend.writeArtifact=(actor,data)=>{if(data.kind==='OUTCOME'){write(actor,data);throw Error('EXPLICIT_MOCK_COMPLETION_INTERRUPTION');}return write(actor,data);};
+    f.backend.db.prepare('UPDATE ow_research_jobs SET next_attempt_ms=0 WHERE id=?').run(job.id);
+    await f.worker.flushOnce();
+    const failed=f.backend.one('ow_research_jobs',job.id);
+    assert.equal(failed.state,'RETRY');assert.equal(failed.last_error,'EXPLICIT_MOCK_COMPLETION_INTERRUPTION');
+    assert.equal(failed.input_json,input);assert.ok(failed.brain_request_json);
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_artifacts WHERE kind='OUTCOME'").get().n,0);
+    assert.equal(f.children().length,0);f.backend.writeArtifact=write;f.restart();
+    f.worker.evidence=()=>{throw Error('must use frozen evidence');};
+    f.backend.operationalLearning.registry=async()=>{throw Error('must use frozen Brain request');};
+    f.backend.db.prepare('UPDATE ow_research_jobs SET next_attempt_ms=0 WHERE id=?').run(job.id);
+    await f.worker.flushOnce();
+    const status=f.worker.statusForCase('source'),completed=sealed(f);
+    assert.equal(status.state,'COMPLETED');assert.equal(calls.length,2);assert.deepEqual(calls[1],calls[0]);
+    assert.ok(calls[0].proposed_recommendation.content.length<=50000);
+    assert.equal(status.report.brain_record.record_id,'EXPLICIT_MOCK_RESEARCH_RECORD');
+    assert.equal(status.report.native_session_evidence.exit_audit.length,1500);
+    assert.equal(completed.job.input_json,input);assert.equal(completed.job.brain_request_json,failed.brain_request_json);
+    f.restart();await f.worker.flushOnce();assert.equal(calls.length,2);assertSealed(f,completed);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('large report continuation comparisons resolve later evidence without rewriting the earlier reference',()=>{
+  const f=fixture({prospective:true,insufficient:true,rowsPerRun:500});try {
+    const first=f.complete(),before=sealed(f),child=first.continuations[0];
+    assert.equal(first.report.outcome,'INSUFFICIENT_EVIDENCE');thirdCoverage(f);f.seed('large-qualified-later');
+    const status=f.complete();assert.equal(status.report.outcome,'EXPLORATORY_PROPOSAL');
+    const view=f.backend.readCase(f.human,child.case_id);
+    assert.equal(view.work_status,'COMPLETED');assert.equal(view.planning.progress.status,'REASSESSED');
+    assert.equal(view.planning.progress.source.report_hash,status.result_hash);
+    assert.equal(view.planning.progress.source.case_id,'large-qualified-later');
+    f.restart();f.worker.reconcile();f.worker.reconcile();
+    assert.equal(progressCount(f),1);assertSealed(f,before);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('large zero-exposure reports still require G21 risk-disable review, not candidate planning',()=>{
+  const f=fixture({prospective:true,oneDirection:'long',rowsPerRun:500});try {
+    const status=f.complete(),before=sealed(f);
+    assert.equal(status.report.outcome,'NO_SUPPORTED_CHANGE');assert.equal(f.children().length,1);
+    assert.equal(status.report.direction_exclusion_dispositions[0].retained_trades,0);
+    assert.equal(status.report.direction_exclusion_dispositions[0].disposition,'RISK_DISABLE_REVIEW_REQUIRED');
+    assert.equal(status.report.native_session_evidence.exit_audit.length,1500);
+    assert.equal(status.report.candidate_validation.status,'NOT_DUE');
+    const {child,artifact}=assertRiskReview(f,status);
+    f.restart();f.worker.reconcile();assertSealed(f,before);assertNoAuthority(f);
+    assert.deepEqual(f.backend.one('ow_cases',child.id),child);assert.deepEqual(f.backend.one('ow_artifacts',artifact.id),artifact);
+    assert.deepEqual(f.worker.statusForCase('source').report,status.report);
+  }finally{f.close();}
+});
+
 test('supported completion atomically freezes an owned planning case/task and exposes linked real action',()=>{
   const f=fixture();try {
     const status=f.complete();assert.equal(status.state,'COMPLETED');assert.equal(status.loop_stage,'PROPOSAL_PLANNING');
@@ -134,9 +306,382 @@ test('prospective all-one-direction losses create no entry-filter planning work 
     const status=f.complete(),before=sealed(f);
     assert.equal(status.report.outcome,'NO_SUPPORTED_CHANGE');assert.deepEqual(status.report.proposals,[]);
     assert.equal(status.report.direction_exclusion_dispositions[0].disposition,'RISK_DISABLE_REVIEW_REQUIRED');
-    assert.equal(status.report.candidate_validation.status,'NOT_DUE');assert.equal(f.children().length,0);
+    assert.equal(status.report.candidate_validation.status,'NOT_DUE');assert.equal(f.children().length,1);
+    assert.equal(status.loop_stage,'RISK_DISABLE_REVIEW_REQUIRED');const {child,artifact}=assertRiskReview(f,status);
     f.restart();for(let i=0;i<3;i++)f.worker.reconcile();
-    assert.equal(f.children().length,0);assertSealed(f,before);assertNoAuthority(f);
+    assert.equal(f.children().length,1);assertSealed(f,before);assertNoAuthority(f);
+    assert.deepEqual(f.backend.one('ow_cases',child.id),child);assert.deepEqual(f.backend.one('ow_artifacts',artifact.id),artifact);
+  }finally{f.close();}
+});
+
+test('risk review coalesces duplicate support, recovers only its missing task and never invokes planning',()=>{
+  const f=fixture({prospective:true,oneDirection:'short'});try {
+    const status=f.complete(),before=sealed(f),{child,artifact}=assertRiskReview(f,status);
+    f.seed('duplicate-risk');f.complete();assert.equal(f.children().length,1);
+    assert.equal(f.worker.statusForCase('duplicate-risk').continuations[0].case_id,child.id);
+    f.backend.db.prepare('DELETE FROM ow_tasks WHERE case_id=?').run(child.id);
+    f.restart();for(let i=0;i<3;i++)f.worker.reconcile();
+    assert.equal(f.children().length,1);assert.equal(f.backend.readCase(f.human,child.id).tasks.length,1);
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_events WHERE action='operational.research.planning.created'").get().n,1);
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_events WHERE action='operational.research.continuation.link'").get().n,2);
+    assert.deepEqual(f.backend.one('ow_cases',child.id),child);assert.deepEqual(f.backend.one('ow_artifacts',artifact.id),artifact);
+    assert.throws(()=>f.backend.db.prepare("UPDATE ow_artifacts SET content='changed' WHERE id=?").run(artifact.id),/immutable workflow record/);
+    assert.throws(()=>plans(f).read(f.actor,child.id),/SUPPORTED_OPERATIONAL_PROPOSAL_REQUIRED/);
+    for(const actor of [f.human,{...f.actor,namespace:'TEST'},f.actor])
+      for(const operation of ['case.transition','artifact.write','approval.request','task.result'])
+        assert.throws(()=>f.backend.mutate(operation,actor,{message_id:'test-risk-denied',data:{case_id:child.id}}),/OPERATIONAL_PLANNING_MUTATION_NOT_ENABLED/);
+    assertSealed(f,before);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('insufficient loss observation retains both risk review and independent evidence remediation',()=>{
+  const f=fixture({prospective:true,oneDirection:'long',insufficient:true});try {
+    const status=f.complete(),before=sealed(f);assert.equal(status.report.outcome,'INSUFFICIENT_EVIDENCE');
+    assert.equal(status.loop_stage,'EVIDENCE_REQUIRED');assert.equal(f.children().length,2);
+    const {child}=assertRiskReview(f,status);assert.equal(status.continuations.find(item=>item.case_id===child.id).risk_review.evidence_status,'INSUFFICIENT');
+    assert.ok(status.continuations.some(item=>item.kind==='EVIDENCE_FOLLOW_UP' && item.evidence_remediation.status==='QUALIFIED_EVIDENCE_REQUIRED'));
+    f.restart();f.worker.reconcile();assert.equal(f.children().length,2);assertSealed(f,before);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('profitable zero-remainder accounting and ordinary no-change do not invent risk-disable work',()=>{
+  for(const options of [{prospective:true,oneDirection:'long'},{prospective:true,noChange:true}]) {
+    const f=fixture(options);try {
+      if(options.oneDirection)for(const row of f.rows)Object.assign(row,{gross_currency_value:20,net_profit_loss:19});
+      const status=f.complete(),before=sealed(f);assert.equal(status.report.outcome,'NO_SUPPORTED_CHANGE');
+      assert.deepEqual(f.children(),[]);assert.deepEqual(status.continuations,[]);
+      f.restart();f.worker.reconcile();assert.deepEqual(f.children(),[]);assertSealed(f,before);assertNoAuthority(f);
+    }finally{f.close();}
+  }
+});
+
+test('risk routing checks sealed disposition agreement and current source/owner proof rather than trusting a flag',()=>{
+  const f=fixture({prospective:true,oneDirection:'long'});try {
+    const {result}=f.capture(),c=f.worker.continuations;
+    for(const mutate of [report=>report.direction_exclusion_dispositions=[],report=>report.hypotheses=[],
+      report=>report.experiments[0].retained_exposure.retained_trades=1]) {
+      const changed=structuredClone(result);mutate(changed);
+      assert.throws(()=>c.items({report:changed}),/CONTINUATION_RISK_DISPOSITION_CONFLICT/);
+    }
+  }finally{f.close();}
+  for(const mode of ['unqualified','owner','historical']) {
+    const f=fixture({prospective:true,oneDirection:'short'});try {
+      if(mode==='historical')f.worker.continuations.ensure=()=>[];
+      const status=f.complete(),before=sealed(f);
+      if(mode==='historical')f.backend.db.prepare("UPDATE ow_research_jobs SET analysis_version='ocean-cumulative-research/v5' WHERE id=?").run(before.job.id);
+      if(mode==='unqualified')f.setProof(false);
+      if(mode==='owner')f.backend.config.identities[0].revoked=true;
+      const retained=sealed(f);f.restart();for(let i=0;i<3;i++)f.worker.reconcile();assertSealed(f,retained);
+      if(mode==='historical')assert.equal(f.children().length,0);
+      else {const view=f.backend.readCase(f.human,f.children()[0].id);assert.equal(view.work_status,'BLOCKED');
+        assert.match(view.planning.blocked_reason,mode==='owner'?/OWNER_REQUIRED/:/PROVENANCE_REQUIRED/);
+        assert.match(view.next_action,/Owner brain: resolve/);}
+      assertNoAuthority(f);
+    }finally{f.close();}
+  }
+});
+
+test('risk publication failure rolls back completion and retry seals exactly one review',()=>{
+  const f=fixture({prospective:true,oneDirection:'short'});try {
+    const {job,result}=f.capture(),write=f.backend.writeArtifact.bind(f.backend),input=f.backend.one('ow_research_jobs',job.id).input_json;
+    f.backend.writeArtifact=(actor,data)=>{if(data.artifact_id.startsWith('test-research-lineage-'))throw Error('risk publication crash');return write(actor,data);};
+    assert.throws(()=>f.worker.complete(job,result,f.actor,'strategy'),/risk publication crash/);
+    assert.equal(f.children().length,0);assert.equal(f.backend.one('ow_research_jobs',job.id).input_json,input);
+    f.backend.writeArtifact=write;f.restart();f.backend.db.prepare('UPDATE ow_research_jobs SET lease_until_ms=0 WHERE id=?').run(job.id);
+    const resumed=f.worker.claim();f.worker.complete(resumed,JSON.parse(input).result,f.actor,'strategy');
+    const status=f.worker.statusForCase('source');assertRiskReview(f,status);const before=sealed(f);
+    f.restart();f.worker.reconcile();assert.equal(f.children().length,1);assertSealed(f,before);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('risk review cancellation is preserved rather than reopened or treated as an authorized disable',()=>{
+  const f=fixture({prospective:true,oneDirection:'short'});try {
+    const status=f.complete(),{child,artifact}=assertRiskReview(f,status),before=sealed(f);
+    // Disposable fixture of a separately recorded terminal disposition; this
+    // does not introduce a browser mutation or fabricate a production review.
+    f.backend.db.prepare("UPDATE ow_cases SET work_status='CANCELLED',revision=revision+1 WHERE id=?").run(child.id);
+    const cancelled=f.backend.one('ow_cases',child.id);f.restart();f.worker.reconcile();f.worker.reconcile();
+    assert.deepEqual(f.backend.one('ow_cases',child.id),cancelled);assert.equal(f.children().length,1);
+    const view=f.backend.readCase(f.human,child.id);assert.equal(view.work_status,'CANCELLED');
+    assert.match(view.next_action,/Risk review is cancelled.*No strategy disable, candidate testing or approval is implied/);
+    assert.deepEqual(f.backend.one('ow_artifacts',artifact.id),artifact);assertSealed(f,before);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+function riskInput(f,caseId,message='risk-return',disposition='KEEP_BASELINE') {
+  const row=f.backend.one('ow_cases',caseId);
+  return {message_id:message,data:{case_id:caseId,expected_revision:row.revision,
+    support_hash:JSON.parse(row.payload_json).support_hash,disposition,
+    review_notes:'Reviewed the frozen zero-retained-exposure observation and its recorded child strata. No disable is authorized.'}};
+}
+function assertMachineRisk(f,child) {
+  const view=f.backend.readCase(f.human,child.id),value=view.planning.risk_disposition;
+  assert.equal(view.work_status,'COMPLETED');assert.equal(value.disposition,'EVIDENCE_LIMITED');
+  assert.equal(value.review_method,'MACHINE_ZERO_EXPOSURE_EVIDENCE_QUALIFICATION_V1');
+  assert.equal(value.reviewer_id,child.owner_id);assert.equal(value.disable_authorized,false);
+  assert.match(value.review_notes,/^Machine evidence qualification; not a human review or substantive risk decision\./);
+  const assessment=JSON.parse(value.review_notes.split('\n')[1]);
+  assert.equal(assessment.unchanged_baseline_hash,child.baseline_hash);
+  assert.equal(assessment.baseline_trades,view.planning.risk_review.baseline_trades);
+  assert.equal(assessment.excluded_trades,assessment.baseline_trades);assert.equal(assessment.retained_trades,0);
+  assert.equal(value.source.report_hash,assessment.source.report_hash);
+  assert.equal(view.tasks[0].status,'COMPLETED');assert.equal(view.tasks[0].artifact_id,value.artifact_id);
+  assert.equal(view.planning.qualified_for_planning,false);assertNoAuthority(f);
+  return {view,value,assessment};
+}
+
+test('G28 existing website learning tick records only checked machine evidence limitation and survives reopen',async()=>{
+  const f=fixture({prospective:true,oneDirection:'short',insufficient:true,ownerScopes:['read','artifact.write','case.transition','approval.request','delivery','event.write']});
+  try {
+    const status=f.complete(),before=sealed(f),{child,artifact}=assertRiskReview(f,status);
+    f.backend.operationalLearning.brainActor=(strategy,instance)=>OperationalLearning.prototype.brainActor.call({backend:f.backend},strategy,instance);
+    f.worker.recordInBrain=()=>{throw Error('No model or new Brain call is due for risk qualification');};
+    const learner=Object.assign(Object.create(OperationalLearning.prototype),{enabled:true,running:false,backend:f.backend,
+      token:()=> 'EXPLICIT_MOCK_TICK_IDENTITY',verifyIdentity:async()=>{},registry:async()=>({}),pendingRun:()=>null,status:()=>({})});
+    await learner.flushOnce();
+    const {value}=assertMachineRisk(f,child),closed=f.backend.one('ow_cases',child.id),receipt=f.backend.one('ow_artifacts',value.artifact_id);
+    const expectedMessage=`risk-review:risk-evidence-${objectHash({method:value.review_method,case_id:child.id,
+      owner_id:child.owner_id,support_hash:value.support_hash,report_hash:value.source.report_hash}).slice(7)}`;
+    assert.equal(f.backend.db.prepare('SELECT COUNT(*) n FROM ow_inbox WHERE producer_id=? AND message_id=?').get(child.owner_id,expectedMessage).n,1);
+    assert.equal(f.worker.statusForCase('source').loop_stage,'EVIDENCE_REQUIRED');
+    f.restart();for(let i=0;i<3;i++)f.worker.reconcile();
+    assert.deepEqual(f.backend.one('ow_cases',child.id),closed);assert.deepEqual(f.backend.one('ow_artifacts',receipt.id),receipt);
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_events WHERE action='operational.research.risk-review.recorded'").get().n,1);
+    assert.deepEqual(f.backend.one('ow_artifacts',artifact.id),artifact);assertSealed(f,before);
+    assert.equal(f.worker.continuations.riskEvidenceOnce().status,'NOT_DUE');
+  }finally{f.close();}
+});
+
+test('G28 notes retain actual contradiction and native evidence gaps without closing separate evidence follow-up',()=>{
+  for(const missingProof of [false,true]) {
+  const f=fixture({prospective:true,oneDirection:'long'});try {
+    const native=structuredClone(f.bundle.execution_sessions);
+    for(const row of f.rows.filter(row=>row.run_id==='r2'))Object.assign(row,{gross_currency_value:20,net_profit_loss:19});
+    if(missingProof)delete f.bundle.execution_sessions.r2;
+    const status=f.complete(),before=sealed(f),{child}=assertRiskReview(f,status);
+    const evidence=f.children().find(row=>JSON.parse(row.payload_json).kind==='EVIDENCE_FOLLOW_UP');
+    f.worker.reconcile();const {value,assessment}=assertMachineRisk(f,child);
+    assert.equal(assessment.aggregate_evidence.status,missingProof?'INSUFFICIENT':'SUFFICIENT');
+    assert.equal(assessment.aggregate_evidence.reasons.includes('OBSERVED_EXECUTION_SESSION_PROOF_REQUIRED'),missingProof);
+    assert.equal(assessment.aggregate_evidence.session_proof_gaps.count,missingProof?1:0);
+    assert.deepEqual(assessment.aggregate_evidence.session_proof_gaps.sample,missingProof?['r2']:[]);
+    assert.deepEqual(assessment.retained_contradictions.sample,['r2']);
+    assert.equal(assessment.retained_contradictions.count,1);assert.equal(assessment.robustness.status,'CONTRADICTED');
+    assert.deepEqual(assessment.contradiction_facts.sample,[{run_id:'r2',trades:20,net_profit_loss:380,observed_exclusion_delta:-380}]);
+    if(missingProof)assert.deepEqual(f.backend.one('ow_cases',evidence.id),evidence);
+    else assert.equal(evidence,undefined);
+    assert.equal(f.worker.statusForCase('source').loop_stage,missingProof?'EVIDENCE_REQUIRED':'RISK_REVIEW_RECORDED');
+    assert.match(value.review_notes,/unsampled entries.*exact immutable source report/);
+    if(missingProof) {
+      f.bundle.execution_sessions=native;
+      f.worker.sessionRows=run=>f.rows.filter(row=>row.run_id===run);f.worker.observedSessions=()=>f.bundle.execution_sessions;
+      f.worker.reconcile();
+      assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_research_jobs WHERE state='PENDING'").get().n,1);
+    }
+    assert.equal(f.backend.one('ow_cases',child.id).work_status,'COMPLETED');assertSealed(f,before);
+  }finally{f.close();}
+  }
+});
+
+test('G28 return rollback and lost committed response retry without duplicate completion or source mutation',()=>{
+  for(const fault of ['artifact','event','inbox','readback','proof-drift','owner-drift','lost-response']) {
+    const f=fixture({prospective:true,oneDirection:'short',insufficient:true});try {
+      const status=f.complete(),before=sealed(f),{child}=assertRiskReview(f,status),c=f.worker.continuations;
+      const write=f.backend.writeArtifact.bind(f.backend),event=f.backend.event.bind(f.backend),record=c.recordRiskDisposition.bind(c);
+      if(fault==='artifact')f.backend.writeArtifact=(actor,data)=>{if(data.artifact_id.startsWith('test-risk-disposition-'))throw Error('EXPLICIT_MOCK_DISK_FAILURE');return write(actor,data);};
+      if(fault==='event')f.backend.event=(entity,action,...args)=>{if(action==='operational.research.risk-review.recorded')throw Error('EXPLICIT_MOCK_RETURN_FAILURE');return event(entity,action,...args);};
+      if(fault==='readback')f.backend.event=(entity,action,...args)=>event(entity,action,...(action==='operational.research.risk-review.recorded'
+        ?[args[0],{...args[1],disposition:'KEEP_BASELINE'}]:args));
+      if(fault==='inbox')f.backend.db.exec("CREATE TRIGGER mock_risk_inbox_failure BEFORE INSERT ON ow_inbox WHEN NEW.message_id LIKE 'risk-review:risk-evidence-%' BEGIN SELECT RAISE(ABORT,'EXPLICIT_MOCK_INBOX_FAILURE'); END");
+      if(fault==='lost-response')c.recordRiskDisposition=(...args)=>{record(...args);throw Error('EXPLICIT_MOCK_LOST_COMMITTED_RESPONSE');};
+      if(fault==='proof-drift')c.recordRiskDisposition=(...args)=>{f.setProof(false);return record(...args);};
+      if(fault==='owner-drift')c.recordRiskDisposition=(...args)=>{f.backend.db.prepare('UPDATE ow_cases SET owner_id=? WHERE id=?').run('replacement-owner',child.id);return record(...args);};
+      const result=c.riskEvidenceOnce();assert.equal(result.status,'RETRY');assert.equal(result.returned.length,0);
+      if(fault!=='lost-response') {
+        assert.equal(f.backend.one('ow_cases',child.id).work_status,'READY');
+        assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_artifacts WHERE id LIKE 'test-risk-disposition-%'").get().n,0);
+        assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_inbox WHERE message_id LIKE 'risk-review:risk-evidence-%'").get().n,0);
+        const blocker=f.backend.db.prepare("SELECT * FROM ow_blockers WHERE id=?").get(`${child.id}:risk-worker`);
+        assert.equal(blocker.owner_id,fault==='owner-drift'?'replacement-owner':child.owner_id);assert.equal(blocker.state,'OPEN');
+        assert.equal(result.blocked[0].owner_id,blocker.owner_id);assert.match(blocker.action,new RegExp(`Owner ${blocker.owner_id}:`));
+        c.riskEvidenceOnce();assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_events WHERE action='operational.research.risk-review.worker-blocked'").get().n,1);
+      }
+      f.backend.writeArtifact=write;f.backend.event=event;
+      f.setProof(true);
+      if(fault==='owner-drift')f.backend.db.prepare('UPDATE ow_cases SET owner_id=? WHERE id=?').run(child.owner_id,child.id);
+      if(fault==='inbox')f.backend.db.exec('DROP TRIGGER mock_risk_inbox_failure');
+      f.restart();f.worker.reconcile();const {value}=assertMachineRisk(f,child);
+      const inbox=f.backend.db.prepare("SELECT * FROM ow_inbox WHERE message_id LIKE 'risk-review:risk-evidence-%'").get();
+      const returned=JSON.parse(inbox.result_json),closed=f.backend.one('ow_cases',child.id);
+      const notes=value.review_notes,input={message_id:inbox.message_id.slice('risk-review:'.length),
+        data:{case_id:child.id,expected_revision:returned.revision-1,support_hash:returned.support_hash,
+          disposition:'EVIDENCE_LIMITED',review_notes:notes}};
+      assert.deepEqual(f.worker.continuations.recordRiskDisposition(f.actor,input,true),returned);
+      f.restart();for(let i=0;i<3;i++)f.worker.reconcile();
+      assert.deepEqual(f.backend.one('ow_cases',child.id),closed);
+      assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_events WHERE action='operational.research.risk-review.recorded'").get().n,1);
+      assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_blockers WHERE case_id=? AND state='OPEN'").get(child.id).n,0);
+      assertSealed(f,before);assertNoAuthority(f);
+    }finally{f.close();}
+  }
+});
+
+test('G28 sufficient zero-exposure without contradictions or shortfalls stays explicitly owned and unqualified',()=>{
+  const f=fixture({prospective:true,oneDirection:'short'});try {
+    const status=f.complete(),before=sealed(f),{child}=assertRiskReview(f,status),c=f.worker.continuations;
+    const result=c.riskEvidenceOnce();assert.equal(result.status,'UNQUALIFIED');assert.deepEqual(result.returned,[]);
+    assert.equal(result.blocked[0].reason,'RISK_MACHINE_LIMITATION_NOT_ESTABLISHED');
+    assert.equal(f.backend.one('ow_cases',child.id).work_status,'READY');
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_events WHERE action='operational.research.risk-review.recorded'").get().n,0);
+    const blocker=f.backend.db.prepare('SELECT * FROM ow_blockers WHERE id=?').get(`${child.id}:risk-worker`);
+    assert.equal(blocker.owner_id,child.owner_id);assert.match(blocker.action,/genuine owner risk review remains due/);
+    f.restart();f.worker.reconcile();assert.equal(f.backend.one('ow_cases',child.id).work_status,'READY');
+    const returned=f.worker.continuations.recordRiskDisposition(f.actor,riskInput(f,child.id,'genuine-owner-return'));
+    assert.equal(returned.disposition,'KEEP_BASELINE');assert.equal(returned.review_method,undefined);
+    assertSealed(f,before);assertNoAuthority(f);
+  }finally{f.close();}
+  const limited=fixture({prospective:true,oneDirection:'short',insufficient:true});try {
+    const status=limited.complete(),{child}=assertRiskReview(limited,status),c=limited.worker.continuations;
+    const work=c.riskWork(limited.actor,child.id),source=c.source(limited.backend.one('ow_research_jobs',work.frozen.source.job_id));
+    const changed=structuredClone(source);changed.report.proposals=[{dimension:'direction',value:'long',supported:true}];
+    assert.throws(()=>c.riskEvidenceNotes(work.frozen,changed),/RISK_MACHINE_LIMITATION_NOT_ESTABLISHED/);
+    assert.equal(limited.backend.one('ow_cases',child.id).work_status,'READY');assertNoAuthority(limited);
+  }finally{limited.close();}
+});
+
+test('G28 wrong owner, revocation and stale/restored source remain owned retry work, never default decisions',()=>{
+  for(const mode of ['wrong-owner','revoked','scope','proof','registry','baseline']) {
+    const f=fixture({prospective:true,oneDirection:'short',insufficient:true});try {
+      const status=f.complete(),before=sealed(f),{child}=assertRiskReview(f,status),identity=f.backend.config.identities[0];
+      const select=f.backend.operationalLearning.brainActor;
+      if(mode==='wrong-owner')f.backend.operationalLearning.brainActor=()=>({...f.actor,id:'other'});
+      if(mode==='revoked')identity.revoked=true;
+      if(mode==='scope')f.backend.operationalLearning.brainActor=()=>({...f.actor,scopes:['read','event.write']});
+      if(mode==='proof')f.setProof(false);
+      if(mode==='registry')f.backend.operationalLearning.registryContext={record_sha256:digest('drift')};
+      if(mode==='baseline')f.backend.db.prepare('UPDATE ow_strategies SET baseline_hash=? WHERE id=?').run(digest('drift'),'s');
+      const retained=sealed(f);f.restart();f.worker.reconcile();
+      assert.notEqual(f.backend.one('ow_cases',child.id).work_status,'COMPLETED');
+      const blocker=f.backend.db.prepare('SELECT * FROM ow_blockers WHERE id=?').get(`${child.id}:risk-worker`);
+      assert.equal(blocker.owner_id,child.owner_id);assert.equal(blocker.state,'OPEN');assert.match(blocker.action,/No default risk decision or completion/);
+      assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_events WHERE action='operational.research.risk-review.recorded'").get().n,0);
+      f.backend.operationalLearning.brainActor=select;delete identity.revoked;f.setProof(true);delete f.backend.operationalLearning.registryContext;
+      if(mode==='baseline')f.backend.db.prepare('UPDATE ow_strategies SET baseline_hash=? WHERE id=?').run(child.baseline_hash,'s');
+      f.worker.reconcile();assertMachineRisk(f,child);assertSealed(f,retained);
+      assert.deepEqual(before,retained);assertNoAuthority(f);
+    }finally{f.close();}
+  }
+});
+
+test('G28 empty queue is NOT_DUE and bounded rotation retries beyond an old blocked batch',()=>{
+  const empty=fixture();try {
+    const counts=()=>Object.fromEntries(['ow_cases','ow_events','ow_artifacts','ow_inbox','ow_blockers'].map(table=>[table,empty.backend.db.prepare(`SELECT COUNT(*) n FROM ${table}`).get().n]));
+    const before=counts();assert.equal(empty.worker.continuations.riskEvidenceOnce().status,'NOT_DUE');assert.deepEqual(counts(),before);
+  }finally{empty.close();}
+  const f=fixture({prospective:true,oneDirection:'short',insufficient:true});try {
+    for(let i=0;i<21;i++) {
+      Object.assign(f.rows[0],{net_profit_loss:-11-i,gross_currency_value:-10-i});if(i)f.seed(`batch-risk-${i}`);f.complete();
+    }
+    assert.equal(f.children().filter(row=>JSON.parse(row.payload_json).kind==='RISK_DISABLE_REVIEW').length,21);f.setProof(false);
+    const c=f.worker.continuations,first=c.riskEvidenceOnce(),second=c.riskEvidenceOnce();
+    assert.equal(first.blocked.length,20);assert.equal(second.blocked.length,1);
+    assert.equal(first.returned.length,0);assert.equal(second.returned.length,0);
+    f.setProof(true);f.worker.reconcile();f.worker.reconcile();
+    assert.equal(f.children().filter(row=>JSON.parse(row.payload_json).kind==='RISK_DISABLE_REVIEW' && row.work_status==='COMPLETED').length,21);
+    assert.equal(c.riskEvidenceOnce().status,'NOT_DUE');assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+// The second scope set is the read-only CICD OPERATIONAL catalog observation
+// from 2026-10-08; identity, session and qualification remain isolated fixtures.
+for(const [scopeLabel,ownerScopes] of [
+  ['minimum scopes',['read','artifact.write','event.write']],
+  ['configured CICD catalog scopes',['read','artifact.write','case.transition','approval.request','delivery','event.write']],
+])test(`real isolated HTTP risk-owner disposition closes only the risk task and replays byte-identically after restart (${scopeLabel})`,async()=>{
+  const {createServer}=await import('node:http');
+  const f=fixture({prospective:true,oneDirection:'short',ownerScopes});let server;
+  try {
+    const status=f.complete(),before=sealed(f),{child,artifact}=assertRiskReview(f,status);
+    const pins=()=>Object.fromEntries(['ow_strategies','ow_profiles','ow_instances','ow_runs'].map(table=>[table,f.backend.db.prepare(`SELECT * FROM ${table} ORDER BY id`).all()]));
+    const originalPins=pins();let actor=OperationalLearning.prototype.brainActor.call({backend:f.backend},'s','i');
+    assert.equal(actor.id,f.actor.id);assert.deepEqual(actor.scopes,ownerScopes);
+    Object.assign(f.backend,{authFailureWindowMs:300000,authFailureThreshold:3,
+      authFailureTotals:{401:0,403:0},authFailureBuckets:new Map()});
+    // Authentication identity is an explicit fixture. Actual HTTP body parser,
+    // scoped handler, authorization, transactions and SQLite execute unchanged.
+    f.backend.auth.authenticate=()=>actor;
+    server=createServer((request,response)=>void f.backend.handle(request,response,new URL(request.url,'http://127.0.0.1')));
+    await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+    const url=`http://127.0.0.1:${server.address().port}/api/workflow/operational/v1/`;
+    const invoke=async(route,input)=>{const response=await fetch(url+route,{signal:AbortSignal.timeout(5000),
+      ...(input?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(input)}:{})});
+      return {status:response.status,body:await response.json()};};
+    const queued=await invoke('risk-reviews/work');assert.equal(queued.status,200);assert.equal(queued.body.items[0].case_id,child.id);
+    const input=riskInput(f,child.id),returned=await invoke('risk-reviews/dispositions',input);
+    assert.equal(returned.status,200);assert.equal(returned.body.risk_review_complete,true);assert.equal(returned.body.disable_authorized,false);
+    const view=f.backend.readCase(f.human,child.id);assert.equal(view.work_status,'COMPLETED');
+    assert.equal(view.tasks[0].status,'COMPLETED');assert.equal(view.tasks[0].artifact_id,returned.body.artifact_id);
+    assert.equal(view.planning.risk_disposition.disposition,'KEEP_BASELINE');assert.equal(view.planning.qualified_for_planning,false);
+    assert.match(view.next_action,/risk review recorded KEEP_BASELINE.*No strategy disable/);
+    assert.equal(f.worker.statusForCase('source').loop_stage,'RISK_REVIEW_RECORDED');
+    assert.deepEqual((await invoke('risk-reviews/work')).body.items,[]);
+    const receipt=f.backend.one('ow_artifacts',returned.body.artifact_id),closed=f.backend.one('ow_cases',child.id);
+    assert.equal(receipt.kind,'EVIDENCE');assert.deepEqual(JSON.parse(receipt.dependencies_json),[artifact.id]);
+    assert.deepEqual((await invoke('risk-reviews/dispositions',input)).body,returned.body);
+    f.restart();f.worker.reconcile();f.worker.reconcile();
+    assert.deepEqual((await invoke('risk-reviews/dispositions',input)).body,returned.body);
+    assert.deepEqual(f.backend.one('ow_cases',child.id),closed);assert.deepEqual(f.backend.one('ow_artifacts',receipt.id),receipt);
+    assert.deepEqual(f.backend.one('ow_artifacts',artifact.id),artifact);assert.deepEqual(pins(),originalPins);
+    const changed=structuredClone(input);changed.data.review_notes='Different disposition notes';
+    assert.equal((await invoke('risk-reviews/dispositions',changed)).body.error.code,'DUPLICATE_CONFLICT');
+    assert.equal((await invoke('risk-reviews/dispositions',{...input,message_id:'new-stale'})).body.error.code,'REVISION_CONFLICT');
+    assert.equal((await invoke('risk-reviews/dispositions',riskInput(f,child.id,'new-closed'))).body.error.code,'RISK_REVIEW_DISPOSITION_HELD');
+    actor={...f.actor,id:'different-owner'};assert.equal((await invoke('risk-reviews/dispositions',input)).body.error.code,'RISK_REVIEW_EXACT_OWNER_REQUIRED');
+    actor=f.actor;f.setProof(false);
+    assert.equal((await invoke('risk-reviews/dispositions',input)).body.error.code,'CONTINUATION_CURRENT_PROVENANCE_REQUIRED');
+    assertSealed(f,before);assertNoAuthority(f);
+  }finally{if(server)await new Promise(resolve=>server.close(resolve));f.close();}
+});
+
+test('risk completion refuses TEST, wrong role/scope/support, authority fields, held state and missing return proof',()=>{
+  const f=fixture({prospective:true,oneDirection:'short'});try {
+    f.complete();const child=f.children()[0],input=riskInput(f,child.id),c=f.worker.continuations;
+    for(const actor of [{...f.actor,namespace:'TEST'},{...f.actor,role:'STRATEGY'},f.human,
+      {...f.actor,scopes:['read','event.write']},{...f.actor,strategyIds:['other']},{...f.actor,instanceIds:['other']}])
+      assert.throws(()=>c.recordRiskDisposition(actor,input),/RISK_REVIEW_OPERATIONAL_BRAIN_REQUIRED|EXACT_OWNER_REQUIRED|WRONG_ACTION_SCOPE|WRONG_STRATEGY_SCOPE|WRONG_INSTANCE_SCOPE/);
+    for(const data of [{...input.data,support_hash:digest('different')},{...input.data,disposition:'DISABLE_APPROVED'},
+      {...input.data,review_notes:''},{...input.data,disable_authorized:true},{...input.data,human_approved:true}])
+      assert.throws(()=>c.recordRiskDisposition(f.actor,{...input,data}),/SUPPORT_CONFLICT|DISPOSITION_REQUIRED|NOTES_REQUIRED|UNKNOWN_OR_AUTHORITY_FIELD/);
+    f.backend.config.identities[0].revoked=true;
+    assert.throws(()=>c.recordRiskDisposition(f.actor,input),/CURRENT_OWNER_REQUIRED/);delete f.backend.config.identities[0].revoked;
+    f.backend.db.prepare("UPDATE ow_cases SET work_status='CANCELLED' WHERE id=?").run(child.id);
+    assert.throws(()=>c.recordRiskDisposition(f.actor,input),/DISPOSITION_HELD/);
+    f.backend.db.prepare("UPDATE ow_cases SET work_status='COMPLETED' WHERE id=?").run(child.id);
+    assert.equal(f.backend.readCase(f.human,child.id).planning.blocked_reason,'RISK_REVIEW_RETURN_PROOF_REQUIRED');
+    assert.throws(()=>c.recordRiskDisposition(f.actor,input),/RETURN_PROOF_REQUIRED/);
+    assertNoAuthority(f);
+  }finally{f.close();}
+  const f2=fixture();try {
+    f2.complete();const child=f2.children()[0];
+    assert.throws(()=>f2.worker.continuations.recordRiskDisposition(f2.actor,riskInput(f2,child.id)),/OWNED_RISK_REVIEW_REQUIRED/);
+  }finally{f2.close();}
+});
+
+test('risk return failure rolls back all closure evidence and evidence-limited review never closes the separate evidence task',()=>{
+  const f=fixture({prospective:true,oneDirection:'long',insufficient:true});try {
+    const status=f.complete(),before=sealed(f),{child,artifact}=assertRiskReview(f,status);
+    const evidence=f.children().find(row=>JSON.parse(row.payload_json).kind==='EVIDENCE_FOLLOW_UP');
+    const input=riskInput(f,child.id,'evidence-limited-risk','EVIDENCE_LIMITED'),event=f.backend.event.bind(f.backend);
+    f.backend.event=(entity,action,...args)=>{if(action==='operational.research.risk-review.recorded')throw Error('risk closure crash');return event(entity,action,...args);};
+    assert.throws(()=>f.worker.continuations.recordRiskDisposition(f.actor,input),/risk closure crash/);
+    assert.equal(f.backend.one('ow_cases',child.id).work_status,'READY');
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_artifacts WHERE id LIKE 'test-risk-disposition-%'").get().n,0);
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_inbox WHERE message_id LIKE 'risk-review:%'").get().n,0);
+    f.backend.event=event;f.restart();const returned=f.worker.continuations.recordRiskDisposition(f.actor,input);
+    assert.equal(returned.risk_review_complete,true);assert.equal(returned.disable_authorized,false);
+    f.restart();f.worker.reconcile();assert.deepEqual(f.worker.continuations.recordRiskDisposition(f.actor,input),returned);
+    assert.deepEqual(f.backend.one('ow_cases',evidence.id),evidence);assert.equal(f.worker.statusForCase('source').loop_stage,'EVIDENCE_REQUIRED');
+    assert.deepEqual(f.backend.one('ow_artifacts',artifact.id),artifact);assertSealed(f,before);assertNoAuthority(f);
   }finally{f.close();}
 });
 
@@ -398,13 +943,78 @@ test('new operational planning is visible in existing read views but TEST servic
   }finally{f.close();}
 });
 
-test('learning projection does not call an open owned continuation a completed whole loop',()=>{
+function learningProjection(f,classification) {
+  const learner=Object.create(OperationalLearning.prototype);
+  Object.assign(learner,{backend:f.backend,db:f.backend.db,registryContext:null,retry:new Map(),classification,
+    resultFor:()=>({result:{},callback:{status:'COMPLETED'},details:{conclusion_type:'RECOMMENDATION',continuation:{case_id:'source'}}})});
+  return learner;
+}
+
+test('learning projection prioritizes missing current provenance over an open compatibility continuation',()=>{
   const f=fixture({insufficient:true});try {
-    f.complete();const learner=Object.create(OperationalLearning.prototype);
-    Object.assign(learner,{backend:f.backend,db:f.backend.db,registryContext:null,retry:new Map(),classification:()=>({eligible:true,reasons:[],telemetry:{}}),
-      resultFor:()=>({result:{},callback:{status:'COMPLETED'},details:{conclusion_type:'RECOMMENDATION',continuation:{case_id:'source'}}})});
-    const status=learner.statusForRun('r1');assert.equal(status.stage,'COMPLETE');assert.equal(status.loop_stage,'EVIDENCE_REQUIRED');
-    assert.match(status.next_action,/Owner brain/);assert.equal(status.research.state,'COMPLETED');assertNoAuthority(f);
+    f.complete();const before=sealed(f),action='Owner provenance: resolve current physical/raw proof before continuing.';
+    const learner=learningProjection(f,()=>({eligible:false,reasons:['CURRENT_PROVENANCE_MISSING'],
+      telemetry:{verified:false,bypassed:false,required_action:action}}));
+    const status=learner.statusForRun('r1');
+    assert.equal(status.stage,'COMPLETE','The preserved callback is not rewritten');
+    assert.equal(status.research.analysis_version,LEGACY_RESEARCH_VERSION);
+    assert.equal(status.research.historical,false,'This fixture explicitly runs the v4 compatibility worker');
+    assert.equal(status.recorded_loop_stage,'EVIDENCE_REQUIRED');
+    assert.equal(status.loop_stage,'QUALIFICATION_REQUIRED');
+    assert.equal(status.current_qualification_status,'QUALIFICATION_REQUIRED');
+    assert.equal(status.current_provenance_qualified,false);assert.equal(status.next_action,action);
+    assert.equal(status.historical_result.loop_stage,'EVIDENCE_REQUIRED');
+    assert.equal(status.research.state,'COMPLETED');assertSealed(f,before);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('learning projection keeps a current-qualified v6 open continuation evidence-required, not whole-loop complete',()=>{
+  const f=fixture({prospective:true,insufficient:true});try {
+    const classification=f.backend.operationalLearning.classification;
+    // Explicit qualification fixture, not physical execution or an approval.
+    f.backend.operationalLearning.classification=run=>{
+      const current=classification(run);
+      return {...current,telemetry:{verified:current.eligible,bypassed:false,proof_basis:'EXPLICIT_MOCK_ONLY',
+        ...(!current.eligible?{required_action:'Owner provenance: restore exact current physical/raw proof.'}:{})}};
+    };
+    f.complete();const before=sealed(f),child=f.children()[0];
+    const learner=learningProjection(f,f.backend.operationalLearning.classification);
+    const checkCurrent=()=>{
+      const status=learner.statusForRun('r1');
+      assert.equal(status.stage,'COMPLETE');assert.equal(status.loop_stage,'EVIDENCE_REQUIRED');
+      assert.equal(status.recorded_loop_stage,'EVIDENCE_REQUIRED');assert.equal(status.current_qualification_status,'CURRENT');
+      assert.equal(status.current_provenance_qualified,true);assert.equal(status.historical_result,null);
+      assert.equal(status.research.analysis_version,RESEARCH_VERSION);assert.equal(status.research.historical,false);
+      assert.equal(status.research.qualified_for_new_support,true);assert.equal(status.research.state,'COMPLETED');
+      assert.equal(status.next_action,status.research.next_action);assert.match(status.next_action,/Owner brain/);
+      assert.ok(status.next_action.includes(child.id));assert.notEqual(status.loop_stage,'COMPLETE');
+    };
+    checkCurrent();
+    f.setProof(false);const blocked=learner.statusForRun('r1');
+    assert.equal(blocked.loop_stage,'QUALIFICATION_REQUIRED');
+    assert.equal(blocked.current_provenance_qualified,false);
+    assert.equal(blocked.next_action,'Owner provenance: restore exact current physical/raw proof.');
+    f.setProof(true);checkCurrent();assertSealed(f,before);assertNoAuthority(f);
+  }finally{f.close();}
+});
+
+test('learning projection treats a completed legacy report as historical even with current physical qualification',()=>{
+  const f=fixture({insufficient:true});try {
+    f.complete();const before=sealed(f);
+    f.worker.version=RESEARCH_VERSION;
+    const learner=learningProjection(f,()=>({eligible:true,reasons:[],
+      telemetry:{verified:true,bypassed:false,proof_basis:'EXPLICIT_MOCK_ONLY'}}));
+    const status=learner.statusForRun('r1');
+    assert.equal(status.stage,'COMPLETE');assert.equal(status.current_provenance_qualified,true);
+    assert.equal(status.research.analysis_version,LEGACY_RESEARCH_VERSION);assert.equal(status.research.state,'COMPLETED');
+    assert.equal(status.research.historical,true);assert.equal(status.research.qualified_for_new_support,false);
+    assert.equal(status.loop_stage,'QUALIFICATION_REQUIRED');
+    assert.equal(status.current_qualification_status,'QUALIFICATION_REQUIRED');
+    assert.equal(status.historical_result.loop_stage,status.recorded_loop_stage);
+    assert.equal(status.next_action,status.research.next_action);
+    assert.match(status.next_action,/Historical Research is completed and preserved/);
+    assert.match(status.next_action,/provenance owner/);assert.doesNotMatch(status.next_action,/Owner brain: obtain/);
+    assertSealed(f,before);assertNoAuthority(f);
   }finally{f.close();}
 });
 
@@ -416,8 +1026,10 @@ test('actual source UI links owned progress and labels planning work without off
       table:(_headers,rows)=>rows.flat().join('\n'),esc:String,badge:String,human:String,link:(_type,id)=>id,
       heading:()=>'',button:(_action,label)=>`BUTTON:${label}`,hash:String,date:String,empty:String,timeline:()=>'',
       caseProgress:()=>'',approvalTable:()=>'',handoffList:()=>''};
-    const panel=vm.runInNewContext(source.slice(source.indexOf('function researchPanel('),source.indexOf('function casePage('))+';researchPanel',helpers);
+    const fullReportLink=source.slice(source.indexOf('const fullReportLink ='),source.indexOf('\n',source.indexOf('const fullReportLink =')));
+    const panel=vm.runInNewContext(fullReportLink+'\n'+source.slice(source.indexOf('function researchPanel('),source.indexOf('function casePage('))+';researchPanel',helpers);
     assert.match(panel(research),/Owned continuation work/);assert.match(panel(research),new RegExp(child.id));assert.match(panel(research),/Owner brain/);
+    assert.ok(panel(research).includes(`/improvement/artifacts/${research.result_artifact_id}#full-research-report`));
     const page=vm.runInNewContext(source.slice(source.indexOf('function casePage('),source.indexOf('function approvalPage('))+';casePage',
       {...helpers,researchPanel:()=>''});
     const data=readWorkflowView(f.backend,f.human,`view/cases/${child.id}`),html=page(data);
@@ -428,6 +1040,84 @@ test('actual source UI links owned progress and labels planning work without off
 });
 
 const plans=f=>f.worker.continuations.plans;
+test('isolated Chrome links the actual owned risk review, retains it across restart and offers no disable or approval',
+  {skip:!process.env.OCEAN_RISK_REVIEW_UI_ARTIFACTS},async t=>{
+  const {createRequire}=await import('node:module');
+  const require=createRequire(import.meta.url);
+  const {chromium}=require(require.resolve('playwright',{paths:[process.env.OCEAN_S21_NODE_MODULES]}));
+  const f=fixture({prospective:true,oneDirection:'short',insufficient:true}),browser=await chromium.launch({channel:'chrome',headless:true});
+  try {
+    const status=f.complete(),before=sealed(f),{child,artifact}=assertRiskReview(f,status);
+    const root=new URL('../public/',import.meta.url),base='http://127.0.0.1:17891',errors=[],writes=[];
+    const context=await browser.newContext(),page=await context.newPage();page.on('pageerror',error=>errors.push(error.message));
+    await page.addInitScript(()=>sessionStorage.setItem('ocean-workflow-human-csrf','EXPLICIT_MOCK_BROWSER_SESSION'));
+    // Transport/session are explicit mocks. Read views use the real backend,
+    // disposable SQLite and current UI; no production service or credential is read.
+    await page.route('**/*',async route=>{
+      const request=route.request(),url=new URL(request.url());
+      if(url.origin!==base)return route.abort();
+      if(request.method()!=='GET'){writes.push(request.url());return route.abort();}
+      if(url.pathname==='/api/workflow/session')return route.fulfill({json:{expires_at_utc:new Date(Date.now()+3600000).toISOString()}});
+      if(url.pathname==='/api/workflow/view/dashboard')return route.fulfill({json:{counts:{action_required:0}}});
+      if(url.pathname.startsWith('/api/workflow/view/cases/'))return route.fulfill({json:readWorkflowView(f.backend,f.human,url.pathname.slice('/api/workflow/'.length))});
+      const relative=url.pathname.startsWith('/improvement/')?'workflow/index.html':url.pathname.slice(1);
+      const file=new URL(relative,root);
+      if(!file.href.startsWith(root.href) || !fs.existsSync(file))return route.fulfill({status:404,body:''});
+      const type={'.html':'text/html','.js':'text/javascript','.css':'text/css','.png':'image/png','.svg':'image/svg+xml'}[path.extname(file.pathname)];
+      return route.fulfill({contentType:type || 'application/octet-stream',body:fs.readFileSync(file)});
+    });
+    const settled=()=>page.waitForFunction(()=>document.querySelector('#content')?.getAttribute('aria-busy')==='false');
+    await page.goto(`${base}/improvement/cases/source`);await settled();
+    await page.locator(`a[href='/improvement/cases/${child.id}']`).click();await settled();
+    await page.getByRole('heading',{name:'Risk review scope',exact:true}).waitFor();
+    const body=await page.locator('#content').innerText();
+    assert.match(body,/Owner brain: review the frozen short direction loss observation/);
+    assert.match(body,/60 baseline \/ 60 excluded \/ 0 retained trades/);assert.match(body,/Required risk review/);
+    assert.match(body,/no strategy disable, candidate development or test permission/);
+    assert.doesNotMatch(body,/Await new qualified Research|Required planning work|Historical validation/);
+    const fact=label=>page.locator('dt').filter({hasText:new RegExp(`^${label}$`)}).locator('..').locator('dd');
+    assert.equal(await fact('Observation classification').innerText(),'Risk disable review required');
+    assert.equal(await fact('Review disposition').count(),0);
+    assert.equal(await fact('Recorded disposition').count(),0);
+    assert.equal(await page.locator('#content [data-action]').count(),0);
+    const output=process.env.OCEAN_RISK_REVIEW_UI_ARTIFACTS;fs.mkdirSync(output,{recursive:true});
+    for(const [width,height,label] of [[1440,1000,'desktop'],[390,844,'mobile']]) {
+      await page.setViewportSize({width,height});
+      await page.screenshot({path:path.join(output,`risk-review-${label}.png`),fullPage:true,animations:'disabled'});
+      const overflow=await page.evaluate(()=>({viewport:innerWidth,document:document.documentElement.scrollWidth,
+        elements:[...document.querySelectorAll('#content *')].filter(node=>node.getBoundingClientRect().right>innerWidth)
+          .slice(0,12).map(node=>({tag:node.tagName,class:node.className,text:node.textContent.slice(0,100),right:node.getBoundingClientRect().right}))}));
+      if(overflow.document>overflow.viewport)t.diagnostic(JSON.stringify(overflow));
+      assert.equal(overflow.document<=overflow.viewport,true);
+    }
+    f.restart();f.worker.reconcile();await page.reload();await settled();
+    assert.equal(await page.getByRole('heading',{name:'Risk review scope',exact:true}).count(),1);
+    const {value:returned}=assertMachineRisk(f,child);
+    assert.match(await page.locator('#content').innerText(),/Machine evidence qualification; not a human review or substantive risk decision/);
+    f.restart();f.worker.reconcile();
+    await page.reload();await settled();
+    assert.match(await page.locator('#content').innerText(),/risk review recorded EVIDENCE_LIMITED/);
+    assert.equal(await fact('Observation classification').innerText(),'Risk disable review required');
+    assert.equal(await fact('Review disposition').innerText(),'Evidence limited');
+    assert.equal(await fact('Review notes').textContent(),returned.review_notes);
+    assert.equal(await fact('Reviewer').innerText(),f.actor.id);
+    assert.equal(await fact('Immutable review artifact').getByRole('link').getAttribute('href'),
+      `/improvement/artifacts/${returned.artifact_id}`);
+    assert.equal(await fact('Immutable review artifact').locator('code').innerText(),returned.content_hash);
+    assert.equal(await fact('Recorded disposition').count(),0);
+    assert.equal(await page.locator('#content [data-action]').count(),0);
+    for(const [width,height,label] of [[1440,1000,'desktop'],[390,844,'mobile']]) {
+      await page.setViewportSize({width,height});
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+      await page.screenshot({path:path.join(output,`risk-review-completed-${label}.png`),fullPage:true,animations:'disabled'});
+    }
+    await page.locator('dt').filter({hasText:'Source Research'}).locator('..').getByRole('link').click();await settled();
+    assert.equal(new URL(page.url()).pathname,'/improvement/cases/source');
+    assert.match(await page.locator('#content').innerText(),/Owned continuation work/);
+    assert.deepEqual(errors,[]);assert.deepEqual(writes,[]);assertSealed(f,before);
+    assert.deepEqual(f.backend.one('ow_artifacts',artifact.id),artifact);assertNoAuthority(f);
+  }finally{await browser.close();f.close();}
+});
 function claimPlan(f,message='plan-claim'){
   const child=f.children()[0];
   return plans(f).perform('claim',f.actor,{message_id:message,data:{case_id:child.id,

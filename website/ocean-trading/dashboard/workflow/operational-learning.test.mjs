@@ -5,6 +5,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { digest, objectHash } from './common.mjs';
+import { WorkflowStore } from './store.mjs';
+import { WorkflowBackend } from './backend.mjs';
+import { OperationalResults } from './operational-results.mjs';
+import { OperationalResearch, RESEARCH_VERSION } from './operational-research.mjs';
 import { OperationalLearning, cumulativeLearningProposal, criticalCausalQualityFlags, parseSttl2Identity,
   REVIEWED_V238_PROFILE6, reviewedPhysicalProfileBinding } from './operational-learning.mjs';
 
@@ -25,11 +29,12 @@ test('reviewed v238 successor requires the exact physical and unchanged logical 
   assert.equal(Object.isFrozen(mapping), true);
 });
 
-function fixture() {
+function fixture({file=false,currentProofMock=false}={}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ocean-learning-'));
   const tokenFile = path.join(root, 'brain.token');
   fs.writeFileSync(tokenFile, 'protected-test-token-value-123456');
-  const db = new DatabaseSync(':memory:');
+  const dbPath=file?path.join(root,'workflow.sqlite'):':memory:';
+  let db = new DatabaseSync(dbPath);
   db.exec(`
     CREATE TABLE ow_strategies (id TEXT PRIMARY KEY, profile_id TEXT, revision INTEGER, baseline_hash TEXT, payload_json TEXT);
     CREATE TABLE ow_profiles (id TEXT PRIMARY KEY, strategy_id TEXT, version TEXT, content_hash TEXT, payload_json TEXT);
@@ -40,6 +45,10 @@ function fixture() {
     CREATE TABLE ow_evidence_revisions (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, event_id TEXT, canonical_id TEXT, payload_json TEXT);
     CREATE TABLE ow_operational_brain_results (id TEXT PRIMARY KEY, run_id TEXT, payload_json TEXT);
     CREATE TABLE ow_operational_brain_callbacks (result_id TEXT PRIMARY KEY, payload_json TEXT);
+    CREATE TABLE ow_cases (id TEXT PRIMARY KEY, run_id TEXT, payload_json TEXT, owner_id TEXT, strategy_id TEXT, instance_id TEXT);
+    CREATE TABLE ow_artifacts (id TEXT PRIMARY KEY, case_id TEXT, kind TEXT, content BLOB, manifest_json TEXT, producer_id TEXT, run_id TEXT);
+    CREATE TABLE ow_research_jobs (id TEXT PRIMARY KEY, case_id TEXT, artifact_id TEXT, artifact_hash TEXT, analysis_version TEXT);
+    CREATE TABLE ow_events (entity_id TEXT, action TEXT, payload_json TEXT);
   `);
   const summaries = new Map();
   const events = [];
@@ -64,11 +73,13 @@ function fixture() {
   }));
   const backend = {
     db,
+    store:{transaction(work){db.exec('BEGIN IMMEDIATE');try{const value=work();db.exec('COMMIT');return value;}
+      catch(error){db.exec('ROLLBACK');throw error;}}},
     config:{ identities:[brainIdentity] },
     runs:{ summary:run=>summaries.get(run.id) },
     operationalResults:{
       register(actor,input) {
-        const result={ result_id:`result:${input.run_id}:${input.content_sha256.slice(-12)}`, run_id:input.run_id, context_hash:input.context_hash, content:input.content, content_sha256:input.content_sha256, correlation:input.correlation };
+        const result={ result_id:`result:${input.run_id}:${input.content_sha256.slice(-12)}`, producer_id:actor.id, run_id:input.run_id, context_hash:input.context_hash, content:input.content, content_sha256:input.content_sha256, correlation:input.correlation };
         db.prepare('INSERT INTO ow_operational_brain_results VALUES(?,?,?)').run(result.result_id,input.run_id,JSON.stringify(result));
         return result;
       },
@@ -78,8 +89,34 @@ function fixture() {
         const callback={...input};db.prepare('INSERT INTO ow_operational_brain_callbacks VALUES(?,?)').run(input.result_id,JSON.stringify(callback));return callback;
       },
     },
-    createOperationalLearningContinuation(actor,input){continuations.push(input);return {case_id:input.case_id,artifact_id:input.artifact_id,recipient_id:'strategy-worker',stage:'RESEARCH',work_status:'READY',next_action:'Strategy Research evaluation queued'};},
-    event(entity,action,actor,payload){events.push({entity,action,actor,payload});},
+    createOperationalLearningContinuation(actor,input){
+      continuations.push(input);
+      const content=JSON.stringify({...input.recommendation,result_id:input.result_id});
+      db.prepare('INSERT OR IGNORE INTO ow_cases VALUES(?,?,?,?,?,?)').run(input.case_id,input.run_id,
+        JSON.stringify({origin:'OPERATIONAL_LEARNING',result_id:input.result_id,registry_record_sha256:input.registry_record_sha256}),actor.id,strategyId,instanceId);
+      db.prepare('INSERT OR IGNORE INTO ow_artifacts VALUES(?,?,?,?,?,?,?)').run(input.artifact_id,input.case_id,
+        'RECOMMENDATION',content,JSON.stringify({content_hash:digest(content)}),actor.id,input.run_id);
+      db.prepare('INSERT OR IGNORE INTO ow_research_jobs VALUES(?,?,?,?,?)').run(`job:${input.case_id}`,input.case_id,input.artifact_id,digest(content),RESEARCH_VERSION);
+      return {case_id:input.case_id,artifact_id:input.artifact_id,recipient_id:'strategy-worker',stage:'RESEARCH',work_status:'READY',next_action:'Strategy Research evaluation queued'};
+    },
+    operationalResearch:{
+      version:RESEARCH_VERSION,continuations:{ownerCurrent:()=>true},
+      async flushOnce(){},
+      queueEvidenceReview(run,actor,result,details,bundle){
+        const suffix=digest(result.result_id).slice(7,31),caseId=`research-evidence-${suffix}`,artifactId=`test-research-evidence-${suffix}`;
+        const content=JSON.stringify({learning_result_id:result.result_id,learning_result_hash:result.content_sha256,cohort_hash:objectHash(bundle.cohort)});
+        db.prepare('INSERT OR IGNORE INTO ow_cases VALUES(?,?,?,?,?,?)').run(caseId,run.id,
+          JSON.stringify({origin:'OPERATIONAL_RESEARCH_REASSESSMENT',registry_record_sha256:details.registry_record_sha256}),actor.id,strategyId,instanceId);
+        db.prepare('INSERT OR IGNORE INTO ow_artifacts VALUES(?,?,?,?,?,?,?)').run(artifactId,caseId,'EVIDENCE',content,
+          JSON.stringify({content_hash:digest(content)}),actor.id,run.id);
+        db.prepare('INSERT OR IGNORE INTO ow_research_jobs VALUES(?,?,?,?,?)').run(`job:${caseId}`,caseId,artifactId,digest(content),RESEARCH_VERSION);
+        return {case_id:caseId,artifact_id:artifactId};
+      },
+      statusForCase(caseId){return db.prepare('SELECT id FROM ow_cases WHERE id=?').get(caseId)
+        ?{state:'PENDING',loop_stage:'PENDING_RESEARCH'}:null;},
+    },
+    event(entity,action,actor,payload){events.push({entity,action,actor,payload});
+      db.prepare('INSERT INTO ow_events VALUES(?,?,?)').run(entity,action,JSON.stringify({actor_id:actor.id,payload}));},
   };
   const addRun = ({id, partition='DISCOVERY', permission='HISTORICAL_DISCOVERY', testRun=false, current=true, pnl=[], contextHash=null, coverage=null, configHash=null}) => {
     const runId=testRun?`test-${id}`:id;
@@ -104,9 +141,615 @@ function fixture() {
     return {ok:true,status:200,json:async()=>({schema_version:'ocean-operational-learning-result/v1',record_id:'reasoning-verified-learning',relative_path:'reasoning/verified-learning.md',content,content_sha256:digest(content),conclusion_type:'NO_CHANGE',source_record_ids:[...input.cohort.eligible_runs,...input.excluded_evidence].map(run=>run.run_id),correlation:input.correlation})};
   };
   // Explicit mock-only provider for Brain/queue tests, never physical provenance evidence.
-  const learner=new OperationalLearning(backend,{enabled:true,strategy_id:strategyId,token_file:tokenFile,fetch,interval_ms:60000,telemetry_required:false});
-  return {root,db,backend,learner,requests,events,continuations,registry,prior,trigger,addRun,close(){learner.stop();db.close();fs.rmSync(root,{recursive:true,force:true});}};
+  const options={enabled:true,strategy_id:strategyId,token_file:tokenFile,fetch,interval_ms:60000,telemetry_required:false};
+  let learner=new OperationalLearning(backend,options);
+  const mockCurrentProof=instance=>{
+    if(!currentProofMock)return;
+    const classify=instance.classification.bind(instance);
+    instance.classification=run=>{
+      const value=classify(run);
+      return {...value,telemetry:{...value.telemetry,verified:true,bypassed:false}};
+    };
+  };
+  mockCurrentProof(learner);
+  const result={root,db,backend,learner,requests,events,continuations,registry,prior,trigger,addRun,
+    restart(){
+      assert.equal(file,true,'restart requires file-backed SQLite');
+      const currentFetch=learner.fetch;
+      learner.stop();db.close();db=new DatabaseSync(dbPath);backend.db=db;
+      learner=new OperationalLearning(backend,{...options,fetch:currentFetch});mockCurrentProof(learner);
+      result.db=db;result.learner=learner;
+    },
+    close(){learner.stop();db.close();fs.rmSync(root,{recursive:true,force:true});}};
+  return result;
 }
+
+function mockBrainConclusion(f, conclusionType) {
+  const original=f.learner.fetch;
+  f.learner.fetch=async(url,options={})=>{
+    if(!options.body)return original(url,options);
+    const input=JSON.parse(options.body);f.requests.push(input);
+    const conclusion={type:conclusionType,reasons:['isolated persistence boundary']};
+    if(conclusionType==='RECOMMENDATION')conclusion.recommendation={
+      title:'Isolated Research hypothesis',content:'Test only; no candidate or approval.'};
+    const content=JSON.stringify({registry_reconciliation_id:input.registry_reconciliation_id,
+      registry_record_sha256:input.registry_record_sha256,conclusion});
+    return {ok:true,status:200,json:async()=>({schema_version:'ocean-operational-learning-result/v1',
+      record_id:`reasoning-isolated-${conclusionType}`,relative_path:`reasoning/isolated-${conclusionType}.md`,
+      content,content_sha256:digest(content),conclusion_type:conclusionType,
+      source_record_ids:[...input.cohort.eligible_runs,...input.excluded_evidence].map(row=>row.run_id),
+      correlation:input.correlation})};
+  };
+}
+
+function productionFixture() {
+  const root=fs.mkdtempSync(path.join(process.env.OCEAN_G11_PRODUCTION_EVIDENCE || os.tmpdir(),'ocean-learning-production-'));
+  const filename=path.join(root,'workflow.sqlite');
+  const tokenFile=path.join(root,'isolated-brain.token');
+  fs.writeFileSync(tokenFile,'isolated-test-token-not-operational',{flag:'wx'});
+  let store=new WorkflowStore(filename),learner;
+  const backend=Object.create(WorkflowBackend.prototype);
+  const brain={identity_id:'isolated-brain',role:'BRAIN',namespace:'OPERATIONAL',audience:'Ocean workflow operational v1',
+    strategy_ids:[strategyId],instance_ids:[instanceId],scopes:['read','artifact.write','event.write'],
+    expires_at_utc:new Date(Date.now()+3600000).toISOString()};
+  const recipient={...brain,identity_id:'isolated-strategy',role:'STRATEGY'};
+  Object.assign(backend,{db:store.db,store,config:{identities:[brain,recipient],browser:{subject_id:'isolated-human'}},
+    environment:{},auth:{human:{state:'CONFIGURED'},bindingErrors:new Map()},
+    validate:kind=>assert.equal(kind,'artifact-manifest')});
+  store.registerIdentity(brain);store.registerIdentity(recipient);
+  const baseline=digest('isolated-baseline');
+  backend.db.prepare('INSERT INTO ow_profiles VALUES(?,?,?,?,?)').run('isolated-profile',strategyId,'1',digest('isolated-profile'),'{}');
+  backend.db.prepare('INSERT INTO ow_strategies VALUES(?,?,?,?,?)').run(strategyId,'isolated-profile',1,baseline,
+    JSON.stringify({strategy_name:'EXPLICIT_MOCK_ONLY'}));
+  backend.db.prepare('INSERT INTO ow_instances VALUES(?,?,?)').run(instanceId,strategyId,'{}');
+  const registry={record_sha256:digest('isolated-registry'),reconciliation_id:'isolated-registry',
+    normal_brain_ingestion_eligible:true,development_recommendations_allowed:true};
+  const requests=[];
+  let brainError=null,conclusionType='NO_CHANGE';
+  function addRun(id,month) {
+    const context={run_id:id,strategy_id:strategyId,execution_instance_id:instanceId,strategy_profile_id:'isolated-profile',
+      strategy_profile_version:'1',strategy_version:'v1',strategy_code_hash:baseline,strategy_config_hash:digest('config'),
+      dataset_manifest_id:'isolated-discovery',dataset_manifest_revision:1,dataset_manifest_hash:digest('dataset'),
+      source_installation_id:'isolated',expected_environment:'REPLAY',evidence_purpose:'HISTORICAL_BUILD',
+      dataset_partition:'DISCOVERY',learner_permission:'HISTORICAL_DISCOVERY',
+      requested_coverage:[{start_utc:`2025-${month}-01T00:00:00Z`,end_utc:`2025-${month}-02T00:00:00Z`}]};
+    context.context_hash=objectHash(context);
+    backend.db.prepare('INSERT INTO ow_runs VALUES(?,?,?,1,?,?)').run(id,strategyId,instanceId,'COMPLETED',JSON.stringify(context));
+    backend.db.prepare('INSERT INTO ow_operational_releases VALUES(?,?,?)').run(id,context.context_hash,'{}');
+    return id;
+  }
+  const triggerId=addRun('production-trigger','01');
+  function attach() {
+    backend.operationalResults=new OperationalResults(backend);
+    backend.operationalResearch=new OperationalResearch(backend);
+    learner=new OperationalLearning(backend,{enabled:true,strategy_id:strategyId,token_file:tokenFile});
+    learner.registryContext=registry;
+    // Only Brain/physical/native providers and artifact-schema validation are mocks.
+    // Store migrations, queue, artifacts, identity, result, callback and event paths are production.
+    learner.classification=run=>({eligible:true,reasons:[],context:JSON.parse(run.context_json),
+      telemetry:{verified:true,bypassed:false,proof_basis:'EXPLICIT_MOCK_ONLY'},
+      summary:{completion:{status:'COMPLETED',requested_coverage:JSON.parse(run.context_json).requested_coverage}}});
+    learner.evidencePolicy=()=>({project:'isolated',strategy_name:'EXPLICIT_MOCK_ONLY',
+      minimum_sample_count:2,minimum_independent_session_count:1});
+    learner.runSummary=run=>({summary:{run_id:run.id,context_hash:JSON.parse(run.context_json).context_hash,
+      completion_hash:digest(`completion-${run.id}`),observed_sample_count:2,independent_session_count:1,
+      source_record_ids:[run.id],evidence_status:'SUFFICIENT',as_of_utc:'2026-10-08T01:00:00Z'},metrics:{},telemetry:{}});
+    learner.nativeSessionEvidence=ids=>({verified:true,observed_session_count:ids.length,proof_basis:'EXPLICIT_MOCK_ONLY'});
+    learner.call=async(route,token,input)=>{
+      if(input===undefined) {
+        assert.equal(token,fs.readFileSync(tokenFile,'utf8'),'worker uses only its isolated credential');
+        if(route==='/auth/me')return {client:{scope:'TRADING',strategy_ids:[strategyId],proof_basis:'EXPLICIT_MOCK_ONLY'}};
+        if(route===`/strategy-registry/${strategyId}`)return {status:'ok',strategy:{
+          reconciliation:{reconciliation_id:registry.reconciliation_id,record_sha256:registry.record_sha256},
+          governance:{normal_brain_ingestion_eligible:true,development_recommendations_allowed:true}}};
+      }
+      assert.equal(route,learner.path);
+      const frozen=JSON.parse(backend.db.prepare("SELECT payload_json FROM ow_events WHERE entity_id=? AND action='operational.learning.input'")
+        .get(input.trigger.run_id).payload_json).payload;
+      assert.deepEqual(frozen.input,input,'exact input is durable before dispatch');
+      requests.push(structuredClone(input));
+      if(brainError)throw new Error(brainError);
+      const conclusion={type:conclusionType,reasons:['EXPLICIT_MOCK_ONLY']};
+      if(conclusionType==='RECOMMENDATION')conclusion.recommendation={title:'Isolated hypothesis',content:'No approval or candidate.'};
+      const content=JSON.stringify({registry_reconciliation_id:input.registry_reconciliation_id,
+        registry_record_sha256:input.registry_record_sha256,conclusion});
+      return {schema_version:'ocean-operational-learning-result/v1',record_id:'isolated-reasoning',relative_path:'reasoning/isolated.md',
+        content,content_sha256:digest(content),conclusion_type:conclusionType,
+        source_record_ids:[...input.cohort.eligible_runs,...input.excluded_evidence].map(row=>row.run_id),correlation:input.correlation};
+    };
+    backend.operationalLearning=learner;
+  }
+  attach();
+  return {backend,registry,requests,root,addRun,brain,
+    get learner(){return learner;},
+    trigger:()=>backend.one('ow_runs',triggerId),
+    brainError(value){brainError=value;},conclusion(value){conclusionType=value;},
+    restart(){learner.stop();store.close();store=new WorkflowStore(filename);backend.db=store.db;backend.store=store;attach();},
+    rows:table=>backend.db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all(),
+    fault(table,condition='1'){backend.db.exec(`CREATE TRIGGER isolated_fault BEFORE INSERT ON ${table} WHEN ${condition}
+      BEGIN SELECT RAISE(ABORT,'isolated-sqlite-fault'); END`);},
+    unfault(){backend.db.exec('DROP TRIGGER isolated_fault');},
+    close(){
+      learner.stop();
+      try {
+        if(process.env.OCEAN_G11_PRODUCTION_EVIDENCE)fs.writeFileSync(path.join(root,'proof.json'),JSON.stringify({
+          classification:'PRODUCTION_SQLITE_QUEUE_CAPTURE_WITH_EXPLICIT_MOCK_BRAIN_PHYSICAL_NATIVE_AND_SCHEMA_PROVIDERS',
+          requests,events:backend.db.prepare('SELECT * FROM ow_events ORDER BY rowid').all(),
+          jobs:backend.db.prepare('SELECT * FROM ow_research_jobs ORDER BY rowid').all(),
+        },null,2),{flag:'wx'});
+      }finally{store.close();}
+      if(!process.env.OCEAN_G11_PRODUCTION_EVIDENCE)fs.rmSync(root,{recursive:true,force:true});
+    }};
+}
+
+function captureProductionResearch(f) {
+  const telemetry=path.join(f.root,'synthetic-telemetry.sqlite'),database=new DatabaseSync(telemetry);
+  try {
+    database.exec(`CREATE TABLE schema_version(version INTEGER); INSERT INTO schema_version VALUES(13);
+      CREATE TABLE ocean_trade_causal_v2(trade_id TEXT,run_id TEXT,entry_datetime REAL,trade_account TEXT,
+      symbol TEXT,direction TEXT,gross_currency_value REAL,total_commission REAL,net_profit_loss REAL,
+      exit_causality TEXT,session_name TEXT,regime_label TEXT,status TEXT);
+      INSERT INTO ocean_trade_causal_v2 VALUES('original-trade','production-trigger',45700,'Sim1','MOCK','LONG',10,1,9,'MOCK','MOCK','MOCK','closed');
+      INSERT INTO ocean_trade_causal_v2 VALUES('original-trade-2','production-trigger',45700,'Sim1','MOCK','SHORT',-3,1,-4,'MOCK','MOCK','MOCK','closed');
+      INSERT INTO ocean_trade_causal_v2 VALUES('later-trade','production-later',45730,'Sim1','MOCK','LONG',1000,1,999,'MOCK','MOCK','MOCK','closed');`);
+  }finally{database.close();}
+  f.learner.telemetryDb=telemetry;
+  const research=f.backend.operationalResearch,job=research.claim();
+  assert.ok(job);assert.equal(research.qualification(job).verified,true);
+  const evidence=research.evidence(job);
+  assert.deepEqual(evidence.bundle.cohort,f.requests[0].cohort);
+  assert.deepEqual(evidence.rows.map(row=>row.trade_id),['original-trade','original-trade-2']);
+  const snapshot=research.capture(job);
+  assert.deepEqual(snapshot.evidence.bundle.cohort,f.requests[0].cohort);
+  assert.deepEqual(snapshot.result.eligible_run_ids,[f.trigger().id]);
+  assert.equal(snapshot.result.aggregate.net_profit_loss,5);
+  assert.equal(snapshot.result.aggregate.trades,2);
+  assert.equal(snapshot.result.evidence_hash,objectHash(evidence.rows));
+  assert.equal(Object.values(snapshot.evidence.bundle.execution_sessions)[0].proof_error,'NATIVE_SESSION_SCHEMA_14_REQUIRED',
+    'synthetic SQL rows never fabricate native session proof');
+  return snapshot;
+}
+
+for(const conclusion of ['NO_CHANGE','BLOCKED','RECOMMENDATION']) {
+  for(const boundary of ['child','callback','event']) {
+    test(`production file SQLite: ${conclusion} ${boundary} failure/restart retains exact original cohort`,async()=>{
+      const f=productionFixture();
+      try {
+        f.conclusion(conclusion);
+        f.fault(boundary==='child'?'ow_cases':boundary==='callback'?'ow_operational_brain_callbacks':'ow_events',
+          boundary==='event'?"NEW.action='operational.learning.complete'":'1');
+        await assert.rejects(f.learner.process(f.trigger(),'isolated-test-token',f.registry),/isolated-sqlite-fault/);
+        const result=f.rows('ow_operational_brain_results'),children=f.rows('ow_cases'),artifacts=f.rows('ow_artifacts');
+        const inputEvents=f.rows('ow_events').filter(row=>row.action==='operational.learning.input');
+        assert.equal(result.length,1);assert.equal(f.requests.length,1);
+        assert.equal(children.length,boundary==='child'?0:1);
+        assert.equal(f.rows('ow_operational_brain_callbacks').length,boundary==='event'?1:0);
+        f.unfault();f.addRun('production-later','02');f.restart();
+        assert.notEqual(objectHash(f.learner.cohort(f.trigger()).cohort),objectHash(f.requests[0].cohort));
+        assert.equal(f.learner.pendingRun(f.registry)?.id,f.trigger().id);
+        await f.learner.process(f.trigger(),'isolated-test-token',f.registry);
+        f.restart();await f.learner.process(f.trigger(),'isolated-test-token',f.registry);
+        assert.equal(f.requests.length,1,'stored result never dispatches Brain again');
+        assert.deepEqual(f.rows('ow_operational_brain_results'),result);
+        assert.deepEqual(f.rows('ow_events').filter(row=>row.action==='operational.learning.input'),inputEvents);
+        if(children.length)assert.deepEqual(f.rows('ow_cases'),children);
+        if(artifacts.length)assert.deepEqual(f.rows('ow_artifacts'),artifacts);
+        assert.equal(f.rows('ow_cases').length,1);assert.equal(f.rows('ow_research_jobs').length,1);
+        assert.equal(f.rows('ow_operational_brain_callbacks').length,1);
+        const events=f.rows('ow_events').filter(row=>row.action==='operational.learning.complete');
+        assert.equal(events.length,1);
+        const payload=JSON.parse(events[0].payload_json).payload;
+        assert.deepEqual(payload.cohort_run_ids,[f.trigger().id]);
+        assert.equal(payload.cohort_hash,objectHash(f.requests[0].cohort));
+        assert.equal(payload.input_sha256,f.requests[0].correlation.input_sha256);
+        const artifact=f.rows('ow_artifacts')[0];
+        const source=f.learner.continuationSource(f.trigger(),artifact);
+        assert.deepEqual(source.cohort,f.requests[0].cohort,'Research capture reads original membership too');
+        if(conclusion!=='RECOMMENDATION')assert.equal(JSON.parse(Buffer.from(artifact.content)).cohort_hash,payload.cohort_hash);
+        assert.equal(f.learner.completionEventRecorded(f.trigger(),JSON.parse(result[0].payload_json)),true);
+        captureProductionResearch(f);
+      }finally{f.close();}
+    });
+  }
+}
+
+test('production file SQLite: failed first dispatch resends the durable original request after cohort drift',async()=>{
+  const f=productionFixture();
+  try {
+    f.brainError('isolated-dispatch-fault');
+    await assert.rejects(f.learner.process(f.trigger(),'isolated-test-token',f.registry),/isolated-dispatch-fault/);
+    assert.equal(f.rows('ow_operational_brain_results').length,0);
+    f.addRun('production-later','02');f.brainError(null);f.restart();
+    await f.learner.process(f.trigger(),'isolated-test-token',f.registry);
+    assert.deepEqual(f.requests[1],f.requests[0]);
+    assert.equal(f.rows('ow_events').filter(row=>row.action==='operational.learning.input').length,1);
+    await f.learner.process(f.backend.one('ow_runs','production-later'),'isolated-test-token',f.registry);
+    assert.equal(f.requests.length,3,'separate trigger gets a separately correlated analysis');
+    assert.notEqual(f.requests[2].correlation.input_sha256,f.requests[0].correlation.input_sha256);
+    assert.equal(f.rows('ow_cases').length,2);
+  }finally{f.close();}
+});
+
+test('production file SQLite: input publication rollback prevents dispatch and partial lineage',async()=>{
+  const f=productionFixture();
+  try {
+    assert.equal(f.learner.lineageBlock(f.trigger(),{result:{}},f.registry.record_sha256),null,
+      'historical display-only result shapes do not supply a keyed lineage blocker');
+    f.fault('ow_events',"NEW.action='operational.learning.input'");
+    await assert.rejects(f.learner.process(f.trigger(),'isolated-test-token',f.registry),/isolated-sqlite-fault/);
+    assert.equal(f.requests.length,0);assert.equal(f.rows('ow_events').length,0);
+    assert.equal(f.rows('ow_operational_brain_results').length,0);
+    f.unfault();f.restart();await f.learner.process(f.trigger(),'isolated-test-token',f.registry);
+    const event=f.rows('ow_events').find(row=>row.action==='operational.learning.input');
+    assert.throws(()=>f.backend.db.prepare('DELETE FROM ow_events WHERE id=?').run(event.id),/immutable/i);
+  }finally{f.close();}
+});
+
+for(const drift of [false,true]) {
+  test(`production file SQLite: legacy v1 input recovery ${drift?'blocks newer history':'requires exact correlation'}`,async()=>{
+    const f=productionFixture();
+    try {
+      const run=f.trigger(),actor=f.learner.brainActor(run.strategy_id,run.instance_id);
+      const input=f.learner.analysisInput(run,f.learner.classification(run),f.registry);
+      const details={schema_version:'ocean-operational-learning-result/v1',storage_mode:'BRAIN_IMMUTABLE_REFERENCE',
+        conclusion_type:'NO_CHANGE',registry_reconciliation_id:f.registry.reconciliation_id,
+        registry_record_sha256:f.registry.record_sha256,verified_run_ids:input.cohort.eligible_runs.map(row=>row.run_id)};
+      const content=JSON.stringify(details);
+      const result=f.backend.operationalResults.register(actor,{run_id:run.id,context_hash:input.trigger.context_hash,
+        content,content_sha256:digest(content),correlation:input.correlation});
+      if(drift)f.addRun('production-later','02');
+      f.restart();
+      if(!drift) {
+        await f.learner.process(f.trigger(),'isolated-test-token',f.registry);
+        assert.equal(f.requests.length,0);assert.equal(f.rows('ow_cases').length,1);
+        return;
+      }
+      for(let retry=0;retry<2;retry++) {
+        let failure;
+        try {await f.learner.process(f.trigger(),'isolated-test-token',f.registry);}catch(error){failure=error;}
+        assert.equal(failure?.code,'OPERATIONAL_LEARNING_ORIGINAL_INPUT_REQUIRED');
+        f.learner.fail(f.trigger(),failure);f.restart();
+        const status=f.learner.statusForRun(run.id);
+        assert.equal(status.stage,'BLOCKED');assert.equal(status.loop_stage,'BLOCKED');
+        assert.equal(status.research,null);assert.equal(status.continuation_case_id,null);
+        assert.match(status.next_action,/exact original immutable analysis input/);
+      }
+      assert.equal(f.rows('ow_events').filter(row=>row.action==='operational.learning.blocked').length,1);
+      assert.equal(f.rows('ow_operational_brain_results').length,1);
+      assert.equal(f.rows('ow_operational_brain_callbacks').length,0);assert.equal(f.rows('ow_cases').length,0);
+      assert.equal(f.requests.length,0);assert.deepEqual(JSON.parse(f.rows('ow_operational_brain_results')[0].payload_json),result);
+    }finally{f.close();}
+  });
+}
+
+test('production file SQLite: blocked legacy A does not starve B in the batch or after restart',async()=>{
+  const f=productionFixture();
+  try {
+    const run=f.trigger(),actor=f.learner.brainActor(run.strategy_id,run.instance_id);
+    const input=f.learner.analysisInput(run,f.learner.classification(run),f.registry);
+    const details={schema_version:'ocean-operational-learning-result/v1',storage_mode:'BRAIN_IMMUTABLE_REFERENCE',
+      conclusion_type:'NO_CHANGE',registry_reconciliation_id:f.registry.reconciliation_id,
+      registry_record_sha256:f.registry.record_sha256,verified_run_ids:input.cohort.eligible_runs.map(row=>row.run_id)};
+    const content=JSON.stringify(details);
+    const original=f.backend.operationalResults.register(actor,{run_id:run.id,context_hash:input.trigger.context_hash,
+      content,content_sha256:digest(content),correlation:input.correlation});
+    f.addRun('production-later','02');f.restart();
+    f.backend.operationalResearch.stop(); // This test exercises the learning worker, not external Research dispatch.
+    const first=await f.learner.flushOnce();
+    assert.equal(first.items.find(row=>row.run_id===run.id).stage,'BLOCKED');
+    assert.equal(first.items.find(row=>row.run_id==='production-later').stage,'COMPLETE');
+    assert.deepEqual(f.requests.map(request=>request.trigger.run_id),['production-later']);
+    const events=f.rows('ow_events'),children=f.rows('ow_cases'),results=f.rows('ow_operational_brain_results');
+    assert.equal(events.filter(row=>row.action==='operational.learning.blocked').length,1);
+    assert.equal(f.rows('ow_operational_brain_callbacks').length,1);
+    assert.equal(children.length,1);assert.equal(children[0].run_id,'production-later');
+    for(let restart=0;restart<2;restart++) {
+      f.restart();f.backend.operationalResearch.stop();
+      assert.equal(f.learner.pendingRun(f.registry),null,'unrecoverable A is not leased again');
+      await f.learner.flushOnce();
+      assert.equal(f.learner.statusForRun(run.id).last_error,'OPERATIONAL_LEARNING_ORIGINAL_INPUT_REQUIRED');
+      assert.match(f.learner.statusForRun(run.id).next_action,/exact original immutable analysis input/);
+      assert.deepEqual(f.rows('ow_events'),events,'read-only recovery checks do not republish blockers or inputs');
+      assert.deepEqual(f.rows('ow_cases'),children);assert.deepEqual(f.rows('ow_operational_brain_results'),results);
+    }
+    assert.equal(f.requests.length,1);
+    assert.deepEqual(JSON.parse(results.find(row=>row.run_id===run.id).payload_json),original);
+    assert.equal(events.some(row=>row.entity_id===run.id && row.action==='operational.learning.complete'),false);
+  }finally{f.close();}
+});
+
+for(const boundary of ['child','callback']) {
+  test(`production file SQLite: ${boundary} blocked A resumes only when its exact original owner is restored`,async()=>{
+    const f=productionFixture();
+    try {
+      f.fault(boundary==='child'?'ow_cases':'ow_operational_brain_callbacks');
+      await assert.rejects(f.learner.process(f.trigger(),'isolated-test-token',f.registry),/isolated-sqlite-fault/);
+      f.unfault();
+      const originalInput=f.rows('ow_events').find(row=>row.action==='operational.learning.input');
+      const originalResult=f.rows('ow_operational_brain_results')[0];
+      const originalChild=f.rows('ow_cases'),originalArtifacts=f.rows('ow_artifacts');
+      const replacement={...f.brain,identity_id:'isolated-new-brain'};
+      f.backend.store.registerIdentity(replacement);
+      f.backend.config.identities=[replacement,...f.backend.config.identities.filter(row=>row.role!=='BRAIN')];
+      f.addRun('production-later','02');f.restart();f.backend.operationalResearch.stop();
+      await f.learner.flushOnce();
+      assert.equal(f.learner.statusForRun(f.trigger().id).stage,'BLOCKED');
+      assert.equal(f.learner.statusForRun('production-later').stage,'COMPLETE');
+      const block=f.rows('ow_events').find(row=>row.action==='operational.learning.blocked');
+      assert.equal(JSON.parse(block.payload_json).payload.reason,'OPERATIONAL_LEARNING_INPUT_LINEAGE_CONFLICT');
+      f.restart();f.backend.operationalResearch.stop();
+      const before=f.rows('ow_events');
+      assert.equal(f.learner.pendingRun(f.registry),null);
+      await f.learner.flushOnce();assert.deepEqual(f.rows('ow_events'),before);
+      assert.deepEqual(f.requests.map(request=>request.trigger.run_id),[f.trigger().id,'production-later']);
+      // Restore current owner configuration, not immutable rows or workflow statuses.
+      f.backend.config.identities=[f.brain,...f.backend.config.identities.filter(row=>row.role!=='BRAIN')];
+      f.brain.revoked=true;f.restart();
+      assert.equal(f.learner.pendingRun(f.registry),null,'revoked original owner is not recovery');
+      delete f.brain.revoked;f.restart();f.backend.operationalResearch.stop();
+      const originalSummary=f.learner.runSummary;
+      f.learner.runSummary=run=>{
+        const value=originalSummary(run);
+        if(run.id===f.trigger().id)value.summary.completion_hash=digest('changed-original-source');
+        return value;
+      };
+      assert.equal(f.learner.pendingRun(f.registry),null,'restored owner cannot hide changed original source proof');
+      f.learner.runSummary=originalSummary;
+      const checkEvents=f.rows('ow_events');
+      assert.equal(f.learner.pendingRun(f.registry)?.id,f.trigger().id,'exact restoration is detected without status clears');
+      assert.deepEqual(f.rows('ow_events'),checkEvents,'selection is read-only');
+      await f.learner.flushOnce();f.restart();f.backend.operationalResearch.stop();
+      await f.learner.flushOnce();
+      assert.equal(f.learner.statusForRun(f.trigger().id).stage,'COMPLETE');
+      assert.equal(f.requests.length,2,'original result recovery never calls Brain again');
+      assert.deepEqual(f.rows('ow_operational_brain_results').find(row=>row.run_id===f.trigger().id),originalResult);
+      assert.deepEqual(f.rows('ow_events').find(row=>row.id===originalInput.id),originalInput);
+      assert.deepEqual(f.rows('ow_events').find(row=>row.id===block.id),block,'immutable blocker remains in history');
+      assert.equal(f.rows('ow_cases').filter(row=>row.run_id===f.trigger().id).length,1);
+      if(originalChild.length) {
+        assert.deepEqual(f.rows('ow_cases').find(row=>row.id===originalChild[0].id),originalChild[0]);
+        assert.deepEqual(f.rows('ow_artifacts').find(row=>row.id===originalArtifacts[0].id),originalArtifacts[0]);
+      }
+      const completion=f.rows('ow_events').filter(row=>row.entity_id===f.trigger().id && row.action==='operational.learning.complete');
+      assert.equal(completion.length,1);
+      assert.deepEqual(JSON.parse(completion[0].payload_json).payload.cohort_run_ids,[f.trigger().id]);
+    }finally{f.close();}
+  });
+}
+
+test('production file SQLite: durable-child recovery still rejects revoked owner',async()=>{
+  const f=productionFixture();
+  try {
+    f.fault('ow_operational_brain_callbacks');
+    await assert.rejects(f.learner.process(f.trigger(),'isolated-test-token',f.registry),/isolated-sqlite-fault/);
+    f.unfault();f.brain.revoked=true;f.restart();
+    await assert.rejects(f.learner.process(f.trigger(),'isolated-test-token',f.registry),{code:'RESEARCH_CURRENT_OWNER_REQUIRED'});
+    assert.equal(f.requests.length,1);assert.equal(f.rows('ow_cases').length,1);
+    assert.equal(f.rows('ow_operational_brain_callbacks').length,0);
+  }finally{f.close();}
+});
+
+test('production Research input capture retains original membership, not newer history',async()=>{
+  const f=productionFixture();
+  try {
+    await f.learner.process(f.trigger(),'isolated-test-token',f.registry);
+    f.addRun('production-later','02');f.restart();
+    const snapshot=captureProductionResearch(f);
+    const stored=f.rows('ow_research_jobs')[0];
+    f.restart();
+    const resumed=f.backend.operationalResearch.capture(stored);
+    assert.deepEqual(resumed,snapshot);
+    assert.equal(f.requests.length,1);
+    const separatelyVersioned=JSON.stringify({schema_version:'ocean-operational-research-reassessment/v1',
+      source_continuation_case_id:'isolated-follow-up',evidence_revision_hash:digest('new-evidence')});
+    assert.equal(f.learner.continuationSource(f.trigger(),{content:separatelyVersioned}),null,
+      'separate reassessments retain their existing new-evidence capture path');
+  }finally{f.close();}
+});
+
+test('production SQLite: immutable conflicting terminal envelope remains blocked, not completed by existence',async()=>{
+  const f=productionFixture();
+  try {
+    f.fault('ow_operational_brain_callbacks');
+    await assert.rejects(f.learner.process(f.trigger(),'isolated-test-token',f.registry),/isolated-sqlite-fault/);
+    f.unfault();
+    const stored=f.learner.resultFor(f.trigger().id,f.registry.record_sha256);
+    const actor=f.learner.brainActor(strategyId,instanceId);
+    f.backend.event(f.trigger().id,'operational.learning.complete',actor,{result_id:stored.result.result_id,
+      cohort_hash:digest('wrong-new-cohort'),cohort_run_ids:['wrong'],excluded_run_ids:[],
+      continuation_case_id:f.rows('ow_cases')[0].id,continuation_artifact_id:f.rows('ow_artifacts')[0].id});
+    let failure;
+    try{await f.learner.process(f.trigger(),'isolated-test-token',f.registry);}catch(error){failure=error;}
+    assert.equal(failure?.code,'OPERATIONAL_LEARNING_CONTINUATION_LINEAGE_CONFLICT');
+    f.learner.fail(f.trigger(),failure);f.restart();
+    assert.equal(f.learner.statusForRun(f.trigger().id).stage,'BLOCKED');
+    assert.equal(f.rows('ow_events').filter(row=>row.action==='operational.learning.complete').length,1);
+    assert.equal(f.rows('ow_operational_brain_callbacks').length,1);
+    assert.equal(f.requests.length,1);
+    const conflictEvent=f.rows('ow_events').find(row=>row.action==='operational.learning.complete');
+    f.addRun('production-later','02');f.restart();f.backend.operationalResearch.stop();
+    assert.equal(f.learner.pendingRun(f.registry)?.id,'production-later','malformed terminal proof is not recovery');
+    await f.learner.flushOnce();f.restart();
+    assert.equal(f.learner.pendingRun(f.registry),null);
+    assert.equal(f.learner.statusForRun(f.trigger().id).stage,'BLOCKED');
+    assert.deepEqual(f.rows('ow_events').find(row=>row.id===conflictEvent.id),conflictEvent);
+    assert.deepEqual(f.requests.map(request=>request.trigger.run_id),[f.trigger().id,'production-later']);
+  }finally{f.close();}
+});
+
+test('production Research qualification rejects drift in an original source, not just in cohort membership',async()=>{
+  const f=productionFixture();
+  try {
+    await f.learner.process(f.trigger(),'isolated-test-token',f.registry);
+    const summary=f.learner.runSummary;
+    f.learner.runSummary=run=>{
+      const value=summary(run);
+      return {...value,summary:{...value.summary,completion_hash:digest('replaced-source')}};
+    };
+    const job=f.rows('ow_research_jobs')[0],research=f.backend.operationalResearch;
+    const qualification=research.qualification(job);
+    assert.equal(qualification.verified,false);
+    assert.equal(qualification.reason,'OPERATIONAL_LEARNING_INPUT_LINEAGE_CONFLICT');
+    assert.match(qualification.required_action,/Owner isolated-brain: recover the exact original immutable analysis input/);
+    assert.equal(research.claim(),null);
+    assert.match(research.statusForCase(job.case_id).next_action,/Do not substitute newer history/);
+    assert.equal(f.rows('ow_research_jobs')[0].input_json,null);
+    assert.equal(f.requests.length,1);
+  }finally{f.close();}
+});
+
+for(const conflict of ['input-hash','duplicate-input','changed-producer','child-cohort']) {
+  test(`production SQLite: ${conflict} is a lineage conflict, never a retry with new history`,async()=>{
+    const f=productionFixture();
+    try {
+      if(conflict==='input-hash') {
+        const input=f.learner.analysisInput(f.trigger(),f.learner.classification(f.trigger()),f.registry);
+        input.correlation.input_sha256=digest('wrong');
+        f.backend.event(f.trigger().id,'operational.learning.input',f.learner.brainActor(strategyId,instanceId),
+          {schema_version:'ocean-operational-learning-input/v1',registry_record_sha256:f.registry.record_sha256,
+            input_sha256:input.correlation.input_sha256,research_version:RESEARCH_VERSION,input});
+      }else {
+        f.fault('ow_operational_brain_callbacks');
+        await assert.rejects(f.learner.process(f.trigger(),'isolated-test-token',f.registry),/isolated-sqlite-fault/);
+        f.unfault();
+        if(conflict==='duplicate-input') {
+          const payload=JSON.parse(f.rows('ow_events').find(row=>row.action==='operational.learning.input').payload_json).payload;
+          f.backend.event(f.trigger().id,'operational.learning.input',f.learner.brainActor(strategyId,instanceId),payload);
+        }else if(conflict==='changed-producer') {
+          f.brain.identity_id='new-isolated-brain';f.backend.store.registerIdentity(f.brain);
+        }else {
+          // A fault-injected alternate immutable child cannot replace the original result's lineage.
+          const result=f.learner.resultFor(f.trigger().id,f.registry.record_sha256);
+          f.backend.operationalResearch.queueEvidenceReview(f.trigger(),f.learner.brainActor(strategyId,instanceId),
+            result.result,result.details,{cohort:{eligible_runs:[],aggregate:{}}});
+        }
+      }
+      f.restart();
+      await assert.rejects(f.learner.process(f.trigger(),'isolated-test-token',f.registry),
+        {code:conflict==='child-cohort'?'OPERATIONAL_LEARNING_CONTINUATION_LINEAGE_CONFLICT':'OPERATIONAL_LEARNING_INPUT_LINEAGE_CONFLICT'});
+      assert.equal(f.requests.length,conflict==='input-hash'?0:1);
+      assert.equal(f.rows('ow_operational_brain_callbacks').length,0);
+    }finally{f.close();}
+  });
+}
+
+test('EXPLICIT MOCK: a real SQLite child insert failure leaves callback pending; restart reuses Brain result',async()=>{
+  const f=fixture({file:true,currentProofMock:true});
+  try {
+    f.db.prepare("UPDATE ow_runs SET state='FAILED' WHERE id=?").run(f.prior);
+    mockBrainConclusion(f,'NO_CHANGE');
+    const run=f.db.prepare('SELECT * FROM ow_runs WHERE id=?').get(f.trigger);
+    f.db.exec("CREATE TRIGGER isolated_child_fault BEFORE INSERT ON ow_cases BEGIN SELECT RAISE(ABORT,'isolated-child-sqlite-fault'); END");
+    await assert.rejects(f.learner.process(run,'isolated-test-token',f.registry),/isolated-child-sqlite-fault/);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_operational_brain_results').get().n,1);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_operational_brain_callbacks').get().n,0);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_cases').get().n,0);
+    f.db.exec('DROP TRIGGER isolated_child_fault');
+    f.restart();
+    assert.equal(f.learner.pendingRun(f.registry)?.id,f.trigger);
+    await f.learner.flushOnce();
+    assert.equal(f.requests.length,1,'restart must not call Brain again');
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_operational_brain_callbacks').get().n,1);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_cases').get().n,1);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_events WHERE action=?').get('operational.learning.complete').n,1);
+    assert.equal(f.learner.pendingRun(f.registry),null);
+    await f.learner.process(f.db.prepare('SELECT * FROM ow_runs WHERE id=?').get(f.trigger),'isolated-test-token',f.registry);
+    assert.equal(f.requests.length,1);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_cases').get().n,1);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_events WHERE action=?').get('operational.learning.complete').n,1);
+  }finally{f.close();}
+});
+
+test('EXPLICIT MOCK: callback SQLite failure retains one durable child and restart completes without a second Brain call',async()=>{
+  const f=fixture({file:true,currentProofMock:true});
+  try {
+    f.db.prepare("UPDATE ow_runs SET state='FAILED' WHERE id=?").run(f.prior);
+    mockBrainConclusion(f,'RECOMMENDATION');
+    const run=f.db.prepare('SELECT * FROM ow_runs WHERE id=?').get(f.trigger);
+    f.db.exec("CREATE TRIGGER isolated_callback_fault BEFORE INSERT ON ow_operational_brain_callbacks BEGIN SELECT RAISE(ABORT,'isolated-callback-sqlite-fault'); END");
+    await assert.rejects(f.learner.process(run,'isolated-test-token',f.registry),/isolated-callback-sqlite-fault/);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_cases').get().n,1);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_research_jobs').get().n,1);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_operational_brain_callbacks').get().n,0);
+    f.db.exec('DROP TRIGGER isolated_callback_fault');
+    f.restart();
+    assert.equal(f.learner.pendingRun(f.registry)?.id,f.trigger);
+    await f.learner.flushOnce();
+    assert.equal(f.requests.length,1);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_cases').get().n,1);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_operational_brain_callbacks').get().n,1);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_events WHERE action=?').get('operational.learning.complete').n,1);
+  }finally{f.close();}
+});
+
+for(const conclusionType of ['NO_CHANGE','BLOCKED','RECOMMENDATION']) {
+  test(`EXPLICIT MOCK: stranded current ${conclusionType} callback recovers its Research child after restart`,async()=>{
+    const f=fixture({file:true,currentProofMock:true});
+    try {
+      f.db.prepare("UPDATE ow_runs SET state='FAILED' WHERE id=?").run(f.prior);
+      mockBrainConclusion(f,conclusionType);
+      const run=f.db.prepare('SELECT * FROM ow_runs WHERE id=?').get(f.trigger);
+      f.db.exec("CREATE TRIGGER isolated_child_fault BEFORE INSERT ON ow_cases BEGIN SELECT RAISE(ABORT,'isolated-child-sqlite-fault'); END");
+      await assert.rejects(f.learner.process(run,'isolated-test-token',f.registry),/isolated-child-sqlite-fault/);
+      const stored=f.learner.resultFor(f.trigger,f.registry.record_sha256);
+      f.backend.operationalResults.callback(null,{run_id:f.trigger,context_hash:stored.result.context_hash,
+        result_id:stored.result.result_id,result_sha256:stored.result.content_sha256,
+        status:'COMPLETED',correlation:stored.result.correlation});
+      f.db.exec('DROP TRIGGER isolated_child_fault');
+      f.restart();f.learner.registryContext=f.registry;
+      const before=f.learner.statusForRun(f.trigger);
+      assert.equal(before.stage,'BRAIN_RECORDED');
+      assert.equal(before.loop_stage,'RESEARCH_REQUIRED');
+      assert.equal(before.research,null);
+      assert.equal(before.continuation_case_id,null);
+      assert.equal(before.continuation_artifact_id,null);
+      assert.match(before.next_action,/same immutable result/);
+      assert.equal(f.learner.pendingRun(f.registry)?.id,f.trigger);
+      await f.learner.flushOnce();
+      assert.equal(f.requests.length,1,'recovery must not call Brain again');
+      assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_cases').get().n,1);
+      assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_research_jobs').get().n,1);
+      assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_operational_brain_callbacks').get().n,1);
+      assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_events WHERE action=?').get('operational.learning.complete').n,1);
+      assert.equal(f.learner.pendingRun(f.registry),null);
+    }finally{f.close();}
+  });
+}
+
+test('EXPLICIT MOCK: missing completion event is repaired once without duplicating child or Brain call',async()=>{
+  const f=fixture({file:true,currentProofMock:true});
+  try {
+    f.db.prepare("UPDATE ow_runs SET state='FAILED' WHERE id=?").run(f.prior);
+    mockBrainConclusion(f,'NO_CHANGE');
+    await f.learner.process(f.db.prepare('SELECT * FROM ow_runs WHERE id=?').get(f.trigger),'isolated-test-token',f.registry);
+    f.db.prepare("DELETE FROM ow_events WHERE action='operational.learning.complete'").run();
+    f.restart();
+    assert.equal(f.learner.pendingRun(f.registry)?.id,f.trigger);
+    await f.learner.flushOnce();
+    assert.equal(f.requests.length,1);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_cases').get().n,1);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_events WHERE action=?').get('operational.learning.complete').n,1);
+    await f.learner.flushOnce();
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_events WHERE action=?').get('operational.learning.complete').n,1);
+  }finally{f.close();}
+});
+
+test('EXPLICIT MOCK: completed older-format callback stays historical and is not silently requeued',()=>{
+  const f=fixture({currentProofMock:true});
+  try {
+    const context=JSON.parse(f.db.prepare('SELECT context_json FROM ow_runs WHERE id=?').get(f.trigger).context_json);
+    const content=JSON.stringify({conclusion_type:'NO_CHANGE',registry_record_sha256:f.registry.record_sha256});
+    f.db.prepare('INSERT INTO ow_operational_brain_results VALUES(?,?,?)').run('older-format-result',f.trigger,
+      JSON.stringify({result_id:'older-format-result',context_hash:context.context_hash,content}));
+    f.db.prepare('INSERT INTO ow_operational_brain_callbacks VALUES(?,?)').run('older-format-result',JSON.stringify({status:'COMPLETED'}));
+    assert.equal(f.learner.pendingRun(f.registry)?.id,f.prior);
+    f.db.prepare("UPDATE ow_runs SET state='FAILED' WHERE id=?").run(f.prior);
+    assert.equal(f.learner.pendingRun(f.registry),null);
+    f.learner.registryContext=f.registry;
+    assert.equal(f.learner.statusForRun(f.trigger).stage,'COMPLETE');
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_cases').get().n,0);
+  }finally{f.close();}
+});
 
 test('completed operational runs are analysed cumulatively and protected or TEST evidence is excluded',async()=>{
   const f=fixture();
@@ -165,10 +808,58 @@ test('a Brain recommendation creates one deterministic Research continuation',as
     assert.equal(trigger.conclusion_type,'RECOMMENDATION');
     assert.match(trigger.continuation_case_id,/^CASE-OPERATIONAL-/);
     assert.match(trigger.continuation_artifact_id,/^test-operational-learning-recommendation-/);
-    assert.match(trigger.next_action,/persist and complete Research/);
-    assert.equal(trigger.loop_stage,'PENDING_RESEARCH');
+    assert.match(trigger.next_action,/provenance owner/,'Mock-only completion retains an explicit current qualification action');
+    assert.equal(trigger.loop_stage,'QUALIFICATION_REQUIRED','Mock-only provenance cannot claim current completion');
+    assert.equal(trigger.recorded_loop_stage,'PENDING_RESEARCH');
     await f.learner.flushOnce();
     assert.equal(f.continuations.length,2,'completed continuation must remain idempotent');
+  }finally{f.close();}
+});
+
+test('G08 read-only run status separates preserved completion from current qualification and restores qualified positive support',()=>{
+  const f=fixture();
+  try {
+    const content=JSON.stringify({conclusion_type:'NO_CHANGE',registry_record_sha256:f.registry.record_sha256,
+      continuation:{case_id:'preserved-research-case'},next_action:'Keep current baseline.'});
+    f.db.prepare('INSERT INTO ow_operational_brain_results VALUES(?,?,?)').run('preserved-result',f.trigger,
+      JSON.stringify({result_id:'preserved-result',content}));
+    f.db.prepare('INSERT INTO ow_operational_brain_callbacks VALUES(?,?)').run('preserved-result',JSON.stringify({status:'COMPLETED'}));
+    f.learner.registryContext=f.registry;
+    let research={state:'COMPLETED',historical:true,qualified_for_new_support:false,analysis_version:'ocean-cumulative-research/v2',
+      report:{outcome:'NO_SUPPORTED_CHANGE',next_action:'Keep current baseline.'},next_action:'Resolve current provenance; preserve the prior report.'};
+    f.backend.operationalResearch={statusForCase:()=>research};
+    const classify=f.learner.classification.bind(f.learner);
+    let telemetry={verified:false,bypassed:false,required_action:'Resolve physical strategy binding and raw STTL2 identity conflict.'};
+    // Explicit qualification fixture; no native replay or operational authority is represented.
+    f.learner.classification=run=>({...classify(run),eligible:telemetry.verified,telemetry,
+      reasons:telemetry.verified?[]:['PHYSICAL_STRATEGY_BINDING_CONFLICT','RAW_STTL2_IDENTITY_CONFLICT']});
+    const snapshot=()=>objectHash(['ow_runs','ow_run_plans','ow_operational_brain_results','ow_operational_brain_callbacks']
+      .map(table=>f.db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()));
+    const before=snapshot(),reportHash=objectHash(research);
+    for(let i=0;i<2;i++) {
+      const status=f.learner.statusForRun(f.trigger);
+      assert.equal(status.stage,'COMPLETE','Recorded callback stays complete');
+      assert.equal(status.current_provenance_qualified,false);
+      assert.equal(status.loop_stage,'QUALIFICATION_REQUIRED');
+      assert.equal(status.current_qualification_status,'QUALIFICATION_REQUIRED');
+      assert.deepEqual(status.historical_result,{learning_stage:'COMPLETE',loop_stage:'COMPLETE',
+        conclusion_type:'NO_CHANGE',research_outcome:'NO_SUPPORTED_CHANGE'});
+      assert.match(status.next_action,/physical strategy binding and raw STTL2 identity conflict/);
+      assert.doesNotMatch(status.next_action,/Keep current baseline/);
+    }
+    assert.equal(snapshot(),before);assert.equal(objectHash(research),reportHash);
+    telemetry={verified:true,bypassed:false};
+    assert.equal(f.learner.statusForRun(f.trigger).loop_stage,'QUALIFICATION_REQUIRED','Historical report is not new support even if physical proof is restored');
+    research={...research,historical:false,qualified_for_new_support:true,analysis_version:'ocean-cumulative-research/v6',
+      next_action:'Keep current baseline. Qualified direction screen found no supported change.'};
+    const current=f.learner.statusForRun(f.trigger);
+    assert.equal(current.loop_stage,'COMPLETE');assert.equal(current.current_qualification_status,'CURRENT');
+    assert.equal(current.current_provenance_qualified,true);assert.equal(current.historical_result,null);
+    assert.match(current.next_action,/Qualified direction screen/);
+    f.backend.operationalResearch.statusForCase=()=>null;telemetry={verified:false,bypassed:false};
+    assert.equal(f.learner.statusForRun(f.trigger).loop_stage,'QUALIFICATION_REQUIRED','A completed callback alone does not grant current support');
+    assert.match(f.learner.statusForRun(f.trigger).next_action,/provenance owner/);
+    assert.equal(snapshot(),before);
   }finally{f.close();}
 });
 
