@@ -508,7 +508,9 @@ function casePage(data) {
   const executable = !data.planning && !(data.namespace==='OPERATIONAL' && data.research) && !['COMPLETED','PAUSED','FAILED','BLOCKED','CANCELLED'].includes(data.work_status) && data.stage !== 'CLOSED';
   const statusControl = data.planning ? '' : ['PAUSED','FAILED','BLOCKED'].includes(data.work_status) ? button('resume', data.work_status === 'PAUSED' ? 'Resume' : 'Retry', '', 'play') : executable ? button('pause', 'Pause', '', 'pause') : '';
   const prepare = data.approvals.find(row => row.state === 'APPROVED' && row.decision?.current_test_authority && ['DEVELOPMENT','SHADOW','PRODUCTION','ROLLBACK'].includes(row.gate) && !data.handoffs.some(handoff => handoff.decision_id === row.decision.decision.decision_id));
-  return heading(data.case_id, data.strategy_name, badge(data.work_status) + statusControl + (executable ? button('upload', 'Upload result', '', 'upload') : '')) + researchPanel(data.research) + (data.planning?section(riskReview?'Risk review scope':'Planning scope',facts([
+  const reviewCandidate = data.candidate_dispatch?.status === 'BUILT_PENDING_REVIEW' && data.stage === 'RESEARCH'
+    && !data.approvals.some(row => ['PENDING','APPROVED'].includes(row.state));
+  return heading(data.case_id, data.strategy_name, badge(data.work_status) + statusControl + (reviewCandidate ? button('request-candidate-review','Review Replay validation',"class='primary'",'check') : '') + (executable ? button('upload', 'Upload result', '', 'upload') : '')) + researchPanel(data.research) + (data.planning?section(riskReview?'Risk review scope':'Planning scope',facts([
     ['Purpose',esc(human(data.planning.kind))],['Authority',riskReview?'Review context only; no strategy disable, candidate development or test permission':'Planning only; no candidate development or test permission'],
     ['Candidate testing',badge('NOT_DUE')],['Approval','Not due'],['Source Research',data.planning.source_case_id?link('cases',data.planning.source_case_id):'Proof required'],
     ['Frozen lineage',link('artifacts',data.planning.lineage_artifact_id)],
@@ -529,6 +531,12 @@ function casePage(data) {
       ['Returned plan',data.planning.plan_work.returned?.artifact_id?link('artifacts',data.planning.plan_work.returned.artifact_id):'Not returned'],
       ['Plan authoring complete (not execution)',data.planning.plan_work.planning_complete===true?'Yes':'No'],
     ]:[]),
+     ...(data.candidate_dispatch?[
+       ['Candidate continuation',badge(data.candidate_dispatch.status)],
+       ['Candidate version',esc(data.candidate_dispatch.completion?.candidate_version || 'Not built')],
+       ['Candidate hash',data.candidate_dispatch.completion?.candidate_hash?hash(data.candidate_dispatch.completion.candidate_hash):'Not registered'],
+       ['Candidate scope',data.candidate_dispatch.status==='REGISTERED'?'Replay validation only':'No test, Paper, Live or promotion authority'],
+     ]:[]),
     ...(!riskReview?[['Latest Research',data.planning.progress?.source?.case_id?link('cases',data.planning.progress.source.case_id):'Await new qualified Research']]:[]),
   ])):'') + facts([
     ['Stage', esc(human(data.stage))], ['Owner', esc(data.owner_id)], ['Waiting on', esc(data.work_status==='COMPLETED'?'None':data.waiting_on || 'Stage prerequisites')], ['Next action', esc(data.next_action)], ['Strategy', link('strategies', data.strategy_id, data.strategy_name)], ['Run', link('runs', data.run_id)], ['Baseline', hash(data.baseline_hash)], ['Candidate', data.candidate_hash ? hash(data.candidate_hash) : 'None registered'], ['Priority', esc(data.priority ? human(data.priority) : 'Not assigned')],
@@ -859,6 +867,26 @@ async function act(action,element) {
     const row=state.data.operational_releases.find(value=>value.request_id===element.dataset.request);
     await postOperational('dataset-releases',{review:row.review,review_hash:row.review.review_hash});
     showNotice('Dataset released for TEST run selection. No run was created.');await refresh(true);return;
+  }
+  if(action==='request-candidate-review'){
+    const data=state.data,completion=data.candidate_dispatch?.completion;
+    if(!completion || data.candidate_dispatch.status!=='BUILT_PENDING_REVIEW')throw Object.assign(new Error(),{code:'CANDIDATE_COMPLETION_REQUIRED'});
+    return openModal('Review Replay-only candidate validation',facts([
+      ['Candidate version',esc(completion.candidate_version)],['Candidate hash',hash(completion.candidate_hash)],
+      ['Change',esc(completion.change_summary)],['Build checks',badge(completion.verification.build_status)],
+      ['Required tests','Backtest, robustness, walk-forward and independent holdout'],
+      ['Trading authority','None; Paper, Live and promotion remain disabled']
+    ])+`<label class='check-line'><input id='candidate-review-confirm' type='checkbox' required>I confirm this exact candidate may be submitted for Replay-only validation review.</label>`,
+    'Create validation review',async form=>{
+      if(!form.querySelector('#candidate-review-confirm').checked)throw Object.assign(new Error(),{code:'EXPLICIT_CANDIDATE_REVIEW_CONFIRMATION_REQUIRED'});
+      const transitioned=await post('transitions',{case_id:data.case_id,expected_revision:data.revision,action:'advance',
+        to_stage:'DEVELOPMENT_REVIEW',artifact_id:data.candidate_dispatch.plan_artifact_id,artifact_ids:null,decision_id:null,owner_id:null,next_action:null});
+      const approval=await post('approvals',{request_id:newId('request'),case_id:data.case_id,expected_revision:transitioned.revision,
+        gate:'DEVELOPMENT',artifact_id:data.candidate_dispatch.plan_artifact_id,recipient_id:data.candidate_dispatch.recipient_id,
+        authorized_tests:['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'],expires_at_utc:new Date(Date.now()+7*24*60*60*1000).toISOString()});
+      history.pushState({},'',`/improvement/approvals/${approval.request_id}`);state.data=null;state.fingerprint=null;
+      showNotice('Replay-only validation review created. No test, Paper, Live or promotion authority has been granted.');await refresh(true);
+    });
   }
   if (action === 'close-modal') { modal.close(); return; }
   if (action === 'decision') { decisionDialog(element.dataset.decision); return; }

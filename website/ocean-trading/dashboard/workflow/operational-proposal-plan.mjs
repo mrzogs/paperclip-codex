@@ -102,7 +102,10 @@ export class OperationalProposalPlan {
       const recipient=reportArtifact.recipient_id;
       const report=readResearchReport(this.b.one('ow_research_jobs',lineage.source.job_id),reportArtifact);
       requireThat(this.sourceOwnerCurrent(recipient,row),409,'PROPOSAL_CURRENT_SOURCE_OWNER_REQUIRED');
-      const current=this.template({row,payload,frozen:lineage,source:{recipient,report}});
+      // A returned plan remains bound to its recorded plan author even after
+      // the normal lifecycle assigns the case to Wayne or the strategy owner.
+      const planningRow=returned?.planning_owner_id?{...row,owner_id:returned.planning_owner_id}:row;
+      const current=this.template({row:planningRow,payload,frozen:lineage,source:{recipient,report}});
       currentHash=current.execution.capability_hash;
       const gaps=current.execution.capabilities.filter(item=>item.required_now && item.status!=='VERIFIED');
       capabilityAction=gaps.length?gaps.map(item=>`Owner ${item.owner_id}: ${item.action}`).join(' ')
@@ -116,8 +119,9 @@ export class OperationalProposalPlan {
         && plan.support_hash===JSON.parse(row.payload_json).support_hash
         && plan.disposition==='DRAFT_FOR_TECHNICAL_REVIEW'
         && objectHash(plan.authority)===objectHash(authority)
-        && returned.planning_owner_id===row.owner_id
-        && artifact.producer_id===row.owner_id && artifact.recipient_id===returned.source_owner_id
+        && returned.planning_owner_id===plan.planning_owner_id
+        && artifact.producer_id===returned.planning_owner_id && artifact.recipient_id===returned.source_owner_id
+        && this.c.ownerCurrent(returned.planning_owner_id,row)
         && typeof planning_notes==='string' && planning_notes.trim().length>0 && planning_notes.length<=4000
         && (!returned.plan_body_hash || objectHash(body)===returned.plan_body_hash)
         && objectHash(JSON.parse(artifact.dependencies_json))===objectHash([plan.lineage_artifact_id]),
