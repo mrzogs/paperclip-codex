@@ -28,7 +28,7 @@ export class WorkflowStore {
         const tables = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all().map(row => row.name);
         requireThat(tables.length > 0 && tables.every(name => name.startsWith("ow_")), 503, "EXISTING_NON_WORKFLOW_DATABASE_REJECTED");
         requireThat(["ow_schema_migrations", "ow_auth_state", "ow_auth_audit", "ow_identities"].every(name => tables.includes(name)), 503, "EXISTING_WORKFLOW_SCHEMA_REQUIRED");
-        requireThat(this.db.prepare("SELECT MAX(version) AS version FROM ow_schema_migrations").get().version === 11, 503, "READONLY_WORKFLOW_MIGRATION_REQUIRED");
+        requireThat(this.db.prepare("SELECT MAX(version) AS version FROM ow_schema_migrations").get().version === 12, 503, "READONLY_WORKFLOW_MIGRATION_REQUIRED");
       } catch (error) { this.db.close(); throw error; }
       return;
     }
@@ -54,7 +54,7 @@ export class WorkflowStore {
         });
       }
       const version = this.db.prepare("SELECT MAX(version) AS version FROM ow_schema_migrations").get().version;
-      requireThat([1,2,3,4,5,6,7,8,9,10,11].includes(version), 503, "WORKFLOW_MIGRATION_VERSION_CONFLICT");
+      requireThat([1,2,3,4,5,6,7,8,9,10,11,12].includes(version), 503, "WORKFLOW_MIGRATION_VERSION_CONFLICT");
       if (version === 1) this.transaction(() => {
         this.db.exec(fs.readFileSync(new URL("./migrations/002-up.sql", import.meta.url), "utf8"));
         for (const table of RUN_IMMUTABLE) for (const action of ["UPDATE","DELETE"]) this.db.exec(`CREATE TRIGGER ${table}_no_${action.toLowerCase()} BEFORE ${action} ON ${table} BEGIN SELECT RAISE(ABORT,'immutable run record'); END;`);
@@ -72,6 +72,7 @@ export class WorkflowStore {
       if (version < 9) this.transaction(() => this.db.exec(fs.readFileSync(new URL("./migrations/009-up.sql", import.meta.url), "utf8")));
       if (version < 10) this.transaction(() => this.db.exec(fs.readFileSync(new URL("./migrations/010-up.sql", import.meta.url), "utf8")));
       if (version < 11) this.transaction(() => this.db.exec(fs.readFileSync(new URL("./migrations/011-up.sql", import.meta.url), "utf8")));
+      if (version < 12) this.transaction(() => this.db.exec(fs.readFileSync(new URL("./migrations/012-up.sql", import.meta.url), "utf8")));
     } catch (error) { this.db.close(); throw error; }
   }
   transaction(work) {
@@ -110,6 +111,7 @@ export class WorkflowStore {
     const count = this.db.prepare("SELECT (SELECT COUNT(*) FROM ow_cases)+(SELECT COUNT(*) FROM ow_runs)+(SELECT COUNT(*) FROM ow_setup_receipts) AS n").get().n;
     requireThat(count === 0, 409, "POPULATED_WORKFLOW_REQUIRES_BACKUP_AND_OPERATOR_ROLLBACK");
     this.transaction(() => {
+      this.db.exec('DROP INDEX ow_run_progress_run_latest; DROP INDEX ow_coverage_receipts_run_latest; DROP INDEX ow_events_entity_action_latest; DELETE FROM ow_schema_migrations WHERE version=12;');
       requireThat(this.db.prepare('SELECT COUNT(*) AS n FROM ow_research_jobs').get().n===0,409,'RESEARCH_HISTORY_REQUIRES_BACKUP_ROLLBACK');
       this.db.exec('DROP TABLE ow_research_jobs; DELETE FROM ow_schema_migrations WHERE version=11;');
       requireThat(this.db.prepare('SELECT (SELECT COUNT(*) FROM ow_onboarding_brain_outbox)+(SELECT COUNT(*) FROM ow_onboarding_registrations)+(SELECT COUNT(*) FROM ow_onboarding_activation_events) AS n').get().n===0,409,'ONBOARDING_LIFECYCLE_HISTORY_REQUIRES_BACKUP_ROLLBACK');

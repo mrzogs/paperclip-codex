@@ -127,7 +127,10 @@ try {
       const config=structuredClone(app.config);const identity=config.identities.find(i=>i.role==='TELEMETRY');const original=JSON.stringify(identity);
       if(scope==='strategy')identity.strategy_ids=[second.profile.strategy_id];else identity.instance_ids=[second.instance.execution_instance_id];
       const db2=new DatabaseSync(app.config.db_file);db2.prepare('UPDATE ow_identities SET metadata_json=? WHERE id=?').run(JSON.stringify(identity),identity.identity_id);
-      const scoped=new WorkflowBackend({...config,python_executable:'python'},process.env);const server=http.createServer((req,res)=>void scoped.handle(req,res,new URL(req.url,`http://${req.headers.host}`)));await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+      const server=http.createServer((req,res)=>void scoped.handle(req,res,new URL(req.url,`http://${req.headers.host}`)));
+      await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+      config.allowed_origins=[`http://127.0.0.1:${server.address().port}`];
+      const scoped=new WorkflowBackend({...config,python_executable:'python'},process.env);
       try {for(const route of [`context/${run.run_id}`,'claim']){const mutation=route==='claim';const response=await fetch(`http://127.0.0.1:${server.address().port}/api/workflow/run-manager/${route}`,{method:mutation?'POST':'GET',headers:{Authorization:`Bearer ${process.env.OCEAN_TELEMETRY_TOKEN}`,...(mutation?{'Content-Type':'application/json'}:{})},body:mutation?JSON.stringify({message_id:f.id('scope-probe'),data:{run_id:run.run_id,expected_revision:1}}):undefined});assert.equal(response.status,403);assert.equal((await response.json()).error.code,scope==='strategy'?'WRONG_STRATEGY_SCOPE':'WRONG_INSTANCE_SCOPE');}}
       finally{await new Promise(resolve=>server.close(resolve));scoped.close();db2.prepare('UPDATE ow_identities SET metadata_json=? WHERE id=?').run(original,identity.identity_id);db2.close();}
     }
@@ -148,7 +151,7 @@ try {
   await check('UI-S22 actual Chrome wizard, scope changes, fresh confirmation, READY and mobile layout',async()=>{
     // Diagnostic scope on FORWARD avoids the deliberately protected discovery fixture above.
     browser=await app.chromium.launch({channel:'chrome',headless:true});const page=await browser.newPage({viewport:{width:1440,height:1000}});activePage=page;const errors=[];page.on('pageerror',e=>errors.push(e.message));
-    await page.goto(`${app.base}/improvement/runs`);await page.locator('#credential').fill(process.env.OCEAN_WAYNE_BROWSER_SECRET);await page.getByRole('button',{name:'Sign in',exact:true}).click();await page.getByRole('button',{name:'Prepare run',exact:true}).click();
+    await page.goto(`${app.base}/improvement/runs`);await page.locator('#credential').fill(process.env.OCEAN_WAYNE_BROWSER_SECRET);await page.getByRole('button',{name:'Sign in',exact:true}).click();await page.getByRole('button',{name:'Start New Run',exact:true}).click();
     await page.locator('#run-environment').selectOption('PAPER_FORWARD');await page.locator('#run-purpose').selectOption('NOT_ELIGIBLE');await page.locator('#run-dataset').selectOption('test-permission-0-FORWARD:0');await page.locator('#run-next').click();
     await page.locator('#run-start').fill('2026-05-01T00:00');await page.locator('#run-end').fill('2026-05-02T00:00');await page.locator('#run-next').click();await page.waitForSelector('#run-review .facts');assert.equal(await page.locator('#run-next').isDisabled(),true);
     await page.screenshot({path:path.join(evidence,'s22-wizard-desktop.png'),fullPage:true});
@@ -156,7 +159,7 @@ try {
     await page.locator('#run-save-name').fill('Forward diagnostic preset');await page.locator('#run-confirm').check();await page.locator('#run-next').click();await page.waitForURL(/\/improvement\/runs\/test-run-/);await page.getByText('Run control',{exact:true}).waitFor();assert.ok((await page.locator('#content').innerText()).includes('Awaiting telemetry'));
     await page.setViewportSize({width:1440,height:1000});await page.screenshot({path:path.join(evidence,'s22-ready-desktop.png'),fullPage:true});assert.deepEqual(errors,[]);
     assert.equal(await page.locator('[data-action="end-run"] svg').count(),1);
-    await page.getByRole('link',{name:'Runs',exact:true}).click();await page.getByRole('button',{name:'Prepare run',exact:true}).click();
+    await page.getByRole('link',{name:'Runs',exact:true}).click();await page.getByRole('button',{name:'Start New Run',exact:true}).click();
     await page.locator('#run-preset').selectOption({label:'Forward diagnostic preset'});assert.equal(await page.locator('#run-environment').inputValue(),'PAPER_FORWARD');assert.equal(await page.locator('#run-confirm').isChecked(),false);await page.getByRole('button',{name:'Close',exact:true}).click();
     await browser.close();browser=null;
   });
