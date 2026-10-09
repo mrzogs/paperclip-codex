@@ -137,15 +137,48 @@ export class WorkflowBackend {
     if (payload.origin !== CONTINUATION_ORIGIN || payload.kind !== "PROPOSAL_PLANNING") return false;
     const completed = this.operationalCandidateDispatch?.completion(row.id);
     if (!completed || this.operationalCandidateDispatch.registration(row.id)) return false;
+    const requestFor = (requestId) => {
+      const request = this.db.prepare("SELECT * FROM ow_approval_requests WHERE id=?").get(requestId);
+      if (!request || request.case_id !== row.id || request.gate !== "DEVELOPMENT"
+        || request.artifact_id !== completed.plan_artifact_id || request.recipient_id !== completed.recipient_id
+        || objectHash(JSON.parse(request.tests_json)) !== objectHash(CANDIDATE_VALIDATION_TESTS)) return null;
+      return request;
+    };
+    const approvedDecision = (decisionId, authorizedTest = null) => {
+      try {
+        const approval = this.approved(row, "DEVELOPMENT", decisionId, completed.recipient_id, authorizedTest);
+        return approval.binding.artifact_id === completed.plan_artifact_id
+          && objectHash(approval.binding.authorized_tests) === objectHash(CANDIDATE_VALIDATION_TESTS);
+      } catch { return false; }
+    };
+    const empty = (key) => !(key in data) || data[key] === null;
     if (operation === "case.transition") {
-      return row.stage === "RESEARCH" && data.action === "advance" && data.to_stage === "DEVELOPMENT_REVIEW"
-        && data.artifact_id === completed.plan_artifact_id && data.artifact_ids === null && data.decision_id === null
-        && data.owner_id === null && data.next_action === null;
+      if (data.case_id !== row.id || data.expected_revision !== row.revision || data.action !== "advance"
+        || !empty("artifact_ids") || !empty("owner_id") || !empty("next_action")) return false;
+      if (row.stage === "RESEARCH" && data.to_stage === "DEVELOPMENT_REVIEW") {
+        return data.artifact_id === completed.plan_artifact_id && empty("decision_id");
+      }
+      if (row.stage === "DEVELOPMENT_REVIEW" && data.to_stage === "DEVELOPMENT_HANDOFF") {
+        return empty("artifact_id") && approvedDecision(data.decision_id);
+      }
+      return false;
     }
     if (operation === "approval.request") {
-      return row.stage === "DEVELOPMENT_REVIEW" && data.gate === "DEVELOPMENT"
+      return data.case_id === row.id && data.expected_revision === row.revision
+        && row.stage === "DEVELOPMENT_REVIEW" && data.gate === "DEVELOPMENT"
         && data.artifact_id === completed.plan_artifact_id && data.recipient_id === completed.recipient_id
         && objectHash(data.authorized_tests) === objectHash(CANDIDATE_VALIDATION_TESTS);
+    }
+    if (operation === "approval.decide") {
+      const request = requestFor(data.request_id);
+      return data.case_id === row.id && data.expected_revision === row.revision && row.stage === "DEVELOPMENT_REVIEW"
+        && request?.state === "PENDING" && data.snapshot_hash === request.snapshot_hash
+        && ["APPROVED", "REJECTED", "MORE_EVIDENCE"].includes(data.decision);
+    }
+    if (operation === "handoff.create") {
+      return data.case_id === row.id && row.stage === "DEVELOPMENT_HANDOFF" && data.gate === "DEVELOPMENT"
+        && data.recipient_id === completed.recipient_id && CANDIDATE_VALIDATION_TESTS.includes(data.authorized_test)
+        && approvedDecision(data.decision_id, data.authorized_test);
     }
     return false;
   }
