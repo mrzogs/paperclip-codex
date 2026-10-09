@@ -12,9 +12,24 @@ export const RESEARCH_VERSION = RESEARCH_V6;
 const unknown = value => !value || /^(unknown|none|null|n\/a)$/i.test(String(value).trim());
 const round = value => Math.round(value * 100) / 100;
 const authority = Object.freeze({ automatic_strategy_change:false, candidate_approved:false, paper_authorized:false, live_authorized:false });
+const operationalCasePattern = /^CASE-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{4,}$/;
 const screeningPolicy = Object.freeze({ minimum_distinct_declared_periods:3, minimum_direction_trades_per_retained_run:10,
   positive_net_exclusion_required_in_every_retained_run:true,
   basis:'EXISTING_DIRECTION_DISCOVERY_SCREEN_NOT_STATISTICALLY_CALIBRATED' });
+
+function brainCaseId(caseId) {
+  if(operationalCasePattern.test(caseId))return caseId;
+  return `CASE-OPERATIONAL-${digest(caseId).slice('sha256:'.length, 'sha256:'.length + 24).toUpperCase()}-0001`;
+}
+
+function normalizedBrainRequest(input) {
+  const caseId=brainCaseId(input.case_id);
+  if(caseId===input.case_id)return input;
+  const normalized={...input,case_id:caseId,correlation:{...input.correlation}};
+  delete normalized.correlation.input_sha256;
+  normalized.correlation.input_sha256=objectHash(normalized);
+  return normalized;
+}
 
 export function evidenceRemediation(sufficiency) {
   const fixed=sufficiency.sample_shortfalls || [],missing=sufficiency.missing_coverage_run_ids || [];
@@ -273,7 +288,7 @@ export class OperationalResearch {
     requireThat(recipient,409,'RESEARCH_SCOPED_RECIPIENT_REQUIRED');
     return this.backend.store.transaction(()=>{
       const fingerprint=objectHash({run_id:run.id,result_id:result.result_id,result_hash:result.content_sha256,cohort_hash:objectHash(bundle.cohort),version:this.version});
-      const caseId=`research-evidence-${fingerprint.slice(7)}`,artifactId=`test-research-evidence-${fingerprint.slice(7)}`;
+      const caseId=brainCaseId(`research-evidence-${fingerprint.slice(7)}`),artifactId=`test-research-evidence-${fingerprint.slice(7)}`;
       if(!this.db.prepare('SELECT id FROM ow_cases WHERE id=?').get(caseId)) {
         const registry=this.backend.one('ow_strategies',run.strategy_id);
         const content=JSON.stringify({schema_version:'ocean-operational-research-reassessment/v1',
@@ -315,7 +330,7 @@ export class OperationalResearch {
         const actor=this.backend.operationalLearning.brainActor(child.strategy_id,child.instance_id);
         requireThat(actor.id===child.owner_id && this.continuations.ownerCurrent(actor.id,child),403,'REASSESSMENT_CURRENT_OWNER_REQUIRED');
         this.backend.store.transaction(()=>{
-          const caseId=`research-reassessment-${digest(`${child.id}:${current}:${this.version}`).slice(7)}`;
+          const caseId=brainCaseId(`research-reassessment-${digest(`${child.id}:${current}:${this.version}`).slice(7)}`);
           if(this.db.prepare('SELECT id FROM ow_cases WHERE id=?').get(caseId))return;
           const content=JSON.stringify({schema_version:'ocean-operational-research-reassessment/v1',
             source_continuation_case_id:child.id,source:lineage.source,evidence_revision_hash:current,
@@ -550,7 +565,10 @@ export class OperationalResearch {
     let input;
     if(current.brain_request_json) {
       requireThat(digest(current.brain_request_json)===current.brain_request_hash,409,'RESEARCH_REQUEST_HASH_CONFLICT');
-      input=JSON.parse(current.brain_request_json);
+      // Preserve the sealed pre-contract request while retrying its deterministic,
+      // contract-valid equivalent. Brain's immutable job-id/input claim rejects
+      // the normalized request if an older form was ever accepted remotely.
+      input=normalizedBrainRequest(JSON.parse(current.brain_request_json));
     } else {
       const registry=await learner.registry(token);
       if(this.stopped)return null;
@@ -560,7 +578,7 @@ export class OperationalResearch {
       const proposalContent=boundedResearchRecommendation({...job,input_hash:job.input_hash
         || this.db.prepare('SELECT input_hash FROM ow_research_jobs WHERE id=?').get(job.id).input_hash},result);
       input={schema_version:'ocean-operational-learning-request/v1',project:evidence.bundle.policy.project,
-      case_id:job.case_id,strategy_id:evidence.row.strategy_id,strategy_name:evidence.bundle.policy.strategy_name,
+      case_id:brainCaseId(job.case_id),strategy_id:evidence.row.strategy_id,strategy_name:evidence.bundle.policy.strategy_name,
       strategy_profile_id:context.strategy_profile_id,strategy_version:context.strategy_version,
       execution_instance_id:context.execution_instance_id,registry_reconciliation_id:registry.reconciliation_id,
       registry_record_sha256:registry.record_sha256,dataset_manifest_hash:context.dataset_manifest_hash,
