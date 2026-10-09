@@ -21,6 +21,7 @@ import { OperationalResearch } from './operational-research.mjs';
 import { REPORT_REFERENCE_VERSION, readResearchReport } from './operational-research-report.mjs';
 import { CONTINUATION_ORIGIN } from './operational-continuation.mjs';
 import { PaperForwardPreparation } from './paper-forward-preparation.mjs';
+import { OperationalCandidateDispatch } from './operational-candidate-dispatch.mjs';
 import {
   activateStrategyOnboarding,
   deactivateStrategyOnboarding,
@@ -33,6 +34,7 @@ import { OnboardingBrainSync, retryOnboardingBrain } from './onboarding-brain-sy
 
 export const TABLE = JSON.parse(fs.readFileSync(new URL("./workflow-transition-table.json", import.meta.url), "utf8"));
 const candidateRouteImplementationHash=digest(fs.readFileSync(new URL('./backend.mjs',import.meta.url)));
+const operationalCandidateDispatchHash=digest(fs.readFileSync(new URL('./operational-candidate-dispatch.mjs',import.meta.url)));
 const candidateRunLifecycleHash=digest(fs.readFileSync(new URL('./run-manager.mjs',import.meta.url)));
 const GATES = { ONBOARDING: "DISCOVERY", DEVELOPMENT: "DEVELOPMENT_REVIEW", SHADOW: "SHADOW_REVIEW", PRODUCTION: "DEPLOYMENT_REVIEW", ROLLBACK: "ROLLBACK_REVIEW" };
 const ARTIFACT_KINDS = new Set(["EVIDENCE", "RECOMMENDATION", "CANDIDATE", "BACKTEST", "ROBUSTNESS", "WALK_FORWARD", "OOS_HOLDOUT", "EVALUATION", "FORWARD_RESULT", "FORWARD_EVALUATION", "DEPLOYMENT_PLAN", "ROLLBACK_PLAN", "VALIDATION_REPORT", "OUTCOME", "LESSON", "NO_BENEFIT"]);
@@ -79,6 +81,7 @@ export class WorkflowBackend {
     this.onboardingBrain.start();
     this.operationalLearning = new OperationalLearning(this, config.operational_learning || { enabled: false });
     this.operationalResearch = new OperationalResearch(this);
+    this.operationalCandidateDispatch = new OperationalCandidateDispatch(this);
     this.operationalLearning.start();
     this.authFailureWindowMs = 5 * 60 * 1000;
     this.authFailureThreshold = 3;
@@ -527,10 +530,10 @@ export class WorkflowBackend {
   }
   operationalCandidateCapabilities() {
     return {catalog_version:'ocean-operational-candidate-routes/v1',
-      implementation_hash:candidateRouteImplementationHash,
+      implementation_hash:objectHash({backend:candidateRouteImplementationHash,dispatch:operationalCandidateDispatchHash}),
       run_lifecycle_hash:candidateRunLifecycleHash,
-      operational_candidate_test_dispatch:false,
-      available_operational_routes:['proposals/work','proposals/claim','proposals/progress','proposals/plans','run/claim','run/evidence','run/finish'],
+      operational_candidate_test_dispatch:true,
+      available_operational_routes:['proposals/work','proposals/claim','proposals/progress','proposals/plans','candidates/work','candidates/claim','candidates/renew','run/claim','run/evidence','run/finish'],
       generic_candidate_lifecycle:'TEST_ONLY_NO_OPERATIONAL_EXECUTION',
       scope:'THIS_WEBSITE_ROUTE_IMPLEMENTATION_NOT_A_CLAIM_ABOUT_ALL_EXTERNAL_PROVIDERS'};
   }
@@ -893,6 +896,9 @@ export class WorkflowBackend {
         else if(local==='proposals/work' && request.method==='GET')result=this.operationalResearch.continuations.plans.queue(actor);
         else if(/^proposals\/[A-Za-z0-9_.:-]+\/work$/.test(local) && request.method==='GET')result=this.operationalResearch.continuations.plans.read(actor,local.split('/')[1]);
         else if(['proposals/claim','proposals/progress','proposals/plans'].includes(local) && request.method==='POST')result=this.operationalResearch.continuations.plans.perform(local.slice(10),actor,await jsonBody(request));
+        else if(local==='candidates/work' && request.method==='GET')result=this.operationalCandidateDispatch.queue(actor);
+        else if(/^candidates\/[A-Za-z0-9_.:-]+\/work$/.test(local) && request.method==='GET')result=this.operationalCandidateDispatch.read(actor,local.split('/')[1]);
+        else if(['candidates/claim','candidates/renew'].includes(local) && request.method==='POST')result=this.operationalCandidateDispatch.perform(local.slice(11),actor,await jsonBody(request));
         else if(local==='risk-reviews/work' && request.method==='GET')result=this.operationalResearch.continuations.riskQueue(actor);
         else if(local==='risk-reviews/dispositions' && request.method==='POST')result=this.operationalResearch.continuations.recordRiskDisposition(actor,await jsonBody(request));
         else if(/^artifacts\/[A-Za-z0-9_.:-]+\/research-report(?:\/download)?$/.test(local) && request.method==='GET') {
