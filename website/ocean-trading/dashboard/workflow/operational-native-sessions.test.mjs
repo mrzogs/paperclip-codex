@@ -15,10 +15,12 @@ const telemetrySource='D:/Trading/CICD/worktrees/telemetry-s30-2';
 const oldSource='88ba8c2214de6326b495037ca477e11a022dd9e7';
 // Git blob is LF; the owner's f19afe... receipt hashes the CRLF checkout.
 const schemaHash='sha256:ab361ff06b8634a4ce838acaf16cb81326cfba5d423fd4b81a7e66249ce2cfdf';
-function fixture({producerPin=false}={}) {
+function fixture({producerPin=false,producerVersion=NATIVE_LOGGER_BUILD.version}={}) {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'ocean-native-session-readonly-'));
   const filename=path.join(root,'telemetry.sqlite'),db=new DatabaseSync(filename);
-  const source=producerPin?NATIVE_LOGGER_BUILD.source_commit:oldSource;
+  const producerBuild=producerPin?NATIVE_LOGGER_BUILDS.find(build=>build.version===producerVersion):null;
+  assert.equal(producerPin && !producerBuild,false,'requested producer fixture must be a reviewed build');
+  const source=producerBuild?.source_commit ?? oldSource;
   const schema=execFileSync('git',['show',`${source}:src/sierra_trade_telemetry/schema.sql`],{cwd:telemetrySource,windowsHide:true});
   assert.equal(digest(schema),producerPin?'sha256:ca4bee67d0e3ba6237e70891ed0cb3475f89d4744438fdf5bf3ab87baec428ef':schemaHash,
     'immutable reviewed schema14 producer-contract fixture pin');
@@ -27,8 +29,8 @@ function fixture({producerPin=false}={}) {
   const rows=Array.from({length:3},(_,i)=>({run_id:'r',trade_id:i+1}));
   const proof=mockNativeProof(context,rows,{month:9,firstDay:4});
   if(producerPin) {
-    proof.run.study_name=`Sierra Trade Telemetry Logger ${NATIVE_LOGGER_BUILD.version}`;
-    for(const observation of proof.observations)observation.logger_module_sha256=NATIVE_LOGGER_BUILD.module_sha256;
+    proof.run.study_name=`Sierra Trade Telemetry Logger ${producerBuild.version}`;
+    for(const observation of proof.observations)observation.logger_module_sha256=producerBuild.module_sha256;
   }
   const insert=(table,values)=>{
     const columns=new Set(db.prepare(`PRAGMA table_info(${table})`).all().map(row=>row.name));
@@ -51,9 +53,9 @@ function fixture({producerPin=false}={}) {
   }
   db.close();
   const binding={schema_version:'ocean-replay-run-bridge/v4',namespace:'OPERATIONAL',strategy_id:'s',instance_id:'i',
-    factual_binding_hash:digest('EXPLICIT_MOCK_FACTUAL_BINDING'),expected_telemetry_version:NATIVE_LOGGER_BUILD.version,
-    expected_telemetry_module_sha256:`sha256:${NATIVE_LOGGER_BUILD.module_sha256}`,
-    expected_telemetry_module_path:path.join(telemetrySource,'build/releases/v0.5.45/SierraTradeTelemetryLogger_v0.5.45_64.dll')};
+    factual_binding_hash:digest('EXPLICIT_MOCK_FACTUAL_BINDING'),expected_telemetry_version:producerBuild?.version ?? NATIVE_LOGGER_BUILD.version,
+    expected_telemetry_module_sha256:`sha256:${producerBuild?.module_sha256 ?? NATIVE_LOGGER_BUILD.module_sha256}`,
+    expected_telemetry_module_path:path.join(telemetrySource,`build/releases/${producerBuild?.version ?? NATIVE_LOGGER_BUILD.version}/SierraTradeTelemetryLogger_${producerBuild?.version ?? NATIVE_LOGGER_BUILD.version}_64.dll`)};
   const bindingFile=path.join(root,'binding.json');fs.writeFileSync(bindingFile,JSON.stringify(binding));
   const factualBindingHash=binding.factual_binding_hash;
   const backend={one:()=>({id:'r',strategy_id:'s',instance_id:'i',context_json:JSON.stringify(context)}),operationalLearning:{telemetryDb:filename,
@@ -114,6 +116,21 @@ test('actual v545 recorded own-logger hash plus versioned reviewed source/exact 
     assert.equal(evidence.verified,true);assert.equal(evidence.observed_session_count,3);
     assert.equal(evidence.statistical_independence_verified,false);assert.equal(evidence.full_market_session_coverage_verified,false);
     assert.equal(evidence.zero_trade_coverage_verified,false);assert.equal(digest(fs.readFileSync(f.filename)),before);
+  }finally{f.close();}
+});
+
+test('actual v546 recorded own-logger hash is reviewed without invalidating v545 history',()=>{
+  const f=fixture({producerPin:true,producerVersion:'v0.5.46'});try {
+    const before=digest(fs.readFileSync(f.filename)),proofs=readObservedSessionProofs(f.backend,['r'],f.rows);
+    assert.equal(proofs.r.producer_verification.verified,true);
+    assert.equal(proofs.r.producer_verification.reviewed_build.version,'v0.5.46');
+    assert.equal(proofs.r.producer_verification.reviewed_build.source_commit,'123abc72c65b01946a0ca13ec862e30050315e7a');
+    assert.deepEqual(proofs.r.producer_verification.recorded_hashes,
+      ['51b7302398456de3022d98f669141cdf752b46fc13acde48be6ccc19c97210ad']);
+    const evidence=sessionEvidence({cohort:{eligible_runs:[{run_id:'r'}]},execution_sessions:proofs},f.rows);
+    assert.equal(evidence.verified,true);assert.equal(evidence.observed_session_count,3);
+    assert.equal(digest(fs.readFileSync(f.filename)),before,'reader wrote no schema, rows or ledger bytes');
+    assert.equal(NATIVE_LOGGER_BUILDS.some(build=>build.version==='v0.5.45'),true,'historical v545 remains reviewed');
   }finally{f.close();}
 });
 
