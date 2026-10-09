@@ -38,6 +38,7 @@ const operationalCandidateDispatchHash=digest(fs.readFileSync(new URL('./operati
 const candidateRunLifecycleHash=digest(fs.readFileSync(new URL('./run-manager.mjs',import.meta.url)));
 const GATES = { ONBOARDING: "DISCOVERY", DEVELOPMENT: "DEVELOPMENT_REVIEW", SHADOW: "SHADOW_REVIEW", PRODUCTION: "DEPLOYMENT_REVIEW", ROLLBACK: "ROLLBACK_REVIEW" };
 const ARTIFACT_KINDS = new Set(["EVIDENCE", "RECOMMENDATION", "CANDIDATE", "BACKTEST", "ROBUSTNESS", "WALK_FORWARD", "OOS_HOLDOUT", "EVALUATION", "FORWARD_RESULT", "FORWARD_EVALUATION", "DEPLOYMENT_PLAN", "ROLLBACK_PLAN", "VALIDATION_REPORT", "OUTCOME", "LESSON", "NO_BENEFIT"]);
+const CANDIDATE_VALIDATION_TESTS = Object.freeze(["BACKTEST", "ROBUSTNESS", "WALK_FORWARD", "OOS_HOLDOUT"]);
 const HUMAN_OPERATIONS = new Set(["profile.register", "strategy.register", "instance.register", "dataset.register", "plan.register", "run.register", "case.register", "approval.decide", "approval.revoke", "setup.register", "outbox.retry", "handoff.create", "onboarding.draft", "onboarding.submit", "onboarding.brain.retry", "onboarding.register", "onboarding.activate", "onboarding.pause", "onboarding.deactivate", "onboarding.emergency-stop"]);
 export const ROUTES = {
   profiles: "profile.register", strategies: "strategy.register", instances: "instance.register", datasets: "dataset.register", "dataset-plans": "plan.register",
@@ -130,6 +131,24 @@ export class WorkflowBackend {
     this.authorize(actor, scope, row.strategy_id, row.instance_id);
     return row;
   }
+  candidateReviewMutationAllowed(operation, actor, data, row) {
+    if (actor.role !== "HUMAN" || actor.id !== "wayne-ocean-ui") return false;
+    const payload = JSON.parse(row.payload_json);
+    if (payload.origin !== CONTINUATION_ORIGIN || payload.kind !== "PROPOSAL_PLANNING") return false;
+    const completed = this.operationalCandidateDispatch?.completion(row.id);
+    if (!completed || this.operationalCandidateDispatch.registration(row.id)) return false;
+    if (operation === "case.transition") {
+      return row.stage === "RESEARCH" && data.action === "advance" && data.to_stage === "DEVELOPMENT_REVIEW"
+        && data.artifact_id === completed.plan_artifact_id && data.artifact_ids === null && data.decision_id === null
+        && data.owner_id === null && data.next_action === null;
+    }
+    if (operation === "approval.request") {
+      return row.stage === "DEVELOPMENT_REVIEW" && data.gate === "DEVELOPMENT"
+        && data.artifact_id === completed.plan_artifact_id && data.recipient_id === completed.recipient_id
+        && objectHash(data.authorized_tests) === objectHash(CANDIDATE_VALIDATION_TESTS);
+    }
+    return false;
+  }
   baseline(row) {
     const current = this.one("ow_strategies", row.strategy_id);
     requireThat(current.baseline_hash === row.baseline_hash && current.revision === JSON.parse(row.payload_json).registry_revision, 409, "BLOCKED_RECONCILIATION");
@@ -153,8 +172,9 @@ export class WorkflowBackend {
     noSecrets(input.data, this.environment);
     requireThat(input.data && typeof input.data === "object", 422, "DATA_REQUIRED");
     if(input.data.case_id) {
-      const row=this.db.prepare('SELECT payload_json FROM ow_cases WHERE id=?').get(input.data.case_id);
-      requireThat(!row || ![CONTINUATION_ORIGIN,'OPERATIONAL_RESEARCH_REASSESSMENT'].includes(JSON.parse(row.payload_json).origin),403,'OPERATIONAL_PLANNING_MUTATION_NOT_ENABLED');
+      const row=this.db.prepare('SELECT * FROM ow_cases WHERE id=?').get(input.data.case_id);
+      const operationalPlanning=row && [CONTINUATION_ORIGIN,'OPERATIONAL_RESEARCH_REASSESSMENT'].includes(JSON.parse(row.payload_json).origin);
+      requireThat(!operationalPlanning || this.candidateReviewMutationAllowed(operation,actor,input.data,row),403,'OPERATIONAL_PLANNING_MUTATION_NOT_ENABLED');
     }
     if (HUMAN_OPERATIONS.has(operation)) requireThat(actor.role === "HUMAN", 403, "WAYNE_BROWSER_ONLY");
     const hash = objectHash({ operation, data: input.data });
