@@ -185,6 +185,8 @@ function mockBrainConclusion(f, conclusionType) {
 function productionFixture() {
   const root=fs.mkdtempSync(path.join(process.env.OCEAN_G11_PRODUCTION_EVIDENCE || os.tmpdir(),'ocean-learning-production-'));
   const filename=path.join(root,'workflow.sqlite');
+  const tokenFile=path.join(root,'isolated-brain.token');
+  fs.writeFileSync(tokenFile,'isolated-test-token-not-operational',{flag:'wx'});
   let store=new WorkflowStore(filename),learner;
   const backend=Object.create(WorkflowBackend.prototype);
   const brain={identity_id:'isolated-brain',role:'BRAIN',namespace:'OPERATIONAL',audience:'Ocean workflow operational v1',
@@ -220,7 +222,7 @@ function productionFixture() {
   function attach() {
     backend.operationalResults=new OperationalResults(backend);
     backend.operationalResearch=new OperationalResearch(backend);
-    learner=new OperationalLearning(backend,{enabled:true,strategy_id:strategyId});
+    learner=new OperationalLearning(backend,{enabled:true,strategy_id:strategyId,token_file:tokenFile});
     learner.registryContext=registry;
     // Only Brain/physical/native providers and artifact-schema validation are mocks.
     // Store migrations, queue, artifacts, identity, result, callback and event paths are production.
@@ -234,6 +236,13 @@ function productionFixture() {
       source_record_ids:[run.id],evidence_status:'SUFFICIENT',as_of_utc:'2026-10-08T01:00:00Z'},metrics:{},telemetry:{}});
     learner.nativeSessionEvidence=ids=>({verified:true,observed_session_count:ids.length,proof_basis:'EXPLICIT_MOCK_ONLY'});
     learner.call=async(route,token,input)=>{
+      if(input===undefined) {
+        assert.equal(token,fs.readFileSync(tokenFile,'utf8'),'worker uses only its isolated credential');
+        if(route==='/auth/me')return {client:{scope:'TRADING',strategy_ids:[strategyId],proof_basis:'EXPLICIT_MOCK_ONLY'}};
+        if(route===`/strategy-registry/${strategyId}`)return {status:'ok',strategy:{
+          reconciliation:{reconciliation_id:registry.reconciliation_id,record_sha256:registry.record_sha256},
+          governance:{normal_brain_ingestion_eligible:true,development_recommendations_allowed:true}}};
+      }
       assert.equal(route,learner.path);
       const frozen=JSON.parse(backend.db.prepare("SELECT payload_json FROM ow_events WHERE entity_id=? AND action='operational.learning.input'")
         .get(input.trigger.run_id).payload_json).payload;
@@ -413,6 +422,101 @@ for(const drift of [false,true]) {
   });
 }
 
+test('production file SQLite: blocked legacy A does not starve B in the batch or after restart',async()=>{
+  const f=productionFixture();
+  try {
+    const run=f.trigger(),actor=f.learner.brainActor(run.strategy_id,run.instance_id);
+    const input=f.learner.analysisInput(run,f.learner.classification(run),f.registry);
+    const details={schema_version:'ocean-operational-learning-result/v1',storage_mode:'BRAIN_IMMUTABLE_REFERENCE',
+      conclusion_type:'NO_CHANGE',registry_reconciliation_id:f.registry.reconciliation_id,
+      registry_record_sha256:f.registry.record_sha256,verified_run_ids:input.cohort.eligible_runs.map(row=>row.run_id)};
+    const content=JSON.stringify(details);
+    const original=f.backend.operationalResults.register(actor,{run_id:run.id,context_hash:input.trigger.context_hash,
+      content,content_sha256:digest(content),correlation:input.correlation});
+    f.addRun('production-later','02');f.restart();
+    f.backend.operationalResearch.stop(); // This test exercises the learning worker, not external Research dispatch.
+    const first=await f.learner.flushOnce();
+    assert.equal(first.items.find(row=>row.run_id===run.id).stage,'BLOCKED');
+    assert.equal(first.items.find(row=>row.run_id==='production-later').stage,'COMPLETE');
+    assert.deepEqual(f.requests.map(request=>request.trigger.run_id),['production-later']);
+    const events=f.rows('ow_events'),children=f.rows('ow_cases'),results=f.rows('ow_operational_brain_results');
+    assert.equal(events.filter(row=>row.action==='operational.learning.blocked').length,1);
+    assert.equal(f.rows('ow_operational_brain_callbacks').length,1);
+    assert.equal(children.length,1);assert.equal(children[0].run_id,'production-later');
+    for(let restart=0;restart<2;restart++) {
+      f.restart();f.backend.operationalResearch.stop();
+      assert.equal(f.learner.pendingRun(f.registry),null,'unrecoverable A is not leased again');
+      await f.learner.flushOnce();
+      assert.equal(f.learner.statusForRun(run.id).last_error,'OPERATIONAL_LEARNING_ORIGINAL_INPUT_REQUIRED');
+      assert.match(f.learner.statusForRun(run.id).next_action,/exact original immutable analysis input/);
+      assert.deepEqual(f.rows('ow_events'),events,'read-only recovery checks do not republish blockers or inputs');
+      assert.deepEqual(f.rows('ow_cases'),children);assert.deepEqual(f.rows('ow_operational_brain_results'),results);
+    }
+    assert.equal(f.requests.length,1);
+    assert.deepEqual(JSON.parse(results.find(row=>row.run_id===run.id).payload_json),original);
+    assert.equal(events.some(row=>row.entity_id===run.id && row.action==='operational.learning.complete'),false);
+  }finally{f.close();}
+});
+
+for(const boundary of ['child','callback']) {
+  test(`production file SQLite: ${boundary} blocked A resumes only when its exact original owner is restored`,async()=>{
+    const f=productionFixture();
+    try {
+      f.fault(boundary==='child'?'ow_cases':'ow_operational_brain_callbacks');
+      await assert.rejects(f.learner.process(f.trigger(),'isolated-test-token',f.registry),/isolated-sqlite-fault/);
+      f.unfault();
+      const originalInput=f.rows('ow_events').find(row=>row.action==='operational.learning.input');
+      const originalResult=f.rows('ow_operational_brain_results')[0];
+      const originalChild=f.rows('ow_cases'),originalArtifacts=f.rows('ow_artifacts');
+      const replacement={...f.brain,identity_id:'isolated-new-brain'};
+      f.backend.store.registerIdentity(replacement);
+      f.backend.config.identities=[replacement,...f.backend.config.identities.filter(row=>row.role!=='BRAIN')];
+      f.addRun('production-later','02');f.restart();f.backend.operationalResearch.stop();
+      await f.learner.flushOnce();
+      assert.equal(f.learner.statusForRun(f.trigger().id).stage,'BLOCKED');
+      assert.equal(f.learner.statusForRun('production-later').stage,'COMPLETE');
+      const block=f.rows('ow_events').find(row=>row.action==='operational.learning.blocked');
+      assert.equal(JSON.parse(block.payload_json).payload.reason,'OPERATIONAL_LEARNING_INPUT_LINEAGE_CONFLICT');
+      f.restart();f.backend.operationalResearch.stop();
+      const before=f.rows('ow_events');
+      assert.equal(f.learner.pendingRun(f.registry),null);
+      await f.learner.flushOnce();assert.deepEqual(f.rows('ow_events'),before);
+      assert.deepEqual(f.requests.map(request=>request.trigger.run_id),[f.trigger().id,'production-later']);
+      // Restore current owner configuration, not immutable rows or workflow statuses.
+      f.backend.config.identities=[f.brain,...f.backend.config.identities.filter(row=>row.role!=='BRAIN')];
+      f.brain.revoked=true;f.restart();
+      assert.equal(f.learner.pendingRun(f.registry),null,'revoked original owner is not recovery');
+      delete f.brain.revoked;f.restart();f.backend.operationalResearch.stop();
+      const originalSummary=f.learner.runSummary;
+      f.learner.runSummary=run=>{
+        const value=originalSummary(run);
+        if(run.id===f.trigger().id)value.summary.completion_hash=digest('changed-original-source');
+        return value;
+      };
+      assert.equal(f.learner.pendingRun(f.registry),null,'restored owner cannot hide changed original source proof');
+      f.learner.runSummary=originalSummary;
+      const checkEvents=f.rows('ow_events');
+      assert.equal(f.learner.pendingRun(f.registry)?.id,f.trigger().id,'exact restoration is detected without status clears');
+      assert.deepEqual(f.rows('ow_events'),checkEvents,'selection is read-only');
+      await f.learner.flushOnce();f.restart();f.backend.operationalResearch.stop();
+      await f.learner.flushOnce();
+      assert.equal(f.learner.statusForRun(f.trigger().id).stage,'COMPLETE');
+      assert.equal(f.requests.length,2,'original result recovery never calls Brain again');
+      assert.deepEqual(f.rows('ow_operational_brain_results').find(row=>row.run_id===f.trigger().id),originalResult);
+      assert.deepEqual(f.rows('ow_events').find(row=>row.id===originalInput.id),originalInput);
+      assert.deepEqual(f.rows('ow_events').find(row=>row.id===block.id),block,'immutable blocker remains in history');
+      assert.equal(f.rows('ow_cases').filter(row=>row.run_id===f.trigger().id).length,1);
+      if(originalChild.length) {
+        assert.deepEqual(f.rows('ow_cases').find(row=>row.id===originalChild[0].id),originalChild[0]);
+        assert.deepEqual(f.rows('ow_artifacts').find(row=>row.id===originalArtifacts[0].id),originalArtifacts[0]);
+      }
+      const completion=f.rows('ow_events').filter(row=>row.entity_id===f.trigger().id && row.action==='operational.learning.complete');
+      assert.equal(completion.length,1);
+      assert.deepEqual(JSON.parse(completion[0].payload_json).payload.cohort_run_ids,[f.trigger().id]);
+    }finally{f.close();}
+  });
+}
+
 test('production file SQLite: durable-child recovery still rejects revoked owner',async()=>{
   const f=productionFixture();
   try {
@@ -462,6 +566,14 @@ test('production SQLite: immutable conflicting terminal envelope remains blocked
     assert.equal(f.rows('ow_events').filter(row=>row.action==='operational.learning.complete').length,1);
     assert.equal(f.rows('ow_operational_brain_callbacks').length,1);
     assert.equal(f.requests.length,1);
+    const conflictEvent=f.rows('ow_events').find(row=>row.action==='operational.learning.complete');
+    f.addRun('production-later','02');f.restart();f.backend.operationalResearch.stop();
+    assert.equal(f.learner.pendingRun(f.registry)?.id,'production-later','malformed terminal proof is not recovery');
+    await f.learner.flushOnce();f.restart();
+    assert.equal(f.learner.pendingRun(f.registry),null);
+    assert.equal(f.learner.statusForRun(f.trigger().id).stage,'BLOCKED');
+    assert.deepEqual(f.rows('ow_events').find(row=>row.id===conflictEvent.id),conflictEvent);
+    assert.deepEqual(f.requests.map(request=>request.trigger.run_id),[f.trigger().id,'production-later']);
   }finally{f.close();}
 });
 

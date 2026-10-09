@@ -1132,6 +1132,41 @@ export class OperationalLearning {
     return row ? JSON.parse(row.payload_json).payload : null;
   }
 
+  lineageRetryReady(run, stored, registry, classification) {
+    // A durable blocker is not a queue lease. Recheck exact recovery without
+    // publishing input, clearing history, or dispatching another Brain analysis.
+    try {
+      const actor = this.brainActor(run.strategy_id, run.instance_id);
+      if (!this.backend.operationalResearch?.continuations?.ownerCurrent(actor.id, run)
+        || !this.currentContinuationResult(stored, registry.record_sha256, classification.context?.context_hash)
+        || stored.result.producer_id !== actor.id || digest(stored.result.content) !== stored.result.content_sha256) return false;
+      let frozen = this.recordedAnalysisInput(run, registry, actor, stored.result);
+      if (!frozen) {
+        const input = this.analysisInput(run, classification, registry);
+        if (objectHash(input.correlation) !== objectHash(stored.result.correlation)) return false;
+        frozen = {input, input_sha256: input.correlation.input_sha256,
+          research_version: this.backend.operationalResearch.version};
+      }
+      const {input} = frozen, details = stored.details;
+      const runIds = [...input.cohort.eligible_runs, ...input.excluded_evidence].map(value => value.run_id);
+      if (details.registry_reconciliation_id !== input.registry_reconciliation_id
+        || objectHash(details.verified_run_ids) !== objectHash(runIds)
+        || (details.analysis_input_sha256 && details.analysis_input_sha256 !== frozen.input_sha256)) return false;
+      const policy = {project: input.project, strategy_name: input.strategy_name,
+        minimum_sample_count: input.cohort.aggregate.minimum_sample_count,
+        minimum_independent_session_count: input.cohort.aggregate.minimum_independent_session_count};
+      for (const original of input.cohort.eligible_runs) {
+        const current = this.backend.one('ow_runs', original.run_id), proof = this.classification(current);
+        if (!proof.eligible || objectHash(this.runSummary(current, proof, policy).summary) !== objectHash(original)) return false;
+      }
+      const continuation = this.recordedContinuation(run, stored.result, details, frozen);
+      if (!continuation) return frozen.research_version === this.backend.operationalResearch.version
+        && !this.completionEventRecorded(run, stored.result);
+      this.completionEventRecorded(run, stored.result, frozen, continuation);
+      return true;
+    } catch { return false; }
+  }
+
   statusForRun(runId) {
     const run = this.db.prepare('SELECT * FROM ow_runs WHERE id=?').get(runId);
     if (!run) return null;
@@ -1228,6 +1263,8 @@ export class OperationalLearning {
         const classification=this.classification(run);
         if(!classification.eligible)return false;
         const stored=this.resultFor(run.id,registry.record_sha256);
+        if(this.lineageBlock(run,stored,registry.record_sha256)
+          && !this.lineageRetryReady(run,stored,registry,classification))return false;
         if(stored?.callback?.status!=='COMPLETED')return true;
         if(!classification.telemetry.verified || classification.telemetry.bypassed)return false;
         if(!this.currentContinuationResult(stored,registry.record_sha256,classification.context?.context_hash))return false;
@@ -1426,7 +1463,10 @@ export class OperationalLearning {
       let run;
       while ((run = this.pendingRun(registry))) {
         try { await this.process(run, token, registry); }
-        catch (error) { this.fail(run, error); break; }
+        catch (error) {
+          this.fail(run, error);
+          if (!LINEAGE_ERRORS.has(error.code)) break;
+        }
       }
       await this.backend.operationalResearch?.flushOnce();
       return this.status();
