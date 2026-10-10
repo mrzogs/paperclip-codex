@@ -10,10 +10,27 @@ import { WorkflowBackend } from './backend.mjs';
 import { OperationalResults } from './operational-results.mjs';
 import { OperationalResearch, RESEARCH_VERSION } from './operational-research.mjs';
 import { OperationalLearning, cumulativeLearningProposal, criticalCausalQualityFlags, parseSttl2Identity,
-  REVIEWED_V238_PROFILE6, reviewedPhysicalProfileBinding } from './operational-learning.mjs';
+  REVIEWED_V238_PROFILE6, reviewedPhysicalProfileBinding, TELEMETRY_READ_BUSY_TIMEOUT_MS } from './operational-learning.mjs';
 
 const strategyId = 'cicd-vwap-pull-back-strategy';
 const instanceId = 'cicd-vwap-pull-back-strategy:replay-two:chart1';
+
+test('learning telemetry reads fail fast enough to preserve website liveness', () => {
+  assert.ok(TELEMETRY_READ_BUSY_TIMEOUT_MS > 0 && TELEMETRY_READ_BUSY_TIMEOUT_MS <= 100);
+});
+
+test('pending scan does not requalify an immutable completed continuation', () => {
+  let classified = 0;
+  const run={id:'operational-complete',strategy_id:strategyId,context_json:JSON.stringify({context_hash:digest('complete')})};
+  const stored={result:{result_id:'result-complete'},callback:{status:'COMPLETED'}};
+  const learner=Object.assign(Object.create(OperationalLearning.prototype),{
+    strategyId,retry:new Map(),db:{prepare:()=>({all:()=>[run]})},resultFor:()=>stored,
+    currentContinuationResult:()=>true,continuationRecorded:()=>true,completionEventRecorded:()=>true,
+    classification:()=>{classified+=1;throw new Error('completed continuation must not be requalified');},
+  });
+  assert.equal(learner.pendingRun({record_sha256:digest('registry')}),null);
+  assert.equal(classified,0);
+});
 
 test('reviewed v238 successor requires the exact physical and unchanged logical tuple', () => {
   const mapping = REVIEWED_V238_PROFILE6;
