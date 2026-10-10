@@ -113,9 +113,12 @@ Assert-Test ($delayIndex -ge 0 -and $postDelayGateIndex -ge 0 -and $postDelayLau
 $singletonHolder = $null
 $singletonScript = Join-Path ([IO.Path]::GetTempPath()) ('ocean-supervisor-singleton-' + [Guid]::NewGuid().ToString('N') + '.ps1')
 $singletonSignal = "$singletonScript.ready"
+$savedSupervisorMutexName = $script:SupervisorMutexName
+$script:SupervisorMutexName = "Local\OceanTradingWebsiteSupervisor-test-$([Guid]::NewGuid().ToString('N'))"
 try {
   $holderSource = @"
 . '$($sourcePath.Replace("'", "''"))' -DefineOnly
+`$script:SupervisorMutexName = '$($script:SupervisorMutexName)'
 `$mutex = Enter-WebsiteSupervisorSingleton
 if (-not `$mutex) { exit 2 }
 [IO.File]::WriteAllText('$($singletonSignal.Replace("'", "''"))', 'ready')
@@ -130,6 +133,7 @@ try { Start-Sleep -Seconds 30 } finally { Exit-WebsiteSupervisorSingleton `$mute
   $duplicateMutex = Enter-WebsiteSupervisorSingleton
   Assert-Test (-not $duplicateMutex) 'DUPLICATE_SUPERVISOR_ACQUIRED_SINGLETON'
 } finally {
+  $script:SupervisorMutexName = $savedSupervisorMutexName
   if ($singletonHolder) {
     try { if (-not $singletonHolder.HasExited) { Stop-Process -Id $singletonHolder.Id -Force } } catch {}
     $singletonHolder.Dispose()
