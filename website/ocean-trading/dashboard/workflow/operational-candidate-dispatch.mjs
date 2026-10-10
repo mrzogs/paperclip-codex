@@ -261,9 +261,17 @@ export class OperationalCandidateDispatch {
   }
 
   recordValidationPlan(actor,row,completed,registered,data){
-    exactKeys(data,['case_id','expected_revision','completion_hash','candidate_hash','baseline_hash','plan_artifact_id','tests']);
+    exactKeys(data,['case_id','expected_revision','completion_hash','candidate_hash','baseline_hash','plan_artifact_id','tests','supersedes_plan_hash']);
     this.b.expect(row,data.expected_revision);this.b.active(row);this.b.baseline(row);
-    requireThat(row.stage==='HISTORICAL_VALIDATION' && !this.validationPlan(row.id),409,'CANDIDATE_VALIDATION_PLAN_STATE_CONFLICT');
+    const existing=this.validationPlan(row.id);
+    requireThat(row.stage==='HISTORICAL_VALIDATION',409,'CANDIDATE_VALIDATION_PLAN_STATE_CONFLICT');
+    if(existing){
+      const resultCount=this.db.prepare('SELECT COUNT(*) n FROM ow_events WHERE entity_id=? AND action=?').get(row.id,validationResultAction).n;
+      const tasks=this.db.prepare('SELECT status FROM ow_tasks WHERE case_id=? AND kind IN (?,?,?,?)')
+        .all(row.id,...REQUIRED_TESTS);
+      requireThat(data.supersedes_plan_hash===existing.plan_hash && resultCount===0
+        && tasks.length===REQUIRED_TESTS.length && tasks.every(task=>task.status==='NOT_RUN'),409,'CANDIDATE_VALIDATION_PLAN_REVISION_NOT_ALLOWED');
+    }else requireThat(data.supersedes_plan_hash===undefined,409,'CANDIDATE_VALIDATION_PLAN_REVISION_CONFLICT');
     requireThat(data.completion_hash===completed.completion_hash && data.candidate_hash===registered.candidate_hash
       && data.baseline_hash===row.baseline_hash && data.plan_artifact_id===completed.plan_artifact_id,
       409,'CANDIDATE_VALIDATION_PLAN_BINDING_CONFLICT');
@@ -319,7 +327,8 @@ export class OperationalCandidateDispatch {
       return {...structuredClone(test),segments};
     });
     requireThat(tests.at(-1).segments.every(segment=>segment.dataset_role==='HOLDOUT'),422,'CANDIDATE_VALIDATION_HOLDOUT_REQUIRED');
-    const frozen={schema_version:CANDIDATE_VALIDATION_VERSION,case_id:row.id,plan_artifact_id:completed.plan_artifact_id,
+    const frozen={schema_version:CANDIDATE_VALIDATION_VERSION,case_id:row.id,plan_revision:(existing?.plan_revision || 1)+(existing?1:0),
+      supersedes_plan_hash:existing?.plan_hash || null,plan_artifact_id:completed.plan_artifact_id,
       completion_hash:completed.completion_hash,candidate_hash:registered.candidate_hash,baseline_hash:row.baseline_hash,
       decision_id:approvedDecisionId(this.b.approved(row,'DEVELOPMENT')),owner_id:actor.id,tests,
       authority:{...authority,authorized_tests:REQUIRED_TESTS,execution_environment:'REPLAY'},created_at_utc:new Date().toISOString()};
@@ -327,7 +336,8 @@ export class OperationalCandidateDispatch {
     this.b.event(row.id,validationPlanAction,actor,plan);
     const nextAction=`Run ${tests[0].kind} from validation plan ${plan.plan_hash}; result PASS means evidence integrity only, not performance approval.`;
     this.db.prepare('UPDATE ow_cases SET revision=revision+1,waiting_on=? WHERE id=?').run(nextAction,row.id);
-    return {case_id:row.id,revision:row.revision+1,status:'PLANNED',plan_hash:plan.plan_hash,next_test:tests[0].kind,
+    return {case_id:row.id,revision:row.revision+1,status:'PLANNED',plan_revision:plan.plan_revision,
+      supersedes_plan_hash:plan.supersedes_plan_hash,plan_hash:plan.plan_hash,next_test:tests[0].kind,
       holdout_state:'SEALED',next_action:nextAction};
   }
 
