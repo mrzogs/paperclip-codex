@@ -8,6 +8,7 @@ import { coverageOverlaps, readObservedSessionProofs, sessionEvidence } from './
 const REQUEST_VERSION = 'ocean-operational-learning-request/v1';
 const RESPONSE_VERSION = 'ocean-operational-learning-result/v1';
 const INPUT_VERSION = 'ocean-operational-learning-input/v1';
+export const TELEMETRY_READ_BUSY_TIMEOUT_MS = 50;
 const INPUT_ACTION = 'operational.learning.input';
 const LINEAGE_ERRORS = new Set([
   'OPERATIONAL_LEARNING_ORIGINAL_INPUT_REQUIRED',
@@ -663,8 +664,8 @@ export class OperationalLearning {
     }
     let database;
     try {
-      database = new DatabaseSync(this.telemetryDb, { readOnly: true, timeout: 2000 });
-      database.exec('PRAGMA query_only=ON; PRAGMA busy_timeout=2000; BEGIN;');
+      database = new DatabaseSync(this.telemetryDb, { readOnly: true, timeout: TELEMETRY_READ_BUSY_TIMEOUT_MS });
+      database.exec(`PRAGMA query_only=ON; PRAGMA busy_timeout=${TELEMETRY_READ_BUSY_TIMEOUT_MS}; BEGIN;`);
       const schema = Number(database.prepare('SELECT COALESCE(MAX(version),0) version FROM schema_version').get().version);
       if (schema < 13) return { verified: false, reasons: ['TELEMETRY_SCHEMA_13_REQUIRED'], schema_version: schema };
       const rows = database.prepare('SELECT * FROM ocean_run_lineage_v1 WHERE run_id=?').all(run.id);
@@ -1260,9 +1261,13 @@ export class OperationalLearning {
       .find(run => {
         if((this.strategyId && run.strategy_id!==this.strategyId)
           || (this.retry.get(`${run.id}:${registry.record_sha256}`)?.nextAttemptMs || 0)>now)return false;
+        const stored=this.resultFor(run.id,registry.record_sha256);
+        const context=JSON.parse(run.context_json);
+        if(stored?.callback?.status==='COMPLETED'
+          && this.currentContinuationResult(stored,registry.record_sha256,context.context_hash)
+          && this.continuationRecorded(run,stored) && this.completionEventRecorded(run,stored.result))return false;
         const classification=this.classification(run);
         if(!classification.eligible)return false;
-        const stored=this.resultFor(run.id,registry.record_sha256);
         if(this.lineageBlock(run,stored,registry.record_sha256)
           && !this.lineageRetryReady(run,stored,registry,classification))return false;
         if(stored?.callback?.status!=='COMPLETED')return true;
