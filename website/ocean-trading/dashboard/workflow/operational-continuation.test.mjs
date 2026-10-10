@@ -1427,7 +1427,7 @@ test('candidate completion survives restart and registration requires an approve
       await f.backend.handle(request,response,new URL(`http://127.0.0.1/api/workflow/operational/v1/candidates/${route}`));
       return {status:response.statusCode,body:output};
     };
-    const matrix=validationMatrix(f,child.baseline_hash),registeredRow=f.backend.one('ow_cases',child.id);
+    let matrix=validationMatrix(f,child.baseline_hash);const registeredRow=f.backend.one('ow_cases',child.id);
     const validationPlanInput={message_id:'candidate-validation-plan',data:{case_id:child.id,expected_revision:registeredRow.revision,
       completion_hash:completed.completion.completion_hash,candidate_hash:candidateBuild().candidate_hash,baseline_hash:child.baseline_hash,
       plan_artifact_id:returned.artifact_id,tests:matrix}};
@@ -1436,9 +1436,19 @@ test('candidate completion survives restart and registration requires an approve
     const duplicate=structuredClone(validationPlanInput);duplicate.message_id='candidate-validation-plan-duplicate';duplicate.data.tests[0].segments[1].baseline_run_id=duplicate.data.tests[0].segments[0].baseline_run_id;
     assert.equal((await validationHttp('validation-plan',duplicate)).body.error.code,'CANDIDATE_VALIDATION_RUN_DUPLICATE');
     const validationPlanResponse=await validationHttp('validation-plan',validationPlanInput);
-    assert.equal(validationPlanResponse.status,200);const validationPlan=validationPlanResponse.body;
+    assert.equal(validationPlanResponse.status,200);let validationPlan=validationPlanResponse.body;
     assert.equal(validationPlan.status,'PLANNED');assert.equal(validationPlan.holdout_state,'SEALED');
+    assert.equal(validationPlan.plan_revision,1);assert.equal(validationPlan.supersedes_plan_hash,null);
     assert.deepEqual((await validationHttp('validation-plan',validationPlanInput)).body,validationPlan);
+    const wrongRevision=structuredClone(validationPlanInput);wrongRevision.message_id='candidate-validation-plan-wrong-revision';
+    wrongRevision.data.expected_revision=validationPlan.revision;wrongRevision.data.supersedes_plan_hash=digest('wrong-plan');
+    assert.equal((await validationHttp('validation-plan',wrongRevision)).body.error.code,'CANDIDATE_VALIDATION_PLAN_REVISION_NOT_ALLOWED');
+    const revisedInput=structuredClone(validationPlanInput);revisedInput.message_id='candidate-validation-plan-revision';
+    revisedInput.data.expected_revision=validationPlan.revision;revisedInput.data.supersedes_plan_hash=validationPlan.plan_hash;
+    revisedInput.data.tests[0].failure_rule+=' Corrected before execution.';
+    const revisedResponse=await validationHttp('validation-plan',revisedInput);assert.equal(revisedResponse.status,200);
+    const originalPlanHash=validationPlan.plan_hash;validationPlan=revisedResponse.body;matrix=revisedInput.data.tests;
+    assert.equal(validationPlan.plan_revision,2);assert.equal(validationPlan.supersedes_plan_hash,originalPlanHash);
     const early=f.backend.one('ow_cases',child.id),earlyTest=matrix.at(-1);
     const earlyResponse=await validationHttp('validation-results',{message_id:'early-holdout',data:{
       case_id:child.id,expected_revision:early.revision,plan_hash:validationPlan.plan_hash,kind:'OOS_HOLDOUT',
