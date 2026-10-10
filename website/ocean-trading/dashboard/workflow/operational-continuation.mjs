@@ -18,7 +18,7 @@ const evidenceGroup = binding => objectHash(Object.fromEntries(['strategy_id','e
 
 export class OperationalContinuation {
   constructor(research) { this.research=research;this.backend=research.backend;this.db=research.db;this.plans=new OperationalProposalPlan(this); }
-  source(job) {
+  source(job,{requireCurrentProvenance=true}={}) {
     const row=this.backend.one('ow_cases',job.case_id);
     requireThat(['OPERATIONAL_LEARNING',REASSESSMENT_ORIGIN].includes(JSON.parse(row.payload_json).origin)
       && job.state==='COMPLETED' && job.analysis_version===this.research.version,409,'CONTINUATION_CURRENT_RESEARCH_REQUIRED');
@@ -44,7 +44,7 @@ export class OperationalContinuation {
       && snapshot.evidence.row.strategy_id===row.strategy_id && snapshot.evidence.row.run_id===row.run_id,
     409,'CONTINUATION_COHORT_LINEAGE_CONFLICT');
     this.backend.baseline(row);
-    requireThat(this.research.qualification(job).verified,409,'CONTINUATION_CURRENT_PROVENANCE_REQUIRED');
+    if(requireCurrentProvenance)requireThat(this.research.qualification(job).verified,409,'CONTINUATION_CURRENT_PROVENANCE_REQUIRED');
     const context=JSON.parse(this.backend.one('ow_runs',row.run_id).context_json);
     requireThat(context.context_hash && context.context_hash===snapshot.evidence.context.context_hash,
       409,'CONTINUATION_CONTEXT_CONFLICT');
@@ -416,6 +416,10 @@ export class OperationalContinuation {
     const progress=progressRow?JSON.parse(progressRow.payload_json).payload:null;
     let reason=null,source=null,evidenceRemediation=null,riskReview=null,riskDisposition=null,registeredCandidate=null;
     try {
+      // Registration freezes the candidate and hands authority to the dedicated
+      // validation contract. Later planning-provenance drift must not reopen or
+      // block that already-approved candidate lifecycle.
+      registeredCandidate=this.registeredCandidate(row);
       const artifact=this.backend.artifactFor(row,payload.lineage_artifact_id);
       const frozen=JSON.parse(Buffer.from(artifact.content).toString('utf8'));
       if(payload.kind==='EVIDENCE_FOLLOW_UP')evidenceRemediation=this.research.remediation(frozen.support.requirement);
@@ -427,14 +431,13 @@ export class OperationalContinuation {
           task_kind:frozen.support.task_kind,authority:noAuthority}),
       409,'CONTINUATION_LINEAGE_CONFLICT');
       const job=this.backend.one('ow_research_jobs',frozen.source.job_id);
-      source=this.source(job);
+      source=this.source(job,{requireCurrentProvenance:!registeredCandidate});
       if(payload.kind==='PROPOSAL_PLANNING' && source)
         requireDirectionExclusionExposure(source.report,frozen.support.requirement);
       requireThat(source && objectHash(source.reference)===objectHash(frozen.source)
         && this.items(source).some(item=>objectHash({...source.binding,...item})===payload.support_hash),
       409,'CONTINUATION_SOURCE_LINEAGE_CONFLICT');
       if(payload.kind==='RISK_DISABLE_REVIEW')riskReview=frozen.support.requirement;
-      registeredCandidate=this.registeredCandidate(row);
       requireThat(row.strategy_id===source.row.strategy_id && row.instance_id===source.row.instance_id
         && row.baseline_hash===source.row.baseline_hash && (row.candidate_hash===null || registeredCandidate),
       409,'CONTINUATION_IDENTITY_CONFLICT');
@@ -487,7 +490,7 @@ export class OperationalContinuation {
       }
     }catch(error){reason=errorCode(error);}
     const planWork=this.plans.forCase(row);
-    reason ||= planWork?.blocked_reason;
+    if(!registeredCandidate)reason ||= planWork?.blocked_reason;
     const status=terminal.has(row.work_status)?row.work_status:reason?'BLOCKED':row.work_status;
     return {case_id:row.id,kind:payload.kind,owner_id:row.owner_id,work_status:status,
       support_hash:payload.support_hash,lineage_artifact_id:payload.lineage_artifact_id,
@@ -506,6 +509,7 @@ export class OperationalContinuation {
         :terminal.has(row.work_status)?`${payload.kind==='RISK_DISABLE_REVIEW'?'Risk review':'Planning'} is ${row.work_status.toLowerCase()}; owner ${row.owner_id} retains the recorded disposition. Restart does not reopen it. No ${payload.kind==='RISK_DISABLE_REVIEW'?'strategy disable, ':''}candidate testing or approval is implied.`
         :payload.kind==='RISK_DISABLE_REVIEW'?this.action(payload.kind,row.owner_id,riskReview)
         :evidenceRemediation?`Owner ${row.owner_id}: ${progress?.status==='STILL_INSUFFICIENT'?`new qualified Research ${progress.source.case_id} still reports evidence shortfalls. `:''}${evidenceRemediation.next_action} Insufficient evidence is not an evaluated no-change finding. Keep the baseline; no approval is due for unassessed directions.`
+        :registeredCandidate?'Run the exact frozen Replay-only candidate validation plan. Paper, Live, promotion and automatic strategy change remain disabled.'
         :planWork?.returned?planWork.next_action:row.waiting_on || this.action(payload.kind,row.owner_id),
       scope:registeredCandidate?'REGISTERED_CANDIDATE_VALIDATION':payload.kind==='RISK_DISABLE_REVIEW'?'OWNED_RISK_REVIEW_ONLY':'OWNED_PLANNING_ONLY',
       candidate_testing:planWork?.candidate_testing || 'NOT_DUE',approval_due:planWork?.approval_due || false,authority:noAuthority};
