@@ -8,7 +8,7 @@ import { OceanAuth } from "./auth.mjs";
 import { WorkflowStore } from "./store.mjs";
 import { readWorkflowView, recordManualAcknowledgement } from "./ui-api.mjs";
 import { RunManager } from "./run-manager.mjs";
-import { attachMaintenance, protectedOperatorHost } from './maintenance.mjs';
+import { attachMaintenance, protectedOperatorHost, protectedOperatorTimeoutMs } from './maintenance.mjs';
 import { orderedSetup, knownSetupTask } from './setup-operator.mjs';
 import { TestCommunication, TEST_PREFIX, TEST_PREFIX_V2, TEST_VERSION, TEST_VERSION_V2 } from './test-communication.mjs';
 import { integrationStatus } from './integration.mjs';
@@ -1113,7 +1113,7 @@ export function workflowFromEnvironment(environment, python) {
   let resolvedEnvironment = environment;
   if (environment.OCEAN_WORKFLOW_CONFIG.endsWith('.dpapi')) {
     requireThat(fs.existsSync(environment.OCEAN_WORKFLOW_CONFIG), 503, 'MACHINE_BOOTSTRAP_REQUIRED');
-    const result = spawnSync(protectedOperatorHost, ['-NoProfile','-NonInteractive','-File',fileURLToPath(new URL('../../../../scripts/ocean-workflow-operator.ps1', import.meta.url)),'-Action','Bootstrap-Runtime','-Root',path.dirname(environment.OCEAN_WORKFLOW_CONFIG)], { encoding: 'utf8', windowsHide: true, timeout: 15_000, maxBuffer: 256*1024 });
+    const result = spawnSync(protectedOperatorHost, ['-NoProfile','-NonInteractive','-File',fileURLToPath(new URL('../../../../scripts/ocean-workflow-operator.ps1', import.meta.url)),'-Action','Bootstrap-Runtime','-Root',path.dirname(environment.OCEAN_WORKFLOW_CONFIG)], { encoding: 'utf8', windowsHide: true, timeout: protectedOperatorTimeoutMs, maxBuffer: 256*1024 });
     requireThat(result.status === 0, 503, 'PROTECTED_OPERATOR_STATE_UNAVAILABLE');
     const state = JSON.parse(result.stdout.replace(/^\uFEFF/,''));
     config = state.config;
