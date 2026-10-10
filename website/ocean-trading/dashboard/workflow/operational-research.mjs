@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { PROVENANCE_ACTION, parseSttl2Identity } from './operational-learning.mjs';
+import { PROVENANCE_ACTION, TELEMETRY_READ_BUSY_TIMEOUT_MS, parseSttl2Identity } from './operational-learning.mjs';
 import { digest, objectHash, requireThat } from './common.mjs';
 import { OperationalContinuation } from './operational-continuation.mjs';
 import { researchReportContent, readResearchReport } from './operational-research-report.mjs';
@@ -470,7 +470,7 @@ export class OperationalResearch {
     });
   }
   sessionRows(runId) {
-    const database=new DatabaseSync(this.backend.operationalLearning.telemetryDb,{readOnly:true,timeout:2000});
+    const database=new DatabaseSync(this.backend.operationalLearning.telemetryDb,{readOnly:true,timeout:TELEMETRY_READ_BUSY_TIMEOUT_MS});
     try{return database.prepare("SELECT trade_id,run_id,entry_datetime,trade_account,symbol FROM ocean_trade_causal_v2 WHERE run_id=? AND lower(status)='closed' ORDER BY trade_id").all(runId);}
     finally{database.close();}
   }
@@ -522,7 +522,7 @@ export class OperationalResearch {
     const bundle={...source,research_coverage:Object.fromEntries(source.cohort.eligible_runs.map(item=>[item.run_id,
       this.backend.operationalLearning.classification(this.backend.one('ow_runs',item.run_id))
         .summary?.completion?.requested_coverage || []]))};
-    const database=new DatabaseSync(this.backend.operationalLearning.telemetryDb,{readOnly:true,timeout:2000});
+    const database=new DatabaseSync(this.backend.operationalLearning.telemetryDb,{readOnly:true,timeout:TELEMETRY_READ_BUSY_TIMEOUT_MS});
     try {
       const identityColumns=job.analysis_version===LEGACY_RESEARCH_VERSION?'':'trade_account,symbol,';
       const rows=bundle.cohort.eligible_runs.flatMap(run=>database.prepare(`SELECT trade_id,run_id,entry_datetime,${identityColumns}direction,
