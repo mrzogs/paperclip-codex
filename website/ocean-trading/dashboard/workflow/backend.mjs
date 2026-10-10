@@ -582,11 +582,11 @@ export class WorkflowBackend {
     });
   }
   operationalCandidateCapabilities() {
-    return {catalog_version:'ocean-operational-candidate-routes/v1',
+    return {catalog_version:'ocean-operational-candidate-routes/v2',
       implementation_hash:objectHash({backend:candidateRouteImplementationHash,dispatch:operationalCandidateDispatchHash}),
       run_lifecycle_hash:candidateRunLifecycleHash,
-      operational_candidate_test_dispatch:true,
-      available_operational_routes:['proposals/work','proposals/claim','proposals/progress','proposals/plans','candidates/work','candidates/claim','candidates/renew','candidates/complete','candidates/acknowledge','candidates/register','run/claim','run/evidence','run/finish'],
+      operational_candidate_test_dispatch:true,operational_candidate_validation_results:true,
+      available_operational_routes:['proposals/work','proposals/claim','proposals/progress','proposals/plans','candidates/work','candidates/claim','candidates/renew','candidates/complete','candidates/acknowledge','candidates/register','candidates/validation-plan','candidates/validation-results','candidates/validation-complete','run/claim','run/evidence','run/finish'],
       generic_candidate_lifecycle:'TEST_ONLY_NO_OPERATIONAL_EXECUTION',
       scope:'THIS_WEBSITE_ROUTE_IMPLEMENTATION_NOT_A_CLAIM_ABOUT_ALL_EXTERNAL_PROVIDERS'};
   }
@@ -953,6 +953,10 @@ export class WorkflowBackend {
         else if(local==='candidates/work' && request.method==='GET')result=this.operationalCandidateDispatch.queue(actor);
         else if(/^candidates\/[A-Za-z0-9_.:-]+\/work$/.test(local) && request.method==='GET')result=this.operationalCandidateDispatch.read(actor,local.split('/')[1]);
         else if(['candidates/claim','candidates/renew','candidates/complete','candidates/acknowledge','candidates/register'].includes(local) && request.method==='POST')result=this.operationalCandidateDispatch.perform(local.slice(11),actor,await jsonBody(request));
+        else if(['candidates/validation-plan','candidates/validation-results','candidates/validation-complete'].includes(local) && request.method==='POST') {
+          const action={'candidates/validation-plan':'plan','candidates/validation-results':'result','candidates/validation-complete':'complete'}[local];
+          result=this.operationalCandidateDispatch.validationPerform(action,actor,await jsonBody(request));
+        }
         else if(local==='risk-reviews/work' && request.method==='GET')result=this.operationalResearch.continuations.riskQueue(actor);
         else if(local==='risk-reviews/dispositions' && request.method==='POST')result=this.operationalResearch.continuations.recordRiskDisposition(actor,await jsonBody(request));
         else if(/^artifacts\/[A-Za-z0-9_.:-]+\/research-report(?:\/download)?$/.test(local) && request.method==='GET') {
