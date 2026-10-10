@@ -586,7 +586,7 @@ export class WorkflowBackend {
       implementation_hash:objectHash({backend:candidateRouteImplementationHash,dispatch:operationalCandidateDispatchHash}),
       run_lifecycle_hash:candidateRunLifecycleHash,
       operational_candidate_test_dispatch:true,
-      available_operational_routes:['proposals/work','proposals/claim','proposals/progress','proposals/plans','candidates/work','candidates/claim','candidates/renew','candidates/complete','candidates/register','run/claim','run/evidence','run/finish'],
+      available_operational_routes:['proposals/work','proposals/claim','proposals/progress','proposals/plans','candidates/work','candidates/claim','candidates/renew','candidates/complete','candidates/acknowledge','candidates/register','run/claim','run/evidence','run/finish'],
       generic_candidate_lifecycle:'TEST_ONLY_NO_OPERATIONAL_EXECUTION',
       scope:'THIS_WEBSITE_ROUTE_IMPLEMENTATION_NOT_A_CLAIM_ABOUT_ALL_EXTERNAL_PROVIDERS'};
   }
@@ -952,7 +952,7 @@ export class WorkflowBackend {
         else if(['proposals/claim','proposals/progress','proposals/plans'].includes(local) && request.method==='POST')result=this.operationalResearch.continuations.plans.perform(local.slice(10),actor,await jsonBody(request));
         else if(local==='candidates/work' && request.method==='GET')result=this.operationalCandidateDispatch.queue(actor);
         else if(/^candidates\/[A-Za-z0-9_.:-]+\/work$/.test(local) && request.method==='GET')result=this.operationalCandidateDispatch.read(actor,local.split('/')[1]);
-        else if(['candidates/claim','candidates/renew','candidates/complete','candidates/register'].includes(local) && request.method==='POST')result=this.operationalCandidateDispatch.perform(local.slice(11),actor,await jsonBody(request));
+        else if(['candidates/claim','candidates/renew','candidates/complete','candidates/acknowledge','candidates/register'].includes(local) && request.method==='POST')result=this.operationalCandidateDispatch.perform(local.slice(11),actor,await jsonBody(request));
         else if(local==='risk-reviews/work' && request.method==='GET')result=this.operationalResearch.continuations.riskQueue(actor);
         else if(local==='risk-reviews/dispositions' && request.method==='POST')result=this.operationalResearch.continuations.recordRiskDisposition(actor,await jsonBody(request));
         else if(/^artifacts\/[A-Za-z0-9_.:-]+\/research-report(?:\/download)?$/.test(local) && request.method==='GET') {

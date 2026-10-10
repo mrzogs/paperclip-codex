@@ -17,6 +17,13 @@ export class OperationalProposalPlan {
     const row=this.db.prepare('SELECT payload_json FROM ow_events WHERE entity_id=? AND action=? ORDER BY id DESC LIMIT 1').get(caseId,action);
     return row?JSON.parse(row.payload_json).payload:null;
   }
+  returnedForArtifact(caseId,artifactId){
+    for(const row of this.db.prepare('SELECT payload_json FROM ow_events WHERE entity_id=? AND action=? ORDER BY id DESC').all(caseId,returnAction)){
+      const payload=JSON.parse(row.payload_json).payload;
+      if(payload.artifact_id===artifactId)return payload;
+    }
+    return null;
+  }
   identity(actor,row,scope='read'){
     requireThat(actor.id===row.owner_id,403,'PROPOSAL_EXACT_OWNER_REQUIRED');
     if(actor.role==='HUMAN')requireThat(actor.id===this.b.config.browser?.subject_id,403,'WAYNE_BROWSER_ONLY');
@@ -92,7 +99,8 @@ export class OperationalProposalPlan {
   }
   forCase(row){
     if(JSON.parse(row.payload_json).kind!=='PROPOSAL_PLANNING')return null;
-    const lease=this.latest(row.id,leaseAction),returned=this.latest(row.id,returnAction);
+    const lease=this.latest(row.id,leaseAction),completion=this.b.operationalCandidateDispatch?.completion(row.id) || null;
+    const returned=completion?this.returnedForArtifact(row.id,completion.plan_artifact_id):this.latest(row.id,returnAction);
     let reason=null,currentHash=null,recordedHash=null,capabilityAction=null;
     try{
       const payload=JSON.parse(row.payload_json);
@@ -129,15 +137,19 @@ export class OperationalProposalPlan {
         recordedHash=plan.execution?.capability_hash || null;
       }
     }catch(error){reason=error.code || 'PROPOSAL_RETURN_PROOF_CONFLICT';}
-    const stale=returned && recordedHash!==currentHash;
+    if(completion && !returned && !reason)reason='CANDIDATE_PLAN_LINEAGE_MISSING';
+    const stale=returned && !completion && recordedHash!==currentHash;
+    const registered=completion?this.b.operationalCandidateDispatch?.registration(row.id):null;
     return {schema_version:PLAN_VERSION,status:reason?'BLOCKED':stale?'REVISION_DUE':returned?'PLAN_RETURNED'
       :lease && lease.lease_until_ms>Date.now()?'IN_PROGRESS':'READY',
       lease:lease?{lease_id:lease.lease_id,owner_id:lease.owner_id,expires_at_utc:new Date(lease.lease_until_ms).toISOString()}:null,
-      returned,blocked_reason:reason,planning_complete:Boolean(returned && !stale && !reason),candidate_testing:'NOT_DUE',approval_due:false,
+      returned,blocked_reason:reason,planning_complete:Boolean(returned && !stale && !reason),
+      candidate_testing:registered?'DUE':completion?'REVIEW_DUE':'NOT_DUE',approval_due:Boolean(completion && !registered),
+      candidate_lineage_frozen:Boolean(completion),
       capability_hash:currentHash,recorded_capability_hash:recordedHash,
       queue_route:'/api/workflow/operational/v1/proposals/work',
       next_action:reason?`Owner ${row.owner_id}: resolve ${reason}; no new plan or candidate execution is supported. Sealed plans remain preserved.`
-        :returned?`Owner ${row.owner_id}: ${stale?'reconcile a new immutable capability/plan revision; previous drafts stay sealed. ':''}Frozen plan ${returned.artifact_id} defines the concrete direction hypothesis and retained comparison scope. ${capabilityAction} Source owner ${returned.source_owner_id} retains candidate development work when genuinely due. This is plan authoring, not candidate execution or tested improvement; no approval or testing is due.`
+        :returned?`Owner ${row.owner_id}: ${stale?'reconcile a new immutable capability/plan revision; previous drafts stay sealed. ':''}Frozen plan ${returned.artifact_id} defines the concrete direction hypothesis and retained comparison scope. ${completion?'Candidate lineage is frozen to this completed build; do not generate a replacement plan. ':''}${capabilityAction} Source owner ${returned.source_owner_id} retains candidate development work when genuinely due.${completion?' Continue through the exact governed candidate review and Replay-only validation.':' This is plan authoring, not candidate execution or tested improvement; no approval or testing is due.'}`
         :`Owner ${row.owner_id}: claim this work through the operational proposal queue and return the frozen non-live planning draft. A delivery acknowledgement does not complete planning.`};
   }
   read(actor,caseId){

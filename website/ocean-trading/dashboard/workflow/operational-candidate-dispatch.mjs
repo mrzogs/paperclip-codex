@@ -102,11 +102,12 @@ export class OperationalCandidateDispatch {
     return {schema_version:CANDIDATE_DISPATCH_VERSION,namespace:'OPERATIONAL',owner_id:actor.id,items,authority};
   }
   perform(action,actor,input){
-    requireThat(['claim','renew','complete','register'].includes(action),404,'UNKNOWN_CANDIDATE_DISPATCH_ACTION');
+    requireThat(['claim','renew','complete','acknowledge','register'].includes(action),404,'UNKNOWN_CANDIDATE_DISPATCH_ACTION');
     exactKeys(input,['message_id','data']);id(input.message_id);noSecrets(input,this.b.environment);
     const keys=['case_id','expected_revision','plan_artifact_id','dispatch_hash',
       ...(['renew','complete'].includes(action)?['lease_id']:[]),...(action==='complete'?['candidate']:[]),
-      ...(action==='register'?['completion_hash','handoff_id']:[])];
+      ...(['acknowledge','register'].includes(action)?['completion_hash','handoff_id']:[]),
+      ...(action==='acknowledge'?['handoff_revision']:[])];
     exactKeys(input.data,keys);const data=input.data,work=this.load(actor,data.case_id,'event.write'),dispatch=this.payload(work);
     requireThat(data.plan_artifact_id===dispatch.plan_artifact_id && data.dispatch_hash===dispatch.dispatch_hash,
       409,'CANDIDATE_DISPATCH_BINDING_CONFLICT');
@@ -145,6 +146,20 @@ export class OperationalCandidateDispatch {
         // review transition assigns Wayne; changing it invalidates plan proof.
         this.db.prepare('UPDATE ow_cases SET revision=revision+1,waiting_on=? WHERE id=?').run(nextAction,current.row.id);
         const result={case_id:current.row.id,revision:current.row.revision+1,status:'BUILT_PENDING_REVIEW',completion:this.publicCompletion(next),next_action:nextAction};
+        this.db.prepare('INSERT INTO ow_inbox VALUES(?,?,?,?)').run(actor.id,message,requestHash,JSON.stringify(result));
+        return result;
+      }else if(action==='acknowledge'){
+        requireThat(completed && completed.completion_hash===data.completion_hash,409,'CANDIDATE_COMPLETION_BINDING_REQUIRED');
+        const handoff=this.b.one('ow_handoffs',data.handoff_id),handoffPayload=JSON.parse(handoff.payload_json);
+        requireThat(handoff.case_id===current.row.id && handoff.recipient_id===actor.id
+          && handoff.state==='DISPATCHED' && handoff.revision===data.handoff_revision
+          && handoffPayload.gate==='DEVELOPMENT',409,'CANDIDATE_DISPATCHED_HANDOFF_REQUIRED');
+        const approved=this.b.approved(current.row,'DEVELOPMENT',handoff.decision_id,actor.id);
+        requireThat(REQUIRED_TESTS.every(kind=>approved.binding.authorized_tests.includes(kind)),409,'CANDIDATE_REQUIRED_TEST_AUTHORITY_MISSING');
+        const acknowledged=this.b.handoffEvent(actor,{handoff_id:handoff.id,expected_revision:handoff.revision,
+          state:'ACKNOWLEDGED',result_artifact_id:null,reason:null});
+        const result={case_id:current.row.id,status:'ACKNOWLEDGED',revision:current.row.revision,
+          handoff_id:acknowledged.handoff_id,handoff_revision:acknowledged.revision,completion_hash:completed.completion_hash};
         this.db.prepare('INSERT INTO ow_inbox VALUES(?,?,?,?)').run(actor.id,message,requestHash,JSON.stringify(result));
         return result;
       }else{
