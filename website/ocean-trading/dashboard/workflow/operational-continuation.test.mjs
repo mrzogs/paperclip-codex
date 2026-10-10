@@ -1276,7 +1276,7 @@ test('operational plan HTTP route delegates only exact owned planning mutations 
 });
 
 test('candidate completion survives restart and registration requires an approved acknowledged Replay-only handoff',async()=>{
-  const f=fixture();try{
+  const f=fixture({ownerScopes:['read','artifact.write','case.transition','event.write']});try{
     f.complete();const before=sealed(f),child=f.children()[0],planClaim=claimPlan(f);
     const returned=plans(f).perform('plans',f.actor,planInput(planClaim));
     const strategy={id:'strategy',role:'STRATEGY',namespace:'OPERATIONAL',strategyIds:['s'],instanceIds:['i'],
@@ -1339,6 +1339,8 @@ test('candidate completion survives restart and registration requires an approve
     assert.equal(httpResponse.statusCode,200);assert.equal(output.status,'ACKNOWLEDGED');
     handoff=f.backend.one('ow_handoffs',handoff.handoff_id);assert.equal(handoff.state,'ACKNOWLEDGED');
     const current=f.backend.operationalCandidateDispatch.read(strategy,child.id);
+    f.backend.db.prepare("UPDATE ow_tasks SET status='NOT_RUN',artifact_id=? WHERE case_id=? AND kind='CANDIDATE_DISPATCH_ENGINEERING'")
+      .run(returned.artifact_id,child.id);
     const registered=f.backend.operationalCandidateDispatch.perform('register',strategy,{message_id:'candidate-register',data:{case_id:child.id,
       expected_revision:row.revision,plan_artifact_id:current.dispatch.plan_artifact_id,dispatch_hash:current.dispatch.dispatch_hash,
       completion_hash:completed.completion.completion_hash,handoff_id:handoff.id}});
@@ -1347,7 +1349,13 @@ test('candidate completion survives restart and registration requires an approve
     assert.equal(view.candidate_hash,candidateBuild().candidate_hash);assert.deepEqual(view.tasks.filter(task=>['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'].includes(task.kind)).map(task=>task.status),['NOT_RUN','NOT_RUN','NOT_RUN','NOT_RUN']);
     assert.equal(f.backend.one('ow_artifacts',registered.candidate_artifact_id).kind,'CANDIDATE');
     assert.equal(view.candidate_dispatch.registration.authority.paper_authorized,false);
-    f.restart();assert.equal(f.backend.readCase(f.human,child.id).candidate_dispatch.status,'REGISTERED');assertSealed(f,before);
+    assert.equal(view.tasks.find(task=>task.kind==='CANDIDATE_DISPATCH_ENGINEERING').status,'COMPLETED');
+    assert.equal(view.planning.candidate_testing,'DUE');assert.equal(view.planning.approval_due,false);
+    assert.equal(view.planning.qualified_for_planning,false);assert.equal(view.planning.blocked_reason,null);
+    f.restart();f.worker.reconcile();
+    const restarted=f.backend.readCase(f.human,child.id);assert.equal(restarted.candidate_dispatch.status,'REGISTERED');
+    assert.equal(restarted.work_status,'READY');assert.equal(restarted.planning.blocked_reason,null);
+    assert.equal(returnedCount(f),1);assertSealed(f,before);
   }finally{f.close();}
 });
 
