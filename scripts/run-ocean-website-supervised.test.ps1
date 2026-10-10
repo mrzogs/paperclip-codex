@@ -99,6 +99,7 @@ $source = Get-Content -LiteralPath $sourcePath -Raw
 Assert-Test ($source.Contains("[Uri]'http://127.0.0.1:3102/'")) 'PROBE_IS_NOT_THE_CHEAP_STATIC_ROOT'
 Assert-Test (-not $source.Contains('/api/workflow/status')) 'SUPERVISOR_PROBES_THE_SLOW_WORKFLOW_STATUS_ROUTE'
 Assert-Test ($source.Contains('-WindowStyle Hidden')) 'WEBSITE_CHILD_IS_NOT_STARTED_HIDDEN'
+Assert-Test ($source.Contains("Local\OceanTradingWebsiteSupervisor-v1")) 'WEBSITE_SUPERVISOR_HAS_NO_PERSISTENT_SINGLETON'
 Assert-Test ($source.Contains('Stop-Process -Id $Process.Id -Force')) 'RECOVERY_IS_NOT_SCOPED_TO_THE_EXACT_CHILD_PID'
 Assert-Test (-not ($source -match 'manage-ocean-services\.ps1.+Restart')) 'LIVENESS_RECOVERY_RESTARTS_THE_SERVICE_STACK'
 Assert-Test ($source.Contains("Get-ScheduledTask -TaskPath '\OceanTrading\' -TaskName 'OceanTrading-Website'")) 'DISABLED_WEBSITE_TASK_DOES_NOT_SUPPRESS_RESTART'
@@ -108,6 +109,33 @@ $postDelay = if ($delayIndex -ge 0) { $source.Substring($delayIndex + $delayMark
 $postDelayGateIndex = $postDelay.IndexOf('Test-WebsiteRestartAllowed')
 $postDelayLaunchIndex = $postDelay.IndexOf('$process = Start-WebsiteChild')
 Assert-Test ($delayIndex -ge 0 -and $postDelayGateIndex -ge 0 -and $postDelayLaunchIndex -gt $postDelayGateIndex) 'RECOVERY_DELAY_HAS_AN_UNCHECKED_OPERATOR_STOP_RACE'
+
+$singletonHolder = $null
+$singletonScript = Join-Path ([IO.Path]::GetTempPath()) ('ocean-supervisor-singleton-' + [Guid]::NewGuid().ToString('N') + '.ps1')
+$singletonSignal = "$singletonScript.ready"
+try {
+  $holderSource = @"
+. '$($sourcePath.Replace("'", "''"))' -DefineOnly
+`$mutex = Enter-WebsiteSupervisorSingleton
+if (-not `$mutex) { exit 2 }
+[IO.File]::WriteAllText('$($singletonSignal.Replace("'", "''"))', 'ready')
+try { Start-Sleep -Seconds 30 } finally { Exit-WebsiteSupervisorSingleton `$mutex }
+"@
+  [IO.File]::WriteAllText($singletonScript, $holderSource)
+  $testHost = (Get-Process -Id $PID).Path
+  $singletonHolder = Start-Process -FilePath $testHost -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$singletonScript) -WindowStyle Hidden -PassThru
+  $singletonDeadline = (Get-Date).AddSeconds(5)
+  while (-not (Test-Path -LiteralPath $singletonSignal) -and (Get-Date) -lt $singletonDeadline) { Start-Sleep -Milliseconds 50 }
+  Assert-Test (Test-Path -LiteralPath $singletonSignal) 'SINGLETON_HOLDER_DID_NOT_START'
+  $duplicateMutex = Enter-WebsiteSupervisorSingleton
+  Assert-Test (-not $duplicateMutex) 'DUPLICATE_SUPERVISOR_ACQUIRED_SINGLETON'
+} finally {
+  if ($singletonHolder) {
+    try { if (-not $singletonHolder.HasExited) { Stop-Process -Id $singletonHolder.Id -Force } } catch {}
+    $singletonHolder.Dispose()
+  }
+  Remove-Item -LiteralPath $singletonScript,$singletonSignal -Force -ErrorAction SilentlyContinue
+}
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('ocean-website-liveness-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
