@@ -69,11 +69,21 @@ function Invoke-Core($Value) {
   $psi.RedirectStandardOutput = $true
   $psi.RedirectStandardError = $true
   $p = [Diagnostics.Process]::Start($psi)
-  $p.StandardInput.Write($json)
+  $outputTask = $p.StandardOutput.ReadToEndAsync()
+  $errorTask = $p.StandardError.ReadToEndAsync()
+  $writeTask = $p.StandardInput.WriteAsync($json)
+  if (-not $writeTask.Wait(30000)) {
+    try { $p.Kill($true) } catch { if (-not $p.HasExited) { $p.Kill() } }
+    throw 'Protected workflow core input timed out.'
+  }
   $p.StandardInput.Close()
-  $output = $p.StandardOutput.ReadToEnd()
-  $err = $p.StandardError.ReadToEnd()
-  $p.WaitForExit()
+  if (-not $p.WaitForExit(60000)) {
+    try { $p.Kill($true) } catch { if (-not $p.HasExited) { $p.Kill() } }
+    try { $p.WaitForExit(5000) | Out-Null } catch {}
+    throw 'Protected workflow core operation timed out.'
+  }
+  $output = $outputTask.GetAwaiter().GetResult()
+  $err = $errorTask.GetAwaiter().GetResult()
   if ($p.ExitCode -ne 0) { throw "Protected workflow operation failed: $err" }
   $output | Convert-OperatorJson
 }
