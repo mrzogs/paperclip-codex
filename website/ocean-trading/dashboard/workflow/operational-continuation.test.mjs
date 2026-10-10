@@ -1137,6 +1137,31 @@ const candidateBuild=()=>({candidate_version:'v0.6.239-short-exclusion-candidate
   pull_request_url:'https://github.com/example/strategy/pull/13',build_receipt_hash:digest('candidate-build-receipt'),
   change_summary:'Disable short entries only; preserve inherited long-entry, exit, sizing and risk behaviour.',
   verification:{build_status:'PASS',tests_status:'PASS',short_entries_enabled:false,non_live_only:true}});
+const validationMatrix=(baselineHash)=>['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'].map((kind,index)=>({
+  kind,dataset_id:`dataset-${kind.toLowerCase().replaceAll('_','-')}`,dataset_revision:3,
+  dataset_role:kind==='BACKTEST'?'DISCOVERY':kind==='OOS_HOLDOUT'?'HOLDOUT':'VALIDATION',
+  dataset_manifest_hash:digest(`dataset-${kind}`),contract:['MNQU25_FUT_CME[M]','MNQH26_FUT_CME[M]','MNQM26_FUT_CME[M]','MNQM26_FUT_CME[M]'][index],
+  warmup_start_utc:['2025-08-18T00:00:00.000Z','2025-12-18T00:00:00.000Z','2026-03-18T00:00:00.000Z','2026-05-18T00:00:00.000Z'][index],
+  scored_start_utc:['2025-09-01T00:00:00.000Z','2026-01-01T00:00:00.000Z','2026-04-01T00:00:00.000Z','2026-06-01T00:00:00.000Z'][index],
+  scored_end_utc:['2025-10-01T00:00:00.000Z','2026-02-01T00:00:00.000Z','2026-05-01T00:00:00.000Z','2026-07-01T00:00:00.000Z'][index],
+  baseline_version:'v0.6.238',baseline_strategy_hash:baselineHash,candidate_version:candidateBuild().candidate_version,
+  telemetry_version:'v0.5.46',telemetry_hash:digest('telemetry-v0546'),cost_model_hash:digest('cost-model'),
+  acceptance:{evidence_integrity_only:true,favorable_performance_required:false,zero_trade_valid:true,costs_required:true,
+    duplicate_check_required:true,completion_receipt_required:true},
+  failure_rule:'FAIL or BLOCK when physical identity, attribution, cost, duplicate, zero-trade, completion, interval or database-read evidence is incomplete.'}));
+const validationReport=(test,baselineHash,kind=test.kind)=>({status:'PASS',baseline:{run_id:`baseline-${kind.toLowerCase()}`,
+  strategy_version:test.baseline_version,strategy_hash:baselineHash,telemetry_version:test.telemetry_version,
+  telemetry_hash:test.telemetry_hash,trade_count:10,gross_pnl:100,fees:20,net_pnl:80,short_trade_count:2,
+  zero_trade_periods:1,completion_receipt_hash:digest(`baseline-receipt-${kind}`),data_quality_flags:[]},
+  candidate:{run_id:`candidate-${kind.toLowerCase()}`,strategy_version:test.candidate_version,strategy_hash:candidateBuild().candidate_hash,
+    telemetry_version:test.telemetry_version,telemetry_hash:test.telemetry_hash,trade_count:8,gross_pnl:110,fees:16,net_pnl:94,
+    short_trade_count:0,zero_trade_periods:1,completion_receipt_hash:digest(`candidate-receipt-${kind}`),data_quality_flags:[]},
+  checks:{physical_strategy_hash_verified:true,telemetry_attribution_complete:true,fees_reconciled:true,duplicates_absent:true,
+    zero_trade_periods_recorded:true,completion_receipt_verified:true,same_window_and_cost_model:true,database_read_completed:true},
+  comparison:{net_pnl_delta:14,performance_conclusion:'EVALUATION_NOT_PERFORMED'},contradictions:[],limitations:['TEST fixture'],
+  provenance:{dataset_id:test.dataset_id,dataset_revision:test.dataset_revision,dataset_role:test.dataset_role,
+    dataset_manifest_hash:test.dataset_manifest_hash,contract:test.contract,warmup_start_utc:test.warmup_start_utc,
+    scored_start_utc:test.scored_start_utc,scored_end_utc:test.scored_end_utc,cost_model_hash:test.cost_model_hash,source_files:[]}});
 
 test('exact operational owner returns an immutable plan with verified scoped dispatch, never candidate PASS',()=>{
   const f=fixture();try{
@@ -1352,9 +1377,60 @@ test('candidate completion survives restart and registration requires an approve
     assert.equal(view.tasks.find(task=>task.kind==='CANDIDATE_DISPATCH_ENGINEERING').status,'COMPLETED');
     assert.equal(view.planning.candidate_testing,'DUE');assert.equal(view.planning.approval_due,false);
     assert.equal(view.planning.qualified_for_planning,false);assert.equal(view.planning.blocked_reason,null);
+    const source=fs.readFileSync(new URL('../public/workflow/ui.js',import.meta.url),'utf8');
+    const helpers={section:(title,body)=>`${title}\n${body}`,facts:items=>items.map(([name,value])=>`${name}: ${value}`).join('\n'),
+      table:(_headers,rows)=>rows.flat().join('\n'),esc:String,badge:String,human:String,link:(_type,id,label)=>label || id,
+      heading:()=>'',button:(_action,label)=>`BUTTON:${label}`,hash:String,date:String,empty:String,timeline:()=>'',
+      caseProgress:()=>'',approvalTable:()=>'',handoffList:()=>'',researchPanel:()=>''};
+    const page=vm.runInNewContext(source.slice(source.indexOf('function casePage('),source.indexOf('function approvalPage('))+';casePage',helpers);
+    const html=page(readWorkflowView(f.backend,f.human,`view/cases/${child.id}`));
+    assert.match(html,/Historical validation scope/);assert.match(html,/Replay candidate validation/);
+    assert.match(html,/Candidate testing: DUE/);assert.match(html,/Historical validation/);
+    assert.match(html,/Paper, Live and promotion remain disabled/);
+    assert.doesNotMatch(html,/Candidate testing: NOT_DUE|Planning only; no candidate development or test permission/);
+    assert.throws(()=>f.backend.mutate('artifact.write',strategy,{message_id:'test-generic-post-registration-write',data:{case_id:child.id}}),/OPERATIONAL_PLANNING_MUTATION_NOT_ENABLED/);
+    const validationHttp=async(route,body)=>{
+      const request={method:'POST',headers:{'content-type':'application/json'},socket:{remoteAddress:'127.0.0.1'},
+        async *[Symbol.asyncIterator](){yield Buffer.from(JSON.stringify(body));}};
+      let output;const response={setHeader(){},end(value){output=JSON.parse(value);},statusCode:200};
+      await f.backend.handle(request,response,new URL(`http://127.0.0.1/api/workflow/operational/v1/candidates/${route}`));
+      return {status:response.statusCode,body:output};
+    };
+    const matrix=validationMatrix(child.baseline_hash),registeredRow=f.backend.one('ow_cases',child.id);
+    const validationPlanInput={message_id:'candidate-validation-plan',data:{case_id:child.id,expected_revision:registeredRow.revision,
+      completion_hash:completed.completion.completion_hash,candidate_hash:candidateBuild().candidate_hash,baseline_hash:child.baseline_hash,
+      plan_artifact_id:returned.artifact_id,tests:matrix}};
+    const validationPlanResponse=await validationHttp('validation-plan',validationPlanInput);
+    assert.equal(validationPlanResponse.status,200);const validationPlan=validationPlanResponse.body;
+    assert.equal(validationPlan.status,'PLANNED');assert.equal(validationPlan.holdout_state,'SEALED');
+    assert.deepEqual((await validationHttp('validation-plan',validationPlanInput)).body,validationPlan);
+    const early=f.backend.one('ow_cases',child.id),earlyTest=matrix.at(-1);
+    const earlyResponse=await validationHttp('validation-results',{message_id:'early-holdout',data:{
+      case_id:child.id,expected_revision:early.revision,plan_hash:validationPlan.plan_hash,kind:'OOS_HOLDOUT',
+      result:validationReport(earlyTest,child.baseline_hash)}});
+    assert.equal(earlyResponse.status,409);assert.equal(earlyResponse.body.error.code,'CANDIDATE_VALIDATION_ORDER_CONFLICT');
+    for(const [index,test] of matrix.entries()){
+      const currentRow=f.backend.one('ow_cases',child.id),input={message_id:`candidate-validation-result-${test.kind}`,data:{
+        case_id:child.id,expected_revision:currentRow.revision,plan_hash:validationPlan.plan_hash,kind:test.kind,
+        result:validationReport(test,child.baseline_hash)}};
+      if(index===0){const invalid=structuredClone(input);invalid.message_id='candidate-validation-incomplete-pass';invalid.data.result.checks.fees_reconciled=false;
+        const invalidResponse=await validationHttp('validation-results',invalid);
+        assert.equal(invalidResponse.status,409);assert.equal(invalidResponse.body.error.code,'CANDIDATE_VALIDATION_PASS_EVIDENCE_INCOMPLETE');}
+      if(index===3)assert.equal(f.backend.db.prepare('SELECT COUNT(*) n FROM ow_events WHERE action=?').get('operational.candidate.validation.holdout_released').n,0);
+      const recordedResponse=await validationHttp('validation-results',input);assert.equal(recordedResponse.status,200);
+      const recorded=recordedResponse.body;
+      assert.equal(recorded.status,'PASS');assert.equal((await validationHttp('validation-results',input)).body.artifact_id,recorded.artifact_id);
+    }
+    assert.equal(f.backend.db.prepare('SELECT COUNT(*) n FROM ow_events WHERE action=?').get('operational.candidate.validation.holdout_released').n,1);
+    const completeRow=f.backend.one('ow_cases',child.id),validationCompleteResponse=await validationHttp('validation-complete',{message_id:'candidate-validation-complete',data:{
+      case_id:child.id,expected_revision:completeRow.revision,plan_hash:validationPlan.plan_hash}});
+    assert.equal(validationCompleteResponse.status,200);const validationComplete=validationCompleteResponse.body;
+    assert.equal(validationComplete.stage,'CANDIDATE_EVALUATION');assert.match(validationComplete.next_action,/Obsidian Brain/);
+    assert.deepEqual(f.backend.readCase(f.human,child.id).tasks.filter(task=>['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'].includes(task.kind)).map(task=>task.status),['PASS','PASS','PASS','PASS']);
     f.restart();f.worker.reconcile();
     const restarted=f.backend.readCase(f.human,child.id);assert.equal(restarted.candidate_dispatch.status,'REGISTERED');
-    assert.equal(restarted.work_status,'READY');assert.equal(restarted.planning.blocked_reason,null);
+    assert.equal(restarted.candidate_dispatch.validation.status,'COMPLETED');assert.equal(restarted.stage,'CANDIDATE_EVALUATION');
+    assert.equal(restarted.work_status,'READY',JSON.stringify({planning:restarted.planning,blockers:restarted.blockers}));assert.equal(restarted.planning.blocked_reason,null);
     assert.equal(returnedCount(f),1);assertSealed(f,before);
   }finally{f.close();}
 });

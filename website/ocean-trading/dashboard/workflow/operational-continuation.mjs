@@ -129,15 +129,18 @@ export class OperationalContinuation {
   registeredCandidate(row) {
     const registration=this.backend.operationalCandidateDispatch?.registration(row.id);
     if(!registration)return null;
+    const completion=this.backend.operationalCandidateDispatch.completion(row.id);
     const artifact=this.backend.artifactFor(row,registration.candidate_artifact_id,'CANDIDATE');
-    const identity=this.backend.config.identities.find(value=>value.identity_id===row.owner_id);
+    const producer=completion?.recipient_id;
+    const identity=this.backend.config.identities.find(value=>value.identity_id===producer);
     requireThat(registration.case_id===row.id && registration.candidate_hash===row.candidate_hash
-      && artifact.candidate_hash===row.candidate_hash && artifact.producer_id===row.owner_id
+      && completion?.candidate?.candidate_hash===row.candidate_hash
+      && artifact.candidate_hash===row.candidate_hash && artifact.producer_id===producer
       && identity?.namespace==='OPERATIONAL' && identity.role==='STRATEGY' && !identity.revoked
       && Date.parse(identity.expires_at_utc)>Date.now() && identity.strategy_ids?.includes(row.strategy_id)
       && identity.instance_ids?.includes(row.instance_id)
       && ['read','artifact.write','case.transition','event.write'].every(scope=>identity.scopes?.includes(scope))
-      && this.backend.store.identityCurrent(identity) && !this.backend.auth?.bindingErrors?.has(row.owner_id),
+      && this.backend.store.identityCurrent(identity) && !this.backend.auth?.bindingErrors?.has(producer),
     409,'REGISTERED_CANDIDATE_IDENTITY_CONFLICT');
     return registration;
   }
