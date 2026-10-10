@@ -20,6 +20,26 @@ $Node = 'C:\Program Files\nodejs\node.exe'
 $LogDir = Join-Path $Dashboard 'logs'
 $ProbeUri = [Uri]'http://127.0.0.1:3102/'
 $script:SupervisorLog = $null
+$script:SupervisorMutexName = 'Local\OceanTradingWebsiteSupervisor-v1'
+
+function Enter-WebsiteSupervisorSingleton {
+  $mutex = [Threading.Mutex]::new($false, $script:SupervisorMutexName)
+  try {
+    try { $acquired = $mutex.WaitOne(0) }
+    catch [Threading.AbandonedMutexException] { $acquired = $true }
+    if ($acquired) { return $mutex }
+    $mutex.Dispose()
+    return $null
+  } catch {
+    $mutex.Dispose()
+    throw
+  }
+}
+
+function Exit-WebsiteSupervisorSingleton([Threading.Mutex]$Mutex) {
+  if (-not $Mutex) { return }
+  try { $Mutex.ReleaseMutex() } finally { $Mutex.Dispose() }
+}
 
 function Write-SupervisorLog([string]$Message) {
   $line = "$(Get-Date -Format o) $Message"
@@ -542,4 +562,10 @@ function Invoke-OceanWebsiteSupervisor {
 }
 
 if ($DefineOnly) { return }
-Invoke-OceanWebsiteSupervisor
+$supervisorMutex = Enter-WebsiteSupervisorSingleton
+if (-not $supervisorMutex) {
+  Write-Output 'Another Ocean website supervisor generation is already active; duplicate launch suppressed.'
+  exit 0
+}
+try { Invoke-OceanWebsiteSupervisor }
+finally { Exit-WebsiteSupervisorSingleton $supervisorMutex }
