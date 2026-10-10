@@ -1275,7 +1275,7 @@ test('operational plan HTTP route delegates only exact owned planning mutations 
   }finally{f.close();}
 });
 
-test('candidate completion survives restart and registration requires an approved acknowledged Replay-only handoff',()=>{
+test('candidate completion survives restart and registration requires an approved acknowledged Replay-only handoff',async()=>{
   const f=fixture();try{
     f.complete();const before=sealed(f),child=f.children()[0],planClaim=claimPlan(f);
     const returned=plans(f).perform('plans',f.actor,planInput(planClaim));
@@ -1291,6 +1291,10 @@ test('candidate completion survives restart and registration requires an approve
     assert.equal(f.backend.readCase(f.human,child.id).candidate_dispatch.status,'BUILT_PENDING_REVIEW');
     assert.equal(f.backend.readCase(f.human,child.id).tasks.find(task=>task.kind==='CANDIDATE_DISPATCH_ENGINEERING').status,'COMPLETED');
     f.restart();assert.deepEqual(f.backend.operationalCandidateDispatch.perform('complete',strategy,completionInput),completed);
+    f.backend.db.prepare('INSERT INTO ow_run_versions VALUES(?,?,?)').run('post-completion-capability-change','s',JSON.stringify({kind:'BASELINE',version:'post-completion'}));
+    assert.equal(plans(f).forCase(f.backend.one('ow_cases',child.id)).status,'PLAN_RETURNED');
+    assert.equal(plans(f).forCase(f.backend.one('ow_cases',child.id)).returned.artifact_id,returned.artifact_id);
+    f.worker.reconcile();assert.equal(returnedCount(f),1,'completed candidate freezes its exact plan across capability changes');
     work=f.backend.operationalCandidateDispatch.read(strategy,child.id);assert.equal(work.status,'BUILT_PENDING_REVIEW');
     assert.throws(()=>f.backend.operationalCandidateDispatch.perform('register',strategy,{message_id:'early-register',data:{case_id:child.id,
       expected_revision:work.revision,plan_artifact_id:work.dispatch.plan_artifact_id,dispatch_hash:work.dispatch.dispatch_hash,
@@ -1324,11 +1328,20 @@ test('candidate completion survives restart and registration requires an approve
     let handoff=f.backend.mutate('handoff.create',f.human,{message_id:'test-candidate-handoff',data:handoffData});
     handoff=f.backend.handoffEvent(f.human,{handoff_id:handoff.handoff_id,expected_revision:handoff.revision,state:'READY',result_artifact_id:null,reason:null});
     handoff=f.backend.handoffEvent(f.human,{handoff_id:handoff.handoff_id,expected_revision:handoff.revision,state:'DISPATCHED',result_artifact_id:null,reason:null});
-    handoff=f.backend.handoffEvent(strategy,{handoff_id:handoff.handoff_id,expected_revision:handoff.revision,state:'ACKNOWLEDGED',result_artifact_id:null,reason:null});
+    f.backend.auth.authenticate=()=>strategy;
+    const acknowledgeBody={message_id:'candidate-acknowledge',data:{case_id:child.id,expected_revision:row.revision,
+      plan_artifact_id:work.dispatch.plan_artifact_id,dispatch_hash:work.dispatch.dispatch_hash,
+      completion_hash:completed.completion.completion_hash,handoff_id:handoff.handoff_id,handoff_revision:handoff.revision}};
+    const httpRequest={method:'POST',headers:{'content-type':'application/json'},socket:{remoteAddress:'127.0.0.1'},
+      async *[Symbol.asyncIterator](){yield Buffer.from(JSON.stringify(acknowledgeBody));}};
+    let output;const httpResponse={setHeader(){},end(value){output=JSON.parse(value);},statusCode:200};
+    await f.backend.handle(httpRequest,httpResponse,new URL('http://127.0.0.1/api/workflow/operational/v1/candidates/acknowledge'));
+    assert.equal(httpResponse.statusCode,200);assert.equal(output.status,'ACKNOWLEDGED');
+    handoff=f.backend.one('ow_handoffs',handoff.handoff_id);assert.equal(handoff.state,'ACKNOWLEDGED');
     const current=f.backend.operationalCandidateDispatch.read(strategy,child.id);
     const registered=f.backend.operationalCandidateDispatch.perform('register',strategy,{message_id:'candidate-register',data:{case_id:child.id,
       expected_revision:row.revision,plan_artifact_id:current.dispatch.plan_artifact_id,dispatch_hash:current.dispatch.dispatch_hash,
-      completion_hash:completed.completion.completion_hash,handoff_id:handoff.handoff_id}});
+      completion_hash:completed.completion.completion_hash,handoff_id:handoff.id}});
     assert.equal(registered.status,'REGISTERED');assert.equal(registered.stage,'HISTORICAL_VALIDATION');
     const view=f.backend.readCase(f.human,child.id);assert.equal(view.candidate_dispatch.status,'REGISTERED');
     assert.equal(view.candidate_hash,candidateBuild().candidate_hash);assert.deepEqual(view.tasks.filter(task=>['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'].includes(task.kind)).map(task=>task.status),['NOT_RUN','NOT_RUN','NOT_RUN','NOT_RUN']);
