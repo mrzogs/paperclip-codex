@@ -126,6 +126,21 @@ export class OperationalContinuation {
       && ['read','artifact.write','event.write'].every(scope=>identity.scopes?.includes(scope))
       && this.backend.store.identityCurrent(identity) && !this.backend.auth?.bindingErrors?.has(owner));
   }
+  registeredCandidate(row) {
+    const registration=this.backend.operationalCandidateDispatch?.registration(row.id);
+    if(!registration)return null;
+    const artifact=this.backend.artifactFor(row,registration.candidate_artifact_id,'CANDIDATE');
+    const identity=this.backend.config.identities.find(value=>value.identity_id===row.owner_id);
+    requireThat(registration.case_id===row.id && registration.candidate_hash===row.candidate_hash
+      && artifact.candidate_hash===row.candidate_hash && artifact.producer_id===row.owner_id
+      && identity?.namespace==='OPERATIONAL' && identity.role==='STRATEGY' && !identity.revoked
+      && Date.parse(identity.expires_at_utc)>Date.now() && identity.strategy_ids?.includes(row.strategy_id)
+      && identity.instance_ids?.includes(row.instance_id)
+      && ['read','artifact.write','case.transition','event.write'].every(scope=>identity.scopes?.includes(scope))
+      && this.backend.store.identityCurrent(identity) && !this.backend.auth?.bindingErrors?.has(row.owner_id),
+    409,'REGISTERED_CANDIDATE_IDENTITY_CONFLICT');
+    return registration;
+  }
   action(kind,owner,requirement=null) {
     if(kind==='RISK_DISABLE_REVIEW')return `Owner ${owner}: review the frozen ${requirement.value} direction loss observation and retained child-stratum contradictions against the unchanged baseline. Excluding ${requirement.excluded_trades} of ${requirement.baseline_trades} recorded trades leaves zero exposure; this is risk-disable review context, not a profitable entry filter. Record KEEP_BASELINE or EVIDENCE_LIMITED with review notes through the owner-only operational risk-reviews/dispositions route. Preserve the source report. Keep the baseline unchanged; no strategy disable, candidate, execution or human approval is authorized or claimed.`;
     return kind==='PROPOSAL_PLANNING'
@@ -320,8 +335,9 @@ export class OperationalContinuation {
           source:source.reference,owner_id:owner,task_id:taskId,authority:noAuthority});
         row=this.backend.one('ow_cases',caseId);
       } else {
+        const registered=this.registeredCandidate(row);
         requireThat(row.strategy_id===source.row.strategy_id && row.instance_id===source.row.instance_id
-          && row.baseline_hash===source.row.baseline_hash && row.candidate_hash===null
+          && row.baseline_hash===source.row.baseline_hash && (row.candidate_hash===null || registered)
           && objectHash(JSON.parse(row.payload_json))===objectHash(payload),409,'CONTINUATION_IDENTITY_CONFLICT');
         const original=this.backend.artifactFor(row,artifactId);
         requireThat(objectHash(JSON.parse(Buffer.from(original.content).toString('utf8')).support)===fingerprint,
@@ -395,7 +411,7 @@ export class OperationalContinuation {
     if(payload.origin!==CONTINUATION_ORIGIN)return null;
     const progressRow=this.db.prepare("SELECT payload_json FROM ow_events WHERE entity_id=? AND action='operational.research.evidence.progress' ORDER BY id DESC LIMIT 1").get(row.id);
     const progress=progressRow?JSON.parse(progressRow.payload_json).payload:null;
-    let reason=null,source=null,evidenceRemediation=null,riskReview=null,riskDisposition=null;
+    let reason=null,source=null,evidenceRemediation=null,riskReview=null,riskDisposition=null,registeredCandidate=null;
     try {
       const artifact=this.backend.artifactFor(row,payload.lineage_artifact_id);
       const frozen=JSON.parse(Buffer.from(artifact.content).toString('utf8'));
@@ -415,15 +431,16 @@ export class OperationalContinuation {
         && this.items(source).some(item=>objectHash({...source.binding,...item})===payload.support_hash),
       409,'CONTINUATION_SOURCE_LINEAGE_CONFLICT');
       if(payload.kind==='RISK_DISABLE_REVIEW')riskReview=frozen.support.requirement;
+      registeredCandidate=this.registeredCandidate(row);
       requireThat(row.strategy_id===source.row.strategy_id && row.instance_id===source.row.instance_id
-        && row.baseline_hash===source.row.baseline_hash && row.candidate_hash===null,
+        && row.baseline_hash===source.row.baseline_hash && (row.candidate_hash===null || registeredCandidate),
       409,'CONTINUATION_IDENTITY_CONFLICT');
       const registry=this.backend.operationalLearning.registryContext;
       requireThat(!registry?.record_sha256 || registry.record_sha256===source.binding.registry_record_sha256,
         409,'CONTINUATION_REGISTRY_RECONCILIATION_REQUIRED');
       const task=this.db.prepare('SELECT * FROM ow_tasks WHERE case_id=? AND kind=?').get(row.id,payload.task_kind);
       requireThat(task?.required===1,409,'CONTINUATION_REQUIRED_TASK_MISSING');
-      requireThat(this.ownerCurrent(row.owner_id,row),409,'CONTINUATION_PLANNING_OWNER_REQUIRED');
+      if(!registeredCandidate)requireThat(this.ownerCurrent(row.owner_id,row),409,'CONTINUATION_PLANNING_OWNER_REQUIRED');
       if(payload.kind==='RISK_DISABLE_REVIEW') {
         const recorded=this.db.prepare('SELECT * FROM ow_events WHERE entity_id=? AND action=? ORDER BY id DESC LIMIT 1').get(row.id,RISK_RETURN);
         if(recorded) {
@@ -473,7 +490,7 @@ export class OperationalContinuation {
       support_hash:payload.support_hash,lineage_artifact_id:payload.lineage_artifact_id,
       source_case_id:source?.row.id || null,task_kind:payload.task_kind,
       tasks:this.db.prepare('SELECT kind,status,artifact_id,required FROM ow_tasks WHERE case_id=? ORDER BY kind').all(row.id),
-      blocked_reason:reason,qualified_for_planning:!reason && payload.kind!=='RISK_DISABLE_REVIEW',
+      blocked_reason:reason,qualified_for_planning:!reason && payload.kind!=='RISK_DISABLE_REVIEW' && !registeredCandidate,
       progress,
       plan_work:planWork,
       evidence_remediation:evidenceRemediation,
@@ -487,7 +504,8 @@ export class OperationalContinuation {
         :payload.kind==='RISK_DISABLE_REVIEW'?this.action(payload.kind,row.owner_id,riskReview)
         :evidenceRemediation?`Owner ${row.owner_id}: ${progress?.status==='STILL_INSUFFICIENT'?`new qualified Research ${progress.source.case_id} still reports evidence shortfalls. `:''}${evidenceRemediation.next_action} Insufficient evidence is not an evaluated no-change finding. Keep the baseline; no approval is due for unassessed directions.`
         :planWork?.returned?planWork.next_action:row.waiting_on || this.action(payload.kind,row.owner_id),
-      scope:payload.kind==='RISK_DISABLE_REVIEW'?'OWNED_RISK_REVIEW_ONLY':'OWNED_PLANNING_ONLY',candidate_testing:'NOT_DUE',approval_due:false,authority:noAuthority};
+      scope:registeredCandidate?'REGISTERED_CANDIDATE_VALIDATION':payload.kind==='RISK_DISABLE_REVIEW'?'OWNED_RISK_REVIEW_ONLY':'OWNED_PLANNING_ONLY',
+      candidate_testing:planWork?.candidate_testing || 'NOT_DUE',approval_due:planWork?.approval_due || false,authority:noAuthority};
   }
   links(caseId) {
     const events=this.db.prepare('SELECT payload_json FROM ow_events WHERE entity_id=? AND action=? ORDER BY id').all(caseId,LINK);

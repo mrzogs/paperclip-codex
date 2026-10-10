@@ -167,6 +167,8 @@ export class OperationalCandidateDispatch {
         const existing=this.registration(current.row.id);
         if(existing){
           requireThat(existing.completion_hash===data.completion_hash && existing.candidate_hash===completed.candidate.candidate_hash,409,'CANDIDATE_REGISTRATION_CONFLICT');
+          this.db.prepare("UPDATE ow_tasks SET status='COMPLETED',artifact_id=? WHERE case_id=? AND kind='CANDIDATE_DISPATCH_ENGINEERING'")
+            .run(completed.plan_artifact_id,current.row.id);
           const result={...existing,status:'REGISTERED',revision:current.row.revision};
           this.db.prepare('INSERT INTO ow_inbox VALUES(?,?,?,?)').run(actor.id,message,requestHash,JSON.stringify(result));
           return result;
@@ -197,6 +199,8 @@ export class OperationalCandidateDispatch {
           candidate_hash:completed.candidate.candidate_hash,candidate_artifact_id:artifactId,handoff_id:handoff.id,
           registered_at_utc:new Date().toISOString(),stage:historical.stage,authority};
         this.b.event(current.row.id,registrationAction,actor,next);
+        this.db.prepare("UPDATE ow_tasks SET status='COMPLETED',artifact_id=? WHERE case_id=? AND kind='CANDIDATE_DISPATCH_ENGINEERING'")
+          .run(completed.plan_artifact_id,current.row.id);
         const result={...next,status:'REGISTERED',revision:historical.revision};
         this.db.prepare('INSERT INTO ow_inbox VALUES(?,?,?,?)').run(actor.id,message,requestHash,JSON.stringify(result));
         return result;
