@@ -107,6 +107,24 @@ test('actual protected loader starts after a clean last-writer shutdown without 
   }
 });
 
+test('actual hidden bootstrap drains a large protected state without leaving the core child blocked',async()=>{
+  const root=path.join(os.tmpdir(),`ocean-s302-loader-${randomUUID()}`);
+  try{
+    safe(call(root,'Bootstrap'));
+    const initial=safe(call(root,'Bootstrap-Runtime'));const next=structuredClone(initial);
+    next.config.protected_io_regression_padding='x'.repeat(60*1024);next.revision++;
+    commitOperation({operation_id:randomUUID(),action:'protected-io-regression',identity_id:'fixture',operator_id:'S-1-5-21-1000',previous_hash:objectHash(initial),next,next_hash:objectHash(next)});
+    const seal=spawnSync(protectedOperatorHost,['-NoProfile','-NonInteractive','-File',path.join(here,'native-fixture-state.ps1'),'-Action','Write','-File',path.join(root,'operator-state.dpapi')],{input:JSON.stringify(next),encoding:'utf8',windowsHide:true,timeout:15000});
+    assert.equal(seal.status,0,seal.stderr);
+    const result=call(root,'Bootstrap-Runtime');
+    const runtime=safe(result);
+    assert.equal(runtime.config.protected_io_regression_padding.length,60*1024);
+  }finally{
+    assert.ok(path.resolve(root).startsWith(path.resolve(os.tmpdir())+path.sep)&&path.basename(root).startsWith('ocean-s302-loader-'));
+    fs.rmSync(root,{recursive:true,force:true});
+  }
+});
+
 test('startup runtime rejects missing protected database without creating a substitute',async()=>{
   const root=path.join(os.tmpdir(),`ocean-s302-loader-${randomUUID()}`);
   try{
