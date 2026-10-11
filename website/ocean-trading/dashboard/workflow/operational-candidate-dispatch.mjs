@@ -4,7 +4,7 @@ import path from 'node:path';
 import { digest, exactKeys, id, noSecrets, objectHash, requireThat } from './common.mjs';
 
 export const CANDIDATE_DISPATCH_VERSION='ocean-operational-candidate-dispatch/v2';
-export const CANDIDATE_VALIDATION_VERSION='ocean-operational-candidate-validation/v2';
+export const CANDIDATE_VALIDATION_VERSION='ocean-operational-candidate-validation/v3';
 const ORIGIN='OPERATIONAL_RESEARCH_CONTINUATION';
 const leaseAction='operational.candidate.dispatch.lease';
 const completionAction='operational.candidate.dispatch.completed';
@@ -20,6 +20,8 @@ const validHash=value=>typeof value==='string' && /^sha256:[a-f0-9]{64}$/.test(v
 const sameNumber=(left,right)=>Math.abs(left-right)<=1e-6;
 const contractKey=value=>String(value).replace(/\[M\]$/,'');
 const metricKeys=Object.freeze(['trade_count','gross_pnl','fees','net_pnl','short_trade_count','zero_trade_periods']);
+const candidateExecutionVersion=(test,completed)=>test.candidate_execution_version || test.candidate_version || completed.candidate.candidate_version;
+const candidateExecutionHash=(test,registered)=>test.candidate_execution_hash || registered.candidate_hash;
 
 // This adapter dispatches an exact, non-live engineering brief to the current
 // strategy owner and records its completion. Review, validation, Paper and Live
@@ -101,7 +103,7 @@ export class OperationalCandidateDispatch {
     return {schema_version:CANDIDATE_DISPATCH_VERSION,status:registered?'REGISTERED':completed?'BUILT_PENDING_REVIEW':lease && lease.lease_until_ms>now?'IN_PROGRESS':'READY',
       recipient_id:completed?.recipient_id || lease?.owner_id || null,plan_artifact_id:completed?.plan_artifact_id || lease?.plan_artifact_id || null,
       completion:completed?this.publicCompletion(completed):null,registration:registered || null,
-      validation:validation?{schema_version:CANDIDATE_VALIDATION_VERSION,plan_hash:validation.plan_hash,
+      validation:validation?{schema_version:validation.schema_version || CANDIDATE_VALIDATION_VERSION,plan_hash:validation.plan_hash,
         status:validationComplete?'COMPLETED':'PLANNED',tests:validation.tests.map(test=>({kind:test.kind,
           state:test.kind==='OOS_HOLDOUT' && !this.latest(row.id,holdoutReleaseAction)?'SEALED':'RELEASED'}))}:null};
   }
@@ -278,12 +280,14 @@ export class OperationalCandidateDispatch {
     requireThat(Array.isArray(data.tests) && data.tests.length===REQUIRED_TESTS.length,422,'CANDIDATE_VALIDATION_TEST_MATRIX_REQUIRED');
     const runIds=new Set(),segmentIds=new Set();
     const tests=data.tests.map((test,index)=>{
-      exactKeys(test,['kind','baseline_version','baseline_strategy_hash','candidate_version','telemetry_version','telemetry_hash','cost_model','cost_model_hash','acceptance','failure_rule','segments']);
+      exactKeys(test,['kind','baseline_version','baseline_strategy_hash','candidate_version','candidate_execution_version','candidate_execution_hash','telemetry_version','telemetry_hash','cost_model','cost_model_hash','acceptance','failure_rule','segments']);
       requireThat(test.kind===REQUIRED_TESTS[index],422,'CANDIDATE_VALIDATION_TEST_ORDER_REQUIRED');
-      for(const key of ['baseline_strategy_hash','telemetry_hash','cost_model_hash'])requireThat(validHash(test[key]),422,'CANDIDATE_VALIDATION_TEST_HASH_REQUIRED');
+      for(const key of ['baseline_strategy_hash','candidate_execution_hash','telemetry_hash','cost_model_hash'])requireThat(validHash(test[key]),422,'CANDIDATE_VALIDATION_TEST_HASH_REQUIRED');
       requireThat(typeof test.baseline_version==='string' && test.baseline_version.length>0
+        && typeof test.candidate_execution_version==='string' && test.candidate_execution_version.length>0
         && typeof test.telemetry_version==='string' && test.telemetry_version.length>0
         && test.candidate_version===completed.candidate.candidate_version,409,'CANDIDATE_VALIDATION_VERSION_CONFLICT');
+      requireThat(test.candidate_execution_hash!==test.baseline_strategy_hash,409,'CANDIDATE_VALIDATION_EXECUTION_BINDING_CONFLICT');
       exactKeys(test.cost_model,['schema_version','broker_profile','product','fee_tier','currency','total_fee_per_side','effective_from','source_reference','source_type']);
       requireThat(typeof test.cost_model.schema_version==='string' && typeof test.cost_model.broker_profile==='string'
         && typeof test.cost_model.product==='string' && typeof test.cost_model.fee_tier==='string'
@@ -401,8 +405,8 @@ export class OperationalCandidateDispatch {
           && Number.isInteger(value.short_trade_count) && value.short_trade_count>=0
           && Number.isInteger(value.zero_trade_periods) && value.zero_trade_periods>=0
           && sameNumber(value.net_pnl,value.gross_pnl-value.fees) && Array.isArray(value.data_quality_flags),422,'CANDIDATE_VALIDATION_METRIC_INVALID');
-        requireThat(value.strategy_version===(name==='baseline'?test.baseline_version:completed.candidate.candidate_version)
-          && value.strategy_hash===(name==='baseline'?test.baseline_strategy_hash:registered.candidate_hash)
+        requireThat(value.strategy_version===(name==='baseline'?test.baseline_version:candidateExecutionVersion(test,completed))
+          && value.strategy_hash===(name==='baseline'?test.baseline_strategy_hash:candidateExecutionHash(test,registered))
           && value.telemetry_version===test.telemetry_version && value.telemetry_hash===test.telemetry_hash,
         409,'CANDIDATE_VALIDATION_EVIDENCE_BINDING_CONFLICT');
         requireThat(fileHashes.has(value.strategy_hash) && fileHashes.has(value.telemetry_hash)
@@ -415,8 +419,8 @@ export class OperationalCandidateDispatch {
     for(const name of ['baseline','candidate']){
       const aggregate=result[name];
       exactKeys(aggregate,['strategy_version','strategy_hash','telemetry_version','telemetry_hash','trade_count','gross_pnl','fees','net_pnl','short_trade_count','zero_trade_periods','data_quality_flags']);
-      requireThat(aggregate.strategy_version===(name==='baseline'?test.baseline_version:completed.candidate.candidate_version)
-        && aggregate.strategy_hash===(name==='baseline'?test.baseline_strategy_hash:registered.candidate_hash)
+      requireThat(aggregate.strategy_version===(name==='baseline'?test.baseline_version:candidateExecutionVersion(test,completed))
+        && aggregate.strategy_hash===(name==='baseline'?test.baseline_strategy_hash:candidateExecutionHash(test,registered))
         && aggregate.telemetry_version===test.telemetry_version && aggregate.telemetry_hash===test.telemetry_hash
         && Array.isArray(aggregate.data_quality_flags),409,'CANDIDATE_VALIDATION_AGGREGATE_BINDING_CONFLICT');
       for(const key of metricKeys){
@@ -438,7 +442,11 @@ export class OperationalCandidateDispatch {
       && result.provenance && typeof result.provenance==='object' && !Array.isArray(result.provenance),422,'CANDIDATE_VALIDATION_RESULT_STRUCTURE_REQUIRED');
     return {schema_version:CANDIDATE_VALIDATION_VERSION,case_id:row.id,plan_hash:plan.plan_hash,
       plan_artifact_id:completed.plan_artifact_id,completion_hash:completed.completion_hash,candidate_hash:registered.candidate_hash,
-      baseline_hash:row.baseline_hash,test,status:result.status,evidence_integrity_passed:integrity,...structuredClone(result),segments:measured,
+      baseline_hash:row.baseline_hash,test,execution_bindings:{
+        baseline:{strategy_version:test.baseline_version,strategy_hash:test.baseline_strategy_hash},
+        candidate:{logical_version:completed.candidate.candidate_version,logical_hash:registered.candidate_hash,
+          strategy_version:candidateExecutionVersion(test,completed),strategy_hash:candidateExecutionHash(test,registered)}},
+      status:result.status,evidence_integrity_passed:integrity,...structuredClone(result),segments:measured,
       recorded_at_utc:new Date().toISOString(),authority:{...authority,execution_environment:'REPLAY'}};
   }
 

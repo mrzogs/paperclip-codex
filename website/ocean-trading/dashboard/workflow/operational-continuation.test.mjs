@@ -1159,7 +1159,9 @@ const validationMatrix=(f,baselineHash)=>{
   const cost_model={schema_version:'ocean-observed-cost-model/v1',broker_profile:'Stage5_ActiveTrader',product:'MNQ',fee_tier:'active_trader',
     currency:'USD',total_fee_per_side:0.57,effective_from:'2026-01-01',source_reference:'fixture-observed-sierra-fees',source_type:'sierra_observed'};
   return ['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'].map((kind,index)=>({kind,baseline_version:'v0.6.238',
-    baseline_strategy_hash:baselineHash,candidate_version:candidateBuild().candidate_version,telemetry_version:'v0.5.47',
+    baseline_strategy_hash:baselineHash,candidate_version:candidateBuild().candidate_version,
+    candidate_execution_version:candidateBuild().candidate_version,candidate_execution_hash:candidateBuild().candidate_hash,
+    telemetry_version:'v0.5.47',
     telemetry_hash:digest('telemetry-v0547'),cost_model,cost_model_hash:objectHash(cost_model),
     acceptance:{evidence_integrity_only:true,favorable_performance_required:false,zero_trade_valid:true,costs_required:true,
       duplicate_check_required:true,completion_receipt_required:true},
@@ -1167,7 +1169,8 @@ const validationMatrix=(f,baselineHash)=>{
 };
 const validationReport=(f,test,baselineHash)=>{
   const write=(name,content)=>{const file=path.join(f.root,name);fs.writeFileSync(file,content);return {path:file,sha256:digest(content)};};
-  const baselineDll=write('baseline.dll','baseline'),candidateDll=write('candidate.dll','candidate-binary'),telemetryDll=write('telemetry.dll','telemetry-v0547');
+  const candidateContent=test.candidate_execution_hash===digest('candidate-validation-binary')?'candidate-validation-binary':'candidate-binary';
+  const baselineDll=write('baseline.dll','baseline'),candidateDll=write('candidate.dll',candidateContent),telemetryDll=write('telemetry.dll','telemetry-v0547');
   const segments=test.segments.map(segment=>{
     const baselineReceipt=write(`${segment.segment_id}-baseline-receipt.json`,`baseline-receipt-${segment.segment_id}`);
     const candidateReceipt=write(`${segment.segment_id}-candidate-receipt.json`,`candidate-receipt-${segment.segment_id}`);
@@ -1175,13 +1178,13 @@ const validationReport=(f,test,baselineHash)=>{
     return {segment_id:segment.segment_id,baseline:{run_id:segment.baseline_run_id,strategy_version:test.baseline_version,
       strategy_hash:baselineHash,telemetry_version:test.telemetry_version,telemetry_hash:test.telemetry_hash,trade_count:10,
       gross_pnl:100,fees:20,net_pnl:80,short_trade_count:2,zero_trade_periods:1,completion_receipt_hash:baselineReceipt.sha256,data_quality_flags:[]},
-    candidate:{run_id:segment.candidate_run_id,strategy_version:test.candidate_version,strategy_hash:candidateBuild().candidate_hash,
+    candidate:{run_id:segment.candidate_run_id,strategy_version:test.candidate_execution_version,strategy_hash:test.candidate_execution_hash,
       telemetry_version:test.telemetry_version,telemetry_hash:test.telemetry_hash,trade_count:8,gross_pnl:110,fees:16,net_pnl:94,
       short_trade_count:0,zero_trade_periods:1,completion_receipt_hash:candidateReceipt.sha256,data_quality_flags:[]},
     source_files:[baselineDll,candidateDll,telemetryDll,baselineReceipt,candidateReceipt,database]};
   });
-  const aggregate=name=>({strategy_version:name==='baseline'?test.baseline_version:test.candidate_version,
-    strategy_hash:name==='baseline'?baselineHash:candidateBuild().candidate_hash,telemetry_version:test.telemetry_version,
+  const aggregate=name=>({strategy_version:name==='baseline'?test.baseline_version:test.candidate_execution_version,
+    strategy_hash:name==='baseline'?baselineHash:test.candidate_execution_hash,telemetry_version:test.telemetry_version,
     telemetry_hash:test.telemetry_hash,...Object.fromEntries(['trade_count','gross_pnl','fees','net_pnl','short_trade_count','zero_trade_periods']
       .map(key=>[key,segments.reduce((sum,segment)=>sum+segment[name][key],0)])),data_quality_flags:[]});
   return {status:'PASS',segments,baseline:aggregate('baseline'),candidate:aggregate('candidate'),
@@ -1446,9 +1449,19 @@ test('candidate completion survives restart and registration requires an approve
     const revisedInput=structuredClone(validationPlanInput);revisedInput.message_id='candidate-validation-plan-revision';
     revisedInput.data.expected_revision=validationPlan.revision;revisedInput.data.supersedes_plan_hash=validationPlan.plan_hash;
     revisedInput.data.tests[0].failure_rule+=' Corrected before execution.';
+    revisedInput.data.tests.at(-1).candidate_execution_version='v0.6.240-test-boundary-drain-short-exclusion-candidate';
+    revisedInput.data.tests.at(-1).candidate_execution_hash=digest('candidate-validation-binary');
     const revisedResponse=await validationHttp('validation-plan',revisedInput);assert.equal(revisedResponse.status,200);
     const originalPlanHash=validationPlan.plan_hash;validationPlan=revisedResponse.body;matrix=revisedInput.data.tests;
     assert.equal(validationPlan.plan_revision,2);assert.equal(validationPlan.supersedes_plan_hash,originalPlanHash);
+    const legacyTest=structuredClone(matrix[0]);delete legacyTest.candidate_execution_version;delete legacyTest.candidate_execution_hash;
+    const legacyReport=f.backend.operationalCandidateDispatch.validateResult(f.backend.one('ow_cases',child.id),
+      f.backend.operationalCandidateDispatch.completion(child.id),
+      f.backend.operationalCandidateDispatch.registration(child.id),{...validationPlan,tests:[legacyTest]},legacyTest,
+      validationReport(f,matrix[0],child.baseline_hash));
+    assert.equal(legacyReport.execution_bindings.candidate.logical_hash,candidateBuild().candidate_hash);
+    assert.equal(legacyReport.execution_bindings.candidate.strategy_version,candidateBuild().candidate_version);
+    assert.equal(legacyReport.execution_bindings.candidate.strategy_hash,candidateBuild().candidate_hash);
     const early=f.backend.one('ow_cases',child.id),earlyTest=matrix.at(-1);
     const earlyResponse=await validationHttp('validation-results',{message_id:'early-holdout',data:{
       case_id:child.id,expected_revision:early.revision,plan_hash:validationPlan.plan_hash,kind:'OOS_HOLDOUT',
@@ -1469,10 +1482,28 @@ test('candidate completion survives restart and registration requires an approve
         assert.equal((await validationHttp('validation-results',wrongHash)).body.error.code,'CANDIDATE_VALIDATION_SOURCE_FILE_HASH_CONFLICT');
         const missing=structuredClone(input);missing.message_id='candidate-validation-missing-file';missing.data.result.segments[0].source_files[0].path=path.join(f.root,'missing.dll');
         assert.equal((await validationHttp('validation-results',missing)).body.error.code,'CANDIDATE_VALIDATION_SOURCE_FILE_MISSING');}
+      if(index===3){
+        const logicalAsExecution=structuredClone(input);logicalAsExecution.message_id='candidate-validation-logical-hash-is-not-execution-hash';
+        logicalAsExecution.data.result.segments[0].candidate.strategy_version=candidateBuild().candidate_version;
+        logicalAsExecution.data.result.segments[0].candidate.strategy_hash=candidateBuild().candidate_hash;
+        assert.equal((await validationHttp('validation-results',logicalAsExecution)).body.error.code,'CANDIDATE_VALIDATION_EVIDENCE_BINDING_CONFLICT');
+      }
       if(index===3)assert.equal(f.backend.db.prepare('SELECT COUNT(*) n FROM ow_events WHERE action=?').get('operational.candidate.validation.holdout_released').n,0);
       const recordedResponse=await validationHttp('validation-results',input);assert.equal(recordedResponse.status,200,JSON.stringify(recordedResponse.body));
       const recorded=recordedResponse.body;
       assert.equal(recorded.status,'PASS');assert.equal((await validationHttp('validation-results',input)).body.artifact_id,recorded.artifact_id);
+      if(index===0){
+        const report=JSON.parse(Buffer.from(f.backend.one('ow_artifacts',recorded.artifact_id).content).toString());
+        assert.equal(report.execution_bindings.candidate.logical_hash,candidateBuild().candidate_hash);
+        assert.equal(report.execution_bindings.candidate.strategy_version,candidateBuild().candidate_version);
+        assert.equal(report.execution_bindings.candidate.strategy_hash,candidateBuild().candidate_hash);
+      }
+      if(index===3){
+        const report=JSON.parse(Buffer.from(f.backend.one('ow_artifacts',recorded.artifact_id).content).toString());
+        assert.equal(report.execution_bindings.candidate.logical_hash,candidateBuild().candidate_hash);
+        assert.equal(report.execution_bindings.candidate.strategy_version,'v0.6.240-test-boundary-drain-short-exclusion-candidate');
+        assert.equal(report.execution_bindings.candidate.strategy_hash,digest('candidate-validation-binary'));
+      }
     }
     assert.equal(f.backend.db.prepare('SELECT COUNT(*) n FROM ow_events WHERE action=?').get('operational.candidate.validation.holdout_released').n,1);
     const completeRow=f.backend.one('ow_cases',child.id),validationCompleteResponse=await validationHttp('validation-complete',{message_id:'candidate-validation-complete',data:{
