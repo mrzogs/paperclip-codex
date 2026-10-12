@@ -1467,7 +1467,23 @@ test('candidate completion survives restart and registration requires an approve
       case_id:child.id,expected_revision:early.revision,plan_hash:validationPlan.plan_hash,kind:'OOS_HOLDOUT',
        result:validationReport(f,earlyTest,child.baseline_hash)}});
     assert.equal(earlyResponse.status,409);assert.equal(earlyResponse.body.error.code,'CANDIDATE_VALIDATION_ORDER_CONFLICT');
-    for(const [index,test] of matrix.entries()){
+    for(const [index,plannedTest] of matrix.entries()){
+      let test=plannedTest;
+      if(index===3){
+        const partialRevision=structuredClone(revisedInput);partialRevision.message_id='candidate-validation-plan-pending-holdout-retry';
+        partialRevision.data.expected_revision=f.backend.one('ow_cases',child.id).revision;
+        partialRevision.data.supersedes_plan_hash=validationPlan.plan_hash;partialRevision.data.tests=structuredClone(matrix);
+        partialRevision.data.tests[3].segments[0].candidate_run_id+='-retry';
+        const changesAcceptedEvidence=structuredClone(partialRevision);changesAcceptedEvidence.message_id='candidate-validation-plan-changes-accepted-evidence';
+        changesAcceptedEvidence.data.tests[0].failure_rule+=' Must be rejected after this test passed.';
+        assert.equal((await validationHttp('validation-plan',changesAcceptedEvidence)).body.error.code,'CANDIDATE_VALIDATION_PLAN_REVISION_NOT_ALLOWED');
+        const partialResponse=await validationHttp('validation-plan',partialRevision);assert.equal(partialResponse.status,200,JSON.stringify(partialResponse.body));
+        const priorPlanHash=validationPlan.plan_hash;validationPlan=partialResponse.body;matrix=partialRevision.data.tests;test=matrix[index];
+        assert.equal(validationPlan.plan_revision,3);assert.equal(validationPlan.supersedes_plan_hash,priorPlanHash);
+        const taskStatus=Object.fromEntries(f.backend.readCase(f.human,child.id).tasks
+          .filter(task=>['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'].includes(task.kind)).map(task=>[task.kind,task.status]));
+        assert.deepEqual(taskStatus,{BACKTEST:'PASS',ROBUSTNESS:'PASS',WALK_FORWARD:'PASS',OOS_HOLDOUT:'NOT_RUN'});
+      }
       const currentRow=f.backend.one('ow_cases',child.id),input={message_id:`candidate-validation-result-${test.kind}`,data:{
         case_id:child.id,expected_revision:currentRow.revision,plan_hash:validationPlan.plan_hash,kind:test.kind,
         result:validationReport(f,test,child.baseline_hash)}};
