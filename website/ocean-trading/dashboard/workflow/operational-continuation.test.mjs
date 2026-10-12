@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
+import { DatabaseSync } from 'node:sqlite';
 import { WorkflowStore } from './store.mjs';
 import { WorkflowBackend } from './backend.mjs';
 import { LEGACY_RESEARCH_VERSION, RESEARCH_VERSION, OperationalResearch, evaluateResearch } from './operational-research.mjs';
@@ -15,8 +16,27 @@ import { CONTINUATION_ORIGIN } from './operational-continuation.mjs';
 import { readWorkflowView } from './ui-api.mjs';
 import { digest, objectHash } from './common.mjs';
 import { consumePlanningOnce } from '../../../../scripts/consume-ocean-proposal-planning.mjs';
-import { OperationalCandidateDispatch } from './operational-candidate-dispatch.mjs';
+import { acceptedTestRevisionCompatible, OperationalCandidateDispatch } from './operational-candidate-dispatch.mjs';
 import { CANDIDATE_EVALUATION_RESULT_VERSION, OperationalCandidateEvaluator } from './operational-candidate-evaluation.mjs';
+
+test('legacy accepted validation tests may add only execution source bindings during a v4 plan revision',()=>{
+  const legacy={kind:'BACKTEST',candidate_execution_hash:digest('candidate'),segments:[{segment_id:'one'}]};
+  const upgraded={...structuredClone(legacy),baseline_execution_source_hash:digest('baseline-source'),
+    candidate_execution_source_hash:digest('candidate-source')};
+  assert.equal(acceptedTestRevisionCompatible(legacy,upgraded),true);
+  assert.equal(acceptedTestRevisionCompatible(legacy,{...upgraded,segments:[{segment_id:'changed'}]}),false);
+  assert.equal(acceptedTestRevisionCompatible(upgraded,{...upgraded,candidate_execution_source_hash:digest('other-source')}),false);
+});
+
+test('candidate evaluation has an independent persistent startup runner',async()=>{
+  const evaluator=new OperationalCandidateEvaluator({db:null,config:{operational_learning:{interval_ms:1000}},
+    operationalLearning:{enabled:true}});
+  let calls=0;evaluator.flushOnce=async()=>{calls+=1;};
+  evaluator.start();
+  try{await new Promise(resolve=>setImmediate(resolve));assert.equal(calls,1);assert.ok(evaluator.timer);}
+  finally{evaluator.stop();}
+  assert.equal(evaluator.timer,null);assert.equal(evaluator.stopped,true);
+});
 
 function fixture({insufficient=false,noChange=false,partial=false,prospective=false,oneDirection=null,rowsPerRun=20,
   ownerScopes=['read','artifact.write','event.write'],registerBaseline=true}={}) {
@@ -96,7 +116,7 @@ function fixture({insufficient=false,noChange=false,partial=false,prospective=fa
     get worker(){return backend.operationalResearch;},setProof(value){proof=value;},
     children:()=>backend.db.prepare("SELECT * FROM ow_cases WHERE json_extract(payload_json,'$.origin')=?").all(CONTINUATION_ORIGIN),
     restart(){backend.operationalCandidateEvaluator.stop();store.close();store=new WorkflowStore(filename);backend.db=store.db;backend.store=store;backend.operationalResearch=new OperationalResearch(backend);backend.operationalResearch.version=version;backend.operationalCandidateDispatch=new OperationalCandidateDispatch(backend);backend.operationalCandidateEvaluator=new OperationalCandidateEvaluator(backend);},
-    close(){store.close();fs.rmSync(root,{recursive:true,force:true});}};
+    close(){store.close();fs.rmSync(root,{recursive:true,force:true,maxRetries:5,retryDelay:100});}};
 }
 
 function sealed(f) {
@@ -1173,24 +1193,50 @@ const validationMatrix=(f,baselineHash)=>{
     failure_rule:'FAIL or BLOCK when physical identity, attribution, cost, duplicate, zero-trade, completion, interval or database-read evidence is incomplete.',segments:groups[index]}));
 };
 const validationReport=(f,test,baselineHash)=>{
-  const write=(name,content)=>{const file=path.join(f.root,name);fs.writeFileSync(file,content);return {path:file,sha256:digest(content)};};
+  const write=(name,content)=>{const file=path.join(f.root,name);fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,content);return {path:file,sha256:digest(content)};};
+  const london=value=>new Intl.DateTimeFormat('sv-SE',{timeZone:'Europe/London',year:'numeric',month:'2-digit',day:'2-digit',
+    hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).format(new Date(value)).replace('T',' ');
+  const database=(segment,side,runId,tradeCount)=>{
+    const file=path.join(f.root,segment.segment_id,side,'telemetry.sqlite');fs.mkdirSync(path.dirname(file),{recursive:true});
+    const db=new DatabaseSync(':memory:');
+    db.exec(`CREATE TABLE replay_runs(run_id TEXT PRIMARY KEY);
+      CREATE TABLE trades(run_id TEXT,trade_account TEXT,is_simulated INTEGER,strategy_id TEXT,fees_available INTEGER,
+        total_fee_per_side REAL,total_commission REAL,fee_broker_profile TEXT,fee_product_code TEXT,fee_tier TEXT,fee_source_type TEXT);`);
+    db.prepare('INSERT INTO replay_runs VALUES(?)').run(runId);
+    const insert=db.prepare('INSERT INTO trades VALUES(?,?,?,?,?,?,?,?,?,?,?)');
+    for(let index=0;index<tradeCount;index++)insert.run(runId,'Sim1',1,'s',1,test.cost_model.total_fee_per_side,
+      2,test.cost_model.broker_profile,test.cost_model.product,test.cost_model.fee_tier,test.cost_model.source_type);
+    const bytes=db.serialize();db.close();fs.writeFileSync(file,bytes);return {path:file,sha256:digest(bytes)};
+  };
   const candidateContent=test.candidate_execution_hash===digest('candidate-validation-binary')?'candidate-validation-binary':'candidate-binary';
   const baselineDll=write('baseline.dll','baseline'),candidateDll=write('candidate.dll',candidateContent),telemetryDll=write('telemetry.dll','telemetry-v0547');
   const segments=test.segments.map(segment=>{
-    const physical=(side,runId,dll)=>{
+    const physical=(side,runId,dll,strategyVersion,tradeCount,metrics)=>{
       const source=write(`${segment.segment_id}-${side}.cpp`,side==='baseline'
         ?(test.kind==='OOS_HOLDOUT'?'baseline-validation-source':'baseline-source')
         :(test.kind==='OOS_HOLDOUT'?'candidate-validation-source':'candidate-source'));
       const marker=write(`${segment.segment_id}-${side}.version.txt`,`${side}-marker-${segment.segment_id}`);
-      const receiptContent=JSON.stringify({run_id:runId,physical_binaries:{replay_source:{path:source.path,sha256:source.sha256},
-        replay_dll:{path:dll.path,sha256:dll.sha256},replay_marker:{path:marker.path,sha256:marker.sha256}}});
+      const receiptContent=JSON.stringify({schema_version:'ocean-replay-test-completion/v1',run_id:runId,run_kind:'TEST',status:'COMPLETED',
+        requested_replay_window:{start_chart_time:london(segment.warmup_start_utc),end_chart_time:london(segment.scored_end_utc)},
+        execution_identity:{strategy_id:'s',strategy_version:'v0.6.239',trade_strategy_version:strategyVersion,
+          symbol:String(segment.contract).replace(/\[M\]$/,''),chart_number:1},
+        logger_receipt:{closed_trade_count:tradeCount},
+        physical_binaries:{replay_source:{path:source.path,sha256:source.sha256},replay_dll:{path:dll.path,sha256:dll.sha256},
+          replay_marker:{path:marker.path,sha256:marker.sha256}},
+        safety:{simulation_account:'Sim1',all_trades_simulated:true,all_fills_simulated:true,live_real:'DISABLED',workflow_status_mutated:false}});
       const receipt=write(`${segment.segment_id}-${side}-receipt.json`,receiptContent);
-      return {receipt,source,marker,hashes:{strategy_source_hash:source.sha256,strategy_dll_hash:dll.sha256,
+      const snapshot=write(path.join(segment.segment_id,side,'run-snapshot.json'),JSON.stringify({
+        schema_version:'ocean-candidate-validation-run-snapshot/v1',run:{run_id:runId,strategy_id:'s',strategy_version:'v0.6.239'},
+        logger_receipt:{run_id:runId,trade_account:'Sim1',closed_trade_count:tradeCount},context:{data_quality_flags:null},metrics,
+        terminal_metrics:{trade_count:tradeCount},duplicate_check:{total_rows:tradeCount,distinct_rows:tradeCount}}));
+      const sqlite=database(segment,side,runId,tradeCount);
+      return {receipt,source,marker,snapshot,sqlite,hashes:{strategy_source_hash:source.sha256,strategy_dll_hash:dll.sha256,
         strategy_marker_hash:marker.sha256,completion_receipt_hash:receipt.sha256}};
     };
-    const baselinePhysical=physical('baseline',segment.baseline_run_id,baselineDll);
-    const candidatePhysical=physical('candidate',segment.candidate_run_id,candidateDll);
-    const database=write(`${segment.segment_id}.sqlite`,`sqlite-evidence-${segment.segment_id}`);
+    const baselineMetrics={trade_count:10,gross_pnl:100,fees:20,net_pnl:80,short_trade_count:2,open_trade_count:0,zero_trade_periods:1};
+    const candidateMetrics={trade_count:8,gross_pnl:110,fees:16,net_pnl:94,short_trade_count:0,open_trade_count:0,zero_trade_periods:1};
+    const baselinePhysical=physical('baseline',segment.baseline_run_id,baselineDll,test.baseline_version,10,baselineMetrics);
+    const candidatePhysical=physical('candidate',segment.candidate_run_id,candidateDll,test.candidate_execution_version,8,candidateMetrics);
     const versionNumber=value=>Number(/^v0\.6\.(\d+)/.exec(value)?.[1] || 0);
     const markerRequired=test.kind==='OOS_HOLDOUT' || versionNumber(test.baseline_version)>=240
       || versionNumber(test.candidate_execution_version)>=240;
@@ -1203,8 +1249,8 @@ const validationReport=(f,test,baselineHash)=>{
       short_trade_count:0,zero_trade_periods:1,completion_receipt_hash:candidatePhysical.receipt.sha256,
       physical_hashes:candidatePhysical.hashes,data_quality_flags:[]},
     source_files:[baselineDll,candidateDll,telemetryDll,baselinePhysical.source,
-      ...(markerRequired?[baselinePhysical.marker]:[]),baselinePhysical.receipt,candidatePhysical.source,
-      ...(markerRequired?[candidatePhysical.marker]:[]),candidatePhysical.receipt,database]};
+      ...(markerRequired?[baselinePhysical.marker]:[]),baselinePhysical.receipt,baselinePhysical.snapshot,baselinePhysical.sqlite,candidatePhysical.source,
+      ...(markerRequired?[candidatePhysical.marker]:[]),candidatePhysical.receipt,candidatePhysical.snapshot,candidatePhysical.sqlite]};
   });
   const aggregate=name=>({strategy_version:name==='baseline'?test.baseline_version:test.candidate_execution_version,
     strategy_hash:name==='baseline'?baselineHash:test.candidate_execution_hash,telemetry_version:test.telemetry_version,
@@ -1548,7 +1594,25 @@ test('candidate completion survives restart and registration requires an approve
         const wrongHash=structuredClone(input);wrongHash.message_id='candidate-validation-wrong-file-hash';wrongHash.data.result.segments[0].source_files[0].sha256=digest('wrong-file');
         assert.equal((await validationHttp('validation-results',wrongHash)).body.error.code,'CANDIDATE_VALIDATION_SOURCE_FILE_HASH_CONFLICT');
         const missing=structuredClone(input);missing.message_id='candidate-validation-missing-file';missing.data.result.segments[0].source_files[0].path=path.join(f.root,'missing.dll');
-        assert.equal((await validationHttp('validation-results',missing)).body.error.code,'CANDIDATE_VALIDATION_SOURCE_FILE_MISSING');}
+        assert.equal((await validationHttp('validation-results',missing)).body.error.code,'CANDIDATE_VALIDATION_SOURCE_FILE_MISSING');
+        const unsafeReceipt=structuredClone(input);unsafeReceipt.message_id='candidate-validation-unsafe-receipt';
+        const unsafeEvidence=unsafeReceipt.data.result.segments[0].baseline;
+        const unsafeFile=unsafeReceipt.data.result.segments[0].source_files.find(file=>file.sha256===unsafeEvidence.completion_receipt_hash);
+        const unsafeContent=JSON.parse(fs.readFileSync(unsafeFile.path,'utf8'));unsafeContent.safety.live_real='ENABLED';
+        const unsafeBytes=Buffer.from(JSON.stringify(unsafeContent)),unsafePath=path.join(f.root,'unsafe-completion-receipt.json'),unsafeHash=digest(unsafeBytes);
+        fs.writeFileSync(unsafePath,unsafeBytes);Object.assign(unsafeFile,{path:unsafePath,sha256:unsafeHash});
+        unsafeEvidence.completion_receipt_hash=unsafeHash;unsafeEvidence.physical_hashes.completion_receipt_hash=unsafeHash;
+        assert.equal((await validationHttp('validation-results',unsafeReceipt)).body.error.code,'CANDIDATE_VALIDATION_COMPLETION_RECEIPT_SCOPE_CONFLICT');
+        const wrongCost=structuredClone(input);wrongCost.message_id='candidate-validation-wrong-cost-database';
+        for(const file of wrongCost.data.result.segments[0].source_files.filter(item=>path.basename(item.path)==='telemetry.sqlite')){
+          const db=new DatabaseSync(':memory:');db.deserialize(fs.readFileSync(file.path));
+          const matches=db.prepare('SELECT COUNT(*) n FROM replay_runs WHERE run_id=?').get(wrongCost.data.result.segments[0].baseline.run_id).n;
+          if(matches){db.exec('UPDATE trades SET total_commission=total_commission+1 WHERE rowid=(SELECT MIN(rowid) FROM trades)');
+            const bytes=db.serialize(),changedPath=path.join(f.root,'wrong-cost','telemetry.sqlite');db.close();fs.mkdirSync(path.dirname(changedPath),{recursive:true});fs.writeFileSync(changedPath,bytes);
+            Object.assign(file,{path:changedPath,sha256:digest(bytes)});break;}
+          db.close();
+        }
+        assert.equal((await validationHttp('validation-results',wrongCost)).body.error.code,'CANDIDATE_VALIDATION_COST_EVIDENCE_CONFLICT');}
       if(index===3){
         const missingMarker=structuredClone(input.data.result),candidateEvidence=missingMarker.segments[0].candidate;
         missingMarker.segments[0].source_files=missingMarker.segments[0].source_files

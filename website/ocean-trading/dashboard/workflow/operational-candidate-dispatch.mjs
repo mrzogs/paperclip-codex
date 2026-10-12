@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { digest, exactKeys, id, noSecrets, objectHash, requireThat } from './common.mjs';
 
 export const CANDIDATE_DISPATCH_VERSION='ocean-operational-candidate-dispatch/v2';
@@ -28,6 +29,18 @@ const physicalHashKeys=Object.freeze(['strategy_source_hash','strategy_dll_hash'
 const candidateExecutionVersion=(test,completed)=>test.candidate_execution_version || test.candidate_version || completed.candidate.candidate_version;
 const candidateExecutionHash=(test,registered)=>test.candidate_execution_hash || registered.candidate_hash;
 const markerLimitation=runId=>`Marker bytes were not retained for ${runId}; the marker hash remains sealed in its completion receipt.`;
+const londonChartTime=value=>new Intl.DateTimeFormat('sv-SE',{timeZone:'Europe/London',year:'numeric',month:'2-digit',day:'2-digit',
+  hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).format(new Date(value)).replace('T',' ');
+const qualityFlags=value=>String(value || '').split(',').map(item=>item.trim()).filter(Boolean).sort();
+export const acceptedTestRevisionCompatible=(existing,proposed)=>{
+  if(!existing || !proposed)return false;
+  if(objectHash(existing)===objectHash(proposed))return true;
+  if(Object.hasOwn(existing,'baseline_execution_source_hash') || Object.hasOwn(existing,'candidate_execution_source_hash'))return false;
+  const legacyComparable=structuredClone(proposed);
+  delete legacyComparable.baseline_execution_source_hash;
+  delete legacyComparable.candidate_execution_source_hash;
+  return objectHash(existing)===objectHash(legacyComparable);
+};
 
 // This adapter dispatches an exact, non-live engineering brief to the current
 // strategy owner and records its completion. Review, validation, Paper and Live
@@ -370,7 +383,7 @@ export class OperationalCandidateDispatch {
       const acceptedTestsPreserved=REQUIRED_TESTS.every(kind=>{
         if(taskByKind.get(kind)!=='PASS')return true;
         const proposed=Array.isArray(data.tests)?data.tests.find(test=>test?.kind===kind):null;
-        return proposed && objectHash(proposed)===objectHash(existing.tests.find(test=>test.kind===kind));
+        return acceptedTestRevisionCompatible(existing.tests.find(test=>test.kind===kind),proposed);
       });
       requireThat(data.supersedes_plan_hash===existing.plan_hash
         && tasks.length===REQUIRED_TESTS.length && tasks.every(task=>['PASS','NOT_RUN'].includes(task.status))
@@ -545,6 +558,64 @@ export class OperationalCandidateDispatch {
           && physical?.replay_dll?.sha256===value.physical_hashes.strategy_dll_hash
           && physical?.replay_marker?.sha256===value.physical_hashes.strategy_marker_hash,
         409,'CANDIDATE_VALIDATION_COMPLETION_RECEIPT_BINDING_CONFLICT');
+        requireThat(receipt.schema_version==='ocean-replay-test-completion/v1' && receipt.run_kind==='TEST' && receipt.status==='COMPLETED'
+          && receipt.requested_replay_window?.start_chart_time===londonChartTime(segment.warmup_start_utc)
+          && receipt.requested_replay_window?.end_chart_time===londonChartTime(segment.scored_end_utc)
+          && receipt.execution_identity?.strategy_id===row.strategy_id
+          && receipt.execution_identity?.trade_strategy_version===value.strategy_version
+          && contractKey(receipt.execution_identity?.symbol)===contractKey(segment.contract)
+          && receipt.execution_identity?.chart_number===1
+          && Number(receipt.logger_receipt?.closed_trade_count)===Number(value.trade_count)
+          && receipt.safety?.simulation_account==='Sim1' && receipt.safety?.all_trades_simulated===true
+          && receipt.safety?.all_fills_simulated===true && receipt.safety?.live_real==='DISABLED'
+          && receipt.safety?.workflow_status_mutated===false,
+        409,'CANDIDATE_VALIDATION_COMPLETION_RECEIPT_SCOPE_CONFLICT');
+        let snapshot;
+        for(const file of sourceFiles.filter(item=>path.basename(item.path).toLowerCase()==='run-snapshot.json')){
+          try{const parsed=JSON.parse(file.bytes.toString('utf8'));if(parsed?.run?.run_id===value.run_id){snapshot=parsed;break;}}catch{}
+        }
+        requireThat(snapshot?.schema_version==='ocean-candidate-validation-run-snapshot/v1'
+          && snapshot.run?.run_id===value.run_id && snapshot.run?.strategy_id===row.strategy_id
+          && snapshot.run?.strategy_version===receipt.execution_identity.strategy_version
+          && snapshot.logger_receipt?.run_id===value.run_id && snapshot.logger_receipt?.trade_account==='Sim1'
+          && Number(snapshot.logger_receipt?.closed_trade_count)===Number(snapshot.terminal_metrics?.trade_count)
+          && Number(snapshot.metrics?.open_trade_count)===0
+          && Number(snapshot.duplicate_check?.total_rows)===Number(snapshot.duplicate_check?.distinct_rows)
+          && metricKeys.every(key=>sameNumber(Number(snapshot.metrics?.[key]),Number(value[key])))
+          && objectHash(qualityFlags(snapshot.context?.data_quality_flags))===objectHash([...value.data_quality_flags].sort()),
+        409,'CANDIDATE_VALIDATION_RUN_SNAPSHOT_CONFLICT');
+        let cost;
+        for(const file of sourceFiles.filter(item=>path.basename(item.path).toLowerCase()==='telemetry.sqlite')){
+          try{
+            const telemetry=new DatabaseSync(':memory:');
+            try{
+              telemetry.deserialize(file.bytes);
+              const runExists=Number(telemetry.prepare('SELECT COUNT(*) AS n FROM replay_runs WHERE run_id=?').get(value.run_id)?.n || 0);
+              if(runExists===1)cost=telemetry.prepare(`SELECT COUNT(*) AS total_rows,
+                SUM(CASE WHEN trade_account='Sim1' AND is_simulated=1 AND strategy_id=? AND run_id=? THEN 1 ELSE 0 END) AS attributed_rows,
+                SUM(CASE WHEN fees_available=1 THEN 1 ELSE 0 END) AS fee_rows,
+                COALESCE(SUM(total_commission),0) AS total_fees,
+                MIN(total_fee_per_side) AS min_fee,MAX(total_fee_per_side) AS max_fee,
+                MIN(fee_broker_profile) AS min_profile,MAX(fee_broker_profile) AS max_profile,
+                MIN(fee_product_code) AS min_product,MAX(fee_product_code) AS max_product,
+                MIN(fee_tier) AS min_tier,MAX(fee_tier) AS max_tier,
+                MIN(fee_source_type) AS min_source_type,MAX(fee_source_type) AS max_source_type
+                FROM trades WHERE run_id=?`).get(row.strategy_id,value.run_id,value.run_id);
+            }finally{telemetry.close();}
+            if(cost)break;
+          }catch{}
+        }
+        requireThat(cost,409,'CANDIDATE_VALIDATION_TELEMETRY_DATABASE_INVALID');
+        requireThat(Number(cost.total_rows)===value.trade_count && Number(cost.attributed_rows)===Number(cost.total_rows)
+          && sameNumber(Number(cost.total_fees),Number(value.fees))
+          && (Number(cost.total_rows)===0 || (Number(cost.fee_rows)===Number(cost.total_rows)
+            && sameNumber(Number(cost.min_fee),Number(test.cost_model.total_fee_per_side))
+            && sameNumber(Number(cost.max_fee),Number(test.cost_model.total_fee_per_side))
+            && cost.min_profile===test.cost_model.broker_profile && cost.max_profile===test.cost_model.broker_profile
+            && cost.min_product===test.cost_model.product && cost.max_product===test.cost_model.product
+            && cost.min_tier===test.cost_model.fee_tier && cost.max_tier===test.cost_model.fee_tier
+            && cost.min_source_type===test.cost_model.source_type && cost.max_source_type===test.cost_model.source_type)),
+        409,'CANDIDATE_VALIDATION_COST_EVIDENCE_CONFLICT');
         const expectedSourceHash=name==='baseline'?test.baseline_execution_source_hash:test.candidate_execution_source_hash;
         requireThat(validHash(expectedSourceHash) && value.physical_hashes.strategy_source_hash===expectedSourceHash,
           409,'CANDIDATE_VALIDATION_EXECUTION_SOURCE_CONFLICT');
