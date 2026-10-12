@@ -1161,8 +1161,11 @@ const validationMatrix=(f,baselineHash)=>{
   const cost_model={schema_version:'ocean-observed-cost-model/v1',broker_profile:'Stage5_ActiveTrader',product:'MNQ',fee_tier:'active_trader',
     currency:'USD',total_fee_per_side:0.57,effective_from:'2026-01-01',source_reference:'fixture-observed-sierra-fees',source_type:'sierra_observed'};
   return ['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'].map((kind,index)=>({kind,baseline_version:'v0.6.238',
-    baseline_strategy_hash:baselineHash,candidate_version:candidateBuild().candidate_version,
+    baseline_strategy_hash:baselineHash,
+    baseline_execution_source_hash:digest(kind==='OOS_HOLDOUT'?'baseline-validation-source':'baseline-source'),
+    candidate_version:candidateBuild().candidate_version,
     candidate_execution_version:candidateBuild().candidate_version,candidate_execution_hash:candidateBuild().candidate_hash,
+    candidate_execution_source_hash:digest('candidate-source'),
     telemetry_version:'v0.5.47',
     telemetry_hash:digest('telemetry-v0547'),cost_model,cost_model_hash:objectHash(cost_model),
     acceptance:{evidence_integrity_only:true,favorable_performance_required:false,zero_trade_valid:true,costs_required:true,
@@ -1174,16 +1177,34 @@ const validationReport=(f,test,baselineHash)=>{
   const candidateContent=test.candidate_execution_hash===digest('candidate-validation-binary')?'candidate-validation-binary':'candidate-binary';
   const baselineDll=write('baseline.dll','baseline'),candidateDll=write('candidate.dll',candidateContent),telemetryDll=write('telemetry.dll','telemetry-v0547');
   const segments=test.segments.map(segment=>{
-    const baselineReceipt=write(`${segment.segment_id}-baseline-receipt.json`,`baseline-receipt-${segment.segment_id}`);
-    const candidateReceipt=write(`${segment.segment_id}-candidate-receipt.json`,`candidate-receipt-${segment.segment_id}`);
+    const physical=(side,runId,dll)=>{
+      const source=write(`${segment.segment_id}-${side}.cpp`,side==='baseline'
+        ?(test.kind==='OOS_HOLDOUT'?'baseline-validation-source':'baseline-source')
+        :(test.kind==='OOS_HOLDOUT'?'candidate-validation-source':'candidate-source'));
+      const marker=write(`${segment.segment_id}-${side}.version.txt`,`${side}-marker-${segment.segment_id}`);
+      const receiptContent=JSON.stringify({run_id:runId,physical_binaries:{replay_source:{path:source.path,sha256:source.sha256},
+        replay_dll:{path:dll.path,sha256:dll.sha256},replay_marker:{path:marker.path,sha256:marker.sha256}}});
+      const receipt=write(`${segment.segment_id}-${side}-receipt.json`,receiptContent);
+      return {receipt,source,marker,hashes:{strategy_source_hash:source.sha256,strategy_dll_hash:dll.sha256,
+        strategy_marker_hash:marker.sha256,completion_receipt_hash:receipt.sha256}};
+    };
+    const baselinePhysical=physical('baseline',segment.baseline_run_id,baselineDll);
+    const candidatePhysical=physical('candidate',segment.candidate_run_id,candidateDll);
     const database=write(`${segment.segment_id}.sqlite`,`sqlite-evidence-${segment.segment_id}`);
+    const versionNumber=value=>Number(/^v0\.6\.(\d+)/.exec(value)?.[1] || 0);
+    const markerRequired=test.kind==='OOS_HOLDOUT' || versionNumber(test.baseline_version)>=240
+      || versionNumber(test.candidate_execution_version)>=240;
     return {segment_id:segment.segment_id,baseline:{run_id:segment.baseline_run_id,strategy_version:test.baseline_version,
       strategy_hash:baselineHash,telemetry_version:test.telemetry_version,telemetry_hash:test.telemetry_hash,trade_count:10,
-      gross_pnl:100,fees:20,net_pnl:80,short_trade_count:2,zero_trade_periods:1,completion_receipt_hash:baselineReceipt.sha256,data_quality_flags:[]},
+      gross_pnl:100,fees:20,net_pnl:80,short_trade_count:2,zero_trade_periods:1,
+      completion_receipt_hash:baselinePhysical.receipt.sha256,physical_hashes:baselinePhysical.hashes,data_quality_flags:[]},
     candidate:{run_id:segment.candidate_run_id,strategy_version:test.candidate_execution_version,strategy_hash:test.candidate_execution_hash,
       telemetry_version:test.telemetry_version,telemetry_hash:test.telemetry_hash,trade_count:8,gross_pnl:110,fees:16,net_pnl:94,
-      short_trade_count:0,zero_trade_periods:1,completion_receipt_hash:candidateReceipt.sha256,data_quality_flags:[]},
-    source_files:[baselineDll,candidateDll,telemetryDll,baselineReceipt,candidateReceipt,database]};
+      short_trade_count:0,zero_trade_periods:1,completion_receipt_hash:candidatePhysical.receipt.sha256,
+      physical_hashes:candidatePhysical.hashes,data_quality_flags:[]},
+    source_files:[baselineDll,candidateDll,telemetryDll,baselinePhysical.source,
+      ...(markerRequired?[baselinePhysical.marker]:[]),baselinePhysical.receipt,candidatePhysical.source,
+      ...(markerRequired?[candidatePhysical.marker]:[]),candidatePhysical.receipt,database]};
   });
   const aggregate=name=>({strategy_version:name==='baseline'?test.baseline_version:test.candidate_execution_version,
     strategy_hash:name==='baseline'?baselineHash:test.candidate_execution_hash,telemetry_version:test.telemetry_version,
@@ -1192,7 +1213,14 @@ const validationReport=(f,test,baselineHash)=>{
   return {status:'PASS',segments,baseline:aggregate('baseline'),candidate:aggregate('candidate'),
     checks:{physical_strategy_hash_verified:true,telemetry_attribution_complete:true,fees_reconciled:true,duplicates_absent:true,
       zero_trade_periods_recorded:true,completion_receipt_verified:true,same_window_and_cost_model:true,database_read_completed:true},
-    comparison:{net_pnl_delta:segments.length*14,performance_conclusion:'EVALUATION_NOT_PERFORMED'},contradictions:[],limitations:['TEST fixture'],
+    comparison:{reported_delta:segments.length*14},contradictions:[],limitations:['TEST fixture',
+      ...segments.flatMap(segment=>{
+        const versionNumber=value=>Number(/^v0\.6\.(\d+)/.exec(value)?.[1] || 0);
+        const markerRequired=test.kind==='OOS_HOLDOUT' || versionNumber(test.baseline_version)>=240
+          || versionNumber(test.candidate_execution_version)>=240;
+        return markerRequired?[]:[`Marker bytes were not retained for ${segment.baseline.run_id}; the marker hash remains sealed in its completion receipt.`,
+          `Marker bytes were not retained for ${segment.candidate.run_id}; the marker hash remains sealed in its completion receipt.`];
+      })],
     provenance:{cost_model:test.cost_model,cost_model_hash:test.cost_model_hash}};
 };
 
@@ -1407,6 +1435,8 @@ test('candidate completion survives restart and registration requires an approve
     assert.equal(view.candidate_hash,candidateBuild().candidate_hash);assert.deepEqual(view.tasks.filter(task=>['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'].includes(task.kind)).map(task=>task.status),['NOT_RUN','NOT_RUN','NOT_RUN','NOT_RUN']);
     assert.equal(f.backend.one('ow_artifacts',registered.candidate_artifact_id).kind,'CANDIDATE');
     assert.equal(view.candidate_dispatch.registration.authority.paper_authorized,false);
+    const candidateManifest=JSON.parse(f.backend.one('ow_artifacts',registered.candidate_artifact_id).manifest_json);
+    assert.equal(candidateManifest.created_at_utc,candidateManifest.captured_at_utc);
     assert.equal(view.tasks.find(task=>task.kind==='CANDIDATE_DISPATCH_ENGINEERING').status,'COMPLETED');
     assert.equal(view.planning.candidate_testing,'DUE');assert.equal(view.planning.approval_due,false);
     assert.equal(view.planning.qualified_for_planning,false);assert.equal(view.planning.blocked_reason,null);
@@ -1440,10 +1470,14 @@ test('candidate completion survives restart and registration requires an approve
     assert.equal((await validationHttp('validation-plan',outside)).body.error.code,'CANDIDATE_VALIDATION_PARTITION_CONFLICT');
     const duplicate=structuredClone(validationPlanInput);duplicate.message_id='candidate-validation-plan-duplicate';duplicate.data.tests[0].segments[1].baseline_run_id=duplicate.data.tests[0].segments[0].baseline_run_id;
     assert.equal((await validationHttp('validation-plan',duplicate)).body.error.code,'CANDIDATE_VALIDATION_RUN_DUPLICATE');
+    const unregisteredSource=structuredClone(validationPlanInput);unregisteredSource.message_id='candidate-validation-plan-unregistered-source';
+    unregisteredSource.data.tests[0].candidate_execution_source_hash=digest('unregistered-candidate-source');
+    assert.equal((await validationHttp('validation-plan',unregisteredSource)).body.error.code,'CANDIDATE_VALIDATION_CANDIDATE_SOURCE_CONFLICT');
     const validationPlanResponse=await validationHttp('validation-plan',validationPlanInput);
     assert.equal(validationPlanResponse.status,200);let validationPlan=validationPlanResponse.body;
     assert.equal(validationPlan.status,'PLANNED');assert.equal(validationPlan.holdout_state,'SEALED');
     assert.equal(validationPlan.plan_revision,1);assert.equal(validationPlan.supersedes_plan_hash,null);
+    const firstSealedPlan=structuredClone(f.backend.operationalCandidateDispatch.validationPlan(child.id));
     assert.deepEqual((await validationHttp('validation-plan',validationPlanInput)).body,validationPlan);
     const wrongRevision=structuredClone(validationPlanInput);wrongRevision.message_id='candidate-validation-plan-wrong-revision';
     wrongRevision.data.expected_revision=validationPlan.revision;wrongRevision.data.supersedes_plan_hash=digest('wrong-plan');
@@ -1453,9 +1487,15 @@ test('candidate completion survives restart and registration requires an approve
     revisedInput.data.tests[0].failure_rule+=' Corrected before execution.';
     revisedInput.data.tests.at(-1).candidate_execution_version='v0.6.240-test-boundary-drain-short-exclusion-candidate';
     revisedInput.data.tests.at(-1).candidate_execution_hash=digest('candidate-validation-binary');
+    revisedInput.data.tests.at(-1).candidate_execution_source_hash=digest('candidate-validation-source');
     const revisedResponse=await validationHttp('validation-plan',revisedInput);assert.equal(revisedResponse.status,200);
     const originalPlanHash=validationPlan.plan_hash;validationPlan=revisedResponse.body;matrix=revisedInput.data.tests;
     assert.equal(validationPlan.plan_revision,2);assert.equal(validationPlan.supersedes_plan_hash,originalPlanHash);
+    const secondSealedPlan=f.backend.operationalCandidateDispatch.validationPlan(child.id);
+    assert.equal(secondSealedPlan.schema_version,'ocean-operational-candidate-validation/v4');
+    assert.equal(secondSealedPlan.owner_id,firstSealedPlan.owner_id);
+    assert.equal(secondSealedPlan.decision_id,firstSealedPlan.decision_id);
+    assert.ok(Date.parse(secondSealedPlan.created_at_utc)>=Date.parse(firstSealedPlan.created_at_utc));
     const legacyTest=structuredClone(matrix[0]);delete legacyTest.candidate_execution_version;delete legacyTest.candidate_execution_hash;
     const legacyReport=f.backend.operationalCandidateDispatch.validateResult(f.backend.one('ow_cases',child.id),
       f.backend.operationalCandidateDispatch.completion(child.id),
@@ -1463,7 +1503,7 @@ test('candidate completion survives restart and registration requires an approve
       validationReport(f,matrix[0],child.baseline_hash));
     assert.equal(legacyReport.execution_bindings.candidate.logical_hash,candidateBuild().candidate_hash);
     assert.equal(legacyReport.execution_bindings.candidate.strategy_version,candidateBuild().candidate_version);
-    assert.equal(legacyReport.execution_bindings.candidate.strategy_hash,candidateBuild().candidate_hash);
+    assert.equal(legacyReport.execution_bindings.candidate.runs[0].physical_hashes.strategy_dll_hash,candidateBuild().candidate_hash);
     const early=f.backend.one('ow_cases',child.id),earlyTest=matrix.at(-1);
     const earlyResponse=await validationHttp('validation-results',{message_id:'early-holdout',data:{
       case_id:child.id,expected_revision:early.revision,plan_hash:validationPlan.plan_hash,kind:'OOS_HOLDOUT',
@@ -1493,19 +1533,34 @@ test('candidate completion survives restart and registration requires an approve
       if(index===0){const invalid=structuredClone(input);invalid.message_id='candidate-validation-incomplete-pass';invalid.data.result.checks.fees_reconciled=false;
         const invalidResponse=await validationHttp('validation-results',invalid);
         assert.equal(invalidResponse.status,409);assert.equal(invalidResponse.body.error.code,'CANDIDATE_VALIDATION_PASS_EVIDENCE_INCOMPLETE');
+        const disclosed=f.backend.operationalCandidateDispatch.validateResult(f.backend.one('ow_cases',child.id),
+          f.backend.operationalCandidateDispatch.completion(child.id),f.backend.operationalCandidateDispatch.registration(child.id),
+          {...validationPlan,tests:[test]},test,input.data.result);
+        assert.equal(disclosed.execution_bindings.candidate.runs[0].marker_bytes_available,false);
         const wrongRun=structuredClone(input);wrongRun.message_id='candidate-validation-wrong-run';wrongRun.data.result.segments[0].baseline.run_id='test-wrong-baseline-run';
         assert.equal((await validationHttp('validation-results',wrongRun)).body.error.code,'CANDIDATE_VALIDATION_RUN_BINDING_CONFLICT');
         const wrongAggregate=structuredClone(input);wrongAggregate.message_id='candidate-validation-wrong-aggregate';wrongAggregate.data.result.candidate.net_pnl+=1;
         assert.equal((await validationHttp('validation-results',wrongAggregate)).body.error.code,'CANDIDATE_VALIDATION_AGGREGATE_CONFLICT');
+        const aliasedPhysical=structuredClone(input);aliasedPhysical.message_id='candidate-validation-aliased-physical-hash';
+        aliasedPhysical.data.result.segments[0].candidate.physical_hashes.strategy_marker_hash=
+          aliasedPhysical.data.result.segments[0].candidate.physical_hashes.strategy_source_hash;
+        assert.equal((await validationHttp('validation-results',aliasedPhysical)).body.error.code,'CANDIDATE_VALIDATION_PHYSICAL_BINDING_CONFLICT');
         const wrongHash=structuredClone(input);wrongHash.message_id='candidate-validation-wrong-file-hash';wrongHash.data.result.segments[0].source_files[0].sha256=digest('wrong-file');
         assert.equal((await validationHttp('validation-results',wrongHash)).body.error.code,'CANDIDATE_VALIDATION_SOURCE_FILE_HASH_CONFLICT');
         const missing=structuredClone(input);missing.message_id='candidate-validation-missing-file';missing.data.result.segments[0].source_files[0].path=path.join(f.root,'missing.dll');
         assert.equal((await validationHttp('validation-results',missing)).body.error.code,'CANDIDATE_VALIDATION_SOURCE_FILE_MISSING');}
       if(index===3){
+        const missingMarker=structuredClone(input.data.result),candidateEvidence=missingMarker.segments[0].candidate;
+        missingMarker.segments[0].source_files=missingMarker.segments[0].source_files
+          .filter(file=>file.sha256!==candidateEvidence.physical_hashes.strategy_marker_hash);
+        missingMarker.limitations.push(`Marker bytes were not retained for ${candidateEvidence.run_id}; the marker hash remains sealed in its completion receipt.`);
+        assert.throws(()=>f.backend.operationalCandidateDispatch.validateResult(f.backend.one('ow_cases',child.id),
+          f.backend.operationalCandidateDispatch.completion(child.id),f.backend.operationalCandidateDispatch.registration(child.id),
+          {...validationPlan,tests:[test]},test,missingMarker),/CANDIDATE_VALIDATION_PHYSICAL_SOURCE_BINDING_CONFLICT/);
         const logicalAsExecution=structuredClone(input);logicalAsExecution.message_id='candidate-validation-logical-hash-is-not-execution-hash';
         logicalAsExecution.data.result.segments[0].candidate.strategy_version=candidateBuild().candidate_version;
         logicalAsExecution.data.result.segments[0].candidate.strategy_hash=candidateBuild().candidate_hash;
-        assert.equal((await validationHttp('validation-results',logicalAsExecution)).body.error.code,'CANDIDATE_VALIDATION_EVIDENCE_BINDING_CONFLICT');
+        assert.equal((await validationHttp('validation-results',logicalAsExecution)).body.error.code,'CANDIDATE_VALIDATION_PHYSICAL_BINDING_CONFLICT');
       }
       if(index===3)assert.equal(f.backend.db.prepare('SELECT COUNT(*) n FROM ow_events WHERE action=?').get('operational.candidate.validation.holdout_released').n,0);
       const recordedResponse=await validationHttp('validation-results',input);assert.equal(recordedResponse.status,200,JSON.stringify(recordedResponse.body));
@@ -1515,13 +1570,13 @@ test('candidate completion survives restart and registration requires an approve
         const report=JSON.parse(Buffer.from(f.backend.one('ow_artifacts',recorded.artifact_id).content).toString());
         assert.equal(report.execution_bindings.candidate.logical_hash,candidateBuild().candidate_hash);
         assert.equal(report.execution_bindings.candidate.strategy_version,candidateBuild().candidate_version);
-        assert.equal(report.execution_bindings.candidate.strategy_hash,candidateBuild().candidate_hash);
+        assert.equal(report.execution_bindings.candidate.runs[0].physical_hashes.strategy_dll_hash,candidateBuild().candidate_hash);
       }
       if(index===3){
         const report=JSON.parse(Buffer.from(f.backend.one('ow_artifacts',recorded.artifact_id).content).toString());
         assert.equal(report.execution_bindings.candidate.logical_hash,candidateBuild().candidate_hash);
         assert.equal(report.execution_bindings.candidate.strategy_version,'v0.6.240-test-boundary-drain-short-exclusion-candidate');
-        assert.equal(report.execution_bindings.candidate.strategy_hash,digest('candidate-validation-binary'));
+        assert.equal(report.execution_bindings.candidate.runs[0].physical_hashes.strategy_dll_hash,digest('candidate-validation-binary'));
       }
     }
     assert.equal(f.backend.db.prepare('SELECT COUNT(*) n FROM ow_events WHERE action=?').get('operational.candidate.validation.holdout_released').n,1);
@@ -1542,15 +1597,28 @@ test('candidate completion survives restart and registration requires an approve
       call:async(pathname,_token,request)=>{
         assert.equal(pathname,'/trading/learning/candidate-evaluation');evaluationCalls.push(structuredClone(request));
         if(failEvaluationOnce){failEvaluationOnce=false;throw new Error('HTTP_503');}
-        const content=JSON.stringify({schema_version:CANDIDATE_EVALUATION_RESULT_VERSION,
-          conclusion:'BENEFIT_NOT_ESTABLISHED',plan_hash:request.plan_hash,candidate_hash:request.logical.candidate_hash,
-          rationale:'The fixture has no predeclared performance decision policy; preserve measured evidence without claiming benefit.',
-          authority:{...request.authority,human_governance_required:true}});
-        return {schema_version:CANDIDATE_EVALUATION_RESULT_VERSION,record_id:'reasoning-isolated-candidate-evaluation',
+        const bindings=f.backend.operationalCandidateEvaluator.expectedBindings(request);
+        const sourceArtifacts=f.backend.operationalCandidateEvaluator.expectedSourceEchoes(request);
+        const brainAuthority={strategy_changed:false,candidate_approved:false,candidate_promoted:false,paper_authorized:false,
+          live_authorized:false,runtime_trade_decision_dependency:false};
+        const content=JSON.stringify({schema_version:'brain-candidate-evaluation-content/v1',
+          strategy:{project:request.project,strategy_id:request.strategy_id,strategy_name:request.strategy_name,
+            strategy_profile_id:request.strategy_profile_id,strategy_version:request.strategy_version,
+            execution_instance_id:request.execution_instance_id},
+          registry_reconciliation_id:request.registry_reconciliation_id,registry_record_sha256:request.registry_record_sha256,
+          bindings,evaluation_policy:request.evaluation_policy,
+          validation_plan_predecessors:request.validation_plan_predecessors.map(envelope=>
+            ({envelope,content:JSON.parse(envelope.content_json)})),validation_plan:JSON.parse(request.validation_plan.content_json),
+          validation_completion:JSON.parse(request.validation_completion.content_json),
+          source_artifacts:sourceArtifacts.map((echo,index)=>({echo,content:JSON.parse(request.source_artifacts[index].content_json)})),
+          dataset_provenance:{partition_id:'isolated-test'},conclusion:{type:'BENEFIT_NOT_ESTABLISHED',reasons:[],metrics:{}},
+          correlation:request.correlation,authority:brainAuthority,human_governance_required:true});
+        const response={schema_version:CANDIDATE_EVALUATION_RESULT_VERSION,record_id:'reasoning-isolated-candidate-evaluation',
           relative_path:'reasoning/isolated-candidate-evaluation.md',content,content_sha256:digest(content),
-          conclusion:'BENEFIT_NOT_ESTABLISHED',plan_hash:request.plan_hash,candidate_hash:request.logical.candidate_hash,
-          source_artifacts:request.source_artifacts,correlation:request.correlation,
-          authority:{...request.authority,human_governance_required:true}};
+          conclusion_type:'BENEFIT_NOT_ESTABLISHED',bindings,evaluation_policy:request.evaluation_policy,
+          source_artifacts:sourceArtifacts,correlation:request.correlation,authority:brainAuthority,human_governance_required:true};
+        return {...response,readback:{verified:true,record_id:response.record_id,relative_path:response.relative_path,
+          content_sha256:response.content_sha256}};
       },
     });
     await f.backend.operationalCandidateEvaluator.flushOnce();
@@ -1566,16 +1634,61 @@ test('candidate completion survives restart and registration requires an approve
     const evaluated=f.backend.readCase(f.human,child.id);
     assert.equal(evaluated.candidate_evaluation.status,'COMPLETED',JSON.stringify(f.backend.db.prepare('SELECT * FROM ow_candidate_evaluation_jobs').get()));
     assert.equal(evaluationCalls.length,3);assert.deepEqual(evaluationCalls[1],evaluationCalls[0]);
+    assert.deepEqual(evaluationCalls[0].validation_plan_predecessors.map(item=>item.revision),[1,2]);
+    assert.equal(JSON.parse(evaluationCalls[0].validation_plan.content_json).plan_revision,3);
+    assert.equal(evaluationCalls[0].validation_plan_predecessors[1].plan_hash,
+      JSON.parse(evaluationCalls[0].validation_plan.content_json).supersedes_plan_hash);
     assert.deepEqual(evaluationCalls[2],evaluationCalls[0]);assert.equal(evaluated.candidate_evaluation.input_hash,frozenInputHash);
     assert.equal(evaluated.candidate_evaluation.conclusion,'BENEFIT_NOT_ESTABLISHED');
     assert.equal(evaluated.stage,'CANDIDATE_EVALUATION');
-    assert.equal(f.backend.one('ow_artifacts',evaluated.candidate_evaluation.result_artifact_id).kind,'EVALUATION');
+    const evaluationArtifact=f.backend.one('ow_artifacts',evaluated.candidate_evaluation.result_artifact_id);
+    assert.equal(evaluationArtifact.kind,'EVALUATION');
+    const evaluationResult=JSON.parse(Buffer.from(evaluationArtifact.content).toString('utf8'));
+    assert.deepEqual(Object.keys(evaluationResult.evaluation.source_artifacts[0]).sort(),
+      ['artifact_id','content_sha256','kind','manifest_sha256']);
+    assert.equal(JSON.stringify(evaluationResult).includes(evaluationCalls[0].source_artifacts[0].content_json),false);
+    assert.ok(Buffer.from(evaluationArtifact.content).length<8192);
     assert.deepEqual(evaluated.candidate_evaluation.authority,{automatic_strategy_change:false,candidate_approved:false,
       paper_authorized:false,live_authorized:false,automatic_promotion:false});
     f.restart();const readback=f.backend.readCase(f.human,child.id);
     assert.equal(readback.candidate_evaluation.status,'COMPLETED');
     assert.equal(readback.candidate_evaluation.brain_record_id,'reasoning-isolated-candidate-evaluation');
     assert.equal(returnedCount(f),1);assertSealed(f,before);
+    const acceptedTask=f.backend.db.prepare("SELECT * FROM ow_tasks WHERE case_id=? AND kind='BACKTEST'").get(child.id);
+    const acceptedArtifact=f.backend.one('ow_artifacts',acceptedTask.artifact_id);
+    const legacyContent=JSON.parse(Buffer.from(acceptedArtifact.content).toString('utf8'));
+    legacyContent.comparison={net_pnl_delta:legacyContent.comparison.reported_delta};
+    delete legacyContent.execution_bindings.baseline.runs;delete legacyContent.execution_bindings.candidate.runs;
+    const legacyBytes=Buffer.from(JSON.stringify(legacyContent)),legacyArtifactId=`${acceptedTask.artifact_id}-legacy`;
+    const legacyManifest=JSON.parse(acceptedArtifact.manifest_json);
+    Object.assign(legacyManifest,{artifact_id:legacyArtifactId,content_hash:digest(legacyBytes),bytes:legacyBytes.length,
+      source_reference:`ocean-artifact:${legacyArtifactId}`});
+    f.backend.db.prepare('INSERT INTO ow_artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(legacyArtifactId,
+      acceptedArtifact.strategy_id,acceptedArtifact.run_id,acceptedArtifact.case_id,acceptedArtifact.producer_id,
+      acceptedArtifact.recipient_id,acceptedArtifact.kind,acceptedArtifact.candidate_hash,acceptedArtifact.baseline_hash,
+      acceptedArtifact.dependencies_json,JSON.stringify(legacyManifest),legacyBytes);
+    f.backend.db.prepare('UPDATE ow_tasks SET artifact_id=? WHERE id=?').run(legacyArtifactId,acceptedTask.id);
+    const actualEvent=f.backend.event;
+    f.backend.event=function(entity,action,...args){
+      if(action==='operational.candidate.validation.revalidation_required')throw new Error('simulated revalidation event failure');
+      return actualEvent.call(this,entity,action,...args);
+    };
+    assert.throws(()=>f.backend.operationalCandidateEvaluator.reconcile(),/simulated revalidation event failure/);
+    assert.equal(f.backend.one('ow_cases',child.id).stage,'CANDIDATE_EVALUATION');
+    assert.equal(f.backend.db.prepare("SELECT status FROM ow_tasks WHERE case_id=? AND kind='BACKTEST'").get(child.id).status,'PASS');
+    f.backend.event=actualEvent;f.backend.operationalCandidateEvaluator.reconcile();
+    const reopened=f.backend.readCase(f.human,child.id);
+    assert.equal(reopened.stage,'HISTORICAL_VALIDATION');
+    assert.equal(f.backend.one('ow_cases',child.id).owner_id,'strategy');
+    assert.equal(reopened.candidate_dispatch.validation.status,'PLANNED');
+    assert.equal(reopened.candidate_dispatch.validation.tests.find(task=>task.kind==='OOS_HOLDOUT').state,'SEALED');
+    assert.equal(f.backend.operationalCandidateDispatch.activeHoldoutRelease(child.id),null);
+    assert.equal(reopened.candidate_evaluation.status,'NOT_DUE');
+    assert.deepEqual(reopened.tasks.filter(task=>['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'].includes(task.kind))
+      .map(task=>task.status),['NOT_RUN','NOT_RUN','NOT_RUN','NOT_RUN']);
+    assert.equal(f.backend.operationalCandidateEvaluator.claim(),null);
+    assert.equal(f.backend.db.prepare('SELECT COUNT(*) n FROM ow_events WHERE action=?')
+      .get('operational.candidate.validation.revalidation_required').n,1);
   }finally{f.close();}
 });
 
