@@ -22,6 +22,7 @@ import { REPORT_REFERENCE_VERSION, readResearchReport } from './operational-rese
 import { CONTINUATION_ORIGIN } from './operational-continuation.mjs';
 import { PaperForwardPreparation } from './paper-forward-preparation.mjs';
 import { OperationalCandidateDispatch } from './operational-candidate-dispatch.mjs';
+import { OperationalCandidateEvaluator } from './operational-candidate-evaluation.mjs';
 import {
   activateStrategyOnboarding,
   deactivateStrategyOnboarding,
@@ -83,13 +84,14 @@ export class WorkflowBackend {
     this.operationalLearning = new OperationalLearning(this, config.operational_learning || { enabled: false });
     this.operationalResearch = new OperationalResearch(this);
     this.operationalCandidateDispatch = new OperationalCandidateDispatch(this);
+    this.operationalCandidateEvaluator = new OperationalCandidateEvaluator(this);
     this.operationalLearning.start();
     this.authFailureWindowMs = 5 * 60 * 1000;
     this.authFailureThreshold = 3;
     this.authFailureTotals = { 401: 0, 403: 0 };
     this.authFailureBuckets = new Map();
   }
-  close() { this.stopMaintenance?.(); this.operationalResearch?.stop(); this.operationalLearning?.stop(); this.onboardingBrain?.stop(); this.store.close(); }
+  close() { this.stopMaintenance?.(); this.operationalCandidateEvaluator?.stop(); this.operationalResearch?.stop(); this.operationalLearning?.stop(); this.onboardingBrain?.stop(); this.store.close(); }
   recordAuthFailure(status, code) {
     if (![401,403].includes(status)) return;
     const now=Date.now();const key=`${status}:${code}`;
@@ -607,14 +609,15 @@ export class WorkflowBackend {
     requireThat(!data.candidate_hash || /^sha256:[a-f0-9]{64}$/.test(data.candidate_hash), 422, "INVALID_CANDIDATE_HASH");
     requireThat(digest(contentBytes) === data.content_hash, 422, "ARTIFACT_HASH_MISMATCH");
     const row = this.caseFor(actor, data.case_id, "artifact.write"); this.active(row); this.baseline(row);
-    const requiredStage = { CANDIDATE: "CANDIDATE_DEVELOPMENT", BACKTEST: "HISTORICAL_VALIDATION", ROBUSTNESS: "HISTORICAL_VALIDATION", WALK_FORWARD: "HISTORICAL_VALIDATION", OOS_HOLDOUT: "HISTORICAL_VALIDATION", EVALUATION: "CANDIDATE_EVALUATION", FORWARD_RESULT: "FORWARD_VALIDATION", FORWARD_EVALUATION: "FORWARD_EVALUATION", DEPLOYMENT_PLAN: "DEPLOYMENT_REVIEW" }[data.kind];
+    const requiredStage = { CANDIDATE: "CANDIDATE_DEVELOPMENT", BACKTEST: "HISTORICAL_VALIDATION", ROBUSTNESS: "HISTORICAL_VALIDATION", WALK_FORWARD: "HISTORICAL_VALIDATION", OOS_HOLDOUT: "HISTORICAL_VALIDATION", EVALUATION: "CANDIDATE_EVALUATION", NO_BENEFIT: "CANDIDATE_EVALUATION", FORWARD_RESULT: "FORWARD_VALIDATION", FORWARD_EVALUATION: "FORWARD_EVALUATION", DEPLOYMENT_PLAN: "DEPLOYMENT_REVIEW" }[data.kind];
     requireThat(!requiredStage || row.stage === requiredStage, 409, "ARTIFACT_STAGE_PREREQUISITE_REQUIRED");
     if (["CANDIDATE", "BACKTEST", "ROBUSTNESS", "WALK_FORWARD", "OOS_HOLDOUT"].includes(data.kind)) this.approved(row, "DEVELOPMENT", null, actor.role === "HUMAN" ? null : actor.id, data.kind === "CANDIDATE" ? null : data.kind);
     if (data.kind === "FORWARD_RESULT") this.approved(row, "SHADOW", null, actor.role === "HUMAN" ? null : actor.id);
     requireThat(data.run_id === row.run_id && this.config.identities.some((entry) => entry.identity_id === data.recipient_id && entry.strategy_ids.includes(row.strategy_id) && entry.instance_ids.includes(row.instance_id)), 403, "ARTIFACT_RECIPIENT_OR_RUN_MISMATCH");
     requireThat(Array.isArray(data.dependency_ids), 422, "DEPENDENCIES_REQUIRED");
     data.dependency_ids.forEach((dependency) => this.artifactFor(row, dependency));
-    const manifest = { schema_version: RELEASE, artifact_id: data.artifact_id, artifact_version: 1, content_hash: data.content_hash, media_type: data.media_type, bytes: contentBytes.length, created_at_utc: new Date().toISOString(), producer_id: actor.id, strategy_id: row.strategy_id, run_id: row.run_id, role: "REPORT", source_reference: `ocean-artifact:${data.artifact_id}`, known_at_utc: null, captured_at_utc: new Date().toISOString(), visible_market_cutoff_utc: null, chart_settings_hash: null, availability: "AVAILABLE", immutable: true, supersedes_artifact_id: null };
+    const recordedAt = new Date().toISOString();
+    const manifest = { schema_version: RELEASE, artifact_id: data.artifact_id, artifact_version: 1, content_hash: data.content_hash, media_type: data.media_type, bytes: contentBytes.length, created_at_utc: recordedAt, producer_id: actor.id, strategy_id: row.strategy_id, run_id: row.run_id, role: "REPORT", source_reference: `ocean-artifact:${data.artifact_id}`, known_at_utc: null, captured_at_utc: recordedAt, visible_market_cutoff_utc: null, chart_settings_hash: null, availability: "AVAILABLE", immutable: true, supersedes_artifact_id: null };
     this.validate("artifact-manifest", manifest);
     this.db.prepare("INSERT INTO ow_artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").run(data.artifact_id, row.strategy_id, row.run_id, row.id, actor.id, data.recipient_id, data.kind, data.candidate_hash || null, row.baseline_hash, JSON.stringify(data.dependency_ids), JSON.stringify(manifest), contentBytes);
     this.event(row.id, "artifact.write", actor, { artifact_id: data.artifact_id, content_hash: data.content_hash });
@@ -845,7 +848,12 @@ export class WorkflowBackend {
     const research = this.operationalResearch.statusForCase(row.id);
     const planning=this.operationalResearch.continuations.forCase(row);
     const candidateDispatch=this.operationalCandidateDispatch.forCase(row);
-    return { case_id: row.id, strategy_id: row.strategy_id, execution_instance_id: row.instance_id, run_id: row.run_id, stage: row.stage, work_status: planning?.work_status || row.work_status, revision: row.revision, baseline_hash: row.baseline_hash, candidate_hash: row.candidate_hash, owner_id: row.owner_id, waiting_on: row.waiting_on, next_action: candidateDispatch?.status === 'REGISTERED' ? 'Run the four approved Replay-only validation tests and attach their immutable results.' : candidateDispatch?.status === 'BUILT_PENDING_REVIEW' ? 'Review the exact Replay-only candidate validation request in Ocean.' : planning?.next_action || research?.next_action || row.waiting_on || `Complete ${row.stage} prerequisites; propose a revision-checked transition`, research, planning, candidate_dispatch:candidateDispatch, namespace: ['OPERATIONAL_LEARNING',CONTINUATION_ORIGIN,'OPERATIONAL_RESEARCH_REASSESSMENT'].includes(JSON.parse(row.payload_json).origin) ? 'OPERATIONAL' : "TEST", pending_sync: this.db.prepare("SELECT COUNT(*) AS n FROM ow_outbox WHERE entity_id=? AND state<>'ACKNOWLEDGED'").get(row.id).n, handoffs: this.db.prepare("SELECT id,recipient_id,state,revision FROM ow_handoffs WHERE case_id=?").all(row.id), tasks: this.db.prepare("SELECT kind,status,artifact_id,required FROM ow_tasks WHERE case_id=? ORDER BY kind").all(row.id), approvals: this.db.prepare("SELECT id,gate,state,snapshot_hash,expires_at_utc FROM ow_approval_requests WHERE case_id=? ORDER BY rowid").all(row.id), blockers: this.db.prepare("SELECT id,owner_id,action,state FROM ow_blockers WHERE case_id=?").all(row.id) };
+    const candidateEvaluation=this.operationalCandidateEvaluator?.statusForCase(row.id)
+      || {status:'NOT_DUE',attempts:0,next_attempt_utc:null,lease_expires_utc:null,error:null,input_hash:null,
+        brain_record_id:null,brain_content_hash:null,result_artifact_id:null,result_hash:null,conclusion:null,
+        authority:{automatic_strategy_change:false,candidate_approved:false,paper_authorized:false,live_authorized:false,automatic_promotion:false}};
+    const evaluationAction={QUEUED:'Ocean is queueing the completed validation evidence for Obsidian Brain evaluation.',PENDING:'Ocean is preparing the immutable evaluation request.',RUNNING:'Obsidian Brain is evaluating the frozen cumulative evidence.',RETRY:'Candidate evaluation will retry automatically after a temporary service failure.',BLOCKED:'Candidate evaluation is blocked; inspect the recorded error and repair the named binding.',COMPLETED:'Candidate evaluation is complete; review its immutable conclusion before any further governed action.'}[candidateEvaluation.status];
+    return { case_id: row.id, strategy_id: row.strategy_id, execution_instance_id: row.instance_id, run_id: row.run_id, stage: row.stage, work_status: planning?.work_status || row.work_status, revision: row.revision, baseline_hash: row.baseline_hash, candidate_hash: row.candidate_hash, owner_id: row.owner_id, waiting_on: row.waiting_on, next_action: row.stage==='CANDIDATE_EVALUATION' && candidateEvaluation.status!=='NOT_DUE' ? evaluationAction : candidateDispatch?.status === 'REGISTERED' ? 'Run the four approved Replay-only validation tests and attach their immutable results.' : candidateDispatch?.status === 'BUILT_PENDING_REVIEW' ? 'Review the exact Replay-only candidate validation request in Ocean.' : planning?.next_action || research?.next_action || row.waiting_on || `Complete ${row.stage} prerequisites; propose a revision-checked transition`, research, planning, candidate_dispatch:candidateDispatch, candidate_evaluation:candidateEvaluation, namespace: ['OPERATIONAL_LEARNING',CONTINUATION_ORIGIN,'OPERATIONAL_RESEARCH_REASSESSMENT'].includes(JSON.parse(row.payload_json).origin) ? 'OPERATIONAL' : "TEST", pending_sync: this.db.prepare("SELECT COUNT(*) AS n FROM ow_outbox WHERE entity_id=? AND state<>'ACKNOWLEDGED'").get(row.id).n, handoffs: this.db.prepare("SELECT id,recipient_id,state,revision FROM ow_handoffs WHERE case_id=?").all(row.id), tasks: this.db.prepare("SELECT kind,status,artifact_id,required FROM ow_tasks WHERE case_id=? ORDER BY kind").all(row.id), approvals: this.db.prepare("SELECT id,gate,state,snapshot_hash,expires_at_utc FROM ow_approval_requests WHERE case_id=? ORDER BY rowid").all(row.id), blockers: this.db.prepare("SELECT id,owner_id,action,state FROM ow_blockers WHERE case_id=?").all(row.id) };
   }
   readDecision(actor, decisionId) {
     const decision = this.one("ow_decisions", decisionId); const row = this.caseFor(actor, decision.case_id, "read"); const binding = JSON.parse(decision.binding_json);
@@ -1030,7 +1038,7 @@ export class WorkflowBackend {
         if (route === "run-manager/options") response.end(JSON.stringify(this.runs.options(actor)));
         else if (/^run-manager\/context\/[A-Za-z0-9_.:-]+$/.test(route)) response.end(JSON.stringify(this.runs.read(actor,route.split('/')[2])));
         else if (route.startsWith("view/")) response.end(JSON.stringify(readWorkflowView(this, actor, route)));
-        else if (route === "status") response.end(JSON.stringify({ api_version: API_VERSION, contract_release: RELEASE, namespace: "TEST", brain_submission: "OFF", live_real: "DISABLED", dispatch_worker: "OFF", auth: "REQUIRED", schema_version: 11, identity: { id: actor.id, role: actor.role, scopes: actor.scopes, strategy_ids: actor.strategyIds, instance_ids: actor.instanceIds }, ...this.auth.readiness(), test_communication:this.testCommunication.readiness(actor), onboarding_brain_sync:this.onboardingBrain.status(), operational_learning:this.operationalLearning.status(), maintenance:this.maintenanceHealth || {state:'NOT_INSTALLED_ISOLATED'} }));
+        else if (route === "status") response.end(JSON.stringify({ api_version: API_VERSION, contract_release: RELEASE, namespace: "TEST", brain_submission: "OFF", live_real: "DISABLED", dispatch_worker: "OFF", auth: "REQUIRED", schema_version: 13, identity: { id: actor.id, role: actor.role, scopes: actor.scopes, strategy_ids: actor.strategyIds, instance_ids: actor.instanceIds }, ...this.auth.readiness(), test_communication:this.testCommunication.readiness(actor), onboarding_brain_sync:this.onboardingBrain.status(), operational_learning:this.operationalLearning.status(), candidate_evaluator:{version:'ocean-operational-candidate-evaluator/v1',state:this.operationalCandidateEvaluator.running?'RUNNING':'READY'}, maintenance:this.maintenanceHealth || {state:'NOT_INSTALLED_ISOLATED'} }));
         else if (route === 'setup-receipts') {
           requireThat(actor.role === 'HUMAN',403,'WAYNE_BROWSER_ONLY');
           response.end(JSON.stringify({ items: orderedSetup(this.db.prepare('SELECT * FROM ow_setup_receipts').all()), order: 'declared setup-task-map sequence; literal amendment IDs; historical statuses preserved' }));

@@ -5,6 +5,7 @@ import { digest, exactKeys, id, noSecrets, objectHash, requireThat } from './com
 
 export const CANDIDATE_DISPATCH_VERSION='ocean-operational-candidate-dispatch/v2';
 export const CANDIDATE_VALIDATION_VERSION='ocean-operational-candidate-validation/v3';
+export const CANDIDATE_VALIDATION_PLAN_VERSION='ocean-operational-candidate-validation/v4';
 const ORIGIN='OPERATIONAL_RESEARCH_CONTINUATION';
 const leaseAction='operational.candidate.dispatch.lease';
 const completionAction='operational.candidate.dispatch.completed';
@@ -13,15 +14,20 @@ const validationPlanAction='operational.candidate.validation.plan';
 const validationResultAction='operational.candidate.validation.result';
 const holdoutReleaseAction='operational.candidate.validation.holdout_released';
 const validationCompletionAction='operational.candidate.validation.completed';
+const validationRevalidationAction='operational.candidate.validation.revalidation_required';
 const REQUIRED_TESTS=Object.freeze(['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT']);
 const REQUIRED_ROLES=Object.freeze({BACKTEST:'DISCOVERY',ROBUSTNESS:'DISCOVERY',WALK_FORWARD:'VALIDATION',OOS_HOLDOUT:'HOLDOUT'});
 const authority=Object.freeze({automatic_strategy_change:false,candidate_approved:false,paper_authorized:false,live_authorized:false});
 const validHash=value=>typeof value==='string' && /^sha256:[a-f0-9]{64}$/.test(value);
+const exactObjectKeys=(value,keys)=>value && typeof value==='object' && !Array.isArray(value)
+  && Object.keys(value).length===keys.length && keys.every(key=>Object.hasOwn(value,key));
 const sameNumber=(left,right)=>Math.abs(left-right)<=1e-6;
 const contractKey=value=>String(value).replace(/\[M\]$/,'');
 const metricKeys=Object.freeze(['trade_count','gross_pnl','fees','net_pnl','short_trade_count','zero_trade_periods']);
+const physicalHashKeys=Object.freeze(['strategy_source_hash','strategy_dll_hash','strategy_marker_hash','completion_receipt_hash']);
 const candidateExecutionVersion=(test,completed)=>test.candidate_execution_version || test.candidate_version || completed.candidate.candidate_version;
 const candidateExecutionHash=(test,registered)=>test.candidate_execution_hash || registered.candidate_hash;
+const markerLimitation=runId=>`Marker bytes were not retained for ${runId}; the marker hash remains sealed in its completion receipt.`;
 
 // This adapter dispatches an exact, non-live engineering brief to the current
 // strategy owner and records its completion. Review, validation, Paper and Live
@@ -35,7 +41,96 @@ export class OperationalCandidateDispatch {
   completion(caseId){return this.latest(caseId,completionAction);}
   registration(caseId){return this.latest(caseId,registrationAction);}
   validationPlan(caseId){return this.latest(caseId,validationPlanAction);}
-  validationCompletion(caseId){return this.latest(caseId,validationCompletionAction);}
+  validationCompletion(caseId){
+    const row=this.db.prepare(`SELECT action,payload_json FROM ow_events WHERE entity_id=? AND action IN (?,?) ORDER BY id DESC LIMIT 1`)
+      .get(caseId,validationCompletionAction,validationRevalidationAction);
+    return row?.action===validationCompletionAction?JSON.parse(row.payload_json).payload:null;
+  }
+  activeHoldoutRelease(caseId){
+    const row=this.db.prepare(`SELECT release.payload_json FROM ow_events release
+      WHERE release.entity_id=? AND release.action=?
+      AND release.id>COALESCE((SELECT MAX(reopened.id) FROM ow_events reopened
+        WHERE reopened.entity_id=release.entity_id AND reopened.action=?),0)
+      ORDER BY release.id DESC LIMIT 1`).get(caseId,holdoutReleaseAction,validationRevalidationAction);
+    return row?JSON.parse(row.payload_json).payload:null;
+  }
+  validationArtifactCompatible(row,plan,kind,artifactId){
+    try{
+      if(!artifactId)return false;
+      const test=plan.tests.find(item=>item.kind===kind);
+      const artifact=this.b.artifactFor(row,artifactId,kind);
+      const report=JSON.parse(Buffer.from(artifact.content).toString('utf8'));
+      const bindings=report.execution_bindings;
+      const completed=this.completion(row.id);
+      const runsValid=name=>Array.isArray(bindings?.[name]?.runs)
+        && bindings[name].runs.length===test.segments.length
+        && bindings[name].runs.every((run,index)=>exactObjectKeys(run,['run_id','physical_hashes','marker_bytes_available'])
+          && run.run_id===test.segments[index][`${name}_run_id`]
+          && exactObjectKeys(run.physical_hashes,physicalHashKeys)
+          && run.physical_hashes.strategy_source_hash===(name==='baseline'
+            ?test.baseline_execution_source_hash:test.candidate_execution_source_hash)
+          && run.physical_hashes.strategy_dll_hash===(name==='baseline'
+            ?test.baseline_strategy_hash:candidateExecutionHash(test,{candidate_hash:row.candidate_hash}))
+          && new Set(Object.values(run.physical_hashes)).size===physicalHashKeys.length);
+      return plan.schema_version===CANDIDATE_VALIDATION_PLAN_VERSION
+        && validHash(test?.baseline_execution_source_hash) && validHash(test?.candidate_execution_source_hash)
+        && report.schema_version===CANDIDATE_VALIDATION_VERSION && report.case_id===row.id
+        && report.plan_hash===plan.plan_hash && report.plan_artifact_id===plan.plan_artifact_id
+        && report.completion_hash===completed?.completion_hash
+        && report.candidate_hash===row.candidate_hash && report.baseline_hash===row.baseline_hash
+        && report.status==='PASS' && report.evidence_integrity_passed===true
+        && objectHash(report.test)===objectHash(test)
+        && exactObjectKeys(report.comparison,['reported_delta'])
+        && objectHash(report.authority)===objectHash({...authority,execution_environment:'REPLAY'})
+        && exactObjectKeys(bindings,['baseline','candidate'])
+        && exactObjectKeys(bindings.baseline,['logical_hash','strategy_version','runs'])
+        && exactObjectKeys(bindings.candidate,['logical_hash','strategy_version','runs'])
+        && bindings?.baseline?.logical_hash===row.baseline_hash
+        && bindings.baseline.strategy_version===test.baseline_version
+        && bindings?.candidate?.logical_hash===row.candidate_hash
+        && bindings.candidate.strategy_version===candidateExecutionVersion(test,completed)
+        && runsValid('baseline') && runsValid('candidate');
+    }catch{return false;}
+  }
+  reconcileValidationArtifacts(actor,row,plan,tasks,{completionEventId=null}={}){
+    const firstInvalid=REQUIRED_TESTS.findIndex(kind=>{
+      const task=tasks.find(item=>item.kind===kind);
+      return task?.status==='PASS' && !this.validationArtifactCompatible(row,plan,kind,task.artifact_id);
+    });
+    if(firstInvalid<0)return null;
+    const resetKinds=REQUIRED_TESTS.slice(firstInvalid);
+    const placeholders=resetKinds.map(()=>'?').join(',');
+    const strategyOwner=this.b.config.identities.find(identity=>identity.namespace==='OPERATIONAL'
+      && identity.role==='STRATEGY' && !identity.revoked && Date.parse(identity.expires_at_utc)>Date.now()
+      && identity.strategy_ids?.includes(row.strategy_id) && identity.instance_ids?.includes(row.instance_id));
+    requireThat(strategyOwner,409,'CANDIDATE_REVALIDATION_STRATEGY_OWNER_REQUIRED');
+    this.db.prepare(`UPDATE ow_tasks SET status='NOT_RUN',artifact_id=NULL WHERE case_id=? AND kind IN (${placeholders})`)
+      .run(row.id,...resetKinds);
+    const nextAction=`Revalidate ${resetKinds[0]} from sealed source evidence under validation plan ${plan.plan_hash}; legacy artifacts remain immutable history.`;
+    this.db.prepare("UPDATE ow_cases SET stage='HISTORICAL_VALIDATION',revision=revision+1,owner_id=?,waiting_on=? WHERE id=?")
+      .run(strategyOwner.identity_id,nextAction,row.id);
+    this.b.event(row.id,validationRevalidationAction,actor,{schema_version:CANDIDATE_VALIDATION_VERSION,
+      plan_hash:plan.plan_hash,completion_event_id:completionEventId,reset_kinds:resetKinds,next_action:nextAction});
+    return {case_id:row.id,revision:row.revision+1,status:'REVALIDATION_REQUIRED',stage:'HISTORICAL_VALIDATION',
+      next_test:resetKinds[0],reset_kinds:resetKinds,next_action:nextAction};
+  }
+  rebindAcceptedArtifacts(actor,row,existing,plan,tasks,completed,registered){
+    for(const task of tasks.filter(item=>item.status==='PASS' && item.artifact_id)){
+      if(!this.validationArtifactCompatible(row,existing,task.kind,task.artifact_id))continue;
+      const artifact=this.b.artifactFor(row,task.artifact_id,task.kind);
+      const report=JSON.parse(Buffer.from(artifact.content).toString('utf8'));
+      const rebound={...report,plan_hash:plan.plan_hash,test:structuredClone(plan.tests.find(item=>item.kind===task.kind)),
+        recorded_at_utc:new Date().toISOString()};
+      const content=JSON.stringify(rebound),contentHash=digest(content);
+      const artifactId=`test-validation-${task.kind.toLowerCase().replaceAll('_','-')}-${contentHash.slice(7,31)}`;
+      this.b.writeArtifact(actor,{artifact_id:artifactId,case_id:row.id,run_id:row.run_id,recipient_id:artifact.recipient_id,
+        kind:task.kind,media_type:'application/json',content,content_encoding:'utf8',content_hash:contentHash,
+        candidate_hash:row.candidate_hash,dependency_ids:[completed.plan_artifact_id,registered.candidate_artifact_id,task.artifact_id]});
+      this.db.prepare('UPDATE ow_tasks SET artifact_id=? WHERE case_id=? AND kind=?').run(artifactId,row.id,task.kind);
+      this.b.event(row.id,validationResultAction,actor,{schema_version:CANDIDATE_VALIDATION_VERSION,plan_hash:plan.plan_hash,
+        kind:task.kind,status:'PASS',artifact_id:artifactId,content_hash:contentHash,revalidated_from_artifact_id:task.artifact_id});
+    }
+  }
   load(actor,caseId,scope='read'){
     const row=this.b.one('ow_cases',caseId),payload=JSON.parse(row.payload_json);
     requireThat(payload.origin===ORIGIN && payload.kind==='PROPOSAL_PLANNING',403,'SUPPORTED_OPERATIONAL_PROPOSAL_REQUIRED');
@@ -105,7 +200,7 @@ export class OperationalCandidateDispatch {
       completion:completed?this.publicCompletion(completed):null,registration:registered || null,
       validation:validation?{schema_version:validation.schema_version || CANDIDATE_VALIDATION_VERSION,plan_hash:validation.plan_hash,
         status:validationComplete?'COMPLETED':'PLANNED',tests:validation.tests.map(test=>({kind:test.kind,
-          state:test.kind==='OOS_HOLDOUT' && !this.latest(row.id,holdoutReleaseAction)?'SEALED':'RELEASED'}))}:null};
+          state:test.kind==='OOS_HOLDOUT' && !this.activeHoldoutRelease(row.id)?'SEALED':'RELEASED'}))}:null};
   }
   queue(actor){
     requireThat(actor.role==='STRATEGY' && actor.namespace==='OPERATIONAL',403,'CANDIDATE_OPERATIONAL_STRATEGY_REQUIRED');
@@ -266,9 +361,10 @@ export class OperationalCandidateDispatch {
     exactKeys(data,['case_id','expected_revision','completion_hash','candidate_hash','baseline_hash','plan_artifact_id','tests','supersedes_plan_hash']);
     this.b.expect(row,data.expected_revision);this.b.active(row);this.b.baseline(row);
     const existing=this.validationPlan(row.id);
+    let tasks=[];
     requireThat(row.stage==='HISTORICAL_VALIDATION',409,'CANDIDATE_VALIDATION_PLAN_STATE_CONFLICT');
     if(existing){
-      const tasks=this.db.prepare('SELECT kind,status FROM ow_tasks WHERE case_id=? AND kind IN (?,?,?,?)')
+      tasks=this.db.prepare('SELECT kind,status,artifact_id FROM ow_tasks WHERE case_id=? AND kind IN (?,?,?,?)')
         .all(row.id,...REQUIRED_TESTS);
       const taskByKind=new Map(tasks.map(task=>[task.kind,task.status]));
       const acceptedTestsPreserved=REQUIRED_TESTS.every(kind=>{
@@ -287,14 +383,17 @@ export class OperationalCandidateDispatch {
     requireThat(Array.isArray(data.tests) && data.tests.length===REQUIRED_TESTS.length,422,'CANDIDATE_VALIDATION_TEST_MATRIX_REQUIRED');
     const runIds=new Set(),segmentIds=new Set();
     const tests=data.tests.map((test,index)=>{
-      exactKeys(test,['kind','baseline_version','baseline_strategy_hash','candidate_version','candidate_execution_version','candidate_execution_hash','telemetry_version','telemetry_hash','cost_model','cost_model_hash','acceptance','failure_rule','segments']);
+      exactKeys(test,['kind','baseline_version','baseline_strategy_hash','baseline_execution_source_hash','candidate_version','candidate_execution_version','candidate_execution_hash','candidate_execution_source_hash','telemetry_version','telemetry_hash','cost_model','cost_model_hash','acceptance','failure_rule','segments']);
       requireThat(test.kind===REQUIRED_TESTS[index],422,'CANDIDATE_VALIDATION_TEST_ORDER_REQUIRED');
-      for(const key of ['baseline_strategy_hash','candidate_execution_hash','telemetry_hash','cost_model_hash'])requireThat(validHash(test[key]),422,'CANDIDATE_VALIDATION_TEST_HASH_REQUIRED');
+      for(const key of ['baseline_strategy_hash','baseline_execution_source_hash','candidate_execution_hash','candidate_execution_source_hash','telemetry_hash','cost_model_hash'])requireThat(validHash(test[key]),422,'CANDIDATE_VALIDATION_TEST_HASH_REQUIRED');
       requireThat(typeof test.baseline_version==='string' && test.baseline_version.length>0
         && typeof test.candidate_execution_version==='string' && test.candidate_execution_version.length>0
         && typeof test.telemetry_version==='string' && test.telemetry_version.length>0
         && test.candidate_version===completed.candidate.candidate_version,409,'CANDIDATE_VALIDATION_VERSION_CONFLICT');
       requireThat(test.candidate_execution_hash!==test.baseline_strategy_hash,409,'CANDIDATE_VALIDATION_EXECUTION_BINDING_CONFLICT');
+      if(test.candidate_execution_version===completed.candidate.candidate_version
+        && test.candidate_execution_hash===registered.candidate_hash)
+        requireThat(test.candidate_execution_source_hash===completed.candidate.source_hash,409,'CANDIDATE_VALIDATION_CANDIDATE_SOURCE_CONFLICT');
       exactKeys(test.cost_model,['schema_version','broker_profile','product','fee_tier','currency','total_fee_per_side','effective_from','source_reference','source_type']);
       requireThat(typeof test.cost_model.schema_version==='string' && typeof test.cost_model.broker_profile==='string'
         && typeof test.cost_model.product==='string' && typeof test.cost_model.fee_tier==='string'
@@ -338,13 +437,17 @@ export class OperationalCandidateDispatch {
       return {...structuredClone(test),segments};
     });
     requireThat(tests.at(-1).segments.every(segment=>segment.dataset_role==='HOLDOUT'),422,'CANDIDATE_VALIDATION_HOLDOUT_REQUIRED');
-    const frozen={schema_version:CANDIDATE_VALIDATION_VERSION,case_id:row.id,plan_revision:(existing?.plan_revision || 1)+(existing?1:0),
+    const now=new Date().toISOString();
+    const createdAt=existing && Date.parse(now)<Date.parse(existing.created_at_utc)?existing.created_at_utc:now;
+    const frozen={schema_version:CANDIDATE_VALIDATION_PLAN_VERSION,case_id:row.id,plan_revision:(existing?.plan_revision || 1)+(existing?1:0),
       supersedes_plan_hash:existing?.plan_hash || null,plan_artifact_id:completed.plan_artifact_id,
       completion_hash:completed.completion_hash,candidate_hash:registered.candidate_hash,baseline_hash:row.baseline_hash,
-      decision_id:approvedDecisionId(this.b.approved(row,'DEVELOPMENT')),owner_id:actor.id,tests,
-      authority:{...authority,authorized_tests:REQUIRED_TESTS,execution_environment:'REPLAY'},created_at_utc:new Date().toISOString()};
+      decision_id:existing?.decision_id || approvedDecisionId(this.b.approved(row,'DEVELOPMENT')),
+      owner_id:existing?.owner_id || actor.id,tests,
+      authority:{...authority,authorized_tests:REQUIRED_TESTS,execution_environment:'REPLAY'},created_at_utc:createdAt};
     const plan={...frozen,plan_hash:objectHash(frozen)};
     this.b.event(row.id,validationPlanAction,actor,plan);
+    if(existing)this.rebindAcceptedArtifacts(actor,row,existing,plan,tasks,completed,registered);
     const taskStatus=new Map(this.db.prepare('SELECT kind,status FROM ow_tasks WHERE case_id=? AND kind IN (?,?,?,?)')
       .all(row.id,...REQUIRED_TESTS).map(task=>[task.kind,task.status]));
     const nextTest=REQUIRED_TESTS.find(kind=>taskStatus.get(kind)==='NOT_RUN') || tests[0].kind;
@@ -362,11 +465,13 @@ export class OperationalCandidateDispatch {
     const plan=this.validationPlan(row.id);requireThat(plan && data.plan_hash===plan.plan_hash,409,'CANDIDATE_VALIDATION_PLAN_REQUIRED');
     requireThat(REQUIRED_TESTS.includes(data.kind),422,'CANDIDATE_VALIDATION_KIND_REQUIRED');
     const tasks=this.db.prepare('SELECT * FROM ow_tasks WHERE case_id=?').all(row.id);
+    const reconciliation=this.reconcileValidationArtifacts(actor,row,plan,tasks);
+    if(reconciliation)return reconciliation;
     const expected=REQUIRED_TESTS.find(kind=>tasks.find(task=>task.kind===kind)?.status==='NOT_RUN');
     requireThat(data.kind===expected,409,'CANDIDATE_VALIDATION_ORDER_CONFLICT');
     if(data.kind==='OOS_HOLDOUT'){
       requireThat(REQUIRED_TESTS.slice(0,3).every(kind=>tasks.find(task=>task.kind===kind)?.status==='PASS'),409,'CANDIDATE_HOLDOUT_NOT_RELEASED');
-      if(!this.latest(row.id,holdoutReleaseAction))this.b.event(row.id,holdoutReleaseAction,actor,{schema_version:CANDIDATE_VALIDATION_VERSION,
+      if(!this.activeHoldoutRelease(row.id))this.b.event(row.id,holdoutReleaseAction,actor,{schema_version:CANDIDATE_VALIDATION_VERSION,
         case_id:row.id,plan_hash:plan.plan_hash,candidate_hash:row.candidate_hash,released_at_utc:new Date().toISOString(),prior_tests:REQUIRED_TESTS.slice(0,3)});
     }
     const test=plan.tests.find(item=>item.kind===data.kind),report=this.validateResult(row,completed,registered,plan,test,data.result);
@@ -391,23 +496,34 @@ export class OperationalCandidateDispatch {
   validateResult(row,completed,registered,plan,test,result){
     exactKeys(result,['status','segments','baseline','candidate','checks','comparison','contradictions','limitations','provenance']);
     requireThat(['PASS','FAIL','BLOCKED'].includes(result.status),422,'CANDIDATE_VALIDATION_RESULT_STATUS_REQUIRED');
+    requireThat(result.comparison && typeof result.comparison==='object' && !Array.isArray(result.comparison)
+      && Array.isArray(result.contradictions) && Array.isArray(result.limitations)
+      && result.provenance && typeof result.provenance==='object' && !Array.isArray(result.provenance),422,'CANDIDATE_VALIDATION_RESULT_STRUCTURE_REQUIRED');
     requireThat(Array.isArray(result.segments) && result.segments.length===test.segments.length,422,'CANDIDATE_VALIDATION_SEGMENT_RESULTS_REQUIRED');
+    const bindingRuns={baseline:[],candidate:[]};
     const measured=result.segments.map((segmentResult,index)=>{
       const segment=test.segments[index];
       exactKeys(segmentResult,['segment_id','baseline','candidate','source_files']);
       requireThat(segmentResult.segment_id===segment.segment_id,409,'CANDIDATE_VALIDATION_SEGMENT_ORDER_CONFLICT');
       requireThat(Array.isArray(segmentResult.source_files) && segmentResult.source_files.length>0,422,'CANDIDATE_VALIDATION_SOURCE_FILES_REQUIRED');
-      const fileHashes=new Set(segmentResult.source_files.map(file=>{
+      const sourceFiles=segmentResult.source_files.map(file=>{
         exactKeys(file,['path','sha256']);requireThat(path.isAbsolute(file.path) && validHash(file.sha256),422,'CANDIDATE_VALIDATION_SOURCE_FILE_REQUIRED');
         let bytes;try{requireThat(fs.statSync(file.path).isFile(),409,'CANDIDATE_VALIDATION_SOURCE_FILE_MISSING');bytes=fs.readFileSync(file.path);}
         catch(error){if(error?.code==='CANDIDATE_VALIDATION_SOURCE_FILE_MISSING')throw error;requireThat(false,409,'CANDIDATE_VALIDATION_SOURCE_FILE_MISSING');}
-        requireThat(digest(bytes)===file.sha256,409,'CANDIDATE_VALIDATION_SOURCE_FILE_HASH_CONFLICT');return file.sha256;
-      }));
+        requireThat(digest(bytes)===file.sha256,409,'CANDIDATE_VALIDATION_SOURCE_FILE_HASH_CONFLICT');return {...file,bytes};
+      });
+      const fileHashes=new Set(sourceFiles.map(file=>file.sha256));
       const evidence={};
       for(const name of ['baseline','candidate']){
         const value=segmentResult[name];
-        exactKeys(value,['run_id','strategy_version','strategy_hash','telemetry_version','telemetry_hash','trade_count','gross_pnl','fees','net_pnl','short_trade_count','zero_trade_periods','completion_receipt_hash','data_quality_flags']);
+        exactKeys(value,['run_id','strategy_version','strategy_hash','telemetry_version','telemetry_hash','trade_count','gross_pnl','fees','net_pnl','short_trade_count','zero_trade_periods','completion_receipt_hash','physical_hashes','data_quality_flags']);
         id(value.run_id,true);for(const key of ['strategy_hash','telemetry_hash','completion_receipt_hash'])requireThat(validHash(value[key]),422,'CANDIDATE_VALIDATION_EVIDENCE_HASH_REQUIRED');
+        exactKeys(value.physical_hashes,physicalHashKeys);
+        requireThat(physicalHashKeys.every(key=>validHash(value.physical_hashes[key]))
+          && new Set(Object.values(value.physical_hashes)).size===physicalHashKeys.length
+          && value.physical_hashes.strategy_dll_hash===value.strategy_hash
+          && value.physical_hashes.completion_receipt_hash===value.completion_receipt_hash,
+        409,'CANDIDATE_VALIDATION_PHYSICAL_BINDING_CONFLICT');
         requireThat(value.run_id===segment[`${name}_run_id`],409,'CANDIDATE_VALIDATION_RUN_BINDING_CONFLICT');
         requireThat(typeof value.strategy_version==='string' && typeof value.telemetry_version==='string',422,'CANDIDATE_VALIDATION_EVIDENCE_VERSION_REQUIRED');
         for(const key of metricKeys)requireThat(Number.isFinite(value[key]),422,'CANDIDATE_VALIDATION_METRIC_REQUIRED');
@@ -421,7 +537,30 @@ export class OperationalCandidateDispatch {
         409,'CANDIDATE_VALIDATION_EVIDENCE_BINDING_CONFLICT');
         requireThat(fileHashes.has(value.strategy_hash) && fileHashes.has(value.telemetry_hash)
           && fileHashes.has(value.completion_receipt_hash),409,'CANDIDATE_VALIDATION_SOURCE_FILE_BINDING_CONFLICT');
-        evidence[name]=structuredClone(value);
+        const receiptFile=sourceFiles.find(file=>file.sha256===value.completion_receipt_hash);
+        let receipt;try{receipt=JSON.parse(receiptFile.bytes.toString('utf8'));}catch{requireThat(false,409,'CANDIDATE_VALIDATION_COMPLETION_RECEIPT_INVALID');}
+        const physical=receipt?.physical_binaries;
+        requireThat(receipt?.run_id===value.run_id
+          && physical?.replay_source?.sha256===value.physical_hashes.strategy_source_hash
+          && physical?.replay_dll?.sha256===value.physical_hashes.strategy_dll_hash
+          && physical?.replay_marker?.sha256===value.physical_hashes.strategy_marker_hash,
+        409,'CANDIDATE_VALIDATION_COMPLETION_RECEIPT_BINDING_CONFLICT');
+        const expectedSourceHash=name==='baseline'?test.baseline_execution_source_hash:test.candidate_execution_source_hash;
+        requireThat(validHash(expectedSourceHash) && value.physical_hashes.strategy_source_hash===expectedSourceHash,
+          409,'CANDIDATE_VALIDATION_EXECUTION_SOURCE_CONFLICT');
+        const markerBytesAvailable=fileHashes.has(value.physical_hashes.strategy_marker_hash);
+        const versionMatch=/^v0\.6\.(\d+)/.exec(value.strategy_version);
+        const markerBytesRequired=test.kind==='OOS_HOLDOUT'
+          || (versionMatch!==null && Number(versionMatch[1])>=240);
+        requireThat(fileHashes.has(value.physical_hashes.strategy_source_hash)
+          && fileHashes.has(value.physical_hashes.strategy_dll_hash)
+          && markerBytesAvailable===markerBytesRequired
+          && (markerBytesAvailable || result.limitations.includes(markerLimitation(value.run_id))),
+        409,'CANDIDATE_VALIDATION_PHYSICAL_SOURCE_BINDING_CONFLICT');
+        bindingRuns[name].push({run_id:value.run_id,physical_hashes:structuredClone(value.physical_hashes),
+          marker_bytes_available:markerBytesAvailable});
+        const {physical_hashes,...metricEvidence}=value;
+        evidence[name]=structuredClone(metricEvidence);
       }
       return {segment_id:segment.segment_id,...evidence,source_files:segmentResult.source_files
         .map(file=>({file_name:path.basename(file.path),sha256:file.sha256}))};
@@ -447,15 +586,15 @@ export class OperationalCandidateDispatch {
     requireThat(result.provenance.cost_model_hash===test.cost_model_hash
       && objectHash(result.provenance.cost_model)===test.cost_model_hash
       && objectHash(result.provenance.cost_model)===objectHash(test.cost_model),409,'CANDIDATE_VALIDATION_PROVENANCE_CONFLICT');
-    requireThat(result.comparison && typeof result.comparison==='object' && !Array.isArray(result.comparison)
-      && Array.isArray(result.contradictions) && Array.isArray(result.limitations)
-      && result.provenance && typeof result.provenance==='object' && !Array.isArray(result.provenance),422,'CANDIDATE_VALIDATION_RESULT_STRUCTURE_REQUIRED');
+    exactKeys(result.comparison,['reported_delta']);
+    requireThat(Number.isFinite(result.comparison.reported_delta)
+      && sameNumber(result.comparison.reported_delta,result.candidate.net_pnl-result.baseline.net_pnl)
+      && Array.isArray(result.contradictions) && Array.isArray(result.limitations),409,'CANDIDATE_VALIDATION_COMPARISON_CONFLICT');
     return {schema_version:CANDIDATE_VALIDATION_VERSION,case_id:row.id,plan_hash:plan.plan_hash,
       plan_artifact_id:completed.plan_artifact_id,completion_hash:completed.completion_hash,candidate_hash:registered.candidate_hash,
       baseline_hash:row.baseline_hash,test,execution_bindings:{
-        baseline:{strategy_version:test.baseline_version,strategy_hash:test.baseline_strategy_hash},
-        candidate:{logical_version:completed.candidate.candidate_version,logical_hash:registered.candidate_hash,
-          strategy_version:candidateExecutionVersion(test,completed),strategy_hash:candidateExecutionHash(test,registered)}},
+        baseline:{logical_hash:row.baseline_hash,strategy_version:test.baseline_version,runs:bindingRuns.baseline},
+        candidate:{logical_hash:registered.candidate_hash,strategy_version:candidateExecutionVersion(test,completed),runs:bindingRuns.candidate}},
       status:result.status,evidence_integrity_passed:integrity,...structuredClone(result),segments:measured,
       recorded_at_utc:new Date().toISOString(),authority:{...authority,execution_environment:'REPLAY'}};
   }
@@ -466,12 +605,15 @@ export class OperationalCandidateDispatch {
     this.b.expect(row,data.expected_revision);this.b.active(row);this.b.baseline(row);
     requireThat(row.stage==='HISTORICAL_VALIDATION',409,'CANDIDATE_VALIDATION_STAGE_REQUIRED');
     const tasks=this.db.prepare('SELECT kind,status,artifact_id FROM ow_tasks WHERE case_id=?').all(row.id);
+    const reconciliation=this.reconcileValidationArtifacts(actor,row,plan,tasks);
+    if(reconciliation)return reconciliation;
     requireThat(REQUIRED_TESTS.every(kind=>tasks.some(task=>task.kind===kind && task.status==='PASS' && task.artifact_id)),409,'REQUIRED_SUBTESTS_INCOMPLETE');
     const next=this.b.transition(actor,{case_id:row.id,expected_revision:row.revision,action:'advance',to_stage:'CANDIDATE_EVALUATION',
       artifact_id:null,artifact_ids:null,decision_id:null,owner_id:null,next_action:null});
     const completion={schema_version:CANDIDATE_VALIDATION_VERSION,case_id:row.id,plan_hash:plan.plan_hash,
-      candidate_hash:registered.candidate_hash,completion_hash:completed.completion_hash,artifacts:REQUIRED_TESTS.map(kind=>({kind,artifact_id:tasks.find(task=>task.kind===kind).artifact_id})),
-      completed_at_utc:new Date().toISOString(),next_stage:'CANDIDATE_EVALUATION',authority};
+      candidate_hash:registered.candidate_hash,completion_hash:completed.completion_hash,
+      artifacts:REQUIRED_TESTS.map(kind=>({kind,artifact_id:tasks.find(task=>task.kind===kind).artifact_id})),
+      completed_at_utc:new Date().toISOString(),next_stage:'CANDIDATE_EVALUATION',authority:{...authority,execution_environment:'REPLAY'}};
     this.b.event(row.id,validationCompletionAction,actor,completion);
     return {case_id:row.id,revision:next.revision,status:'COMPLETED',stage:next.stage,
       next_action:'Obsidian Brain must evaluate the cumulative evidence and record benefit supported or no benefit established; no promotion is automatic.'};
