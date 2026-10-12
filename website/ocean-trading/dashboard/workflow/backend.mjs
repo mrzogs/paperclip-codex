@@ -85,6 +85,7 @@ export class WorkflowBackend {
     this.operationalResearch = new OperationalResearch(this);
     this.operationalCandidateDispatch = new OperationalCandidateDispatch(this);
     this.operationalCandidateEvaluator = new OperationalCandidateEvaluator(this);
+    this.operationalCandidateEvaluator.start();
     this.operationalLearning.start();
     this.authFailureWindowMs = 5 * 60 * 1000;
     this.authFailureThreshold = 3;

@@ -17,8 +17,17 @@ const safeError=error=>String(error?.code || error?.message || 'CANDIDATE_EVALUA
   .replace(/Bearer\s+\S+/gi,'Bearer [redacted]').slice(0,300);
 
 export class OperationalCandidateEvaluator {
-  constructor(backend){this.b=backend;this.db=backend.db;this.running=false;this.stopped=false;this.leaseMs=300000;}
-  stop(){this.stopped=true;}
+  constructor(backend){
+    this.b=backend;this.db=backend.db;this.running=false;this.stopped=false;this.leaseMs=300000;
+    this.intervalMs=Math.max(1000,Number(backend.config.operational_learning?.interval_ms || 5000));this.timer=null;this.lastError=null;
+  }
+  start(){
+    if(this.timer || !this.b.operationalLearning.enabled)return;
+    this.stopped=false;
+    const run=()=>void this.flushOnce().catch(error=>{this.lastError=safeError(error);});
+    this.timer=setInterval(run,this.intervalMs);this.timer.unref?.();run();
+  }
+  stop(){if(this.timer)clearInterval(this.timer);this.timer=null;this.stopped=true;}
   completionEvent(caseId){
     return this.db.prepare('SELECT * FROM ow_events WHERE entity_id=? AND action=? ORDER BY id DESC LIMIT 1').get(caseId,completionAction) || null;
   }
@@ -368,6 +377,7 @@ export class OperationalCandidateEvaluator {
         try{const snapshot=this.capture(job),response=await this.recordInBrain(job,snapshot);if(this.stopped)return;this.complete(job,snapshot,response);}
         catch(error){if(!this.stopped)this.fail(job,error);}
       }
+      this.lastError=null;
     }finally{this.running=false;}
   }
 }
