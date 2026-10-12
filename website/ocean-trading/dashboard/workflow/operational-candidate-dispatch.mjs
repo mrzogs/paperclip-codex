@@ -268,11 +268,18 @@ export class OperationalCandidateDispatch {
     const existing=this.validationPlan(row.id);
     requireThat(row.stage==='HISTORICAL_VALIDATION',409,'CANDIDATE_VALIDATION_PLAN_STATE_CONFLICT');
     if(existing){
-      const resultCount=this.db.prepare('SELECT COUNT(*) n FROM ow_events WHERE entity_id=? AND action=?').get(row.id,validationResultAction).n;
-      const tasks=this.db.prepare('SELECT status FROM ow_tasks WHERE case_id=? AND kind IN (?,?,?,?)')
+      const tasks=this.db.prepare('SELECT kind,status FROM ow_tasks WHERE case_id=? AND kind IN (?,?,?,?)')
         .all(row.id,...REQUIRED_TESTS);
-      requireThat(data.supersedes_plan_hash===existing.plan_hash && resultCount===0
-        && tasks.length===REQUIRED_TESTS.length && tasks.every(task=>task.status==='NOT_RUN'),409,'CANDIDATE_VALIDATION_PLAN_REVISION_NOT_ALLOWED');
+      const taskByKind=new Map(tasks.map(task=>[task.kind,task.status]));
+      const acceptedTestsPreserved=REQUIRED_TESTS.every(kind=>{
+        if(taskByKind.get(kind)!=='PASS')return true;
+        const proposed=Array.isArray(data.tests)?data.tests.find(test=>test?.kind===kind):null;
+        return proposed && objectHash(proposed)===objectHash(existing.tests.find(test=>test.kind===kind));
+      });
+      requireThat(data.supersedes_plan_hash===existing.plan_hash
+        && tasks.length===REQUIRED_TESTS.length && tasks.every(task=>['PASS','NOT_RUN'].includes(task.status))
+        && tasks.some(task=>task.status==='NOT_RUN') && acceptedTestsPreserved,
+      409,'CANDIDATE_VALIDATION_PLAN_REVISION_NOT_ALLOWED');
     }else requireThat(data.supersedes_plan_hash===undefined,409,'CANDIDATE_VALIDATION_PLAN_REVISION_CONFLICT');
     requireThat(data.completion_hash===completed.completion_hash && data.candidate_hash===registered.candidate_hash
       && data.baseline_hash===row.baseline_hash && data.plan_artifact_id===completed.plan_artifact_id,
