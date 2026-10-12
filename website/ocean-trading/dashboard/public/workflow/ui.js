@@ -505,6 +505,7 @@ function continuationTable(items) {
 }
 function casePage(data) {
   const riskReview = data.planning?.kind === 'RISK_DISABLE_REVIEW';
+  const candidateEvaluation = data.candidate_evaluation;
   const registeredCandidate = data.candidate_dispatch?.status === 'REGISTERED'
     && data.stage === 'HISTORICAL_VALIDATION';
   const executable = !data.planning && !(data.namespace==='OPERATIONAL' && data.research) && !['COMPLETED','PAUSED','FAILED','BLOCKED','CANCELLED'].includes(data.work_status) && data.stage !== 'CLOSED';
@@ -538,6 +539,14 @@ function casePage(data) {
        ['Candidate version',esc(data.candidate_dispatch.completion?.candidate_version || 'Not built')],
        ['Candidate hash',data.candidate_dispatch.completion?.candidate_hash?hash(data.candidate_dispatch.completion.candidate_hash):'Not registered'],
        ['Candidate scope',data.candidate_dispatch.status==='REGISTERED'?'Replay validation only':'No test, Paper, Live or promotion authority'],
+     ]:[]),
+     ...(candidateEvaluation && candidateEvaluation.status!=='NOT_DUE'?[
+       ['Evidence evaluation',badge(candidateEvaluation.status)],
+       ['Evaluation conclusion',candidateEvaluation.conclusion?esc(human(candidateEvaluation.conclusion)):'Pending'],
+       ['Obsidian Brain record',candidateEvaluation.brain_record_id?esc(candidateEvaluation.brain_record_id):'Not recorded'],
+       ['Evaluation artifact',candidateEvaluation.result_artifact_id?link('artifacts',candidateEvaluation.result_artifact_id):'Not recorded'],
+       ['Evaluation authority','Evidence assessment only; no Paper, Live, strategy change or promotion authority'],
+       ...(candidateEvaluation.error?[['Evaluation recovery',esc(human(candidateEvaluation.error))]]:[]),
      ]:[]),
     ...(!riskReview?[['Latest Research',data.planning.progress?.source?.case_id?link('cases',data.planning.progress.source.case_id):'Await new qualified Research']]:[]),
   ])):'') + facts([

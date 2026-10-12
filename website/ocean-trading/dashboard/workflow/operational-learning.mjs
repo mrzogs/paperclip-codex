@@ -1474,6 +1474,7 @@ export class OperationalLearning {
         }
       }
       await this.backend.operationalResearch?.flushOnce();
+      await this.backend.operationalCandidateEvaluator?.flushOnce();
       return this.status();
     } finally { this.running = false; }
   }

@@ -16,6 +16,7 @@ import { readWorkflowView } from './ui-api.mjs';
 import { digest, objectHash } from './common.mjs';
 import { consumePlanningOnce } from '../../../../scripts/consume-ocean-proposal-planning.mjs';
 import { OperationalCandidateDispatch } from './operational-candidate-dispatch.mjs';
+import { CANDIDATE_EVALUATION_RESULT_VERSION, OperationalCandidateEvaluator } from './operational-candidate-evaluation.mjs';
 
 function fixture({insufficient=false,noChange=false,partial=false,prospective=false,oneDirection=null,rowsPerRun=20,
   ownerScopes=['read','artifact.write','event.write'],registerBaseline=true}={}) {
@@ -69,6 +70,7 @@ function fixture({insufficient=false,noChange=false,partial=false,prospective=fa
       telemetry:{bypassed:true,proof_basis:'EXPLICIT_MOCK_ONLY'}}),cohort:()=>bundle};
   backend.operationalResearch=new OperationalResearch(backend);
   backend.operationalCandidateDispatch=new OperationalCandidateDispatch(backend);
+  backend.operationalCandidateEvaluator=new OperationalCandidateEvaluator(backend);
   // Historical v4 continuation fixtures; prospective v5 has separate proof tests.
   backend.operationalResearch.version=version;
   const seed=(case_id,trigger='r1')=>{
@@ -93,7 +95,7 @@ function fixture({insufficient=false,noChange=false,partial=false,prospective=fa
   return {backend,actor,human,bundle,rows,root,seed,capture,complete,
     get worker(){return backend.operationalResearch;},setProof(value){proof=value;},
     children:()=>backend.db.prepare("SELECT * FROM ow_cases WHERE json_extract(payload_json,'$.origin')=?").all(CONTINUATION_ORIGIN),
-    restart(){store.close();store=new WorkflowStore(filename);backend.db=store.db;backend.store=store;backend.operationalResearch=new OperationalResearch(backend);backend.operationalResearch.version=version;backend.operationalCandidateDispatch=new OperationalCandidateDispatch(backend);},
+    restart(){backend.operationalCandidateEvaluator.stop();store.close();store=new WorkflowStore(filename);backend.db=store.db;backend.store=store;backend.operationalResearch=new OperationalResearch(backend);backend.operationalResearch.version=version;backend.operationalCandidateDispatch=new OperationalCandidateDispatch(backend);backend.operationalCandidateEvaluator=new OperationalCandidateEvaluator(backend);},
     close(){store.close();fs.rmSync(root,{recursive:true,force:true});}};
 }
 
@@ -1531,7 +1533,48 @@ test('candidate completion survives restart and registration requires an approve
     f.setProof(false);f.restart();f.worker.reconcile();
     const restarted=f.backend.readCase(f.human,child.id);assert.equal(restarted.candidate_dispatch.status,'REGISTERED');
     assert.equal(restarted.candidate_dispatch.validation.status,'COMPLETED');assert.equal(restarted.stage,'CANDIDATE_EVALUATION');
+    assert.equal(restarted.candidate_evaluation.status,'QUEUED');assert.match(restarted.next_action,/queueing.*Obsidian Brain/i);
     assert.equal(restarted.work_status,'READY',JSON.stringify({planning:restarted.planning,blockers:restarted.blockers}));assert.equal(restarted.planning.blocked_reason,null);
+    const evaluationCalls=[];let failEvaluationOnce=true;
+    Object.assign(f.backend.operationalLearning,{
+      token:()=> 'explicit-isolated-brain-token',verifyIdentity:async()=>{},
+      registry:async()=>({reconciliation_id:'isolated-registry-reconciliation',record_sha256:digest('isolated-registry-record')}),
+      call:async(pathname,_token,request)=>{
+        assert.equal(pathname,'/trading/learning/candidate-evaluation');evaluationCalls.push(structuredClone(request));
+        if(failEvaluationOnce){failEvaluationOnce=false;throw new Error('HTTP_503');}
+        const content=JSON.stringify({schema_version:CANDIDATE_EVALUATION_RESULT_VERSION,
+          conclusion:'BENEFIT_NOT_ESTABLISHED',plan_hash:request.plan_hash,candidate_hash:request.logical.candidate_hash,
+          rationale:'The fixture has no predeclared performance decision policy; preserve measured evidence without claiming benefit.',
+          authority:{...request.authority,human_governance_required:true}});
+        return {schema_version:CANDIDATE_EVALUATION_RESULT_VERSION,record_id:'reasoning-isolated-candidate-evaluation',
+          relative_path:'reasoning/isolated-candidate-evaluation.md',content,content_sha256:digest(content),
+          conclusion:'BENEFIT_NOT_ESTABLISHED',plan_hash:request.plan_hash,candidate_hash:request.logical.candidate_hash,
+          source_artifacts:request.source_artifacts,correlation:request.correlation,
+          authority:{...request.authority,human_governance_required:true}};
+      },
+    });
+    await f.backend.operationalCandidateEvaluator.flushOnce();
+    let retry=f.backend.readCase(f.human,child.id);
+    assert.equal(retry.candidate_evaluation.status,'RETRY');assert.equal(retry.candidate_evaluation.error,'HTTP_503');
+    const frozenInputHash=retry.candidate_evaluation.input_hash;
+    f.backend.db.prepare('UPDATE ow_candidate_evaluation_jobs SET next_attempt_ms=0').run();
+    const dueEvaluation=f.backend.db.prepare('SELECT state,next_attempt_ms,lease_id,lease_until_ms FROM ow_candidate_evaluation_jobs').get();
+    assert.equal(dueEvaluation.state,'RETRY');assert.equal(dueEvaluation.next_attempt_ms,0);
+    assert.equal(dueEvaluation.lease_id,null);assert.equal(dueEvaluation.lease_until_ms,null);
+    assert.equal(f.backend.operationalCandidateEvaluator.stopped,false);assert.equal(f.backend.operationalLearning.enabled,true);
+    await f.backend.operationalCandidateEvaluator.flushOnce();
+    const evaluated=f.backend.readCase(f.human,child.id);
+    assert.equal(evaluated.candidate_evaluation.status,'COMPLETED',JSON.stringify(f.backend.db.prepare('SELECT * FROM ow_candidate_evaluation_jobs').get()));
+    assert.equal(evaluationCalls.length,3);assert.deepEqual(evaluationCalls[1],evaluationCalls[0]);
+    assert.deepEqual(evaluationCalls[2],evaluationCalls[0]);assert.equal(evaluated.candidate_evaluation.input_hash,frozenInputHash);
+    assert.equal(evaluated.candidate_evaluation.conclusion,'BENEFIT_NOT_ESTABLISHED');
+    assert.equal(evaluated.stage,'CANDIDATE_EVALUATION');
+    assert.equal(f.backend.one('ow_artifacts',evaluated.candidate_evaluation.result_artifact_id).kind,'EVALUATION');
+    assert.deepEqual(evaluated.candidate_evaluation.authority,{automatic_strategy_change:false,candidate_approved:false,
+      paper_authorized:false,live_authorized:false,automatic_promotion:false});
+    f.restart();const readback=f.backend.readCase(f.human,child.id);
+    assert.equal(readback.candidate_evaluation.status,'COMPLETED');
+    assert.equal(readback.candidate_evaluation.brain_record_id,'reasoning-isolated-candidate-evaluation');
     assert.equal(returnedCount(f),1);assertSealed(f,before);
   }finally{f.close();}
 });
