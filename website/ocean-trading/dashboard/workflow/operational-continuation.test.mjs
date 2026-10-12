@@ -1480,6 +1480,7 @@ test('candidate completion survives restart and registration requires an approve
         const partialResponse=await validationHttp('validation-plan',partialRevision);assert.equal(partialResponse.status,200,JSON.stringify(partialResponse.body));
         const priorPlanHash=validationPlan.plan_hash;validationPlan=partialResponse.body;matrix=partialRevision.data.tests;test=matrix[index];
         assert.equal(validationPlan.plan_revision,3);assert.equal(validationPlan.supersedes_plan_hash,priorPlanHash);
+        assert.equal(validationPlan.next_test,'OOS_HOLDOUT');assert.match(validationPlan.next_action,/Run OOS_HOLDOUT/);
         const taskStatus=Object.fromEntries(f.backend.readCase(f.human,child.id).tasks
           .filter(task=>['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'].includes(task.kind)).map(task=>[task.kind,task.status]));
         assert.deepEqual(taskStatus,{BACKTEST:'PASS',ROBUSTNESS:'PASS',WALK_FORWARD:'PASS',OOS_HOLDOUT:'NOT_RUN'});

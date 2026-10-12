@@ -345,10 +345,13 @@ export class OperationalCandidateDispatch {
       authority:{...authority,authorized_tests:REQUIRED_TESTS,execution_environment:'REPLAY'},created_at_utc:new Date().toISOString()};
     const plan={...frozen,plan_hash:objectHash(frozen)};
     this.b.event(row.id,validationPlanAction,actor,plan);
-    const nextAction=`Run ${tests[0].kind} from validation plan ${plan.plan_hash}; result PASS means evidence integrity only, not performance approval.`;
+    const taskStatus=new Map(this.db.prepare('SELECT kind,status FROM ow_tasks WHERE case_id=? AND kind IN (?,?,?,?)')
+      .all(row.id,...REQUIRED_TESTS).map(task=>[task.kind,task.status]));
+    const nextTest=REQUIRED_TESTS.find(kind=>taskStatus.get(kind)==='NOT_RUN') || tests[0].kind;
+    const nextAction=`Run ${nextTest} from validation plan ${plan.plan_hash}; result PASS means evidence integrity only, not performance approval.`;
     this.db.prepare('UPDATE ow_cases SET revision=revision+1,waiting_on=? WHERE id=?').run(nextAction,row.id);
     return {case_id:row.id,revision:row.revision+1,status:'PLANNED',plan_revision:plan.plan_revision,
-      supersedes_plan_hash:plan.supersedes_plan_hash,plan_hash:plan.plan_hash,next_test:tests[0].kind,
+      supersedes_plan_hash:plan.supersedes_plan_hash,plan_hash:plan.plan_hash,next_test:nextTest,
       holdout_state:'SEALED',next_action:nextAction};
   }
 
