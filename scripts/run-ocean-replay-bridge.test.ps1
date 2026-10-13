@@ -3,6 +3,10 @@ Import-Module -Name (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Utility\Mic
 
 $scriptPath = Join-Path $PSScriptRoot 'run-ocean-replay-bridge.ps1'
 $source = [IO.File]::ReadAllText($scriptPath)
+if (-not $source.Contains("Join-Path `$PSScriptRoot 'ocean-deployment.ps1'") -or
+    $source.Contains('D:\Paperclip-codex\website\ocean-trading\dashboard\config\replay-run-bridge.json')) {
+  throw 'REPLAY_BRIDGE_MUST_USE_DEPLOYMENT_MANIFEST'
+}
 if (-not $source.Contains("Import-Module -Name (Join-Path `$PSHOME 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop")) {
   throw 'OWN_ENGINE_UTILITY_MODULE_REQUIRED'
 }

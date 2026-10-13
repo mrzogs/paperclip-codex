@@ -1200,11 +1200,11 @@ const validationReport=(f,test,baselineHash)=>{
     const file=path.join(f.root,segment.segment_id,side,'telemetry.sqlite');fs.mkdirSync(path.dirname(file),{recursive:true});
     const db=new DatabaseSync(':memory:');
     db.exec(`CREATE TABLE replay_runs(run_id TEXT PRIMARY KEY);
-      CREATE TABLE trades(run_id TEXT,trade_account TEXT,is_simulated INTEGER,strategy_id TEXT,fees_available INTEGER,
+      CREATE TABLE trades(run_id TEXT,trade_id TEXT,trade_account TEXT,is_simulated INTEGER,strategy_id TEXT,fees_available INTEGER,
         total_fee_per_side REAL,total_commission REAL,fee_broker_profile TEXT,fee_product_code TEXT,fee_tier TEXT,fee_source_type TEXT);`);
     db.prepare('INSERT INTO replay_runs VALUES(?)').run(runId);
-    const insert=db.prepare('INSERT INTO trades VALUES(?,?,?,?,?,?,?,?,?,?,?)');
-    for(let index=0;index<tradeCount;index++)insert.run(runId,'Sim1',1,'s',1,test.cost_model.total_fee_per_side,
+    const insert=db.prepare('INSERT INTO trades VALUES(?,?,?,?,?,?,?,?,?,?,?,?)');
+    for(let index=0;index<tradeCount;index++)insert.run(runId,`${runId}-${index}`,'Sim1',1,'s',1,test.cost_model.total_fee_per_side,
       2,test.cost_model.broker_profile,test.cost_model.product,test.cost_model.fee_tier,test.cost_model.source_type);
     const bytes=db.serialize();db.close();fs.writeFileSync(file,bytes);return {path:file,sha256:digest(bytes)};
   };
@@ -1220,7 +1220,8 @@ const validationReport=(f,test,baselineHash)=>{
         requested_replay_window:{start_chart_time:london(segment.warmup_start_utc),end_chart_time:london(segment.scored_end_utc)},
         execution_identity:{strategy_id:'s',strategy_version:'v0.6.239',trade_strategy_version:strategyVersion,
           symbol:String(segment.contract).replace(/\[M\]$/,''),chart_number:1},
-        logger_receipt:{closed_trade_count:tradeCount},
+        logger_receipt:{closed_trade_count:tradeCount,scored_closed_trade_count:tradeCount},
+         runner_boundary_proof:{scored_boundary_open_trade_excluded:false,test_boundary_close:{applied:false}},
         physical_binaries:{replay_source:{path:source.path,sha256:source.sha256},replay_dll:{path:dll.path,sha256:dll.sha256},
           replay_marker:{path:marker.path,sha256:marker.sha256}},
         safety:{simulation_account:'Sim1',all_trades_simulated:true,all_fills_simulated:true,live_real:'DISABLED',workflow_status_mutated:false}});
@@ -1228,7 +1229,9 @@ const validationReport=(f,test,baselineHash)=>{
       const snapshot=write(path.join(segment.segment_id,side,'run-snapshot.json'),JSON.stringify({
         schema_version:'ocean-candidate-validation-run-snapshot/v1',run:{run_id:runId,strategy_id:'s',strategy_version:'v0.6.239'},
         logger_receipt:{run_id:runId,trade_account:'Sim1',closed_trade_count:tradeCount},context:{data_quality_flags:null},metrics,
-        terminal_metrics:{trade_count:tradeCount},duplicate_check:{total_rows:tradeCount,distinct_rows:tradeCount}}));
+        terminal_metrics:{trade_count:tradeCount},scored_boundary:{cleanup_applied:false,scored_closed_trade_count:tradeCount,
+          terminal_trade_count:tradeCount,cleanup_trade_id:null,cleanup_trade:null},
+        duplicate_check:{total_rows:tradeCount,distinct_rows:tradeCount}}));
       const sqlite=database(segment,side,runId,tradeCount);
       return {receipt,source,marker,snapshot,sqlite,hashes:{strategy_source_hash:source.sha256,strategy_dll_hash:dll.sha256,
         strategy_marker_hash:marker.sha256,completion_receipt_hash:receipt.sha256}};
@@ -1243,10 +1246,11 @@ const validationReport=(f,test,baselineHash)=>{
     return {segment_id:segment.segment_id,baseline:{run_id:segment.baseline_run_id,strategy_version:test.baseline_version,
       strategy_hash:baselineHash,telemetry_version:test.telemetry_version,telemetry_hash:test.telemetry_hash,trade_count:10,
       gross_pnl:100,fees:20,net_pnl:80,short_trade_count:2,zero_trade_periods:1,
+      terminal_trade_count:10,boundary_cleanup_trade_id:null,
       completion_receipt_hash:baselinePhysical.receipt.sha256,physical_hashes:baselinePhysical.hashes,data_quality_flags:[]},
     candidate:{run_id:segment.candidate_run_id,strategy_version:test.candidate_execution_version,strategy_hash:test.candidate_execution_hash,
       telemetry_version:test.telemetry_version,telemetry_hash:test.telemetry_hash,trade_count:8,gross_pnl:110,fees:16,net_pnl:94,
-      short_trade_count:0,zero_trade_periods:1,completion_receipt_hash:candidatePhysical.receipt.sha256,
+      short_trade_count:0,zero_trade_periods:1,terminal_trade_count:8,boundary_cleanup_trade_id:null,completion_receipt_hash:candidatePhysical.receipt.sha256,
       physical_hashes:candidatePhysical.hashes,data_quality_flags:[]},
     source_files:[baselineDll,candidateDll,telemetryDll,baselinePhysical.source,
       ...(markerRequired?[baselinePhysical.marker]:[]),baselinePhysical.receipt,baselinePhysical.snapshot,baselinePhysical.sqlite,candidatePhysical.source,
@@ -1268,6 +1272,49 @@ const validationReport=(f,test,baselineHash)=>{
           `Marker bytes were not retained for ${segment.candidate.run_id}; the marker hash remains sealed in its completion receipt.`];
       })],
     provenance:{cost_model:test.cost_model,cost_model_hash:test.cost_model_hash}};
+};
+const withBoundaryCleanup=(f,input,side='baseline')=>{
+  const changed=structuredClone(input),segment=changed.data.result.segments[0],evidence=segment[side];
+  const cleanupId='9001',terminalCount=evidence.trade_count+1;
+  const write=(name,bytes)=>{const file=path.join(f.root,'boundary-cleanup',name);fs.mkdirSync(path.dirname(file),{recursive:true});
+    fs.writeFileSync(file,bytes);return {path:file,sha256:digest(bytes)};};
+  const proofBytes=Buffer.from(JSON.stringify({schema_version:'oql.vwap-test-boundary-close/v3',run_id:evidence.run_id,
+    cleanup_trade_id:Number(cleanupId),before:{open_trade_ids:[Number(cleanupId)]},after:{open_trade_ids:[]}}));
+  const proof=write(`${side}-boundary-close-proof.json`,proofBytes);
+  const immutable={path:proof.path,bytes:proofBytes.length,sha256:proof.sha256};
+  const receiptFile=segment.source_files.find(file=>file.sha256===evidence.completion_receipt_hash);
+  const receipt=JSON.parse(fs.readFileSync(receiptFile.path,'utf8'));
+  receipt.logger_receipt.closed_trade_count=terminalCount;receipt.logger_receipt.scored_closed_trade_count=evidence.trade_count;
+  receipt.runner_boundary_proof={scored_boundary_open_trade_excluded:true,test_boundary_close:{applied:true,
+    cleanup_trade_id:cleanupId,terminal_trade_count:terminalCount,scored_trade_count:evidence.trade_count,immutable_proof:immutable}};
+  const receiptBytes=Buffer.from(JSON.stringify(receipt)),newReceipt=write(`${side}-completion-receipt.json`,receiptBytes);
+  Object.assign(receiptFile,newReceipt);evidence.completion_receipt_hash=newReceipt.sha256;
+  evidence.physical_hashes.completion_receipt_hash=newReceipt.sha256;evidence.terminal_trade_count=terminalCount;
+  evidence.boundary_cleanup_trade_id=cleanupId;
+  const snapshotFile=segment.source_files.find(file=>{
+    if(path.basename(file.path).toLowerCase()!=='run-snapshot.json')return false;
+    try{return JSON.parse(fs.readFileSync(file.path,'utf8')).run?.run_id===evidence.run_id;}catch{return false;}
+  });
+  const snapshot=JSON.parse(fs.readFileSync(snapshotFile.path,'utf8'));
+  snapshot.logger_receipt.closed_trade_count=terminalCount;snapshot.terminal_metrics.trade_count=terminalCount;
+  snapshot.scored_boundary={cleanup_applied:true,scored_closed_trade_count:evidence.trade_count,terminal_trade_count:terminalCount,
+    cleanup_trade_id:cleanupId,cleanup_trade:{trade_id:cleanupId},immutable_proof:immutable};
+  snapshot.duplicate_check={total_rows:terminalCount,distinct_rows:terminalCount};
+  Object.assign(snapshotFile,write(path.join(side,'run-snapshot.json'),Buffer.from(JSON.stringify(snapshot))));
+  const sqliteFile=segment.source_files.find(file=>{
+    if(path.basename(file.path).toLowerCase()!=='telemetry.sqlite')return false;
+    const db=new DatabaseSync(':memory:');try{db.deserialize(fs.readFileSync(file.path));
+      return Number(db.prepare('SELECT COUNT(*) n FROM replay_runs WHERE run_id=?').get(evidence.run_id)?.n || 0)===1;
+    }finally{db.close();}
+  });
+  const db=new DatabaseSync(':memory:');db.deserialize(fs.readFileSync(sqliteFile.path));
+  db.prepare(`INSERT INTO trades(run_id,trade_id,trade_account,is_simulated,strategy_id,fees_available,total_fee_per_side,total_commission,
+    fee_broker_profile,fee_product_code,fee_tier,fee_source_type)
+    SELECT run_id,?,trade_account,is_simulated,strategy_id,fees_available,total_fee_per_side,total_commission,
+      fee_broker_profile,fee_product_code,fee_tier,fee_source_type FROM trades WHERE run_id=? LIMIT 1`).run(cleanupId,evidence.run_id);
+  const dbBytes=db.serialize();db.close();Object.assign(sqliteFile,write(path.join(side,'telemetry.sqlite'),dbBytes));
+  segment.source_files.push(proof);
+  return changed.data.result;
 };
 
 test('exact operational owner returns an immutable plan with verified scoped dispatch, never candidate PASS',()=>{
@@ -1573,6 +1620,14 @@ test('candidate completion survives restart and registration requires an approve
           .filter(task=>['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'].includes(task.kind)).map(task=>[task.kind,task.status]));
         assert.deepEqual(taskStatus,{BACKTEST:'PASS',ROBUSTNESS:'PASS',WALK_FORWARD:'PASS',OOS_HOLDOUT:'NOT_RUN'});
       }
+      if(index===1){
+        const retuned=structuredClone(revisedInput);retuned.message_id='candidate-validation-plan-retuned-after-evidence';
+        retuned.data.expected_revision=f.backend.one('ow_cases',child.id).revision;
+        retuned.data.supersedes_plan_hash=validationPlan.plan_hash;retuned.data.tests=structuredClone(matrix);
+        retuned.data.tests[1].candidate_execution_hash=digest('retuned-after-backtest');
+        retuned.data.tests[1].candidate_execution_source_hash=digest('retuned-source-after-backtest');
+        assert.equal((await validationHttp('validation-plan',retuned)).body.error.code,'CANDIDATE_VALIDATION_PLAN_REVISION_NOT_ALLOWED');
+      }
       const currentRow=f.backend.one('ow_cases',child.id),input={message_id:`candidate-validation-result-${test.kind}`,data:{
         case_id:child.id,expected_revision:currentRow.revision,plan_hash:validationPlan.plan_hash,kind:test.kind,
         result:validationReport(f,test,child.baseline_hash)}};
@@ -1603,6 +1658,21 @@ test('candidate completion survives restart and registration requires an approve
         fs.writeFileSync(unsafePath,unsafeBytes);Object.assign(unsafeFile,{path:unsafePath,sha256:unsafeHash});
         unsafeEvidence.completion_receipt_hash=unsafeHash;unsafeEvidence.physical_hashes.completion_receipt_hash=unsafeHash;
         assert.equal((await validationHttp('validation-results',unsafeReceipt)).body.error.code,'CANDIDATE_VALIDATION_COMPLETION_RECEIPT_SCOPE_CONFLICT');
+        const missingBoundary=structuredClone(input);missingBoundary.message_id='candidate-validation-missing-boundary-disposition';
+        const boundaryEvidence=missingBoundary.data.result.segments[0].baseline;
+        const boundaryFile=missingBoundary.data.result.segments[0].source_files.find(file=>file.sha256===boundaryEvidence.completion_receipt_hash);
+        const boundaryContent=JSON.parse(fs.readFileSync(boundaryFile.path,'utf8'));delete boundaryContent.runner_boundary_proof.test_boundary_close;
+        const boundaryBytes=Buffer.from(JSON.stringify(boundaryContent)),boundaryPath=path.join(f.root,'missing-boundary-completion-receipt.json'),boundaryHash=digest(boundaryBytes);
+        fs.writeFileSync(boundaryPath,boundaryBytes);Object.assign(boundaryFile,{path:boundaryPath,sha256:boundaryHash});
+        boundaryEvidence.completion_receipt_hash=boundaryHash;boundaryEvidence.physical_hashes.completion_receipt_hash=boundaryHash;
+        assert.equal((await validationHttp('validation-results',missingBoundary)).body.error.code,'CANDIDATE_VALIDATION_COMPLETION_RECEIPT_SCOPE_CONFLICT');
+        const cleanupReport=withBoundaryCleanup(f,input);
+        const cleanupValidated=f.backend.operationalCandidateDispatch.validateResult(f.backend.one('ow_cases',child.id),
+          f.backend.operationalCandidateDispatch.completion(child.id),f.backend.operationalCandidateDispatch.registration(child.id),
+          {...validationPlan,tests:[test]},test,cleanupReport);
+        assert.equal(cleanupValidated.segments[0].baseline.boundary_cleanup_trade_id,'9001');
+        assert.equal(cleanupValidated.segments[0].baseline.terminal_trade_count,11);
+        assert.equal(cleanupValidated.segments[0].baseline.trade_count,10);
         const wrongCost=structuredClone(input);wrongCost.message_id='candidate-validation-wrong-cost-database';
         for(const file of wrongCost.data.result.segments[0].source_files.filter(item=>path.basename(item.path)==='telemetry.sqlite')){
           const db=new DatabaseSync(':memory:');db.deserialize(fs.readFileSync(file.path));

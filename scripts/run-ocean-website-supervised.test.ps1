@@ -96,7 +96,8 @@ Assert-Test ((ConvertTo-UtcDateTimeOffset $zTimestamp).ToString('o') -eq '2026-1
 Assert-Test ((ConvertTo-UtcDateTimeOffset $offsetTimestamp).ToString('o') -eq '2026-10-09T18:00:00.0000000+00:00') 'OFFSET_TIMESTAMP_CHANGED_IN_UTC_CONVERSION'
 
 $source = Get-Content -LiteralPath $sourcePath -Raw
-Assert-Test ($source.Contains("[Uri]'http://127.0.0.1:3102/'")) 'PROBE_IS_NOT_THE_CHEAP_STATIC_ROOT'
+Assert-Test ($source.Contains("[Uri]'http://127.0.0.1:3102/api/workflow/readiness'")) 'PROBE_DOES_NOT_REQUIRE_WORKFLOW_READINESS'
+Assert-Test ($source.Contains("Origin', 'http://127.0.0.1:3102'")) 'READINESS_PROBE_HAS_NO_ALLOWED_LOOPBACK_ORIGIN'
 Assert-Test (-not $source.Contains('/api/workflow/status')) 'SUPERVISOR_PROBES_THE_SLOW_WORKFLOW_STATUS_ROUTE'
 Assert-Test ($source.Contains('-WindowStyle Hidden')) 'WEBSITE_CHILD_IS_NOT_STARTED_HIDDEN'
 Assert-Test ($source.Contains("Local\OceanTradingWebsiteSupervisor-v1")) 'WEBSITE_SUPERVISOR_HAS_NO_PERSISTENT_SINGLETON'

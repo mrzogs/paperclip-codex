@@ -1,5 +1,5 @@
 param(
-  [string]$ConfigPath = 'D:\Paperclip-codex\website\ocean-trading\dashboard\config\replay-run-bridge.json',
+  [string]$ConfigPath,
   [switch]$Once
 )
 
@@ -8,9 +8,21 @@ $ErrorActionPreference = 'Stop'
 Import-Module -Name (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop
 Add-Type -AssemblyName System.Net.Http
 $Node = 'C:\Program Files\nodejs\node.exe'
-$RepositoryRoot = Split-Path -Parent $PSScriptRoot
-$Probe = Join-Path $RepositoryRoot 'website\ocean-trading\dashboard\workflow\replay-run-bridge-probe.mjs'
-$EvidenceBuilder = Join-Path $RepositoryRoot 'website\ocean-trading\dashboard\workflow\replay-run-evidence.mjs'
+$currentScripts = [IO.Path]::GetFullPath($PSScriptRoot)
+$operationalScripts = [IO.Path]::GetFullPath('D:\Paperclip-codex\scripts')
+$sourceRoot = Split-Path -Parent $PSScriptRoot
+if ([StringComparer]::OrdinalIgnoreCase.Equals($currentScripts,$operationalScripts) -or
+    -not (Test-Path -LiteralPath (Join-Path $sourceRoot '.git'))) {
+  . (Join-Path $PSScriptRoot 'ocean-deployment.ps1')
+  $Deployment = Get-OceanDeployment
+  $Dashboard = $Deployment.Dashboard
+  if ([string]::IsNullOrWhiteSpace($ConfigPath)) { $ConfigPath = $Deployment.PhysicalBindingFile }
+} else {
+  $Dashboard = Join-Path $sourceRoot 'website\ocean-trading\dashboard'
+  if ([string]::IsNullOrWhiteSpace($ConfigPath)) { $ConfigPath = Join-Path $Dashboard 'config\replay-run-bridge.json' }
+}
+$Probe = Join-Path $Dashboard 'workflow\replay-run-bridge-probe.mjs'
+$EvidenceBuilder = Join-Path $Dashboard 'workflow\replay-run-evidence.mjs'
 $script:Credential = $null
 $script:Client = $null
 $script:Sequence = 0
@@ -480,11 +492,12 @@ function Invoke-PinnedBridgeCycle {
     $script:LeaseRunId = $null
   }
   $context = Get-RunContext $runId
-  $evidencePlan = Get-EvidencePlan $runId
+  if ($script:Namespace -ceq 'OPERATIONAL') {
+    Test-OperationalPhysicalBinding $Config
+  }
+  $evidencePlan = $null
   if ($script:Namespace -ceq 'OPERATIONAL' -and $context.state -eq 'READY') {
-    if ($evidencePlan.status -cne 'READY') {
-      Test-OperationalPhysicalBinding $Config
-    }
+    $evidencePlan = Get-EvidencePlan $runId
     if ($evidencePlan.status -cne 'READY' -and -not $probe.telemetry.preflight_verified) {
       Write-State ([ordered]@{status='AWAITING_SOURCE_PREFLIGHT';run_id=$runId;run_state=$context.state;telemetry=$probe.telemetry;safety='OPERATIONAL_SCOPED_EVENT_ONLY_LIVE_REAL_DISABLED'})
       return

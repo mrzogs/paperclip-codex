@@ -13,12 +13,20 @@ $ErrorActionPreference = 'Stop'
 $TaskPath = '\OceanTrading\'
 $Root = 'D:\Paperclip-codex'
 $PaperclipHome = 'D:\Paperclip-codex\.paperclip-home'
-$Dashboard = 'D:\Paperclip-codex\website\ocean-trading\dashboard'
 $Runtime = 'D:\OceanTradingData\website\ocean-runtime'
+. (Join-Path $PSScriptRoot 'ocean-deployment.ps1')
+$script:Deployment = $null
 $PaperclipConfigPath = Join-Path $PaperclipHome 'instances\default\config.json'
 $Powershell = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 $Wscript = 'C:\Windows\System32\wscript.exe'
 $HiddenLauncher = Join-Path $Root 'scripts\run-hidden-service.vbs'
+
+function Get-ValidatedOceanDeployment {
+  if (-not $script:Deployment) {
+    $script:Deployment = Get-OceanDeployment -ConfigPath (Join-Path $Runtime 'deployment.json')
+  }
+  return $script:Deployment
+}
 
 function Resolve-Components {
   $selected = [System.Collections.Generic.List[string]]::new()
@@ -48,6 +56,38 @@ function Test-HttpOk([string]$Url, [int]$TimeoutSec = 5) {
   } catch {
     return $false
   }
+}
+
+function Get-OceanWorkflowReadiness([int]$TimeoutSec = 5) {
+  try {
+    $response = Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:3102/api/workflow/readiness' `
+      -Headers @{ Origin = 'http://127.0.0.1:3102' } -TimeoutSec $TimeoutSec
+    if ([int]$response.StatusCode -ne 200) { return $null }
+    return $response.Content | ConvertFrom-Json
+  } catch {
+    return $null
+  }
+}
+
+function Test-OceanWorkflowReady {
+  try {
+    $deployment = Get-ValidatedOceanDeployment
+  } catch {
+    return $false
+  }
+  $readiness = Get-OceanWorkflowReadiness
+  return [bool]($readiness -and
+    $readiness.workflow.state -ceq 'READY' -and
+    [int]$readiness.workflow.schema_version -eq 13 -and
+    $readiness.workflow.deployment.release_id -ceq $deployment.ReleaseId -and
+    $readiness.workflow.deployment.source_commit -ceq $deployment.SourceCommit -and
+    $readiness.workflow.deployment.manifest_sha256 -ceq $deployment.ManifestSha256 -and
+    $readiness.workflow.operational_learning.enabled -eq $true -and
+    $readiness.workflow.operational_learning.state -ceq 'READY' -and
+    -not $readiness.workflow.operational_learning.last_error -and
+    $readiness.workflow.candidate_evaluator.version -ceq 'ocean-operational-candidate-evaluator/v1' -and
+    $readiness.workflow.candidate_evaluator.state -in @('READY','RUNNING') -and
+    -not $readiness.workflow.candidate_evaluator.last_error)
 }
 
 function Get-TaskSpec([string]$Name) {
@@ -180,7 +220,6 @@ function Stop-WebsiteGracefully {
 function Get-MonitorProcesses {
   Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
     Where-Object {
-      ($_.CommandLine -as [string]) -match [regex]::Escape((Join-Path $Dashboard 'monitor.mjs')) -or
       ($_.CommandLine -as [string]) -match 'node(\.exe)?"?\s+monitor\.mjs'
     }
 }
@@ -241,7 +280,7 @@ function Wait-ComponentHealthy([string]$Name) {
       # the accepted supervisor generation is still within its own contract.
       $deadline = (Get-Date).AddSeconds(120)
       do {
-        $ok = Test-HttpOk 'http://127.0.0.1:3102/'
+        $ok = Test-OceanWorkflowReady
         if (-not $ok) { Start-Sleep -Seconds 1 }
       } while (-not $ok -and (Get-Date) -lt $deadline)
       if (-not $ok) { throw 'Ocean website did not become healthy.' }
@@ -303,6 +342,7 @@ function Get-ServiceSnapshot {
       paperclip = Test-HttpOk 'http://127.0.0.1:3100/api/health'
       postgres = if ($pgPort) { Test-PortListening $pgPort } else { $false }
       website = Test-HttpOk 'http://127.0.0.1:3102/'
+      workflow = Test-OceanWorkflowReady
       codexBridge = Test-PortListening 8793
       monitor = [bool]@(Get-MonitorProcesses).Count
       replayBridge = if (Test-Path -LiteralPath (Join-Path $Runtime 'replay-bridge-status.json')) {
@@ -334,7 +374,7 @@ switch ($Action) {
     foreach ($name in $selected) {
       $alreadyHealthy = switch ($name) {
         'Paperclip' { (Test-HttpOk 'http://127.0.0.1:3100/api/health') -and ((Get-PostgresPort) -and (Test-PortListening (Get-PostgresPort))) }
-        'Website' { Test-HttpOk 'http://127.0.0.1:3102/' }
+        'Website' { Test-OceanWorkflowReady }
         'Monitor' { [bool]@(Get-MonitorProcesses).Count }
         'ReplayBridge' {
           $state = Join-Path $Runtime 'replay-bridge-status.json'
@@ -380,7 +420,8 @@ switch ($Action) {
   'Health' {
     $snapshot = Get-ServiceSnapshot
     $snapshot | ConvertTo-Json -Depth 6
-    if (-not ($snapshot.health.paperclip -and $snapshot.health.postgres -and $snapshot.health.website)) { exit 1 }
+    if (-not ($snapshot.health.paperclip -and $snapshot.health.postgres -and $snapshot.health.website -and
+      $snapshot.health.workflow -and $snapshot.health.monitor)) { exit 1 }
   }
   'Uninstall' {
     foreach ($name in @('Paperclip','Website','Monitor','ReplayBridge','CodexBridge')) {

@@ -12,7 +12,17 @@ if ($CoreHost -and $PSVersionTable.PSVersion -lt [Version]'7.5') { throw 'Protec
 $ErrorActionPreference = 'Stop'
 $env:PSModulePath = "$PSHOME\Modules;${env:ProgramFiles}\WindowsPowerShell\Modules"
 $Node = 'C:\Program Files\nodejs\node.exe'
-$Module = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\website\ocean-trading\dashboard\workflow\operator.mjs'))
+$currentScripts = [IO.Path]::GetFullPath($PSScriptRoot)
+$operationalScripts = [IO.Path]::GetFullPath('D:\Paperclip-codex\scripts')
+$sourceRoot = Split-Path -Parent $PSScriptRoot
+if ([StringComparer]::OrdinalIgnoreCase.Equals($currentScripts,$operationalScripts) -or
+    -not (Test-Path -LiteralPath (Join-Path $sourceRoot '.git'))) {
+  . (Join-Path $PSScriptRoot 'ocean-deployment.ps1')
+  $Deployment = Get-OceanDeployment
+  $Module = [IO.Path]::GetFullPath((Join-Path $Deployment.Dashboard 'workflow\operator.mjs'))
+} else {
+  $Module = [IO.Path]::GetFullPath((Join-Path $sourceRoot 'website\ocean-trading\dashboard\workflow\operator.mjs'))
+}
 $Sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $Root = [IO.Path]::GetFullPath($Root)
 $StatePath = Join-Path $Root 'operator-state.dpapi'
