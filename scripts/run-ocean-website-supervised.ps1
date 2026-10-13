@@ -10,15 +10,28 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$Dashboard = 'D:\Paperclip-codex\website\ocean-trading\dashboard'
 $Runtime = 'D:\OceanTradingData\website\ocean-runtime'
 $WorkflowRoot = 'D:\OceanTradingData\website\workflow'
+$currentScripts = [IO.Path]::GetFullPath($PSScriptRoot)
+$operationalScripts = [IO.Path]::GetFullPath('D:\Paperclip-codex\scripts')
+$sourceRoot = Split-Path -Parent $PSScriptRoot
+$Deployment = $null
+if ([StringComparer]::OrdinalIgnoreCase.Equals($currentScripts,$operationalScripts) -or
+    -not (Test-Path -LiteralPath (Join-Path $sourceRoot '.git'))) {
+  . (Join-Path $PSScriptRoot 'ocean-deployment.ps1')
+  $Deployment = Get-OceanDeployment -ConfigPath (Join-Path $Runtime 'deployment.json')
+  $Dashboard = $Deployment.Dashboard
+  $PhysicalBindingFile = $Deployment.PhysicalBindingFile
+} else {
+  $Dashboard = Join-Path $sourceRoot 'website\ocean-trading\dashboard'
+  $PhysicalBindingFile = Join-Path $Dashboard 'config\replay-run-bridge.json'
+}
 $StateFile = Join-Path $Runtime 'website-process.json'
 $StopFile = Join-Path $Runtime 'website-stop.json'
 $StopAckFile = Join-Path $Runtime 'website-stop-ack.json'
 $Node = 'C:\Program Files\nodejs\node.exe'
 $LogDir = Join-Path $Dashboard 'logs'
-$ProbeUri = [Uri]'http://127.0.0.1:3102/'
+$ProbeUri = [Uri]'http://127.0.0.1:3102/api/workflow/readiness'
 $script:SupervisorLog = $null
 $script:SupervisorMutexName = 'Local\OceanTradingWebsiteSupervisor-v1'
 
@@ -60,6 +73,7 @@ function Test-OceanWebsiteLiveness([Uri]$Uri, [int]$TimeoutSeconds) {
   $client = [Net.Http.HttpClient]::new($handler)
   $client.Timeout = [Threading.Timeout]::InfiniteTimeSpan
   $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get, $Uri)
+  $request.Headers.Add('Origin', 'http://127.0.0.1:3102')
   $request.Headers.ConnectionClose = $true
   $request.Headers.CacheControl = [Net.Http.Headers.CacheControlHeaderValue]::new()
   $request.Headers.CacheControl.NoCache = $true
@@ -474,8 +488,13 @@ function Initialize-WebsiteEnvironment {
   $env:OCEAN_OPERATIONAL_LEARNING_TELEMETRY_REQUIRED = '1'
   $env:OCEAN_OPERATIONAL_LEARNING_TELEMETRY_DB = 'D:\Trading\CICD\runtime\cicd-vwap-pull-back-strategy\ReplayTwo-v013\test-cicd-vwap-pull-back-replay-two-v013\TradeTelemetry_test-cicd-vwap-pull-back-replay-two-v013.sqlite'
   $env:OCEAN_OPERATIONAL_LEARNING_COMPLETION_ROOT = Join-Path $WorkflowRoot 'evidence'
-  $env:OCEAN_OPERATIONAL_LEARNING_PHYSICAL_BINDING_FILE = 'D:\Paperclip-codex\website\ocean-trading\dashboard\config\replay-run-bridge.json'
+  $env:OCEAN_OPERATIONAL_LEARNING_PHYSICAL_BINDING_FILE = $PhysicalBindingFile
   $env:OCEAN_WEBSITE_CONTROL_ROOT = $Runtime
+  if ($Deployment) {
+    $env:OCEAN_DEPLOYMENT_RELEASE_ID = $Deployment.ReleaseId
+    $env:OCEAN_DEPLOYMENT_SOURCE_COMMIT = $Deployment.SourceCommit
+    $env:OCEAN_DEPLOYMENT_MANIFEST_SHA256 = $Deployment.ManifestSha256
+  }
 }
 
 function Invoke-OceanWebsiteSupervisor {

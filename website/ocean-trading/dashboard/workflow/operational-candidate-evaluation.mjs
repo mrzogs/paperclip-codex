@@ -35,20 +35,24 @@ export class OperationalCandidateEvaluator {
     WHERE jobs.case_id=? AND cases.stage='CANDIDATE_EVALUATION' ORDER BY jobs.rowid DESC LIMIT 1`).get(caseId) || null;}
   publicStatus(job){
     if(!job)return null;
+    const phase=job.result_artifact_id?'RESULT_RECORDED':job.brain_readback_json?'BRAIN_READBACK_VERIFIED':
+      job.brain_response_json?'BRAIN_RESPONSE_RECORDED':job.brain_request_json?'BRAIN_REQUEST_RECORDED':
+      job.input_json?'INPUT_CAPTURED':job.state==='RUNNING'?'CLAIMED':'QUEUED';
     return {status:job.state,attempts:job.attempts,next_attempt_utc:['PENDING','RETRY'].includes(job.state)?new Date(job.next_attempt_ms).toISOString():null,
       lease_expires_utc:job.state==='RUNNING' && job.lease_until_ms?new Date(job.lease_until_ms).toISOString():null,
       error:job.last_error || null,input_hash:job.input_hash || null,brain_record_id:job.brain_record_id || null,
       brain_content_hash:job.brain_content_hash || null,result_artifact_id:job.result_artifact_id || null,
-      result_hash:job.result_hash || null,conclusion:job.conclusion || null,authority};
+      result_hash:job.result_hash || null,phase,pipeline_status:job.state==='COMPLETED'?'PIPELINE_COMPLETED':job.state,
+      benefit_conclusion:job.conclusion || null,conclusion:job.conclusion || null,authority};
   }
   statusForCase(caseId){
     const job=this.job(caseId);
     if(job)return this.publicStatus(job);
     const completion=this.completionEvent(caseId),row=this.db.prepare('SELECT stage FROM ow_cases WHERE id=?').get(caseId);
     return completion && row?.stage==='CANDIDATE_EVALUATION'?{status:'QUEUED',attempts:0,next_attempt_utc:null,lease_expires_utc:null,error:null,
-      input_hash:null,brain_record_id:null,brain_content_hash:null,result_artifact_id:null,result_hash:null,conclusion:null,authority}
+      input_hash:null,brain_record_id:null,brain_content_hash:null,result_artifact_id:null,result_hash:null,phase:'QUEUED',pipeline_status:'QUEUED',benefit_conclusion:null,conclusion:null,authority}
       :{status:'NOT_DUE',attempts:0,next_attempt_utc:null,lease_expires_utc:null,error:null,input_hash:null,
-        brain_record_id:null,brain_content_hash:null,result_artifact_id:null,result_hash:null,conclusion:null,authority};
+        brain_record_id:null,brain_content_hash:null,result_artifact_id:null,result_hash:null,phase:'NOT_DUE',pipeline_status:'NOT_DUE',benefit_conclusion:null,conclusion:null,authority};
   }
   verifyCompletion(event){
     const envelope=JSON.parse(event.payload_json),payload=envelope.payload;
@@ -113,6 +117,13 @@ export class OperationalCandidateEvaluator {
         .run(lease,Date.now()+this.leaseMs,row.id);
       return {...row,state:'RUNNING',attempts:row.attempts+1,lease_id:lease,lease_until_ms:Date.now()+this.leaseMs};
     });
+  }
+  renew(job){
+    const leaseUntil=Date.now()+this.leaseMs;
+    const update=this.db.prepare(`UPDATE ow_candidate_evaluation_jobs SET lease_until_ms=?
+      WHERE id=? AND state='RUNNING' AND lease_id=?`).run(leaseUntil,job.id,job.lease_id);
+    requireThat(update.changes===1,409,'CANDIDATE_EVALUATION_LEASE_LOST');
+    return this.b.one('ow_candidate_evaluation_jobs',job.id);
   }
   artifactEnvelope(row,artifactId,kind){
     const artifact=this.b.artifactFor(row,artifactId,kind),manifest=JSON.parse(artifact.manifest_json);
@@ -289,7 +300,8 @@ export class OperationalCandidateEvaluator {
   }
   async recordInBrain(job,snapshot){
     const learner=this.b.operationalLearning,token=learner.token();
-    await learner.verifyIdentity(token);const registry=await learner.registry(token);
+    this.renew(job);await learner.verifyIdentity(token);this.renew(job);
+    const registry=await learner.registry(token);this.renew(job);
     let current=this.db.prepare('SELECT * FROM ow_candidate_evaluation_jobs WHERE id=?').get(job.id),request;
     if(current.brain_request_json){requireThat(digest(current.brain_request_json)===current.brain_request_hash,409,'CANDIDATE_EVALUATION_REQUEST_HASH_CONFLICT');request=JSON.parse(current.brain_request_json);}
     else{
@@ -302,7 +314,9 @@ export class OperationalCandidateEvaluator {
     let response;
     if(current.brain_response_json){requireThat(digest(current.brain_response_json)===current.brain_response_hash,409,'CANDIDATE_EVALUATION_RESPONSE_HASH_CONFLICT');response=this.verifyResponse(JSON.parse(current.brain_response_json),request);}
     else{
+      this.renew(job);
       response=this.verifyResponse(await learner.call('/trading/learning/candidate-evaluation',token,request),request);
+      this.renew(job);
       const content=canonical(response),hash=digest(content);
       const update=this.db.prepare(`UPDATE ow_candidate_evaluation_jobs SET brain_response_json=?,brain_response_hash=?,brain_record_id=?,brain_relative_path=?,brain_content_hash=?
         WHERE id=? AND state='RUNNING' AND lease_id=? AND brain_response_json IS NULL`)
@@ -313,7 +327,9 @@ export class OperationalCandidateEvaluator {
     let readback;
     if(current.brain_readback_json){requireThat(digest(current.brain_readback_json)===current.brain_readback_hash,409,'CANDIDATE_EVALUATION_READBACK_HASH_CONFLICT');readback=this.verifyResponse(JSON.parse(current.brain_readback_json),request);}
     else{
+      this.renew(job);
       readback=this.verifyResponse(await learner.call('/trading/learning/candidate-evaluation',token,request),request);
+      this.renew(job);
       requireThat(objectHash(readback)===objectHash(response),503,'CANDIDATE_EVALUATION_BRAIN_READBACK_CONFLICT');
       const content=canonical(readback),hash=digest(content);
       const update=this.db.prepare(`UPDATE ow_candidate_evaluation_jobs SET brain_readback_json=?,brain_readback_hash=?
@@ -324,6 +340,7 @@ export class OperationalCandidateEvaluator {
     return response;
   }
   complete(job,snapshot,response){
+    this.renew(job);
     return this.b.store.transaction(()=>{
       const current=this.b.one('ow_candidate_evaluation_jobs',job.id);
       requireThat(current.state==='RUNNING' && current.lease_id===job.lease_id && current.lease_until_ms>Date.now(),409,'CANDIDATE_EVALUATION_LEASE_EXPIRED');
@@ -339,7 +356,8 @@ export class OperationalCandidateEvaluator {
       const kind=response.conclusion_type==='NO_BENEFIT'?'NO_BENEFIT':'EVALUATION';
       requireThat(kind!=='NO_BENEFIT' || snapshot.evaluation_policy.status==='PREDECLARED',409,'CANDIDATE_EVALUATION_POLICY_REQUIRED');
       const brainContent=JSON.parse(response.content);
-      const result={schema_version:CANDIDATE_EVALUATOR_VERSION,case_id:row.id,job_id:job.id,plan_hash:current.plan_hash,
+      const result={schema_version:CANDIDATE_EVALUATOR_VERSION,pipeline_status:'PIPELINE_COMPLETED',
+        benefit_conclusion:response.conclusion_type,case_id:row.id,job_id:job.id,plan_hash:current.plan_hash,
         candidate_hash:current.candidate_hash,conclusion:response.conclusion_type,brain_record:{record_id:response.record_id,
           relative_path:response.relative_path,content_hash:response.content_sha256},evaluation:{schema_version:brainContent.schema_version,
           bindings:response.bindings,evaluation_policy:response.evaluation_policy,conclusion:brainContent.conclusion,
@@ -362,8 +380,8 @@ export class OperationalCandidateEvaluator {
     });
   }
   fail(job,error){
-    const message=safeError(error),blocked=(error?.status>=400 && error?.status<500)
-      || /HTTP_(400|401|403|404|409|410|422)|TAMPER|CONFLICT|MISMATCH|INVALID/.test(message);
+    const message=safeError(error),leaseLoss=/CANDIDATE_EVALUATION_LEASE_(?:EXPIRED|LOST)/.test(message),blocked=!leaseLoss && ((error?.status>=400 && error?.status<500)
+      || /HTTP_(400|401|403|404|409|410|422)|TAMPER|CONFLICT|MISMATCH|INVALID/.test(message));
     this.db.prepare(`UPDATE ow_candidate_evaluation_jobs SET state=?,lease_id=NULL,lease_until_ms=NULL,last_error=?,next_attempt_ms=?
       WHERE id=? AND lease_id=?`).run(blocked?'BLOCKED':'RETRY',message,
       Date.now()+Math.min(300000,1000*2**Math.min(job.attempts,8)),job.id,job.lease_id);

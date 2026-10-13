@@ -22,7 +22,7 @@ import { REPORT_REFERENCE_VERSION, readResearchReport } from './operational-rese
 import { CONTINUATION_ORIGIN } from './operational-continuation.mjs';
 import { PaperForwardPreparation } from './paper-forward-preparation.mjs';
 import { OperationalCandidateDispatch } from './operational-candidate-dispatch.mjs';
-import { OperationalCandidateEvaluator } from './operational-candidate-evaluation.mjs';
+import { CANDIDATE_EVALUATOR_VERSION, OperationalCandidateEvaluator } from './operational-candidate-evaluation.mjs';
 import {
   activateStrategyOnboarding,
   deactivateStrategyOnboarding,
@@ -927,7 +927,8 @@ export class WorkflowBackend {
         this.auth.browserOrigin(request);
         requireThat(['127.0.0.1','::1','::ffff:127.0.0.1'].includes(request.socket.remoteAddress),403,'LOOPBACK_REQUIRED');
         const readiness=this.auth.readiness();
-        response.end(JSON.stringify({machine:this.maintenanceHealth?.state==='ERROR'?'DEGRADED':readiness.machine_readiness,human:this.auth.human.state,human_auth_method:readiness.human_auth_method,human_acceptance_due:readiness.human_acceptance_due,integrations:'PENDING',execution:'TEST_ONLY',ingestion:'OFF',maintenance:this.maintenanceHealth?.state || 'NOT_INSTALLED_ISOLATED'}));return true;
+        const learning=this.operationalLearning.status(),evaluator=this.operationalCandidateEvaluator;
+        response.end(JSON.stringify({machine:this.maintenanceHealth?.state==='ERROR'?'DEGRADED':readiness.machine_readiness,human:this.auth.human.state,human_auth_method:readiness.human_auth_method,human_acceptance_due:readiness.human_acceptance_due,integrations:'PENDING',execution:'TEST_ONLY',ingestion:'OFF',maintenance:this.maintenanceHealth?.state || 'NOT_INSTALLED_ISOLATED',workflow:{state:'READY',schema_version:13,deployment:{release_id:this.environment.OCEAN_DEPLOYMENT_RELEASE_ID || null,source_commit:this.environment.OCEAN_DEPLOYMENT_SOURCE_COMMIT || null,manifest_sha256:this.environment.OCEAN_DEPLOYMENT_MANIFEST_SHA256 || null},operational_learning:{enabled:learning.enabled,state:learning.state,last_error:learning.last_error},candidate_evaluator:{version:CANDIDATE_EVALUATOR_VERSION,state:evaluator.running?'RUNNING':'READY',last_error:evaluator.lastError || null}}}));return true;
       }
       if (route === "session" && request.method === "POST") {
         const input = await jsonBody(request); response.end(JSON.stringify(this.auth.login(request, input, response))); return true;

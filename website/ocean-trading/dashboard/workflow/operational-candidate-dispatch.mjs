@@ -41,6 +41,16 @@ export const acceptedTestRevisionCompatible=(existing,proposed)=>{
   delete legacyComparable.candidate_execution_source_hash;
   return objectHash(existing)===objectHash(legacyComparable);
 };
+export const pendingTestRerunCompatible=(existing,proposed)=>{
+  if(!existing || !proposed || existing.kind!==proposed.kind || !Array.isArray(existing.segments)
+    || !Array.isArray(proposed.segments) || existing.segments.length!==proposed.segments.length)return false;
+  const normalized=structuredClone(proposed);
+  for(let index=0;index<normalized.segments.length;index++){
+    normalized.segments[index].baseline_run_id=existing.segments[index].baseline_run_id;
+    normalized.segments[index].candidate_run_id=existing.segments[index].candidate_run_id;
+  }
+  return objectHash(existing)===objectHash(normalized);
+};
 
 // This adapter dispatches an exact, non-live engineering brief to the current
 // strategy owner and records its completion. Review, validation, Paper and Live
@@ -385,9 +395,15 @@ export class OperationalCandidateDispatch {
         const proposed=Array.isArray(data.tests)?data.tests.find(test=>test?.kind===kind):null;
         return acceptedTestRevisionCompatible(existing.tests.find(test=>test.kind===kind),proposed);
       });
+      const anyEvidenceConsumed=tasks.some(task=>task.status==='PASS');
+      const pendingTestsFrozen=!anyEvidenceConsumed || REQUIRED_TESTS.every(kind=>{
+        if(taskByKind.get(kind)!=='NOT_RUN')return true;
+        const proposed=Array.isArray(data.tests)?data.tests.find(test=>test?.kind===kind):null;
+        return pendingTestRerunCompatible(existing.tests.find(test=>test.kind===kind),proposed);
+      });
       requireThat(data.supersedes_plan_hash===existing.plan_hash
         && tasks.length===REQUIRED_TESTS.length && tasks.every(task=>['PASS','NOT_RUN'].includes(task.status))
-        && tasks.some(task=>task.status==='NOT_RUN') && acceptedTestsPreserved,
+        && tasks.some(task=>task.status==='NOT_RUN') && acceptedTestsPreserved && pendingTestsFrozen,
       409,'CANDIDATE_VALIDATION_PLAN_REVISION_NOT_ALLOWED');
     }else requireThat(data.supersedes_plan_hash===undefined,409,'CANDIDATE_VALIDATION_PLAN_REVISION_CONFLICT');
     requireThat(data.completion_hash===completed.completion_hash && data.candidate_hash===registered.candidate_hash
@@ -529,7 +545,7 @@ export class OperationalCandidateDispatch {
       const evidence={};
       for(const name of ['baseline','candidate']){
         const value=segmentResult[name];
-        exactKeys(value,['run_id','strategy_version','strategy_hash','telemetry_version','telemetry_hash','trade_count','gross_pnl','fees','net_pnl','short_trade_count','zero_trade_periods','completion_receipt_hash','physical_hashes','data_quality_flags']);
+        exactKeys(value,['run_id','strategy_version','strategy_hash','telemetry_version','telemetry_hash','trade_count','gross_pnl','fees','net_pnl','short_trade_count','zero_trade_periods','terminal_trade_count','boundary_cleanup_trade_id','completion_receipt_hash','physical_hashes','data_quality_flags']);
         id(value.run_id,true);for(const key of ['strategy_hash','telemetry_hash','completion_receipt_hash'])requireThat(validHash(value[key]),422,'CANDIDATE_VALIDATION_EVIDENCE_HASH_REQUIRED');
         exactKeys(value.physical_hashes,physicalHashKeys);
         requireThat(physicalHashKeys.every(key=>validHash(value.physical_hashes[key]))
@@ -543,6 +559,10 @@ export class OperationalCandidateDispatch {
         requireThat(Number.isInteger(value.trade_count) && value.trade_count>=0 && value.fees>=0
           && Number.isInteger(value.short_trade_count) && value.short_trade_count>=0
           && Number.isInteger(value.zero_trade_periods) && value.zero_trade_periods>=0
+          && Number.isInteger(value.terminal_trade_count) && value.terminal_trade_count>=value.trade_count
+          && value.terminal_trade_count-value.trade_count<2
+          && (value.boundary_cleanup_trade_id===null || (typeof value.boundary_cleanup_trade_id==='string' && value.boundary_cleanup_trade_id.length>0))
+          && (value.terminal_trade_count===value.trade_count)===(value.boundary_cleanup_trade_id===null)
           && sameNumber(value.net_pnl,value.gross_pnl-value.fees) && Array.isArray(value.data_quality_flags),422,'CANDIDATE_VALIDATION_METRIC_INVALID');
         requireThat(value.strategy_version===(name==='baseline'?test.baseline_version:candidateExecutionVersion(test,completed))
           && value.strategy_hash===(name==='baseline'?test.baseline_strategy_hash:candidateExecutionHash(test,registered))
@@ -558,6 +578,31 @@ export class OperationalCandidateDispatch {
           && physical?.replay_dll?.sha256===value.physical_hashes.strategy_dll_hash
           && physical?.replay_marker?.sha256===value.physical_hashes.strategy_marker_hash,
         409,'CANDIDATE_VALIDATION_COMPLETION_RECEIPT_BINDING_CONFLICT');
+        const cleanupApplied=value.boundary_cleanup_trade_id!==null;
+        const boundaryClose=receipt.runner_boundary_proof?.test_boundary_close;
+        const scoredReceiptCount=receipt.logger_receipt?.scored_closed_trade_count
+          ?? (cleanupApplied?null:receipt.logger_receipt?.closed_trade_count);
+        let boundaryProofValid=boundaryClose?.applied===cleanupApplied;
+        if(cleanupApplied){
+          const immutable=boundaryClose?.immutable_proof,proofPath=String(immutable?.path || '');
+          let proofBytes=null;
+          if(path.isAbsolute(proofPath) && fs.existsSync(proofPath) && fs.statSync(proofPath).isFile()){
+            proofBytes=fs.readFileSync(proofPath);
+          }
+          boundaryProofValid=boundaryProofValid && receipt.runner_boundary_proof?.scored_boundary_open_trade_excluded===true
+            && String(boundaryClose?.cleanup_trade_id || '')===value.boundary_cleanup_trade_id
+            && Number(boundaryClose?.terminal_trade_count)===Number(value.terminal_trade_count)
+            && Number(boundaryClose?.scored_trade_count)===Number(value.trade_count)
+            && proofBytes!==null && Number.isInteger(Number(immutable?.bytes)) && Number(immutable.bytes)===proofBytes.length
+            && validHash(immutable?.sha256) && digest(proofBytes)===immutable.sha256;
+          if(boundaryProofValid){
+            const proof=JSON.parse(proofBytes.toString('utf8'));
+            boundaryProofValid=proof.schema_version==='oql.vwap-test-boundary-close/v3' && proof.run_id===value.run_id
+              && String(proof.cleanup_trade_id)===value.boundary_cleanup_trade_id
+              && JSON.stringify(proof.before?.open_trade_ids)===JSON.stringify([Number(value.boundary_cleanup_trade_id)])
+              && JSON.stringify(proof.after?.open_trade_ids)===JSON.stringify([]);
+          }
+        }
         requireThat(receipt.schema_version==='ocean-replay-test-completion/v1' && receipt.run_kind==='TEST' && receipt.status==='COMPLETED'
           && receipt.requested_replay_window?.start_chart_time===londonChartTime(segment.warmup_start_utc)
           && receipt.requested_replay_window?.end_chart_time===londonChartTime(segment.scored_end_utc)
@@ -565,7 +610,9 @@ export class OperationalCandidateDispatch {
           && receipt.execution_identity?.trade_strategy_version===value.strategy_version
           && contractKey(receipt.execution_identity?.symbol)===contractKey(segment.contract)
           && receipt.execution_identity?.chart_number===1
-          && Number(receipt.logger_receipt?.closed_trade_count)===Number(value.trade_count)
+          && Number(receipt.logger_receipt?.closed_trade_count)===Number(value.terminal_trade_count)
+          && Number(scoredReceiptCount)===Number(value.trade_count)
+          && boundaryProofValid
           && receipt.safety?.simulation_account==='Sim1' && receipt.safety?.all_trades_simulated===true
           && receipt.safety?.all_fills_simulated===true && receipt.safety?.live_real==='DISABLED'
           && receipt.safety?.workflow_status_mutated===false,
@@ -579,6 +626,13 @@ export class OperationalCandidateDispatch {
           && snapshot.run?.strategy_version===receipt.execution_identity.strategy_version
           && snapshot.logger_receipt?.run_id===value.run_id && snapshot.logger_receipt?.trade_account==='Sim1'
           && Number(snapshot.logger_receipt?.closed_trade_count)===Number(snapshot.terminal_metrics?.trade_count)
+          && Number(snapshot.terminal_metrics?.trade_count)===Number(value.terminal_trade_count)
+          && Boolean(snapshot.scored_boundary?.cleanup_applied)===cleanupApplied
+          && Number(snapshot.scored_boundary?.scored_closed_trade_count)===Number(value.trade_count)
+          && Number(snapshot.scored_boundary?.terminal_trade_count)===Number(value.terminal_trade_count)
+          && (cleanupApplied?(String(snapshot.scored_boundary?.cleanup_trade_id || snapshot.scored_boundary?.cleanup_trade?.trade_id || '')===value.boundary_cleanup_trade_id
+            && snapshot.scored_boundary?.immutable_proof?.sha256===boundaryClose.immutable_proof.sha256
+            && Number(snapshot.scored_boundary?.immutable_proof?.bytes)===Number(boundaryClose.immutable_proof.bytes)):true)
           && Number(snapshot.metrics?.open_trade_count)===0
           && Number(snapshot.duplicate_check?.total_rows)===Number(snapshot.duplicate_check?.distinct_rows)
           && metricKeys.every(key=>sameNumber(Number(snapshot.metrics?.[key]),Number(value[key])))
@@ -600,7 +654,8 @@ export class OperationalCandidateDispatch {
                 MIN(fee_product_code) AS min_product,MAX(fee_product_code) AS max_product,
                 MIN(fee_tier) AS min_tier,MAX(fee_tier) AS max_tier,
                 MIN(fee_source_type) AS min_source_type,MAX(fee_source_type) AS max_source_type
-                FROM trades WHERE run_id=?`).get(row.strategy_id,value.run_id,value.run_id);
+                 FROM trades WHERE run_id=? AND (? IS NULL OR trade_id<>?)`).get(row.strategy_id,value.run_id,value.run_id,
+                   value.boundary_cleanup_trade_id,value.boundary_cleanup_trade_id);
             }finally{telemetry.close();}
             if(cost)break;
           }catch{}

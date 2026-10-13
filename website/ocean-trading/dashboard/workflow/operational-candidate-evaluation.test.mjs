@@ -169,8 +169,32 @@ test('an in-flight Brain result cannot complete after a newer revalidation inval
   const row={id:'test-case',stage:'HISTORICAL_VALIDATION'};
   evaluator.b={store:{transaction:fn=>fn()},one:(table)=>table==='ow_candidate_evaluation_jobs'?job:row,
     operationalCandidateDispatch:{validationPlan:()=>({plan_hash:job.plan_hash})}};
-  evaluator.db={prepare:sql=>({get:()=>sql.includes('action IN')
+  evaluator.db={prepare:sql=>({run:()=>({changes:1}),get:()=>sql.includes('action IN')
     ?{id:13,action:'operational.candidate.validation.revalidation_required'}
     :{id:12}})};
   assert.throws(()=>evaluator.complete(job,{},{}),/CANDIDATE_EVALUATION_EVIDENCE_INVALIDATED/);
+});
+
+test('candidate evaluator renews only its fenced lease and exposes pipeline completion separately from benefit', () => {
+  const evaluator=Object.create(OperationalCandidateEvaluator.prototype),updates=[];
+  evaluator.leaseMs=300_000;
+  evaluator.db={prepare:()=>({run:(...args)=>{updates.push(args);return {changes:1};}})};
+  evaluator.b={one:()=>({id:'job',state:'RUNNING',lease_id:'lease',lease_until_ms:Date.now()+300_000})};
+  const renewed=evaluator.renew({id:'job',lease_id:'lease'});
+  assert.equal(renewed.lease_id,'lease');
+  assert.equal(updates[0][1],'job');
+  assert.equal(updates[0][2],'lease');
+  const status=evaluator.publicStatus({state:'COMPLETED',attempts:1,next_attempt_ms:0,lease_until_ms:null,
+    brain_request_json:'{}',brain_response_json:'{}',brain_readback_json:'{}',result_artifact_id:'test-result',
+    result_hash:digest('result'),brain_record_id:'reasoning-result',brain_content_hash:digest('brain'),conclusion:'MORE_EVIDENCE_REQUIRED'});
+  assert.equal(status.pipeline_status,'PIPELINE_COMPLETED');
+  assert.equal(status.benefit_conclusion,'MORE_EVIDENCE_REQUIRED');
+  assert.equal(status.phase,'RESULT_RECORDED');
+});
+
+test('candidate evaluator treats its own lease loss as resumable rather than a durable blocker', () => {
+  const evaluator=Object.create(OperationalCandidateEvaluator.prototype),writes=[];
+  evaluator.db={prepare:()=>({run:(...args)=>writes.push(args)})};
+  evaluator.fail({id:'job',lease_id:'lease',attempts:2},{status:409,code:'CANDIDATE_EVALUATION_LEASE_LOST'});
+  assert.equal(writes[0][0],'RETRY');
 });

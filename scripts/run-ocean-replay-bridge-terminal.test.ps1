@@ -115,7 +115,7 @@ foreach ($change in @(
 }
 Run-Case 'restart cannot adopt a hidden live lease; expired lease is freshly claimed' {
   Reset-Case; $script:LeaseId=$null; $script:LeaseRunId=$null
-  Assert-Rejected 'FOREIGN_OR_UNAVAILABLE_RUN_LEASE'
+  Assert-Rejected 'OWNER_LEASE_RECOVERY_WAIT'
   $script:Context.lease.expired=$true
   Invoke-PinnedBridgeCycle
   Assert-Case (($script:Calls.action -join ',') -ceq 'claim,renew,finish') 'RESTART_DID_NOT_RECLAIM'
