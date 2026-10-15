@@ -218,9 +218,16 @@ function Stop-WebsiteGracefully {
 }
 
 function Get-MonitorProcesses {
+  try {
+    $monitorPath = Join-Path (Get-ValidatedOceanDeployment).Dashboard 'monitor.mjs'
+  } catch {
+    return @()
+  }
+  $monitorPattern = [regex]::Escape($monitorPath)
   Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
     Where-Object {
-      ($_.CommandLine -as [string]) -match 'node(\.exe)?"?\s+monitor\.mjs'
+      $_.Name -ieq 'node.exe' -and
+      ($_.CommandLine -as [string]) -match $monitorPattern
     }
 }
 
@@ -286,8 +293,12 @@ function Wait-ComponentHealthy([string]$Name) {
       if (-not $ok) { throw 'Ocean website did not become healthy.' }
     }
     'Monitor' {
-      Start-Sleep -Seconds 2
-      if (-not @(Get-MonitorProcesses).Count) { throw 'Ocean monitor is not running.' }
+      $deadline = (Get-Date).AddSeconds(30)
+      do {
+        $ok = [bool]@(Get-MonitorProcesses).Count
+        if (-not $ok) { Start-Sleep -Milliseconds 250 }
+      } while (-not $ok -and (Get-Date) -lt $deadline)
+      if (-not $ok) { throw 'Ocean monitor is not running.' }
     }
     'ReplayBridge' {
       # A completed month can require hundreds of authenticated evidence writes
