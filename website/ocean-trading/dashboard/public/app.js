@@ -7975,6 +7975,7 @@ function setupNavigation() {
     ensureNavLink(nav, "hmm-strategy", "/hmm-strategy.html", "HMM Strategy", "confluence");
     ensureNavLink(nav, "replay", "/replay-monitor.html", "Replay", "open");
     ensureNavLink(nav, "improvement", "/improvement/dashboard", "Continuous Improvement", "strategies");
+    ensureNavLink(nav, "quant-terminal", "/quant-terminal/", "Quant Terminal", "improvement");
   });
   const page = document.body?.dataset?.page || "dashboard";
   const labels = {
@@ -7992,6 +7993,7 @@ function setupNavigation() {
     markov: "Markov Regime",
     confluence: "Confluence",
     "hmm-strategy": "HMM Strategy Monitor",
+    "quant-terminal": "Quant Terminal",
   };
   document.querySelectorAll("[data-nav-page]").forEach((link) => {
     link.classList.toggle("active", link.getAttribute("data-nav-page") === page);
