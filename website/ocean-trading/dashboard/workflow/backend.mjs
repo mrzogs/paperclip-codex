@@ -970,6 +970,7 @@ export class WorkflowBackend {
         else if(['proposals/claim','proposals/progress','proposals/plans'].includes(local) && request.method==='POST')result=this.operationalResearch.continuations.plans.perform(local.slice(10),actor,await jsonBody(request));
         else if(local==='candidates/work' && request.method==='GET')result=this.operationalCandidateDispatch.queue(actor);
         else if(/^candidates\/[A-Za-z0-9_.:-]+\/work$/.test(local) && request.method==='GET')result=this.operationalCandidateDispatch.read(actor,local.split('/')[1]);
+        else if(local==='candidates/fresh-attempt' && request.method==='POST')result=this.operationalResearch.continuations.freshCandidateAttempt(actor,await jsonBody(request));
         else if(['candidates/claim','candidates/renew','candidates/complete','candidates/acknowledge','candidates/register'].includes(local) && request.method==='POST')result=this.operationalCandidateDispatch.perform(local.slice(11),actor,await jsonBody(request));
         else if(['candidates/prospective-plan','candidates/governance','candidates/exposures','candidates/validation-plan','candidates/validation-results','candidates/validation-complete'].includes(local) && request.method==='POST') {
           const action={'candidates/prospective-plan':'prospective','candidates/governance':'governance','candidates/exposures':'exposure','candidates/validation-plan':'plan','candidates/validation-results':'result','candidates/validation-complete':'complete'}[local];

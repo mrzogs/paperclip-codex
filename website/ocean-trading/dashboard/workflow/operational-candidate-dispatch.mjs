@@ -298,6 +298,12 @@ export class OperationalCandidateDispatch {
         requireThat(lease && lease.lease_id===data.lease_id && lease.owner_id===actor.id
           && lease.lease_until_ms>now && lease.dispatch_hash===dispatch.dispatch_hash,409,'CANDIDATE_DISPATCH_LEASE_EXPIRED');
         const candidate=this.validateCandidate(data.candidate);
+        const attempt=JSON.parse(current.row.payload_json).attempt;
+        if(attempt){
+          const source=this.completion(attempt.retry_of_case_id);
+          requireThat(source && source.completion_hash===attempt.candidate_completion_hash
+            && objectHash(source.candidate)===objectHash(candidate),409,'CANDIDATE_FRESH_ATTEMPT_IDENTITY_CONFLICT');
+        }
         const frozen={schema_version:CANDIDATE_DISPATCH_VERSION,case_id:current.row.id,recipient_id:actor.id,
           plan_artifact_id:dispatch.plan_artifact_id,dispatch_hash:dispatch.dispatch_hash,candidate,
           completed_at_utc:new Date(now).toISOString(),authority};
@@ -351,7 +357,10 @@ export class OperationalCandidateDispatch {
           build_receipt_hash:completed.candidate.build_receipt_hash,change_summary:completed.candidate.change_summary,
           verification:completed.candidate.verification,dispatch_hash:completed.dispatch_hash,completion_hash:completed.completion_hash,
           authorized_tests:REQUIRED_TESTS,execution_environment:'REPLAY',authority});
-        const artifactId=`test-candidate-${completed.candidate.candidate_hash.slice(7,39)}`;
+        const attempt=JSON.parse(current.row.payload_json).attempt;
+        const attemptSuffix=attempt?`-${objectHash({case_id:current.row.id,
+          completion_hash:completed.completion_hash}).slice(7,23)}`:'';
+        const artifactId=`test-candidate-${completed.candidate.candidate_hash.slice(7,39)}${attemptSuffix}`;
         const brain=this.b.config.identities.find(entry=>entry.role==='BRAIN' && entry.strategy_ids.includes(current.row.strategy_id) && entry.instance_ids.includes(current.row.instance_id));
         requireThat(brain,409,'CANDIDATE_REVIEW_RECIPIENT_REQUIRED');
         this.b.writeArtifact(actor,{artifact_id:artifactId,case_id:current.row.id,run_id:current.row.run_id,recipient_id:brain.identity_id,

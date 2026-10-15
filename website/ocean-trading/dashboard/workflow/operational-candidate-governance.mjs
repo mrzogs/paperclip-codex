@@ -153,6 +153,9 @@ export class OperationalCandidateGovernance {
       && /^[A-Za-z0-9_.:-]{1,120}$/.test(data.policy[key]),422,'CANDIDATE_GOVERNANCE_POLICY_REQUIRED');
     requireThat(validHash(data.policy.card_hash) && Number.isInteger(data.policy.attempt_number)
       && data.policy.attempt_number>0,422,'CANDIDATE_GOVERNANCE_ATTEMPT_REQUIRED');
+    const continuationAttempt=JSON.parse(row.payload_json).attempt;
+    if(continuationAttempt)requireThat(data.policy.attempt_number===continuationAttempt.attempt_number,
+      409,'CANDIDATE_GOVERNANCE_ATTEMPT_CONFLICT');
     const duplicate=this.db.prepare(`SELECT e.entity_id,e.payload_json FROM ow_events e JOIN ow_cases c ON c.id=e.entity_id
       WHERE e.action IN (?,?) AND c.strategy_id=?`).all(CANDIDATE_GOVERNANCE_ACTION,CANDIDATE_PROSPECTIVE_PLAN_ACTION,row.strategy_id)
       .map(item=>({entity_id:item.entity_id,payload:JSON.parse(item.payload_json).payload}))
@@ -223,6 +226,9 @@ export class OperationalCandidateGovernance {
     for(const key of ['policy_id','card_id','change_family','change_class'])requireThat(typeof data.policy[key]==='string' && /^[A-Za-z0-9_.:-]{1,120}$/.test(data.policy[key]),422,'CANDIDATE_GOVERNANCE_POLICY_REQUIRED');
     requireThat(validHash(data.policy.card_hash),422,'CANDIDATE_GOVERNANCE_POLICY_REQUIRED');
     requireThat(Number.isInteger(data.policy.attempt_number) && data.policy.attempt_number>0,422,'CANDIDATE_GOVERNANCE_ATTEMPT_REQUIRED');
+    const continuationAttempt=JSON.parse(row.payload_json).attempt;
+    if(continuationAttempt)requireThat(data.policy.attempt_number===continuationAttempt.attempt_number,
+      409,'CANDIDATE_GOVERNANCE_ATTEMPT_CONFLICT');
     const duplicate=this.db.prepare(`SELECT e.entity_id,e.payload_json FROM ow_events e JOIN ow_cases c ON c.id=e.entity_id
       WHERE e.action=? AND c.strategy_id=?`).all(CANDIDATE_GOVERNANCE_ACTION,row.strategy_id).map(item=>({entity_id:item.entity_id,payload:JSON.parse(item.payload_json).payload}))
       .find(item=>item.payload?.policy?.change_family===data.policy.change_family
