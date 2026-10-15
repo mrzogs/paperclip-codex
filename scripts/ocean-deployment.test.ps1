@@ -22,25 +22,35 @@ try {
   $runtimeFiles = @($runtimePaths | ForEach-Object {
     [pscustomobject][ordered]@{relative_path=$_;sha256=(Get-FileHash -LiteralPath (Join-Path $dashboard $_) -Algorithm SHA256).Hash.ToLowerInvariant()}
   })
+  $supportPaths = @('scripts\consume-ocean-proposal-planning.mjs','scripts\ocean-workflow-operator.ps1')
+  $supportFiles = @($supportPaths | ForEach-Object {
+    [pscustomobject][ordered]@{relative_path=$_;sha256=(Get-FileHash -LiteralPath (Join-Path $repositoryRoot $_) -Algorithm SHA256).Hash.ToLowerInvariant()}
+  })
   $fileMapHash = Get-OceanDeploymentFileMapHash -Entries $runtimeFiles
+  $supportFileMapHash = Get-OceanDeploymentFileMapHash -Entries $supportFiles
   $manifest = Join-Path $fixture 'deployment.json'
   [IO.File]::WriteAllText($manifest,([ordered]@{
     schema_version='ocean-website-deployment/v1'
     release_id='test-release'
     source_commit=('a' * 40)
     dashboard=$dashboard
+    source_root=$repositoryRoot
     physical_binding_file=$binding
     physical_binding_sha256=$bindingHash
     file_map_sha256=$fileMapHash
     files=$runtimeFiles
+    support_file_map_sha256=$supportFileMapHash
+    support_files=$supportFiles
   } | ConvertTo-Json),[Text.UTF8Encoding]::new($false))
 
   $resolved = Get-OceanDeployment -ConfigPath $manifest
   Assert-Test ($resolved.ReleaseId -ceq 'test-release') 'VALID_DEPLOYMENT_WAS_NOT_RESOLVED'
   Assert-Test ($resolved.Dashboard -ceq $dashboard) 'DASHBOARD_PATH_CHANGED'
+  Assert-Test ($resolved.SourceRoot -ceq $repositoryRoot) 'SOURCE_ROOT_CHANGED'
   Assert-Test ($resolved.PhysicalBindingSha256 -ceq $bindingHash) 'BINDING_HASH_CHANGED'
   Assert-Test ($resolved.ManifestSha256 -ceq (Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash.ToLowerInvariant()) 'MANIFEST_HASH_CHANGED'
   Assert-Test ($resolved.FileMapSha256 -ceq $fileMapHash) 'FILE_MAP_HASH_CHANGED'
+  Assert-Test ($resolved.SupportFileMapSha256 -ceq $supportFileMapHash) 'SUPPORT_FILE_MAP_HASH_CHANGED'
   Assert-Test (Test-OceanLocalAbsolutePath $dashboard) 'LOCAL_ABSOLUTE_PATH_WAS_REJECTED'
   Assert-Test (-not (Test-OceanLocalAbsolutePath '\\server\share\dashboard')) 'UNC_PATH_WAS_ACCEPTED'
   Assert-Test (-not (Test-OceanLocalAbsolutePath (Join-Path $dashboard '..\dashboard'))) 'NONCANONICAL_PATH_WAS_ACCEPTED'
@@ -72,6 +82,16 @@ try {
   try { $null = Get-OceanDeployment -ConfigPath $missingGovernanceManifest } catch { $governanceFailure = $_.Exception.Message }
   Assert-Test ($governanceFailure -eq 'Ocean deployment runtime binding is missing or invalid: workflow\operational-candidate-governance.mjs') `
     'MISSING_CANDIDATE_GOVERNANCE_WAS_ACCEPTED'
+
+  $missingOperator = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
+  $missingOperator.support_files = @($missingOperator.support_files | Where-Object { $_.relative_path -cne 'scripts\ocean-workflow-operator.ps1' })
+  $missingOperator.support_file_map_sha256 = Get-OceanDeploymentFileMapHash -Entries $missingOperator.support_files
+  $missingOperatorManifest = Join-Path $fixture 'deployment-missing-operator.json'
+  [IO.File]::WriteAllText($missingOperatorManifest,($missingOperator | ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))
+  $operatorFailure = $null
+  try { $null = Get-OceanDeployment -ConfigPath $missingOperatorManifest } catch { $operatorFailure = $_.Exception.Message }
+  Assert-Test ($operatorFailure -eq 'Ocean deployment support binding is missing or invalid: scripts\ocean-workflow-operator.ps1') `
+    'MISSING_PROTECTED_OPERATOR_WAS_ACCEPTED'
 
   $wrongRuntimeHash = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
   $wrongRuntimeHash.files[0].sha256 = '0' * 64

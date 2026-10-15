@@ -46,6 +46,7 @@ function Get-OceanDeployment {
   }
 
   $dashboard = [string]$deployment.dashboard
+  $sourceRoot = [string]$deployment.source_root
   $binding = [string]$deployment.physical_binding_file
   if (-not (Test-OceanLocalAbsolutePath $dashboard) -or
       -not (Test-Path -LiteralPath $dashboard -PathType Container)) {
@@ -93,6 +94,47 @@ function Get-OceanDeployment {
       throw "Ocean deployment runtime binding is missing or invalid: $relativePath"
     }
   }
+  if (-not (Test-OceanLocalAbsolutePath $sourceRoot) -or
+      -not (Test-Path -LiteralPath $sourceRoot -PathType Container)) {
+    throw "Ocean deployment source root is incomplete: $sourceRoot"
+  }
+  $requiredSupportFiles = @(
+    'scripts\consume-ocean-proposal-planning.mjs',
+    'scripts\ocean-workflow-operator.ps1'
+  )
+  $supportFiles = @($deployment.support_files)
+  $validatedSupportFiles = @()
+  $seenSupportFiles = @{}
+  foreach ($entry in $supportFiles) {
+    $relativePath = [string]$entry.relative_path
+    $segments = @($relativePath -split '[\\/]')
+    if ([string]::IsNullOrWhiteSpace($relativePath) -or [IO.Path]::IsPathRooted($relativePath) -or
+        $relativePath.Contains('/') -or $segments -contains '..' -or $segments -contains '.' -or
+        [string]$entry.sha256 -cnotmatch '^[a-f0-9]{64}$' -or $seenSupportFiles.ContainsKey($relativePath)) {
+      throw "Ocean deployment support binding is invalid: $relativePath"
+    }
+    $seenSupportFiles[$relativePath] = $true
+    $supportPath = [IO.Path]::GetFullPath((Join-Path $sourceRoot $relativePath))
+    if (-not $supportPath.StartsWith(([IO.Path]::GetFullPath($sourceRoot).TrimEnd('\') + '\'),[StringComparison]::OrdinalIgnoreCase) -or
+        -not (Test-Path -LiteralPath $supportPath -PathType Leaf)) {
+      throw "Ocean deployment support file is missing: $supportPath"
+    }
+    $actualSupportHash = (Get-FileHash -LiteralPath $supportPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualSupportHash -cne [string]$entry.sha256) {
+      throw "Ocean deployment support hash mismatch: $supportPath"
+    }
+    $validatedSupportFiles += [pscustomobject]@{ relative_path=$relativePath; sha256=$actualSupportHash }
+  }
+  $supportFileMapHash = Get-OceanDeploymentFileMapHash -Entries $validatedSupportFiles
+  if ([string]$deployment.support_file_map_sha256 -cne $supportFileMapHash) {
+    throw 'Ocean deployment support-file-map hash mismatch.'
+  }
+  foreach ($relativePath in $requiredSupportFiles) {
+    $entry = @($validatedSupportFiles | Where-Object { [string]$_.relative_path -ceq $relativePath })
+    if ($entry.Count -ne 1) {
+      throw "Ocean deployment support binding is missing or invalid: $relativePath"
+    }
+  }
   if (-not (Test-OceanLocalAbsolutePath $binding) -or
       -not (Test-Path -LiteralPath $binding -PathType Leaf)) {
     throw "Ocean physical binding is missing: $binding"
@@ -106,10 +148,13 @@ function Get-OceanDeployment {
     ReleaseId = [string]$deployment.release_id
     SourceCommit = [string]$deployment.source_commit
     Dashboard = $dashboard
+    SourceRoot = $sourceRoot
     PhysicalBindingFile = $binding
     PhysicalBindingSha256 = $actualBindingHash
     ManifestSha256 = $manifestSha256
     FileMapSha256 = $fileMapHash
     RuntimeFiles = $validatedRuntimeFiles
+    SupportFileMapSha256 = $supportFileMapHash
+    SupportFiles = $validatedSupportFiles
   }
 }
