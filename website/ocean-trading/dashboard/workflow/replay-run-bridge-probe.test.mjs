@@ -312,6 +312,15 @@ test('v4 probe verifies the exact operational Replay preflight and run binding',
   assert.equal(result.telemetry.source_schema_version, 'sierra-telemetry-sqlite/9');
 });
 
+test('v4 probe accepts an exact composite rule-lineage and plumbing candidate identifier', t => {
+  const fixture = createOperationalFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  fixture.config.managed_candidate_id = 'v0.6.239-short-exclusion+v0.6.240-test-boundary-drain';
+  fs.writeFileSync(fixture.configFile, JSON.stringify(fixture.config));
+  const result = readProbe(fixture);
+  assert.equal(result.telemetry.verified, true);
+});
+
 test('v4 probe keeps source preflight distinct from the not-yet-started Replay run', t => {
   const fixture = createOperationalFixture();
   t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
