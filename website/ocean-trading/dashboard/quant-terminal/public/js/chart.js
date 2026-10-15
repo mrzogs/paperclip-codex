@@ -363,6 +363,9 @@ export class ChartPane {
   async load({ keepView = false } = {}) {
     const token = (this.loadToken = {});
     this.stopLive();
+    this.marketData = null;
+    this.notes = [];
+    this.provider = null;
     this.showMsg(`Loading ${ticker(this.cfg.symbol)}…`);
     try {
       const limit = this.app.settings.bars || 3000;
@@ -371,6 +374,8 @@ export class ChartPane {
       this.cfg.symbol = r.symbol;
       this.provider = r.provider;
       this.notes = r.notes || [];
+      this.marketData = r.marketData;
+      this.feedError = false;
       this.bars = r.candles;
       this.mtf = {};
       this.replay = null;
@@ -390,6 +395,8 @@ export class ChartPane {
       this.showMsg(
         `Couldn't load ${esc(this.cfg.symbol)} on ${esc(this.cfg.tf)}.\n${esc(e.message)}`,
       );
+      // An initial provider outage used to leave the pane blank forever.
+      this.liveTimer = setTimeout(() => this.load({ keepView: true }), 60000);
     }
   }
 
@@ -707,6 +714,8 @@ export class ChartPane {
     const cls = chg == null ? "" : chg >= 0 ? "up" : "down";
     const name = `${ticker(this.cfg.symbol)} · ${this.cfg.tf} · ${this.provider || exchange(this.cfg.symbol)}`;
     let html = `<div class="row"><span class="title" data-act="symbol">${esc(name)}</span>`;
+    if (this.marketData?.kind === "delayed")
+      html += `<span class="feed-badge" title="Delayed public data. Not eligible for live execution.">DELAYED · RESEARCH ONLY${this.feedError ? " · UPDATE FAILED" : ""}</span>`;
     if (b)
       html += `<span class="ohlc ${cls}"><span><b>O</b>${fmtPrice(b.open)}</span><span><b>H</b>${fmtPrice(b.high)}</span><span><b>L</b>${fmtPrice(b.low)}</span><span><b>C</b>${fmtPrice(b.close)}</span><span>${fmtPct(chg)}</span></span>`;
     html += "</div>";
@@ -734,6 +743,8 @@ export class ChartPane {
         /\(([^)]+)\)$/.exec(def.name)?.[1].split(" / ")[0] || def.name;
       html += `<div class="row ind" data-uid="${ind.uid}" style="${ind.hidden ? "opacity:.45" : ""}"><span class="name">${esc(short)} ${esc(params)}</span><span class="vals">${vals}</span><span class="acts"><button data-act="settings" title="Settings">${ICON.gear}</button><button data-act="hide" title="Show/hide">${ICON.eye}</button><button data-act="remove" title="Remove">${ICON.x}</button></span></div>`;
     }
+    if (this.marketData?.lastTradeTime)
+      html += `<div class="row note">${esc(this.marketData.contract)} · Last provider trade ${esc(new Date(this.marketData.lastTradeTime * 1000).toISOString())}</div>`;
     for (const note of this.notes || [])
       html += `<div class="row note">${esc(note)}</div>`;
     this.legendEl.innerHTML = html;
@@ -914,13 +925,17 @@ export class ChartPane {
       exchange(this.cfg.symbol),
     )
       ? 3000
-      : 10000;
+      : this.marketData?.kind === "delayed" ? 60000 : 10000;
     const tick = async () => {
       try {
         const r = await api.candles(this.cfg.symbol, this.cfg.tf, 5);
+        this.marketData = r.marketData;
+        this.notes = r.notes || [];
+        this.feedError = false;
         this.merge(r.candles);
       } catch {
-        /* keep trying */
+        this.feedError = true;
+        this.updateLegend();
       }
       this.liveTimer = setTimeout(tick, kind);
     };
