@@ -1556,6 +1556,9 @@ test('candidate completion survives restart and registration requires an approve
     assert.throws(()=>f.backend.mutate('case.transition',strategy,{message_id:'test-candidate-review-wrong-actor',data:transitionData}),/OPERATIONAL_PLANNING_MUTATION_NOT_ENABLED/);
     assert.throws(()=>f.backend.mutate('case.transition',f.human,{message_id:'test-candidate-review-wrong-stage',data:{...transitionData,to_stage:'CANDIDATE_DEVELOPMENT'}}),/OPERATIONAL_PLANNING_MUTATION_NOT_ENABLED/);
     let row=f.backend.mutate('case.transition',f.human,{message_id:'test-candidate-review-transition',data:transitionData});
+    f.restart();
+    const resumedReview=f.backend.readCase(f.human,child.id);
+    assert.equal(resumedReview.stage,'DEVELOPMENT_REVIEW');assert.equal(resumedReview.approvals.length,0);
     const approvalData={request_id:'test-candidate-review',case_id:child.id,expected_revision:row.revision,
       gate:'DEVELOPMENT',artifact_id:returned.artifact_id,recipient_id:'strategy',authorized_tests:['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'],
       expires_at_utc:new Date(Date.now()+3600000).toISOString()};
@@ -1609,6 +1612,8 @@ test('candidate completion survives restart and registration requires an approve
     const frozenCandidate=f.backend.readCase(f.human,child.id);assert.equal(frozenCandidate.planning.blocked_reason,null);
     assert.equal(frozenCandidate.planning.scope,'REGISTERED_CANDIDATE_VALIDATION');planAuthor.revoked=false;
     const source=fs.readFileSync(new URL('../public/workflow/ui.js',import.meta.url),'utf8');
+    assert.match(source,/\['RESEARCH','DEVELOPMENT_REVIEW'\]\.includes\(data\.stage\)/);
+    assert.match(source,/if\(data\.stage==='RESEARCH'\)/);
     const helpers={section:(title,body)=>`${title}\n${body}`,facts:items=>items.map(([name,value])=>`${name}: ${value}`).join('\n'),
       table:(_headers,rows)=>rows.flat().join('\n'),esc:String,badge:String,human:String,link:(_type,id,label)=>label || id,
       heading:()=>'',button:(_action,label)=>`BUTTON:${label}`,hash:String,date:String,empty:String,timeline:()=>'',

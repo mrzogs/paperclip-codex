@@ -513,7 +513,8 @@ function casePage(data) {
   const executable = !data.planning && !(data.namespace==='OPERATIONAL' && data.research) && !['COMPLETED','PAUSED','FAILED','BLOCKED','CANCELLED'].includes(data.work_status) && data.stage !== 'CLOSED';
   const statusControl = data.planning ? '' : ['PAUSED','FAILED','BLOCKED'].includes(data.work_status) ? button('resume', data.work_status === 'PAUSED' ? 'Resume' : 'Retry', '', 'play') : executable ? button('pause', 'Pause', '', 'pause') : '';
   const prepare = data.approvals.find(row => row.state === 'APPROVED' && row.decision?.current_test_authority && ['DEVELOPMENT','SHADOW','PRODUCTION','ROLLBACK'].includes(row.gate) && !data.handoffs.some(handoff => handoff.decision_id === row.decision.decision.decision_id));
-  const reviewCandidate = data.candidate_dispatch?.status === 'BUILT_PENDING_REVIEW' && data.stage === 'RESEARCH'
+  const reviewCandidate = data.candidate_dispatch?.status === 'BUILT_PENDING_REVIEW'
+    && ['RESEARCH','DEVELOPMENT_REVIEW'].includes(data.stage)
     && !data.approvals.some(row => ['PENDING','APPROVED'].includes(row.state));
   return heading(data.case_id, data.strategy_name, badge(data.work_status) + statusControl + (reviewCandidate ? button('request-candidate-review','Review Replay validation',"class='primary'",'check') : '') + (executable ? button('upload', 'Upload result', '', 'upload') : '')) + researchPanel(data.research) + (data.planning?section(riskReview?'Risk review scope':registeredCandidate?'Historical validation scope':'Planning scope',facts([
     ['Purpose',registeredCandidate?'Replay candidate validation':esc(human(data.planning.kind))],['Authority',riskReview?'Review context only; no strategy disable, candidate development or test permission':registeredCandidate?'The four approved Replay-only tests are due; Paper, Live and promotion remain disabled.':'Planning only; no candidate development or test permission'],
@@ -900,9 +901,13 @@ async function act(action,element) {
     ])+`<label class='check-line'><input id='candidate-review-confirm' type='checkbox' required>I confirm this exact candidate may be submitted for Replay-only validation review.</label>`,
     'Create validation review',async form=>{
       if(!form.querySelector('#candidate-review-confirm').checked)throw Object.assign(new Error(),{code:'EXPLICIT_CANDIDATE_REVIEW_CONFIRMATION_REQUIRED'});
-      const transitioned=await post('transitions',{case_id:data.case_id,expected_revision:data.revision,action:'advance',
-        to_stage:'DEVELOPMENT_REVIEW',artifact_id:data.candidate_dispatch.plan_artifact_id,artifact_ids:null,decision_id:null,owner_id:null,next_action:null});
-      const approval=await post('approvals',{request_id:newId('request'),case_id:data.case_id,expected_revision:transitioned.revision,
+      let reviewRevision=data.revision;
+      if(data.stage==='RESEARCH'){
+        const transitioned=await post('transitions',{case_id:data.case_id,expected_revision:data.revision,action:'advance',
+          to_stage:'DEVELOPMENT_REVIEW',artifact_id:data.candidate_dispatch.plan_artifact_id,artifact_ids:null,decision_id:null,owner_id:null,next_action:null});
+        reviewRevision=transitioned.revision;
+      }else if(data.stage!=='DEVELOPMENT_REVIEW')throw Object.assign(new Error(),{code:'CANDIDATE_REVIEW_STAGE_REQUIRED'});
+      const approval=await post('approvals',{request_id:newId('request'),case_id:data.case_id,expected_revision:reviewRevision,
         gate:'DEVELOPMENT',artifact_id:data.candidate_dispatch.plan_artifact_id,recipient_id:data.candidate_dispatch.recipient_id,
         authorized_tests:['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'],expires_at_utc:new Date(Date.now()+7*24*60*60*1000).toISOString()});
       history.pushState({},'',`/improvement/approvals/${approval.request_id}`);state.data=null;state.fingerprint=null;
