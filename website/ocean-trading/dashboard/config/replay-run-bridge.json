@@ -24,7 +24,7 @@
   "freshness_seconds": 120,
   "expected_chartbook_path": "D:\\Trading\\SierraChart-Replay Two\\Data\\CICD - VWAP Pull Back Strategy.Cht",
   "expected_chart_number": 1,
-  "expected_chartbook_sha256": "sha256:65cc0e36239c8adce10f98bda4d3490d5573e3446e1821cd7350626df5334842",
+  "expected_chartbook_sha256": "sha256:b3c288dec46d0e5f582a4d56d6d8b71338946f26b6dd080fb1ce6c71e19d7445",
   "expected_controller_version": "v0.2.3-read-only-study-input-export",
   "time_basis": "UTC source records; Sierra chart display time preserved",
   "session_calendar_revision": "observed-mnq-maintenance-2100-2200z-20260928",
