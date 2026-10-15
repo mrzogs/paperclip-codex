@@ -16,7 +16,7 @@ import { CONTINUATION_ORIGIN } from './operational-continuation.mjs';
 import { readWorkflowView } from './ui-api.mjs';
 import { digest, objectHash } from './common.mjs';
 import { consumePlanningOnce } from '../../../../scripts/consume-ocean-proposal-planning.mjs';
-import { acceptedTestRevisionCompatible, OperationalCandidateDispatch } from './operational-candidate-dispatch.mjs';
+import { acceptedTestRevisionCompatible, OperationalCandidateDispatch, pendingTestRerunCompatible } from './operational-candidate-dispatch.mjs';
 import { CANDIDATE_EVALUATION_RESULT_VERSION, OperationalCandidateEvaluator } from './operational-candidate-evaluation.mjs';
 
 test('legacy accepted validation tests may add only execution source bindings during a v4 plan revision',()=>{
@@ -26,6 +26,19 @@ test('legacy accepted validation tests may add only execution source bindings du
   assert.equal(acceptedTestRevisionCompatible(legacy,upgraded),true);
   assert.equal(acceptedTestRevisionCompatible(legacy,{...upgraded,segments:[{segment_id:'changed'}]}),false);
   assert.equal(acceptedTestRevisionCompatible(upgraded,{...upgraded,candidate_execution_source_hash:digest('other-source')}),false);
+});
+
+test('legacy pending validation tests may add source bindings while changing only rerun ids',()=>{
+  const legacy={kind:'OOS_HOLDOUT',candidate_execution_hash:digest('candidate'),segments:[{
+    segment_id:'holdout',baseline_run_id:'baseline-r1',candidate_run_id:'candidate-r1'}]};
+  const upgraded={...structuredClone(legacy),baseline_execution_source_hash:digest('baseline-source'),
+    candidate_execution_source_hash:digest('candidate-source'),segments:[{
+      ...legacy.segments[0],baseline_run_id:'baseline-r2',candidate_run_id:'candidate-r2'}]};
+  assert.equal(pendingTestRerunCompatible(legacy,upgraded),true);
+  assert.equal(pendingTestRerunCompatible(legacy,{...upgraded,segments:[{
+    ...upgraded.segments[0],segment_id:'changed'}]}),false);
+  assert.equal(pendingTestRerunCompatible(upgraded,{...upgraded,
+    candidate_execution_source_hash:digest('other-source')}),false);
 });
 
 test('candidate evaluation has an independent persistent startup runner',async()=>{
