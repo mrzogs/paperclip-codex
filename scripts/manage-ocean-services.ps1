@@ -85,7 +85,7 @@ function Test-OceanWorkflowReady {
     $readiness.workflow.operational_learning.enabled -eq $true -and
     $readiness.workflow.operational_learning.state -ceq 'READY' -and
     -not $readiness.workflow.operational_learning.last_error -and
-    $readiness.workflow.candidate_evaluator.version -ceq 'ocean-operational-candidate-evaluator/v1' -and
+    $readiness.workflow.candidate_evaluator.version -ceq 'ocean-operational-candidate-evaluator/v2' -and
     $readiness.workflow.candidate_evaluator.state -in @('READY','RUNNING') -and
     -not $readiness.workflow.candidate_evaluator.last_error)
 }
