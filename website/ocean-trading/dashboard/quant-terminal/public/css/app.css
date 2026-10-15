@@ -1097,3 +1097,12 @@ body.has-ribbon .main { height: calc(100% - 90px); }
 .ptq-brand h4 { font-family: "Fragment Mono", ui-monospace, monospace; font-weight: 400; text-transform: uppercase; letter-spacing: 0.12em; font-size: 11px; color: #a4a9b4; margin: 16px 0 8px; }
 .tester.ptq-brand .left { border-right-color: rgba(255, 255, 255, 0.1); }
 .tabs button[data-tab="ptq"] { color: #6cb8ff; font-weight: 600; }
+.feed-badge {
+  color: #fbbf24;
+  background: #422e12;
+  border: 1px solid #9a6b1a;
+  border-radius: 3px;
+  padding: 2px 5px;
+  font-size: 10px;
+  font-weight: 700;
+}

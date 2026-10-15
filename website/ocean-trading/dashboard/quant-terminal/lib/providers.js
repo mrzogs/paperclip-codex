@@ -20,8 +20,16 @@ import {
 
 const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
+// Identify this client honestly. Yahoo rejects the old, fabricated Chrome headers
+// for the long chart requests used by the futures panes (HTTP 429).
+const YAHOO_HEADERS = { "User-Agent": "QuantTerminal/1.0", Accept: "application/json" };
 const TIMEOUT_MS = Number(process.env.QT_TIMEOUT_MS) || 10000;
 const FIAT = ["USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"];
+const FUTURES = [
+  { symbol: "YAHOO:NQ=F", name: "Nasdaq-100 E-mini futures (delayed)", type: "futures", exchange: "CME / Yahoo" },
+  { symbol: "YAHOO:ES=F", name: "S&P 500 E-mini futures (delayed)", type: "futures", exchange: "CME / Yahoo" },
+  { symbol: "YAHOO:GC=F", name: "Gold futures (delayed)", type: "futures", exchange: "COMEX / Yahoo" },
+];
 const OFFLINE = process.env.QT_OFFLINE === "1";
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -402,6 +410,8 @@ async function krakenCandles(pair, tf, limit) {
 
 // ---------- Yahoo ----------
 let yahooDownUntil = 0;
+let yahooSearchDownUntil = 0;
+const yahooDetails = new Map();
 const YAHOO_NATIVE = {
   "1m": ["1m", "7d"],
   "2m": ["2m", "60d"],
@@ -415,6 +425,16 @@ const YAHOO_NATIVE = {
 };
 export const yahooAvailable = () => Date.now() > yahooDownUntil;
 
+export function yahooRange(base, tf, limit) {
+  const maxDays = { "1m": 7, "2m": 60, "5m": 60, "15m": 60, "30m": 60, "1h": 730 }[base];
+  // Polling ten bars must not download two years of hourly history every ten
+  // seconds. Allow calendar gaps and a full target bar when resampling.
+  const days = Math.ceil(((limit + 2) * parseTf(tf).seconds * 1.6) / 86400) + 3;
+  const ranges = [[5, "5d"], [30, "1mo"], [60, "60d"], [90, "3mo"], [180, "6mo"], [365, "1y"], [730, "2y"]];
+  return ranges.find(([n]) => n >= days && (!maxDays || n <= maxDays))?.[1]
+    || (maxDays ? `${maxDays}d` : YAHOO_NATIVE[base][1]);
+}
+
 async function yahooCandles(symbol, tf, limit) {
   if (!yahooAvailable())
     throw new Error(
@@ -422,11 +442,13 @@ async function yahooCandles(symbol, tf, limit) {
     );
   const base = nativeBase(tf, Object.keys(YAHOO_NATIVE));
   if (!base) throw new Error(`Yahoo can't build a ${tf} chart`);
-  const [interval, range] = YAHOO_NATIVE[base];
+  const [interval] = YAHOO_NATIVE[base];
+  const range = yahooRange(base, tf, limit);
   let j;
   try {
     j = await getJson(
       `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${interval}&range=${range}&includePrePost=false`,
+      YAHOO_HEADERS,
     );
   } catch (e) {
     if (e.status === 429) yahooDownUntil = Date.now() + 10 * 60e3;
@@ -434,6 +456,16 @@ async function yahooCandles(symbol, tf, limit) {
     throw e;
   }
   const out = parseYahoo(j, base);
+  const meta = j.chart.result[0].meta || {};
+  if (yahooDetails.size >= CACHE_MAX) yahooDetails.delete(yahooDetails.keys().next().value);
+  yahooDetails.set(symbol, {
+    kind: meta.instrumentType === "FUTURE" || symbol.endsWith("=F") ? "delayed" : "unspecified",
+    executionEligible: false,
+    contract: meta.shortName || symbol,
+    exchange: meta.exchangeName || "Yahoo",
+    lastTradeTime: Number.isFinite(meta.regularMarketTime) ? meta.regularMarketTime : null,
+    fetchedAt: new Date().toISOString(),
+  });
   mark("yahoo", true);
   return base === tf ? out.slice(-limit) : resample(out, tf).slice(-limit);
 }
@@ -447,10 +479,23 @@ export function parseYahoo(j, tf) {
   const q = r.indicators?.quote?.[0] || {};
   const off = r.meta?.gmtoffset || 0;
   const daily = !isIntraday(tf);
+  const futures = r.meta?.instrumentType === "FUTURE";
+  const seconds = daily ? 86400 : parseTf(tf).seconds;
   const out = [];
   (r.timestamp || []).forEach((t, i) => {
     if (q.close?.[i] == null || q.open?.[i] == null) return;
-    const time = daily ? Math.floor((t + off) / 86400) * 86400 : t;
+    const time = daily ? Math.floor((t + off) / 86400) * 86400
+      : futures ? Math.floor(t / seconds) * seconds : t;
+    // Yahoo can append a latest-quote stub inside the last futures candle.
+    // Merge it into that interval, without replacing its open/range/volume.
+    const prev = out.at(-1);
+    if (futures && prev?.time === time) {
+      prev.high = Math.max(prev.high, q.high[i]);
+      prev.low = Math.min(prev.low, q.low[i]);
+      prev.close = q.close[i];
+      prev.volume = Math.max(prev.volume, q.volume?.[i] || 0);
+      return;
+    }
     out.push({
       time,
       open: q.open[i],
@@ -776,6 +821,9 @@ export async function getCandles(rawSymbol, tf = "1D", limit = 1500) {
       chain = [["Yahoo", () => yahooCandles(t, tf, limit)]];
     }
     const res = await tryChain(chain);
+    const marketData = res.provider === "Yahoo" ? yahooDetails.get(t) : null;
+    if (marketData?.kind === "delayed")
+      notes.push("DELAYED FUTURES — charting/research only, not a live execution feed.");
     if (sym.exchange === "US" && res.provider === "Nasdaq" && isIntraday(tf))
       notes.push(
         "Intraday stock bars come from Nasdaq's free feed, which covers today's session only. Yahoo fills in more history when it is reachable.",
@@ -789,6 +837,7 @@ export async function getCandles(rawSymbol, tf = "1D", limit = 1500) {
       tf,
       provider: res.provider,
       candles: res.candles,
+      ...(marketData ? { marketData } : {}),
       notes,
     };
   });
@@ -858,6 +907,7 @@ export async function search(q) {
     .toUpperCase();
   if (!query) return [];
   const results = [];
+  results.push(...FUTURES.filter((r) => `${r.symbol} ${r.name}`.toUpperCase().includes(query)));
   const bin = await binanceSymbolMap();
   const cryptoHits = [...bin.entries()]
     .filter(([t, s]) => t.startsWith(query) || s.base === query)
@@ -899,9 +949,10 @@ export async function search(q) {
           })),
         )
         .catch(() => []),
-      yahooAvailable()
+      Date.now() > yahooSearchDownUntil
         ? getJson(
             `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(q)}&quotesCount=8&newsCount=0`,
+            YAHOO_HEADERS,
           )
             .then((j) =>
               (j?.quotes || [])
@@ -919,7 +970,9 @@ export async function search(q) {
                 })),
             )
             .catch((e) => {
-              if (e.status === 429) yahooDownUntil = Date.now() + 10 * 60e3;
+              // Autocomplete has a separate rate limit. It must not disable
+              // working chart requests for every futures pane.
+              if (e.status === 429) yahooSearchDownUntil = Date.now() + 10 * 60e3;
               return [];
             })
         : Promise.resolve([]),
@@ -1009,6 +1062,7 @@ export async function probeAll() {
     "Yahoo (global, intraday stocks)": () =>
       getJson(
         "https://query1.finance.yahoo.com/v8/finance/chart/SPY?interval=1d&range=5d",
+        YAHOO_HEADERS,
       ),
     "Economic calendar": () =>
       getJson("https://nfs.faireconomy.media/ff_calendar_thisweek.json"),

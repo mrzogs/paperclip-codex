@@ -40,3 +40,26 @@ saves from invalidating the release's source hashes. Bundled examples seed only
 a newly created external custom directory; existing user files are not overwritten.
 Keep the existing website/workflow databases, physical binding and other services
 unchanged. No live trading connection is authorized by this integration.
+
+## Delayed futures chart feed
+
+NQ=F, ES=F and GC=F use Yahoo's public delayed futures chart data. Yahoo's
+coverage page identifies CME delayed data and ICE Data Services as its provider:
+https://help.yahoo.com/kb/finance/article-exchanges-data-delays-sln2310.html
+This is not TradingView's feed, a paid real-time API or a production execution
+feed. The API returns `marketData.kind=delayed` and `executionEligible=false`;
+the chart shows DELAYED / RESEARCH ONLY, the contract name and last provider
+trade timestamp. Never silently relabel it as live data or use generic rolling
+Yahoo symbols as actual broker execution contract identifiers.
+
+Keep Yahoo requests identified as `QuantTerminal/1.0`, not fabricated browser
+headers. The old Chrome header set reproducibly returned HTTP 429 on the long
+futures requests while the identified client succeeded. Respect genuine chart
+429 cooldowns; an autocomplete 429 must not disable otherwise working candles.
+Polling requests use bounded history, delayed panes refresh once per minute,
+failed initial loads retry after one minute, and failed updates are visible.
+The public endpoint has no availability guarantee: licensed real-time account
+access and feed/execution validation remain separate requirements for live money.
+
+Run `test/yahoo.test.js` (included in `npm run test:quant`) and verify actual
+NQ/ES/GC candles in the browser after promotion. Preserve user chart state.
