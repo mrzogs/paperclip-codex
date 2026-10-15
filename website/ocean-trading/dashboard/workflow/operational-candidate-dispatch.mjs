@@ -29,6 +29,18 @@ const physicalHashKeys=Object.freeze(['strategy_source_hash','strategy_dll_hash'
 const candidateExecutionVersion=(test,completed)=>test.candidate_execution_version || test.candidate_version || completed.candidate.candidate_version;
 const candidateExecutionHash=(test,registered)=>test.candidate_execution_hash || registered.candidate_hash;
 const markerLimitation=runId=>`Marker bytes were not retained for ${runId}; the marker hash remains sealed in its completion receipt.`;
+const versionTuple=value=>{
+  const match=/^v?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$/.exec(String(value || ''));
+  return match?match.slice(1).map(Number):null;
+};
+const strictlyNewerVersion=(existing,proposed)=>{
+  const left=versionTuple(existing),right=versionTuple(proposed);
+  if(!left || !right)return false;
+  for(let index=0;index<left.length;index++){
+    if(right[index]!==left[index])return right[index]>left[index];
+  }
+  return false;
+};
 const londonChartTime=value=>new Intl.DateTimeFormat('sv-SE',{timeZone:'Europe/London',year:'numeric',month:'2-digit',day:'2-digit',
   hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).format(new Date(value)).replace('T',' ');
 const qualityFlags=value=>String(value || '').split(',').map(item=>item.trim()).filter(Boolean).sort();
@@ -44,11 +56,19 @@ export const acceptedTestRevisionCompatible=(existing,proposed)=>{
 export const pendingTestRerunCompatible=(existing,proposed)=>{
   if(!existing || !proposed || existing.kind!==proposed.kind || !Array.isArray(existing.segments)
     || !Array.isArray(proposed.segments) || existing.segments.length!==proposed.segments.length)return false;
+  const telemetryVersionChanged=existing.telemetry_version!==proposed.telemetry_version;
+  const telemetryHashChanged=existing.telemetry_hash!==proposed.telemetry_hash;
+  if(telemetryVersionChanged!==telemetryHashChanged
+    || (telemetryVersionChanged && !strictlyNewerVersion(existing.telemetry_version,proposed.telemetry_version)))return false;
   const normalized=structuredClone(proposed);
   for(let index=0;index<normalized.segments.length;index++){
     normalized.segments[index].baseline_run_id=existing.segments[index].baseline_run_id;
     normalized.segments[index].candidate_run_id=existing.segments[index].candidate_run_id;
   }
+  if(Object.hasOwn(existing,'telemetry_version'))normalized.telemetry_version=existing.telemetry_version;
+  else delete normalized.telemetry_version;
+  if(Object.hasOwn(existing,'telemetry_hash'))normalized.telemetry_hash=existing.telemetry_hash;
+  else delete normalized.telemetry_hash;
   if(!Object.hasOwn(existing,'baseline_execution_source_hash'))delete normalized.baseline_execution_source_hash;
   if(!Object.hasOwn(existing,'candidate_execution_source_hash'))delete normalized.candidate_execution_source_hash;
   return objectHash(existing)===objectHash(normalized);
