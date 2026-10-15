@@ -14,6 +14,20 @@ function Test-OceanLocalAbsolutePath {
   }
 }
 
+function Get-OceanDeploymentFileMapHash {
+  param([object[]]$Entries)
+
+  $rows = [string[]]@($Entries | ForEach-Object {
+    "$([string]$_.relative_path)`t$([string]$_.sha256)"
+  })
+  [array]::Sort($rows,[StringComparer]::Ordinal)
+  $fileMapText = ($rows -join "`n")
+  $fileMapBytes = [Text.UTF8Encoding]::new($false).GetBytes($fileMapText)
+  [BitConverter]::ToString(
+    [Security.Cryptography.SHA256]::Create().ComputeHash($fileMapBytes)
+  ).Replace('-','').ToLowerInvariant()
+}
+
 function Get-OceanDeployment {
   param(
     [string]$ConfigPath = 'D:\OceanTradingData\website\ocean-runtime\deployment.json'
@@ -68,9 +82,7 @@ function Get-OceanDeployment {
     }
     $validatedRuntimeFiles += [pscustomobject]@{ relative_path=$relativePath; sha256=$actualRuntimeHash }
   }
-  $fileMapText = (@($validatedRuntimeFiles | Sort-Object relative_path | ForEach-Object { "$($_.relative_path)`t$($_.sha256)" }) -join "`n")
-  $fileMapBytes = [Text.UTF8Encoding]::new($false).GetBytes($fileMapText)
-  $fileMapHash = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($fileMapBytes)).Replace('-','').ToLowerInvariant()
+  $fileMapHash = Get-OceanDeploymentFileMapHash -Entries $validatedRuntimeFiles
   if ([string]$deployment.file_map_sha256 -cne $fileMapHash) {
     throw 'Ocean deployment file-map hash mismatch.'
   }
