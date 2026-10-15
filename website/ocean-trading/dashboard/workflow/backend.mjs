@@ -705,7 +705,14 @@ export class WorkflowBackend {
     requireThat(row.stage !== "CLOSED" && row.work_status !== "CANCELLED", 409, "CASE_TERMINAL");
     let stage = row.stage; let status = row.work_status; let owner = row.owner_id; let waiting = null; let candidate = row.candidate_hash;
     if (data.action === "advance") {
-      this.active(row); this.baseline(row);
+      const candidateReviewRecovery = row.work_status === "BLOCKED"
+        && this.candidateReviewMutationAllowed("case.transition", actor, data, row);
+      if (candidateReviewRecovery) {
+        this.baseline(row);
+        this.db.prepare("UPDATE ow_blockers SET state='RESOLVED' WHERE case_id=? AND state='OPEN'").run(row.id);
+      } else {
+        this.active(row); this.baseline(row);
+      }
       const rule = TABLE.normal_transitions.find((entry) => entry.from === row.stage && entry.to === data.to_stage);
       requireThat(rule && rule.roles.includes(actor.role), 409, "INVALID_OR_UNAUTHORIZED_TRANSITION");
       if (rule.artifact) {
