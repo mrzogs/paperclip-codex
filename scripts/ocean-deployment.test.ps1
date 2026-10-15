@@ -21,8 +21,7 @@ try {
   $runtimeFiles = @($runtimePaths | ForEach-Object {
     [pscustomobject][ordered]@{relative_path=$_;sha256=(Get-FileHash -LiteralPath (Join-Path $dashboard $_) -Algorithm SHA256).Hash.ToLowerInvariant()}
   })
-  $fileMapText = (@($runtimeFiles | Sort-Object relative_path | ForEach-Object { "$($_.relative_path)`t$($_.sha256)" }) -join "`n")
-  $fileMapHash = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.UTF8Encoding]::new($false).GetBytes($fileMapText))).Replace('-','').ToLowerInvariant()
+  $fileMapHash = Get-OceanDeploymentFileMapHash -Entries $runtimeFiles
   $manifest = Join-Path $fixture 'deployment.json'
   [IO.File]::WriteAllText($manifest,([ordered]@{
     schema_version='ocean-website-deployment/v1'
@@ -44,6 +43,24 @@ try {
   Assert-Test (Test-OceanLocalAbsolutePath $dashboard) 'LOCAL_ABSOLUTE_PATH_WAS_REJECTED'
   Assert-Test (-not (Test-OceanLocalAbsolutePath '\\server\share\dashboard')) 'UNC_PATH_WAS_ACCEPTED'
   Assert-Test (-not (Test-OceanLocalAbsolutePath (Join-Path $dashboard '..\dashboard'))) 'NONCANONICAL_PATH_WAS_ACCEPTED'
+
+  $orderingFixture = @(
+    [pscustomobject]@{relative_path='public\workflow\icons.js';sha256=('1' * 64)}
+    [pscustomobject]@{relative_path='public\workflow\index.html';sha256=('2' * 64)}
+    [pscustomobject]@{relative_path='public\workflow\LUCIDE-LICENSE.txt';sha256=('3' * 64)}
+  )
+  $expectedOrderingText = @(
+    "public\workflow\LUCIDE-LICENSE.txt`t$('3' * 64)"
+    "public\workflow\icons.js`t$('1' * 64)"
+    "public\workflow\index.html`t$('2' * 64)"
+  ) -join "`n"
+  $expectedOrderingHash = [BitConverter]::ToString(
+    [Security.Cryptography.SHA256]::Create().ComputeHash(
+      [Text.UTF8Encoding]::new($false).GetBytes($expectedOrderingText)
+    )
+  ).Replace('-','').ToLowerInvariant()
+  Assert-Test ((Get-OceanDeploymentFileMapHash -Entries $orderingFixture) -ceq $expectedOrderingHash) `
+    'FILE_MAP_ORDER_WAS_NOT_ORDINAL'
 
   $wrongRuntimeHash = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
   $wrongRuntimeHash.files[0].sha256 = '0' * 64
