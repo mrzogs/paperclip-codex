@@ -1222,7 +1222,8 @@ const validationReport=(f,test,baselineHash)=>{
     const bytes=db.serialize();db.close();fs.writeFileSync(file,bytes);return {path:file,sha256:digest(bytes)};
   };
   const candidateContent=test.candidate_execution_hash===digest('candidate-validation-binary')?'candidate-validation-binary':'candidate-binary';
-  const baselineDll=write('baseline.dll','baseline'),candidateDll=write('candidate.dll',candidateContent),telemetryDll=write('telemetry.dll','telemetry-v0547');
+  const telemetryContent=test.telemetry_version==='v0.5.47'?'telemetry-v0547':`telemetry-${test.telemetry_version}`;
+  const baselineDll=write('baseline.dll','baseline'),candidateDll=write('candidate.dll',candidateContent),telemetryDll=write('telemetry.dll',telemetryContent);
   const segments=test.segments.map(segment=>{
     const physical=(side,runId,dll,strategyVersion,tradeCount,metrics)=>{
       const source=write(`${segment.segment_id}-${side}.cpp`,side==='baseline'
@@ -1622,6 +1623,17 @@ test('candidate completion survives restart and registration requires an approve
         partialRevision.data.expected_revision=f.backend.one('ow_cases',child.id).revision;
         partialRevision.data.supersedes_plan_hash=validationPlan.plan_hash;partialRevision.data.tests=structuredClone(matrix);
         partialRevision.data.tests[3].segments[0].candidate_run_id+='-retry';
+        const telemetryVersionOnly=structuredClone(partialRevision);telemetryVersionOnly.message_id='candidate-validation-plan-pending-telemetry-version-only';
+        telemetryVersionOnly.data.tests[3].telemetry_version='v0.5.48';
+        assert.equal((await validationHttp('validation-plan',telemetryVersionOnly)).body.error.code,'CANDIDATE_VALIDATION_PLAN_REVISION_NOT_ALLOWED');
+        const telemetryHashOnly=structuredClone(partialRevision);telemetryHashOnly.message_id='candidate-validation-plan-pending-telemetry-hash-only';
+        telemetryHashOnly.data.tests[3].telemetry_hash=digest('telemetry-v0.5.48');
+        assert.equal((await validationHttp('validation-plan',telemetryHashOnly)).body.error.code,'CANDIDATE_VALIDATION_PLAN_REVISION_NOT_ALLOWED');
+        const telemetryRollback=structuredClone(partialRevision);telemetryRollback.message_id='candidate-validation-plan-pending-telemetry-rollback';
+        telemetryRollback.data.tests[3].telemetry_version='v0.5.46';telemetryRollback.data.tests[3].telemetry_hash=digest('telemetry-v0.5.46');
+        assert.equal((await validationHttp('validation-plan',telemetryRollback)).body.error.code,'CANDIDATE_VALIDATION_PLAN_REVISION_NOT_ALLOWED');
+        partialRevision.data.tests[3].telemetry_version='v0.5.48';
+        partialRevision.data.tests[3].telemetry_hash=digest('telemetry-v0.5.48');
         const changesAcceptedEvidence=structuredClone(partialRevision);changesAcceptedEvidence.message_id='candidate-validation-plan-changes-accepted-evidence';
         changesAcceptedEvidence.data.tests[0].failure_rule+=' Must be rejected after this test passed.';
         assert.equal((await validationHttp('validation-plan',changesAcceptedEvidence)).body.error.code,'CANDIDATE_VALIDATION_PLAN_REVISION_NOT_ALLOWED');
@@ -1634,6 +1646,12 @@ test('candidate completion survives restart and registration requires an approve
         assert.deepEqual(taskStatus,{BACKTEST:'PASS',ROBUSTNESS:'PASS',WALK_FORWARD:'PASS',OOS_HOLDOUT:'NOT_RUN'});
       }
       if(index===1){
+        const acceptedTelemetry=structuredClone(revisedInput);acceptedTelemetry.message_id='candidate-validation-plan-accepted-telemetry-rebind';
+        acceptedTelemetry.data.expected_revision=f.backend.one('ow_cases',child.id).revision;
+        acceptedTelemetry.data.supersedes_plan_hash=validationPlan.plan_hash;acceptedTelemetry.data.tests=structuredClone(matrix);
+        acceptedTelemetry.data.tests[0].telemetry_version='v0.5.49';
+        acceptedTelemetry.data.tests[0].telemetry_hash=digest('telemetry-v0.5.49');
+        assert.equal((await validationHttp('validation-plan',acceptedTelemetry)).body.error.code,'CANDIDATE_VALIDATION_PLAN_REVISION_NOT_ALLOWED');
         const retuned=structuredClone(revisedInput);retuned.message_id='candidate-validation-plan-retuned-after-evidence';
         retuned.data.expected_revision=f.backend.one('ow_cases',child.id).revision;
         retuned.data.supersedes_plan_hash=validationPlan.plan_hash;retuned.data.tests=structuredClone(matrix);
