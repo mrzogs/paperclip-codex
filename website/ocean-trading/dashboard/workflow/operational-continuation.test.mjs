@@ -1555,10 +1555,14 @@ test('candidate completion survives restart and registration requires an approve
       artifact_id:returned.artifact_id,artifact_ids:null,decision_id:null,owner_id:null,next_action:null};
     assert.throws(()=>f.backend.mutate('case.transition',strategy,{message_id:'test-candidate-review-wrong-actor',data:transitionData}),/OPERATIONAL_PLANNING_MUTATION_NOT_ENABLED/);
     assert.throws(()=>f.backend.mutate('case.transition',f.human,{message_id:'test-candidate-review-wrong-stage',data:{...transitionData,to_stage:'CANDIDATE_DEVELOPMENT'}}),/OPERATIONAL_PLANNING_MUTATION_NOT_ENABLED/);
+    f.backend.db.prepare("UPDATE ow_cases SET work_status='BLOCKED',owner_id='brain',waiting_on='CONTINUATION_PLANNING_OWNER_REQUIRED' WHERE id=?").run(child.id);
+    f.backend.db.prepare("INSERT INTO ow_blockers VALUES(?,?,?,?,?)").run('test-candidate-review-recovery-blocker',child.id,'brain','CONTINUATION_PLANNING_OWNER_REQUIRED','OPEN');
     let row=f.backend.mutate('case.transition',f.human,{message_id:'test-candidate-review-transition',data:transitionData});
+    assert.equal(row.work_status,'READY');
+    assert.equal(f.backend.one('ow_blockers','test-candidate-review-recovery-blocker').state,'RESOLVED');
     f.restart();
     const resumedReview=f.backend.readCase(f.human,child.id);
-    assert.equal(resumedReview.stage,'DEVELOPMENT_REVIEW');assert.equal(resumedReview.approvals.length,0);
+    assert.equal(resumedReview.stage,'DEVELOPMENT_REVIEW');assert.equal(resumedReview.work_status,'READY');assert.equal(resumedReview.approvals.length,0);
     const approvalData={request_id:'test-candidate-review',case_id:child.id,expected_revision:row.revision,
       gate:'DEVELOPMENT',artifact_id:returned.artifact_id,recipient_id:'strategy',authorized_tests:['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'],
       expires_at_utc:new Date(Date.now()+3600000).toISOString()};
