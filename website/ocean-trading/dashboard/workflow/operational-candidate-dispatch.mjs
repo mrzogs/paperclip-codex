@@ -326,6 +326,7 @@ export class OperationalCandidateDispatch {
           && handoffPayload.gate==='DEVELOPMENT',409,'CANDIDATE_DISPATCHED_HANDOFF_REQUIRED');
         const approved=this.b.approved(current.row,'DEVELOPMENT',handoff.decision_id,actor.id);
         requireThat(REQUIRED_TESTS.every(kind=>approved.binding.authorized_tests.includes(kind)),409,'CANDIDATE_REQUIRED_TEST_AUTHORITY_MISSING');
+        requireThat(approved.binding.candidate_hash===completed.candidate.candidate_hash,409,'CANDIDATE_APPROVAL_HASH_MISMATCH');
         const acknowledged=this.b.handoffEvent(actor,{handoff_id:handoff.id,expected_revision:handoff.revision,
           state:'ACKNOWLEDGED',result_artifact_id:null,reason:null});
         const result={case_id:current.row.id,status:'ACKNOWLEDGED',revision:current.row.revision,
@@ -348,6 +349,7 @@ export class OperationalCandidateDispatch {
           && ['ACKNOWLEDGED','WORK_IN_PROGRESS'].includes(handoff.state) && handoffPayload.gate==='DEVELOPMENT',409,'CANDIDATE_APPROVED_HANDOFF_REQUIRED');
         const approved=this.b.approved(current.row,'DEVELOPMENT',handoff.decision_id,actor.id);
         requireThat(REQUIRED_TESTS.every(kind=>approved.binding.authorized_tests.includes(kind)),409,'CANDIDATE_REQUIRED_TEST_AUTHORITY_MISSING');
+        requireThat(approved.binding.candidate_hash===completed.candidate.candidate_hash,409,'CANDIDATE_APPROVAL_HASH_MISMATCH');
         requireThat(current.row.stage==='DEVELOPMENT_HANDOFF',409,'CANDIDATE_REGISTRATION_STAGE_REQUIRED');
         const development=this.b.transition(actor,{case_id:current.row.id,expected_revision:current.row.revision,action:'advance',
           to_stage:'CANDIDATE_DEVELOPMENT',artifact_id:null,artifact_ids:null,decision_id:null,owner_id:null,next_action:null});
