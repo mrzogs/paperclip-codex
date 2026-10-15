@@ -28,6 +28,21 @@ Assert-Test ($manager.Contains("Join-Path (Get-ValidatedOceanDeployment).Dashboa
 Assert-Test ($manager.Contains("`$_.Name -ieq 'node.exe'")) 'MONITOR_MATCH_DOES_NOT_REQUIRE_NODE'
 Assert-Test ($manager.Contains('[regex]::Escape($monitorPath)')) 'MONITOR_PATH_IS_NOT_REGEX_SAFE'
 Assert-Test (-not $manager.Contains("'node(\.exe)?")) 'MONITOR_MATCH_RETAINS_BASENAME_ONLY_REGEX'
+Assert-Test ($manager.Contains('function Get-ReleaseMonitorCommandPattern')) 'MONITOR_RESTART_CANNOT_FIND_PRIOR_RELEASE_GENERATIONS'
+Assert-Test ($manager.Contains('paperclip-source\\)?website\\ocean-trading\\dashboard\\monitor\.mjs')) `
+  'MONITOR_RELEASE_PATTERN_DOES_NOT_COVER_LEGACY_AND_CURRENT_LAYOUTS'
+Assert-Test ($manager.Contains("Join-Path `$Root 'scripts\run-ocean-monitor-supervised.ps1'")) `
+  'MONITOR_RESTART_CANNOT_FIND_PRIOR_SUPERVISORS'
+Assert-Test ($manager.Contains('function Get-MonitorOwnedProcessTree')) 'MONITOR_RESTART_DOES_NOT_CLEAN_CHILD_PROCESSES'
+Assert-Test ($manager.Contains('Stopped Ocean monitor generation PID')) 'MONITOR_RESTART_STILL_STOPS_ONLY_CURRENT_MONITOR'
+$releaseMonitorPattern = [regex]::Escape('D:\OceanTradingData\website\deployments\') +
+  'ocean-[^\\"]+\\(?:paperclip-source\\)?website\\ocean-trading\\dashboard\\monitor\.mjs(?:["\s]|$)'
+Assert-Test ('node D:\OceanTradingData\website\deployments\ocean-r8\paperclip-source\website\ocean-trading\dashboard\monitor.mjs' -match $releaseMonitorPattern) `
+  'MONITOR_RELEASE_PATTERN_REJECTS_CURRENT_LAYOUT'
+Assert-Test ('node D:\OceanTradingData\website\deployments\ocean-r9\website\ocean-trading\dashboard\monitor.mjs' -match $releaseMonitorPattern) `
+  'MONITOR_RELEASE_PATTERN_REJECTS_LEGACY_LAYOUT'
+Assert-Test (-not ('node D:\OceanTradingData\website\deployments\ocean-r9\website\ocean-trading\dashboard\build-manifest.mjs' -match $releaseMonitorPattern)) `
+  'MONITOR_RELEASE_PATTERN_MATCHES_NON_MONITOR_CHILD'
 Assert-Test ($manager.Contains("Join-Path `$Root 'scripts\run-hidden-service.vbs'")) 'MANAGER_BYPASSES_HIDDEN_LAUNCHER'
 foreach ($dependency in @('ocean-deployment.ps1','run-hidden-service.vbs','run-paperclip-supervised.ps1',
     'run-codex-bridge-supervised.ps1','run-ocean-monitor-supervised.ps1','run-ocean-website-supervised.ps1',
