@@ -49,6 +49,8 @@ export const pendingTestRerunCompatible=(existing,proposed)=>{
     normalized.segments[index].baseline_run_id=existing.segments[index].baseline_run_id;
     normalized.segments[index].candidate_run_id=existing.segments[index].candidate_run_id;
   }
+  if(!Object.hasOwn(existing,'baseline_execution_source_hash'))delete normalized.baseline_execution_source_hash;
+  if(!Object.hasOwn(existing,'candidate_execution_source_hash'))delete normalized.candidate_execution_source_hash;
   return objectHash(existing)===objectHash(normalized);
 };
 
