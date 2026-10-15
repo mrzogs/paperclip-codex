@@ -22,6 +22,7 @@ function fixture(t) {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'ocean-attempt-failure-mock-'));
   const store=new WorkflowStore(path.join(root,'workflow.sqlite')),db=store.db;
   const telemetryFile=path.join(root,'telemetry.sqlite'),sql=new DatabaseSync(telemetryFile);sql.exec(schema.toString());
+  sql.exec('ALTER TABLE replay_run_context ADD COLUMN fee_model_version TEXT; ALTER TABLE replay_run_context ADD COLUMN fee_schedule_hash TEXT;');
   t.after(()=>{sql.close();store.close();fs.rmSync(root,{recursive:true,force:true});});
   const context={...structuredClone(examples['run-context']),run_id:'mock-failed-u',strategy_id:'mock-vwap',
     execution_instance_id:'mock-replay',expected_environment:'REPLAY',evidence_purpose:'HISTORICAL_BUILD',
@@ -37,7 +38,10 @@ function fixture(t) {
   db.prepare('INSERT INTO ow_strategies VALUES(?,?,?,?,?)').run(context.strategy_id,profileKey,1,context.strategy_code_hash,JSON.stringify({strategy_id:context.strategy_id}));
   db.prepare('INSERT INTO ow_identities(id,role,metadata_json) VALUES(?,?,?)').run(instance.telemetry_producer_id,'TELEMETRY','{"mock_only":true}');
   const plan={context_hash:context.context_hash,reprocess_of_run_id:'mock-original-completed-u',
-    selection:{interval:requested},operational_review:{factual_binding_hash:bindingHash,manifest_key:'mock-manifest',partition_index:0,interval:requested,context}};
+    selection:{interval:requested},operational_review:{factual_binding_hash:bindingHash,manifest_key:'mock-manifest',partition_index:0,interval:requested,context},
+    execution_fee_context:{schema_version:'ocean-operational-fee-context/v1',fee_model_version:'ocean-observed-cost-model/v1',
+      fee_schedule_hash:digest('mock-fee-schedule'),source_binding_hash:bindingHash}};
+  plan.execution_fee_context.fee_context_hash=sealedHash(plan.execution_fee_context,'fee_context_hash');
   plan.plan_hash=sealedHash(plan,'plan_hash');
   db.prepare('INSERT INTO ow_instances VALUES(?,?,?)').run(context.execution_instance_id,context.strategy_id,JSON.stringify(instance));
   db.prepare("INSERT INTO ow_runs VALUES(?,?,?,2,'ACTIVE',?)").run(context.run_id,context.strategy_id,context.execution_instance_id,JSON.stringify(context));
@@ -48,16 +52,18 @@ function fixture(t) {
   const config={schema_version:'ocean-replay-run-bridge/v4',namespace:'OPERATIONAL',workflow_db:store.filename || path.join(root,'workflow.sqlite'),
     telemetry_db:telemetryFile,strategy_id:context.strategy_id,instance_id:context.execution_instance_id,factual_binding_hash:bindingHash,
     source_preflight_status_path:path.join(root,'vwap-replay-status.txt'),account_alias:'Sim1',expected_symbol:'MNQU25_FUT_CME',
-    expected_chart_number:1,expected_sierra_exe:path.join(root,'SierraChart_64.exe'),expected_chartbook_path:path.join(root,'Data','mock.cht'),
+    expected_chart_number:1,expected_controller_version:'v0.2.3-read-only-study-input-export',expected_sierra_exe:path.join(root,'SierraChart_64.exe'),expected_chartbook_path:path.join(root,'Data','mock.cht'),
     expected_strategy_version:'v0.6.237',expected_strategy_module_sha256:digest('mock-strategy-dll'),managed_candidate_id:'mock-managed',
-    expected_session_name:'All',expected_session_timezone:'Europe/London'};
+    expected_session_name:'All',expected_session_timezone:'Europe/London',expected_fee_model_version:'ocean-observed-cost-model/v1',
+    expected_fee_schedule_hash:digest('mock-fee-schedule')};
   const start={commandId:'mock-attempt3-start',action:'start',tradeAccount:'Sim1',expectedSymbol:config.expected_symbol,
     telemetryRunId:context.run_id,telemetryStrategyId:context.strategy_id,telemetryStrategyVersion:config.expected_strategy_version,
     telemetryDllSha256:config.expected_strategy_module_sha256.slice(7),telemetryCandidateId:config.managed_candidate_id,
     telemetryStrategyCodeHash:context.strategy_code_hash,telemetryStrategyConfigHash:context.strategy_config_hash,
     telemetryContextHash:context.context_hash,telemetryDatasetId:`${context.dataset_manifest_id}:${context.dataset_manifest_revision}`,
     telemetryDatasetRole:context.dataset_partition,telemetryStrategyProfileId:context.strategy_profile_id,
-    telemetryStrategyProfileVersion:context.strategy_profile_version,telemetrySessionName:'All',telemetrySessionTimezone:'Europe/London'};
+    telemetryStrategyProfileVersion:context.strategy_profile_version,telemetrySessionName:'All',telemetrySessionTimezone:'Europe/London',
+    telemetryFeeModelVersion:config.expected_fee_model_version,telemetryFeeScheduleHash:config.expected_fee_schedule_hash};
   const encode=value=>Buffer.from(Object.entries(value).map(([key,v])=>`${key}=${v}`).join('\n')+'\n');
   const startBytes=encode(start),badStatus=encode({commandId:'auto-stop',status:'stop_requested'});
   const failure={run_id:context.run_id,reason:'managed_completion_identity_failure',observed_at_utc:'2026-10-08T16:52:11.572Z',
@@ -79,7 +85,8 @@ function fixture(t) {
   insert('replay_run_context',{run_id:context.run_id,candidate_id:config.managed_candidate_id,dataset_id:start.telemetryDatasetId,
     dataset_role:context.dataset_partition,strategy_profile_id:context.strategy_profile_id,strategy_profile_version:context.strategy_profile_version,
     strategy_code_hash:context.strategy_code_hash,strategy_config_hash:context.strategy_config_hash,context_hash:context.context_hash,
-    session_name:'All',session_timezone:'Europe/London'});
+    session_name:'All',session_timezone:'Europe/London',fee_model_version:config.expected_fee_model_version,
+    fee_schedule_hash:config.expected_fee_schedule_hash});
   const attempt={attempt_id:25,run_id:context.run_id,attempt_number:3,attempt_started_utc:'2026-10-08T14:08:08Z',
     attempt_ended_utc:'2026-10-08 16:52:11',start_command_id:start.commandId,stop_command_id:'mock-attempt3-failed-start-stop',starting_trade_id:969,starting_fill_id:1937};
   insert('replay_run_attempts',attempt);
@@ -283,7 +290,7 @@ function delayedFixture(t) {
   const stopFile=path.join(f.root,'vwap-replay-command.txt'),stopId='mock-attempt3-failed-start-stop';
   const commandId=`oql-managed-status-${'a'.repeat(32)}`;
   f.failure.observed_at_utc='2026-10-08T16:52:36.572Z';
-  f.failure.controller_receipt={...f.failure.controller_receipt,controllerVersion:'v0.2.1-cicd-vwap-time-basis',commandId,
+  f.failure.controller_receipt={...f.failure.controller_receipt,controllerVersion:f.config.expected_controller_version,commandId,
     action:'status',status:'status',statusFilePath:controllerFile,currentChartDateTime:'2025-09-19 14:25:00',error:null};
   const hook={commandId:stopId,action:'stop',status:'error',chartNumber:1,symbol:f.config.expected_symbol,
     isReplayRunning:true,replayStatus:1,controllerLifecycleActive:true,chartDataType:2,secondsPerBar:300,

@@ -16,7 +16,7 @@ import { CONTINUATION_ORIGIN } from './operational-continuation.mjs';
 import { readWorkflowView } from './ui-api.mjs';
 import { digest, objectHash } from './common.mjs';
 import { consumePlanningOnce } from '../../../../scripts/consume-ocean-proposal-planning.mjs';
-import { acceptedTestRevisionCompatible, OperationalCandidateDispatch, pendingTestRerunCompatible } from './operational-candidate-dispatch.mjs';
+import { acceptedTestRevisionCompatible, CANDIDATE_VALIDATION_PLAN_VERSION, OperationalCandidateDispatch, pendingTestRerunCompatible } from './operational-candidate-dispatch.mjs';
 import { candidateMetricContract, OperationalCandidateGovernance } from './operational-candidate-governance.mjs';
 import { CANDIDATE_EVALUATION_RESULT_VERSION, OperationalCandidateEvaluator } from './operational-candidate-evaluation.mjs';
 
@@ -1195,7 +1195,8 @@ const validationMatrix=(f,baselineHash)=>{
     [segment('robustness-h26','DISCOVERY','MNQH26_FUT_CME[M]','2026-01-01T00:00:00.000Z','2026-01-15T00:00:00.000Z','2026-02-15T00:00:00.000Z')],
     [segment('walk-forward-m26','VALIDATION','MNQM26_FUT_CME[M]','2026-03-18T00:00:00.000Z','2026-04-01T00:00:00.000Z','2026-04-30T23:00:00.000Z')],
     [segment('holdout-m26','HOLDOUT','MNQM26_FUT_CME[M]','2026-05-01T00:00:00.000Z','2026-05-15T00:00:00.000Z','2026-06-14T23:00:00.000Z')]];
-  const cost_model={schema_version:'ocean-observed-cost-model/v1',broker_profile:'Stage5_ActiveTrader',product:'MNQ',fee_tier:'active_trader',
+  const cost_model={schema_version:'ocean-observed-cost-model/v2',fee_model_version:'sierra-telemetry-fee-model/v1',
+    fee_schedule_hash:digest('fixture-observed-sierra-fee-schedule'),broker_profile:'Stage5_ActiveTrader',product:'MNQ',fee_tier:'active_trader',
     currency:'USD',total_fee_per_side:0.57,effective_from:'2026-01-01',source_reference:'fixture-observed-sierra-fees',source_type:'sierra_observed'};
   return ['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'].map((kind,index)=>({kind,
     baseline_version:'v0.6.240-test-wrapper-baseline',
@@ -1259,9 +1260,11 @@ const validationReport=(f,test,baselineHash)=>{
     const file=path.join(f.root,segment.segment_id,side,'telemetry.sqlite');fs.mkdirSync(path.dirname(file),{recursive:true});
     const db=new DatabaseSync(':memory:');
     db.exec(`CREATE TABLE replay_runs(run_id TEXT PRIMARY KEY);
+      CREATE TABLE replay_run_context(run_id TEXT PRIMARY KEY,fee_model_version TEXT,fee_schedule_hash TEXT);
       CREATE TABLE trades(run_id TEXT,trade_id TEXT,trade_account TEXT,is_simulated INTEGER,strategy_id TEXT,fees_available INTEGER,
         total_fee_per_side REAL,total_commission REAL,fee_broker_profile TEXT,fee_product_code TEXT,fee_tier TEXT,fee_source_type TEXT);`);
     db.prepare('INSERT INTO replay_runs VALUES(?)').run(runId);
+    db.prepare('INSERT INTO replay_run_context VALUES(?,?,?)').run(runId,test.cost_model.fee_model_version,test.cost_model.fee_schedule_hash);
     const insert=db.prepare('INSERT INTO trades VALUES(?,?,?,?,?,?,?,?,?,?,?,?)');
     for(let index=0;index<tradeCount;index++)insert.run(runId,`${runId}-${index}`,'Sim1',1,'s',1,test.cost_model.total_fee_per_side,
       2,test.cost_model.broker_profile,test.cost_model.product,test.cost_model.fee_tier,test.cost_model.source_type);
@@ -1617,6 +1620,20 @@ test('candidate completion survives restart and registration requires an approve
     assert.match(html,/Paper, Live and promotion remain disabled/);
     assert.match(html,/Candidate governance: REQUIRED/);assert.match(html,/Register candidate governance before planning/);
     assert.doesNotMatch(html,/Candidate testing: NOT_DUE|Planning only; no candidate development or test permission/);
+    f.backend.db.exec('SAVEPOINT legacy_candidate_read_model');
+    try {
+      const legacyPlanHash=digest('legacy-validation-plan');
+      f.backend.event(child.id,'operational.candidate.validation.plan',strategy,{schema_version:'ocean-operational-candidate-validation/v2',
+        plan_hash:legacyPlanHash,governance_hash:null,tests:['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'].map(kind=>({kind}))});
+      f.backend.db.prepare('UPDATE ow_cases SET waiting_on=? WHERE id=?').run(`Run OOS_HOLDOUT from validation plan ${legacyPlanHash}.`,child.id);
+      const legacy=readWorkflowView(f.backend,f.human,`view/cases/${child.id}`),legacyHtml=page(legacy);
+      assert.equal(legacy.candidate_governance.status,'LEGACY_INCOMPLETE');
+      assert.match(legacy.waiting_on,/Start a fresh candidate attempt/);assert.doesNotMatch(legacy.waiting_on,/Run OOS_HOLDOUT/);
+      assert.match(legacyHtml,/Legacy validation attempt/);assert.match(legacyHtml,/closed for a favorable conclusion/);
+      assert.match(legacyHtml,/NOT_ALLOWED/);assert.doesNotMatch(legacyHtml,/Waiting on: Run OOS_HOLDOUT/);
+    } finally {
+      f.backend.db.exec('ROLLBACK TO legacy_candidate_read_model; RELEASE legacy_candidate_read_model');
+    }
     assert.throws(()=>f.backend.mutate('artifact.write',strategy,{message_id:'test-generic-post-registration-write',data:{case_id:child.id}}),/OPERATIONAL_PLANNING_MUTATION_NOT_ENABLED/);
     const validationHttp=async(route,body)=>{
       const request={method:'POST',headers:{'content-type':'application/json'},socket:{remoteAddress:'127.0.0.1'},
@@ -1626,6 +1643,38 @@ test('candidate completion survives restart and registration requires an approve
       return {status:response.statusCode,body:output};
     };
     let matrix=validationMatrix(f,child.baseline_hash);const registeredRow=f.backend.one('ow_cases',child.id);
+    f.backend.db.exec('SAVEPOINT prospective_candidate_plan');
+    try {
+      const seed=governanceInput(f,child,completed,matrix).data;
+      const prospective={message_id:'candidate-prospective-plan',data:{case_id:child.id,expected_revision:registeredRow.revision,
+        completion_hash:seed.completion_hash,candidate_hash:seed.candidate_hash,baseline_hash:seed.baseline_hash,
+        policy:seed.policy,bindings:seed.bindings,schedule:{plan_id:'test-prospective-plan',source_owner_id:'brain',
+          source_plan_hash:digest('future-source-plan'),contract_policy_hash:digest('future-contract-policy'),
+          session_policy_hash:digest('future-session-policy'),warmup_policy_hash:digest('future-warmup-policy'),
+          embargo_policy_hash:digest('future-embargo-policy'),holdout_start_utc:'2035-11-01T00:00:00.000Z',
+          holdout_end_utc:'2036-01-01T00:00:00.000Z',forward_start_utc:'2036-01-01T00:00:00.000Z',
+          forward_end_utc:'2036-03-01T00:00:00.000Z',timezone:'Europe/London',
+          interval_policy:'TWO_COMPLETE_CALENDAR_MONTHS_HALF_OPEN',
+          exposure_attestation_method:'Authenticated source-owner metadata review before every evidence release.'},
+        evaluation_policy:seed.evaluation_policy,access:{status:'PLANNING_ONLY',evidence_access_state:'UNEXPOSED_AT_DECLARATION',
+          attestation_hash:digest('future-unexposed-attestation'),brain_record_id:'reasoning/test-prospective-plan.md',
+          brain_record_hash:digest('future-brain-record')}}};
+      const declared=f.backend.operationalCandidateGovernance.declareProspectivePlan(strategy,
+        f.backend.one('ow_cases',child.id),f.backend.operationalCandidateDispatch.completion(child.id),
+        f.backend.operationalCandidateDispatch.registration(child.id),prospective.data);
+      assert.equal(declared.status,'PROSPECTIVE_RESERVED');assert.equal(declared.executable_dataset,false);
+      const reserved=f.backend.readCase(f.human,child.id).candidate_governance;
+      assert.equal(reserved.status,'PROSPECTIVE_RESERVED');assert.equal(reserved.prospective_plan_hash,declared.prospective_plan_hash);
+      assert.match(reserved.next_action,/source owner.*complete qualified coverage/i);
+      const premature=governanceInput(f,child,completed,matrix);premature.message_id='candidate-governance-premature-prospective';
+      premature.data.expected_revision=f.backend.one('ow_cases',child.id).revision;
+      premature.data.prospective_plan_hash=declared.prospective_plan_hash;
+      assert.throws(()=>f.backend.operationalCandidateGovernance.register(strategy,f.backend.one('ow_cases',child.id),
+        f.backend.operationalCandidateDispatch.completion(child.id),f.backend.operationalCandidateDispatch.registration(child.id),premature.data),
+      /CANDIDATE_GOVERNANCE_PROSPECTIVE_PLAN_CONFLICT/);
+    } finally {
+      f.backend.db.exec('ROLLBACK TO prospective_candidate_plan; RELEASE prospective_candidate_plan');
+    }
     const planWithoutGovernance={message_id:'candidate-validation-plan-without-governance',data:{case_id:child.id,expected_revision:registeredRow.revision,
       completion_hash:completed.completion.completion_hash,candidate_hash:candidateBuild().candidate_hash,baseline_hash:child.baseline_hash,
       plan_artifact_id:returned.artifact_id,tests:matrix}};
@@ -1679,7 +1728,7 @@ test('candidate completion survives restart and registration requires an approve
     const originalPlanHash=validationPlan.plan_hash;validationPlan=revisedResponse.body;matrix=revisedInput.data.tests;
     assert.equal(validationPlan.plan_revision,2);assert.equal(validationPlan.supersedes_plan_hash,originalPlanHash);
     const secondSealedPlan=f.backend.operationalCandidateDispatch.validationPlan(child.id);
-    assert.equal(secondSealedPlan.schema_version,'ocean-operational-candidate-validation/v4');
+    assert.equal(secondSealedPlan.schema_version,CANDIDATE_VALIDATION_PLAN_VERSION);
     assert.equal(secondSealedPlan.owner_id,firstSealedPlan.owner_id);
     assert.equal(secondSealedPlan.decision_id,firstSealedPlan.decision_id);
     assert.ok(Date.parse(secondSealedPlan.created_at_utc)>=Date.parse(firstSealedPlan.created_at_utc));
@@ -1829,7 +1878,17 @@ test('candidate completion survives restart and registration requires an approve
             Object.assign(file,{path:changedPath,sha256:digest(bytes)});break;}
           db.close();
         }
-        assert.equal((await validationHttp('validation-results',wrongCost)).body.error.code,'CANDIDATE_VALIDATION_COST_EVIDENCE_CONFLICT');}
+        assert.equal((await validationHttp('validation-results',wrongCost)).body.error.code,'CANDIDATE_VALIDATION_COST_EVIDENCE_CONFLICT');
+        const wrongFeeContext=structuredClone(input);wrongFeeContext.message_id='candidate-validation-wrong-fee-context';
+        for(const file of wrongFeeContext.data.result.segments[0].source_files.filter(item=>path.basename(item.path)==='telemetry.sqlite')){
+          const db=new DatabaseSync(':memory:');db.deserialize(fs.readFileSync(file.path));
+          const matches=db.prepare('SELECT COUNT(*) n FROM replay_runs WHERE run_id=?').get(wrongFeeContext.data.result.segments[0].baseline.run_id).n;
+          if(matches){db.prepare('UPDATE replay_run_context SET fee_schedule_hash=?').run(digest('wrong-fee-schedule'));
+            const bytes=db.serialize(),changedPath=path.join(f.root,'wrong-fee-context','telemetry.sqlite');db.close();fs.mkdirSync(path.dirname(changedPath),{recursive:true});fs.writeFileSync(changedPath,bytes);
+            Object.assign(file,{path:changedPath,sha256:digest(bytes)});break;}
+          db.close();
+        }
+        assert.equal((await validationHttp('validation-results',wrongFeeContext)).body.error.code,'CANDIDATE_VALIDATION_FEE_CONTEXT_CONFLICT');}
       if(index===3){
         const missingMarker=structuredClone(input.data.result),candidateEvidence=missingMarker.segments[0].candidate;
         missingMarker.segments[0].source_files=missingMarker.segments[0].source_files

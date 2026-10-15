@@ -25,7 +25,9 @@ export async function currentFixture({logicalVersion,sessionObservationMode}={})
     expected_sierra_exe:path.join(root,'SierraChart_64.exe'),poll_seconds:10,state_file:path.join(root,'mock-bridge-state.json'),
     factual_binding_hash:b.config.identities[0].factual_binding_hash,minimum_schema_version:14,freshness_seconds:120,
     expected_chartbook_path:path.join(root,'Data','mock-frozen.Cht'),expected_chart_number:1,expected_chartbook_sha256:digest('mock-cht'),
+    expected_controller_version:'v0.2.3-read-only-study-input-export',
     time_basis:'Native chart display; no assumed UTC conversion',session_calendar_revision:'mock-calendar',fill_model_version:'mock-native',
+    expected_fee_model_version:'ocean-observed-cost-model/v1',expected_fee_schedule_hash:digest('mock-fee-schedule'),
     managed_candidate_id:'mock-managed',expected_session_name:'All',expected_session_timezone:'Europe/London',
     expected_bar_period_seconds:300,expected_strategy_module_path:path.join(root,'mock-strategy.dll'),
     expected_strategy_module_sha256:digest('mock-strategy'),expected_telemetry_module_path:path.join(root,'mock-logger.dll'),
@@ -41,7 +43,10 @@ export async function currentFixture({logicalVersion,sessionObservationMode}={})
   const requested={start_utc:'2025-08-31T23:00:00.000Z',end_utc:'2025-09-12T23:00:00.000Z'};
   const storedPlan={selection:{strategy_id:'s',instance_id:'i',interval:requested,purpose:'HISTORICAL_BUILD'},
     context_hash:context.context_hash,operational_review:{context,factual_binding_hash:config.factual_binding_hash,
-      manifest_key:'mock-current-manifest',partition_index:0,interval:requested}};
+      manifest_key:'mock-current-manifest',partition_index:0,interval:requested},execution_fee_context:{
+      schema_version:'ocean-operational-fee-context/v1',fee_model_version:config.expected_fee_model_version,
+      fee_schedule_hash:config.expected_fee_schedule_hash,source_binding_hash:config.factual_binding_hash}};
+  storedPlan.execution_fee_context.fee_context_hash=sealedHash(storedPlan.execution_fee_context,'fee_context_hash');
   storedPlan.plan_hash=sealedHash(storedPlan,'plan_hash');
   db.prepare("INSERT INTO ow_runs VALUES(?,?,?,2,'ACTIVE',?)").run(runId,'s','i',JSON.stringify(context));
   db.prepare('INSERT INTO ow_run_plans VALUES(?,?,?)').run(runId,digest('mock-coverage'),JSON.stringify(storedPlan));
@@ -51,6 +56,7 @@ export async function currentFixture({logicalVersion,sessionObservationMode}={})
   db.prepare('INSERT INTO ow_operational_releases VALUES(?,?,?)').run(runId,context.context_hash,'{}');
   const physical='mock-physical-writer',started=new Date(Date.now()-600000),startId='mock-attempt26-start';
   const sql=new DatabaseSync(config.telemetry_db);sql.exec(schema.toString());
+  sql.exec('ALTER TABLE replay_run_context ADD COLUMN fee_model_version TEXT; ALTER TABLE replay_run_context ADD COLUMN fee_schedule_hash TEXT;');
   const insert=(table,row)=>{const keys=Object.keys(row);sql.prepare(`INSERT INTO ${table}(${keys.join(',')}) VALUES(${keys.map(()=>'?').join(',')})`).run(...Object.values(row));};
   insert('sierra_instance',{instance_id:physical,instance_name:'mock',instance_role:'replay',sierra_exe_path:config.expected_sierra_exe,
     sierra_data_path:path.join(root,'Data'),database_path:config.telemetry_db});
@@ -64,7 +70,8 @@ export async function currentFixture({logicalVersion,sessionObservationMode}={})
   insert('replay_run_context',{run_id:runId,candidate_id:config.managed_candidate_id,dataset_id:'mock-discovery:1',dataset_role:'DISCOVERY',
     strategy_profile_id:context.strategy_profile_id,strategy_profile_version:context.strategy_profile_version,
     strategy_code_hash:context.strategy_code_hash,strategy_config_hash:context.strategy_config_hash,context_hash:context.context_hash,
-    session_name:'All',session_timezone:'Europe/London',...(sessionObservationMode?{session_observation_mode:sessionObservationMode}:{})});
+    session_name:'All',session_timezone:'Europe/London',fee_model_version:config.expected_fee_model_version,
+    fee_schedule_hash:config.expected_fee_schedule_hash,...(sessionObservationMode?{session_observation_mode:sessionObservationMode}:{})});
   insert('replay_run_attempts',{attempt_id:26,run_id:runId,attempt_number:1,attempt_started_utc:started.toISOString(),start_command_id:startId});
   const start={commandId:startId,action:'start',expectedSymbol:config.expected_symbol,tradeAccount:'Sim1',
     startDateTime:'2025-08-18 00:00:00',tradeStartDateTime:'2025-09-01 00:00:00',endDateTime:'2025-09-13 00:00:00',
@@ -73,7 +80,8 @@ export async function currentFixture({logicalVersion,sessionObservationMode}={})
     telemetryContextHash:context.context_hash,telemetryCandidateId:config.managed_candidate_id,telemetryDatasetId:'mock-discovery:1',
     telemetryDatasetRole:'DISCOVERY',telemetryStrategyProfileId:context.strategy_profile_id,telemetryStrategyProfileVersion:context.strategy_profile_version,
     telemetryStrategyCodeHash:context.strategy_code_hash,telemetryStrategyConfigHash:context.strategy_config_hash,
-    telemetrySessionName:'All',telemetrySessionTimezone:'Europe/London',
+    telemetrySessionName:'All',telemetrySessionTimezone:'Europe/London',telemetryFeeModelVersion:config.expected_fee_model_version,
+    telemetryFeeScheduleHash:config.expected_fee_schedule_hash,
     ...(sessionObservationMode?{telemetrySessionObservationMode:sessionObservationMode}:{})};
   const commandFile=path.join(root,'vwap-replay-command.txt');fs.writeFileSync(commandFile,encode(start));
   const hook={commandId:startId,action:'start',status:'running',controllerLifecycleActive:'true',chartNumber:1,
@@ -86,7 +94,7 @@ export async function currentFixture({logicalVersion,sessionObservationMode}={})
   const controllerId=`oql-managed-status-${'a'.repeat(32)}`;
   const request={schema:'ocean-trading.sierra-replay-controller.command.v1',commandId:controllerId,action:'status',chartNumber:1,
     saveChartbook:false,expectedInstanceDataFolder:path.join(root,'Data')};
-  const receipt={schema:'ocean-trading.sierra-replay-controller.status.v1',controllerVersion:'v0.2.1-cicd-vwap-time-basis',
+  const receipt={schema:'ocean-trading.sierra-replay-controller.status.v1',controllerVersion:config.expected_controller_version,
     commandId:controllerId,action:'status',status:'status',chartNumber:1,chartbookPath:config.expected_chartbook_path,
     statusFilePath:controllerFile,instanceDataFolder:request.expectedInstanceDataFolder,isReplayRunning:true,replayStatus:1,
     chartReplayStatus:1,error:null,currentChartDateTime:'2025-08-18 14:03:00'};

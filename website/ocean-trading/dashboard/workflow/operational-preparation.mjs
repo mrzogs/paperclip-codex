@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import {API_VERSION,exactKeys,future,id,noSecrets,objectHash,requireThat,sealedHash} from './common.mjs';
 import {PURPOSES,interval,subtract,intersect,merge} from './run-manager.mjs';
 
@@ -16,6 +17,20 @@ export function onboardingLineageDecisionId(sourceDecisionId,reviewHash){
 // Provider-owned release contract. It does not add enum values to shared 2.1.0 decisions.
 export class OperationalPreparation {
   constructor(backend){this.b=backend;this.db=backend.db;}
+  feeContext(review){
+    const file=this.b.operationalLearning?.physicalBindingFile;
+    requireThat(typeof file==='string' && fs.existsSync(file) && fs.statSync(file).isFile(),503,'OPERATIONAL_FEE_CONTEXT_SOURCE_REQUIRED');
+    let bridge;try{bridge=JSON.parse(fs.readFileSync(file,'utf8'));}catch{requireThat(false,503,'OPERATIONAL_FEE_CONTEXT_SOURCE_INVALID');}
+    requireThat(bridge.schema_version==='ocean-replay-run-bridge/v4' && bridge.namespace==='OPERATIONAL'
+      && bridge.strategy_id===review.context.strategy_id && bridge.instance_id===review.context.execution_instance_id
+      && bridge.factual_binding_hash===review.factual_binding_hash
+      && typeof bridge.expected_fee_model_version==='string' && bridge.expected_fee_model_version.trim().length>0
+      && /^sha256:[a-f0-9]{64}$/.test(bridge.expected_fee_schedule_hash || ''),
+    503,'OPERATIONAL_FEE_CONTEXT_SOURCE_CONFLICT');
+    const frozen={schema_version:'ocean-operational-fee-context/v1',fee_model_version:bridge.expected_fee_model_version,
+      fee_schedule_hash:bridge.expected_fee_schedule_hash,source_binding_hash:review.factual_binding_hash};
+    return {...frozen,fee_context_hash:objectHash(frozen)};
+  }
   review(actor,input){
     human(actor);
     exactKeys(input,[...REVIEW_INPUT_KEYS,...REVIEW_READBACK_KEYS]);
@@ -224,7 +239,8 @@ export class OperationalPreparation {
     context.context_hash=sealedHash(context,'context_hash');
     const nextReview=this.validateReview({context,manifest_key:review.manifest_key,factual_binding_hash:review.factual_binding_hash,interval:review.interval,prior_exposure:review.prior_exposure,expires_at_utc:review.expires_at_utc});
     context=nextReview.context;
-    const sourceRecord=this.b.runs.managed(input.source_run_id),coverageKey=sourceRecord.coverage_key;
+    const sourceRecord=this.b.runs.managed(input.source_run_id),coverageKey=sourceRecord.coverage_key,
+      executionFeeContext=this.feeContext(nextReview);
     const preCounts={source_run_id:input.source_run_id,source_run_revision:source.run.revision,source_processing_id:source.plan.processing_id || input.source_run_id,unique_canonical_trade_count:summary.unique_canonical_count,processing_event_count:summary.processing_count,no_trade_interval_count:completion.no_trade_interval_count,coverage_receipt_hash:objectHash(completion),coverage_key:coverageKey,producer_id:source.plan.instance.telemetry_producer_id};
     const decisions={};
     const createDecision=(scope,direct=false)=>{
@@ -235,7 +251,7 @@ export class OperationalPreparation {
     return this.b.store.transaction(()=>{
       createDecision('STRATEGY_ONBOARDING');createDecision('DATASET_RELEASE');createDecision('RUN_RELEASE',true);
       const permission={permission_id:input.run_id,strategy_id:context.strategy_id,manifest_key:nextReview.manifest_key,manifest_hash:nextReview.manifest_hash,purposes:[context.evidence_purpose],expires_at_utc:nextReview.expires_at_utc,prior_exposure:nextReview.prior_exposure,test_only:false,review:nextReview,decisions,reprocess_of_run_id:input.source_run_id};
-      const plan={selection:{strategy_id:context.strategy_id,instance_id:context.execution_instance_id,purpose:context.evidence_purpose,permission_id:input.run_id,partition_index:nextReview.partition_index,interval:nextReview.interval,build_mode:'REPROCESS_EXISTING_HISTORY'},context_hash:context.context_hash,operational_review:nextReview,processing_id:input.processing_id,reprocess_of_run_id:input.source_run_id,canonical_identity_key:coverageKey,pre_reprocess_counts:preCounts};plan.plan_hash=objectHash(plan);
+      const plan={selection:{strategy_id:context.strategy_id,instance_id:context.execution_instance_id,purpose:context.evidence_purpose,permission_id:input.run_id,partition_index:nextReview.partition_index,interval:nextReview.interval,build_mode:'REPROCESS_EXISTING_HISTORY'},context_hash:context.context_hash,operational_review:nextReview,execution_fee_context:executionFeeContext,processing_id:input.processing_id,reprocess_of_run_id:input.source_run_id,canonical_identity_key:coverageKey,pre_reprocess_counts:preCounts};plan.plan_hash=objectHash(plan);
       this.db.prepare('INSERT INTO ow_dataset_permissions VALUES(?,?,?)').run(input.run_id,context.strategy_id,JSON.stringify(permission));
       this.db.prepare("INSERT INTO ow_runs VALUES(?,?,?,1,'READY',?)").run(input.run_id,context.strategy_id,context.execution_instance_id,JSON.stringify(context));
       this.db.prepare('INSERT INTO ow_run_plans VALUES(?,?,?)').run(input.run_id,coverageKey,JSON.stringify(plan));
@@ -355,7 +371,8 @@ export class OperationalPreparation {
       this.db.prepare('INSERT INTO ow_operational_decisions VALUES(?,?,?,?,?)').run(input.decision_id,review.context.strategy_id,review.review_hash,input.scope,JSON.stringify(decision));return decision;
     }
     requireThat(action==='runs/prepare',404,'UNKNOWN_OPERATIONAL_PREPARATION');
-    const decisions=Object.fromEntries(RELEASE_SCOPES.map(s=>[s,this.approved(review,s)])),c=review.context;
+    const decisions=Object.fromEntries(RELEASE_SCOPES.map(s=>[s,this.approved(review,s)])),c=review.context,
+      executionFeeContext=this.feeContext(review);
     const binding=this.b.config.operational_factual_bindings.find(b=>b.binding_hash===review.factual_binding_hash),instance=binding.instance;
     const manifest=JSON.parse(parse(this.db.prepare('SELECT payload_json FROM ow_operational_pending WHERE id=?').get(review.manifest_key)).manifest_text);
     return this.b.store.transaction(()=>{
@@ -370,7 +387,7 @@ export class OperationalPreparation {
       if(dataset)requireThat(dataset.content_hash===manifest.manifest_hash && dataset.strategy_id===c.strategy_id,409,'DATASET_SCOPE_CONFLICT');
       else this.db.prepare('INSERT INTO ow_datasets VALUES(?,?,?,?,?,?)').run(review.manifest_key,c.strategy_id,manifest.revision,manifest.manifest_hash,'OPERATIONAL_MANIFEST',JSON.stringify(manifest));
       const permission={permission_id:c.run_id,strategy_id:c.strategy_id,manifest_key:review.manifest_key,manifest_hash:manifest.manifest_hash,purposes:[c.evidence_purpose],expires_at_utc:review.expires_at_utc,prior_exposure:review.prior_exposure,test_only:false,review,decisions};
-      const plan={selection:{strategy_id:c.strategy_id,instance_id:c.execution_instance_id,purpose:c.evidence_purpose,permission_id:c.run_id,partition_index:review.partition_index,interval:review.interval},context_hash:c.context_hash,operational_review:review};plan.plan_hash=objectHash(plan);
+      const plan={selection:{strategy_id:c.strategy_id,instance_id:c.execution_instance_id,purpose:c.evidence_purpose,permission_id:c.run_id,partition_index:review.partition_index,interval:review.interval},context_hash:c.context_hash,operational_review:review,execution_fee_context:executionFeeContext};plan.plan_hash=objectHash(plan);
       this.db.prepare('INSERT INTO ow_dataset_permissions VALUES(?,?,?)').run(c.run_id,c.strategy_id,JSON.stringify(permission));
       this.db.prepare("INSERT INTO ow_runs VALUES(?,?,?,?,'READY',?)").run(c.run_id,c.strategy_id,c.execution_instance_id,c.revision,JSON.stringify(c));
       this.db.prepare('INSERT INTO ow_run_plans VALUES(?,?,?)').run(c.run_id,objectHash([binding.binding_hash,manifest.manifest_hash,review.interval]),JSON.stringify(plan));

@@ -324,7 +324,8 @@ $script:MockConfig = [ordered]@{
   expected_strategy_module_path=(Join-Path $tempRoot 'unused-strategy.dll'); expected_telemetry_module_path=(Join-Path $tempRoot 'unused-telemetry.dll')
   factual_binding_hash=('sha256:' + ('a' * 64)); expected_strategy_module_sha256=('sha256:' + ('a' * 64))
   expected_telemetry_module_sha256=('sha256:' + ('c' * 64)); minimum_schema_version=9
-  freshness_seconds=120; expected_chart_number=6; expected_bar_period_seconds=300; poll_seconds=1
+  expected_fee_model_version='ocean-observed-cost-model/v1'; expected_fee_schedule_hash=('sha256:' + ('d' * 64))
+  freshness_seconds=120; expected_chart_number=6; expected_controller_version='v0.2.3-read-only-study-input-export'; expected_bar_period_seconds=300; poll_seconds=1
 }
 function Write-MockBridgeConfig {
   [IO.File]::WriteAllText($ConfigPath, ($script:MockConfig | ConvertTo-Json), [Text.UTF8Encoding]::new($false))

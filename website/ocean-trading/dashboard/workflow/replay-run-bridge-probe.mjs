@@ -16,8 +16,9 @@ const BASE_FIELDS = [
 const OPERATIONAL_FIELDS = [
   ...BASE_FIELDS, 'namespace', 'factual_binding_hash', 'minimum_schema_version',
   'freshness_seconds', 'expected_chartbook_path', 'expected_chart_number',
-  'expected_chartbook_sha256', 'time_basis', 'session_calendar_revision',
-  'fill_model_version', 'managed_candidate_id', 'expected_session_name',
+  'expected_chartbook_sha256', 'expected_controller_version', 'time_basis', 'session_calendar_revision',
+  'fill_model_version', 'expected_fee_model_version', 'expected_fee_schedule_hash',
+  'managed_candidate_id', 'expected_session_name',
   'expected_session_timezone',
   'expected_bar_period_seconds', 'expected_strategy_module_path',
   'expected_strategy_module_sha256', 'expected_telemetry_module_path',
@@ -47,6 +48,7 @@ export function readReplayBridgeConfig(filename) {
     if (!Number.isInteger(value.minimum_schema_version) || value.minimum_schema_version < 9) fail('SCHEMA_FLOOR_REJECTED');
     if (!Number.isInteger(value.freshness_seconds) || value.freshness_seconds < 30 || value.freshness_seconds > 300) fail('FRESHNESS_WINDOW_REJECTED');
     if (!Number.isInteger(value.expected_chart_number) || value.expected_chart_number < 1) fail('CHART_NUMBER_REJECTED');
+    if (!/^v[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9-]+)?$/.test(value.expected_controller_version)) fail('CONTROLLER_VERSION_REJECTED');
     if (!Number.isInteger(value.expected_bar_period_seconds) || value.expected_bar_period_seconds !== 300) fail('BAR_PERIOD_REJECTED');
     for (const key of ['expected_chartbook_sha256', 'expected_strategy_module_sha256', 'expected_telemetry_module_sha256']) {
       if (!/^sha256:[a-f0-9]{64}$/.test(value[key])) fail('MODULE_HASH_REJECTED');
@@ -54,6 +56,9 @@ export function readReplayBridgeConfig(filename) {
     for (const key of ['time_basis', 'session_calendar_revision', 'fill_model_version']) {
       if (typeof value[key] !== 'string' || !value[key].trim() || value[key].length > 500) fail('RUN_SETTINGS_REJECTED');
     }
+    if (typeof value.expected_fee_model_version !== 'string' || !value.expected_fee_model_version.trim()
+      || value.expected_fee_model_version.length > 200) fail('FEE_MODEL_VERSION_REJECTED');
+    if (!/^sha256:[a-f0-9]{64}$/.test(value.expected_fee_schedule_hash)) fail('FEE_SCHEDULE_HASH_REJECTED');
     if (!/^[A-Za-z0-9_.:-]{1,200}$/.test(value.managed_candidate_id)) fail('MANAGED_CANDIDATE_REJECTED');
     if (!/^[A-Za-z0-9_. -]{1,100}$/.test(value.expected_session_name)
       || !/^[A-Za-z0-9_./+-]{1,100}$/.test(value.expected_session_timezone)) fail('SESSION_IDENTITY_REJECTED');
@@ -115,7 +120,8 @@ function readCorrelatedRunningStart(config, run, db, replay, status, statusBytes
       || start.telemetryContextHash !== run.release_context_hash
       || start.telemetryCandidateId !== managed.candidate_id || start.telemetryDatasetId !== managed.dataset_id
       || start.telemetryDatasetRole !== managed.dataset_role
-      || !['StrategyProfileId','StrategyProfileVersion','StrategyCodeHash','StrategyConfigHash','SessionName','SessionTimezone'].every(key => {
+      || !['StrategyProfileId','StrategyProfileVersion','StrategyCodeHash','StrategyConfigHash','SessionName','SessionTimezone',
+        'FeeModelVersion','FeeScheduleHash'].every(key => {
         const field = key.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`).slice(1);
         return start[`telemetry${key}`] === managed[field];
       })
@@ -144,7 +150,7 @@ function readCorrelatedRunningStart(config, run, db, replay, status, statusBytes
     if (!freshTimestamp(new Date(controller.modified).toISOString(), config.freshness_seconds)
       || !freshTimestamp(new Date(controllerCommand.modified).toISOString(), config.freshness_seconds)) return rejected('SOURCE_RUNNING_CONTROLLER_STALE');
     if (receipt.schema !== 'ocean-trading.sierra-replay-controller.status.v1'
-      || receipt.controllerVersion !== 'v0.2.1-cicd-vwap-time-basis'
+      || receipt.controllerVersion !== config.expected_controller_version
       || request.schema !== 'ocean-trading.sierra-replay-controller.command.v1'
       || request.action !== 'status' || request.saveChartbook !== false
       || typeof request.commandId !== 'string' || !/^oql-managed-status-[a-f0-9]{32}$/.test(request.commandId)
@@ -285,6 +291,12 @@ function managedReplayVerified(config, run, telemetryDb) {
       || plan.operational_review?.context?.context_hash !== context.context_hash
       || sealedHash(plan.operational_review.context, 'context_hash') !== context.context_hash
       || plan.operational_review?.factual_binding_hash !== config.factual_binding_hash) return false;
+    const feeContext=plan.execution_fee_context;
+    if (feeContext?.schema_version !== 'ocean-operational-fee-context/v1'
+      || sealedHash(feeContext, 'fee_context_hash') !== feeContext.fee_context_hash
+      || feeContext.source_binding_hash !== config.factual_binding_hash
+      || feeContext.fee_model_version !== config.expected_fee_model_version
+      || feeContext.fee_schedule_hash !== config.expected_fee_schedule_hash) return false;
     if (!Number.isInteger(context.dataset_manifest_revision) || context.dataset_manifest_revision < 1
       || ![context.dataset_manifest_id, context.dataset_partition, context.strategy_profile_id, context.strategy_profile_version].every(value => typeof value === 'string' && value.trim())
       || ![context.strategy_code_hash, context.strategy_config_hash].every(value => /^sha256:[a-f0-9]{64}$/.test(value))
@@ -295,7 +307,9 @@ function managedReplayVerified(config, run, telemetryDb) {
       && managed.dataset_role === context.dataset_partition
       && ['strategy_profile_id', 'strategy_profile_version', 'strategy_code_hash', 'strategy_config_hash'].every(key => managed[key] === context[key])
       && managed.session_name === config.expected_session_name
-      && managed.session_timezone === config.expected_session_timezone;
+      && managed.session_timezone === config.expected_session_timezone
+      && managed.fee_model_version === feeContext.fee_model_version
+      && managed.fee_schedule_hash === feeContext.fee_schedule_hash;
   } finally { db.close(); }
 }
 

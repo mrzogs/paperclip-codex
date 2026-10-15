@@ -34,7 +34,7 @@ function retainedBytes(value, hash) {
 
 function delayedStopSources(config, controller, status, stopId, symbol) {
   requireThat(controller.action === 'status' && controller.status === 'status'
-    && controller.controllerVersion === 'v0.2.1-cicd-vwap-time-basis' && controller.error == null
+    && controller.controllerVersion === config.expected_controller_version && controller.error == null
     && controller.replayStatus===0 && controller.chartReplayStatus===0 && controller.chartNumber===config.expected_chart_number
     && config.expected_symbol===symbol
     && /^oql-managed-status-[a-f0-9]{32}$/.test(controller.commandId)
@@ -130,11 +130,14 @@ export function readAttemptFailure(config, { run, context, plan }) {
       strategy_config_hash: context.strategy_config_hash, dataset_id: identity.telemetryDatasetId,
       dataset_role: context.dataset_partition, strategy_profile_id: context.strategy_profile_id,
       strategy_profile_version: context.strategy_profile_version, candidate_id: start.telemetryCandidateId,
-      session_name: start.telemetrySessionName, session_timezone: start.telemetrySessionTimezone };
+      session_name: start.telemetrySessionName, session_timezone: start.telemetrySessionTimezone,
+      fee_model_version: start.telemetryFeeModelVersion, fee_schedule_hash: start.telemetryFeeScheduleHash };
     requireThat(start.telemetryStrategyVersion===config.expected_strategy_version
       && start.telemetryCandidateId===config.managed_candidate_id
       && start.telemetrySessionName===config.expected_session_name
-      && start.telemetrySessionTimezone===config.expected_session_timezone,409,'FAILURE_APPROVED_MAPPING_CONFLICT');
+      && start.telemetrySessionTimezone===config.expected_session_timezone
+      && start.telemetryFeeModelVersion===config.expected_fee_model_version
+      && start.telemetryFeeScheduleHash===config.expected_fee_schedule_hash,409,'FAILURE_APPROVED_MAPPING_CONFLICT');
     requireThat(Object.entries(contextFields).every(([key, value]) => recorded[key] === value), 409, 'FAILURE_RECORDED_CONTEXT_CONFLICT');
     const ended = at(attempt?.attempt_ended_utc), observed = at(failure.observed_at_utc);
     requireThat(attempt && attempt.start_command_id === start.commandId && attempt.stop_command_id === stopId

@@ -1,8 +1,10 @@
 import { digest, exactKeys, id, objectHash, requireThat } from './common.mjs';
 
-export const CANDIDATE_GOVERNANCE_VERSION='ocean-operational-candidate-governance/v5';
+export const CANDIDATE_GOVERNANCE_VERSION='ocean-operational-candidate-governance/v6';
 export const CANDIDATE_GOVERNANCE_ACTION='operational.candidate.governance.registered';
 export const CANDIDATE_EXPOSURE_ACTION='operational.candidate.evidence.exposure_reserved';
+export const CANDIDATE_PROSPECTIVE_PLAN_VERSION='ocean-operational-candidate-prospective-plan/v1';
+export const CANDIDATE_PROSPECTIVE_PLAN_ACTION='operational.candidate.prospective_plan.declared';
 
 const TESTS=Object.freeze(['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT']);
 const USE_CLASSES=Object.freeze({BACKTEST:'DISCOVERY_DESIGN',ROBUSTNESS:'DISCOVERY_DESIGN',
@@ -19,6 +21,7 @@ export class OperationalCandidateGovernance {
     return row?JSON.parse(row.payload_json).payload:null;
   }
   governance(caseId){return this.latest(caseId);}
+  prospectivePlan(caseId){return this.latest(caseId,CANDIDATE_PROSPECTIVE_PLAN_ACTION);}
   exposures(caseId){
     return this.db.prepare('SELECT payload_json FROM ow_events WHERE entity_id=? AND action=? ORDER BY id').all(caseId,CANDIDATE_EXPOSURE_ACTION)
       .map(row=>JSON.parse(row.payload_json).payload);
@@ -27,15 +30,19 @@ export class OperationalCandidateGovernance {
     const registered=dispatch?.registration(row.id);
     if(!registered)return {schema_version:CANDIDATE_GOVERNANCE_VERSION,status:'NOT_DUE',governance_hash:null,
       artifact_id:null,reason:null,next_action:null,exposures:[]};
-    const governance=this.governance(row.id),plan=dispatch?.validationPlan(row.id),exposures=this.exposures(row.id);
+    const governance=this.governance(row.id),prospective=this.prospectivePlan(row.id),plan=dispatch?.validationPlan(row.id),exposures=this.exposures(row.id);
     if(!governance){
       const legacy=Boolean(plan);
-      return {schema_version:CANDIDATE_GOVERNANCE_VERSION,status:legacy?'LEGACY_INCOMPLETE':'REQUIRED',governance_hash:null,
-        artifact_id:null,reason:legacy
+      return {schema_version:CANDIDATE_GOVERNANCE_VERSION,status:legacy?'LEGACY_INCOMPLETE':prospective?'PROSPECTIVE_RESERVED':'REQUIRED',governance_hash:null,
+        prospective_plan_hash:prospective?.prospective_plan_hash || null,
+        artifact_id:prospective?.artifact_id || null,policy_id:prospective?.policy?.policy_id || null,
+        reason:legacy
           ?'This candidate already consumed or planned evidence without a pre-exposure governance record. Missing bindings remain unknown and cannot be reconstructed retrospectively.'
+          :prospective?'A future holdout and forward interval are frozen as planning only. No dataset completeness, execution, evidence access or favorable conclusion is claimed.'
           :'Record the immutable candidate policy, attempt, physical bindings, complete eligible universe and evaluation policy before creating a validation plan.',
         next_action:legacy
           ?'Keep protected holdout evidence sealed. Start a fresh candidate attempt with complete pre-exposure governance; legacy evidence cannot establish benefit.'
+          :prospective?'Wait for the source owner to seal complete qualified coverage, then obtain the required release and register candidate governance against this exact reservation before any evidence access.'
           :'Register candidate governance before planning or running any Replay validation.',exposures};
     }
     const ready=governance.access.status==='FRESH_UNEXPOSED';
@@ -120,8 +127,90 @@ export class OperationalCandidateGovernance {
     requireThat(TESTS.every(kind=>segments.some(segment=>segment.test_kind===kind && segment.eligible)),422,'CANDIDATE_GOVERNANCE_ELIGIBLE_TEST_MATRIX_REQUIRED');
     return {universe_id:universe.universe_id,segments};
   }
+  validateEvaluationPolicy(value){
+    exactKeys(value,['policy_id','favorable_performance_required','minimum_positive_tests','maximum_negative_tests',
+      'minimum_cumulative_net_pnl_delta','minimum_candidate_trade_count','no_benefit_when_thresholds_fail','metric_contract']);
+    requireThat(typeof value.policy_id==='string' && /^[A-Za-z0-9_.:-]{1,120}$/.test(value.policy_id)
+      && value.favorable_performance_required===true && Number.isInteger(value.minimum_positive_tests) && value.minimum_positive_tests>0
+      && value.minimum_positive_tests<=TESTS.length && Number.isInteger(value.maximum_negative_tests) && value.maximum_negative_tests>=0
+      && Number.isFinite(value.minimum_cumulative_net_pnl_delta) && Number.isInteger(value.minimum_candidate_trade_count)
+      && value.minimum_candidate_trade_count>=0 && value.no_benefit_when_thresholds_fail===true,
+    422,'CANDIDATE_GOVERNANCE_EVALUATION_POLICY_REQUIRED');
+    requireThat(objectHash(value.metric_contract)===objectHash(candidateMetricContract()),422,'CANDIDATE_GOVERNANCE_METRIC_CONTRACT_REQUIRED');
+    return structuredClone(value);
+  }
+  declareProspectivePlan(actor,row,completed,registered,data){
+    exactKeys(data,['case_id','expected_revision','completion_hash','candidate_hash','baseline_hash','policy','bindings','schedule','evaluation_policy','access']);
+    this.b.expect(row,data.expected_revision);this.b.active(row);this.b.baseline(row);
+    requireThat(row.stage==='HISTORICAL_VALIDATION',409,'CANDIDATE_PROSPECTIVE_PLAN_STAGE_REQUIRED');
+    requireThat(!this.prospectivePlan(row.id) && !this.governance(row.id)
+      && !this.b.operationalCandidateDispatch.validationPlan(row.id) && this.exposures(row.id).length===0,
+    409,'CANDIDATE_PROSPECTIVE_PLAN_PREEXPOSURE_REQUIRED');
+    requireThat(data.completion_hash===completed.completion_hash && data.candidate_hash===registered.candidate_hash
+      && data.baseline_hash===row.baseline_hash,409,'CANDIDATE_PROSPECTIVE_PLAN_REGISTRATION_CONFLICT');
+    exactKeys(data.policy,['policy_id','card_id','card_hash','change_family','attempt_number','change_class']);
+    for(const key of ['policy_id','card_id','change_family','change_class'])requireThat(typeof data.policy[key]==='string'
+      && /^[A-Za-z0-9_.:-]{1,120}$/.test(data.policy[key]),422,'CANDIDATE_GOVERNANCE_POLICY_REQUIRED');
+    requireThat(validHash(data.policy.card_hash) && Number.isInteger(data.policy.attempt_number)
+      && data.policy.attempt_number>0,422,'CANDIDATE_GOVERNANCE_ATTEMPT_REQUIRED');
+    const duplicate=this.db.prepare(`SELECT e.entity_id,e.payload_json FROM ow_events e JOIN ow_cases c ON c.id=e.entity_id
+      WHERE e.action IN (?,?) AND c.strategy_id=?`).all(CANDIDATE_GOVERNANCE_ACTION,CANDIDATE_PROSPECTIVE_PLAN_ACTION,row.strategy_id)
+      .map(item=>({entity_id:item.entity_id,payload:JSON.parse(item.payload_json).payload}))
+      .find(item=>item.payload?.policy?.change_family===data.policy.change_family
+        && item.payload?.policy?.attempt_number===data.policy.attempt_number);
+    requireThat(!duplicate,409,'CANDIDATE_GOVERNANCE_ATTEMPT_DUPLICATE');
+    exactKeys(data.bindings,['baseline','candidate']);
+    const bindings={baseline:this.validateBinding('baseline',data.bindings.baseline,{row,completed,registered}),
+      candidate:this.validateBinding('candidate',data.bindings.candidate,{row,completed,registered})};
+    requireThat(bindings.baseline.behavior.binary_hash!==bindings.candidate.behavior.binary_hash
+      && bindings.baseline.execution.binary_hash!==bindings.candidate.execution.binary_hash,
+    409,'CANDIDATE_GOVERNANCE_DISTINCT_CANDIDATE_REQUIRED');
+    exactKeys(data.schedule,['plan_id','source_owner_id','source_plan_hash','contract_policy_hash','session_policy_hash',
+      'warmup_policy_hash','embargo_policy_hash','holdout_start_utc','holdout_end_utc','forward_start_utc','forward_end_utc',
+      'timezone','interval_policy','exposure_attestation_method']);
+    id(data.schedule.plan_id,true);id(data.schedule.source_owner_id);
+    for(const key of ['source_plan_hash','contract_policy_hash','session_policy_hash','warmup_policy_hash','embargo_policy_hash'])
+      requireThat(validHash(data.schedule[key]),422,'CANDIDATE_PROSPECTIVE_PLAN_POLICY_HASH_REQUIRED');
+    const holdoutStart=Date.parse(data.schedule.holdout_start_utc),holdoutEnd=Date.parse(data.schedule.holdout_end_utc),
+      forwardStart=Date.parse(data.schedule.forward_start_utc),forwardEnd=Date.parse(data.schedule.forward_end_utc);
+    requireThat([holdoutStart,holdoutEnd,forwardStart,forwardEnd].every(Number.isFinite)
+      && Date.now()<holdoutStart && holdoutStart<holdoutEnd && holdoutEnd===forwardStart && forwardStart<forwardEnd,
+    422,'CANDIDATE_PROSPECTIVE_PLAN_INTERVAL_REQUIRED');
+    requireThat(typeof data.schedule.timezone==='string' && /^[A-Za-z0-9_./+-]{1,100}$/.test(data.schedule.timezone)
+      && data.schedule.interval_policy==='TWO_COMPLETE_CALENDAR_MONTHS_HALF_OPEN'
+      && typeof data.schedule.exposure_attestation_method==='string'
+      && data.schedule.exposure_attestation_method.length>0 && data.schedule.exposure_attestation_method.length<=500,
+    422,'CANDIDATE_PROSPECTIVE_PLAN_POLICY_REQUIRED');
+    const evaluationPolicy=this.validateEvaluationPolicy(data.evaluation_policy);
+    exactKeys(data.access,['status','evidence_access_state','attestation_hash','brain_record_id','brain_record_hash']);
+    requireThat(data.access.status==='PLANNING_ONLY' && data.access.evidence_access_state==='UNEXPOSED_AT_DECLARATION'
+      && validHash(data.access.attestation_hash) && validHash(data.access.brain_record_hash)
+      && typeof data.access.brain_record_id==='string' && /^reasoning\/[A-Za-z0-9_.-]+\.md$/.test(data.access.brain_record_id),
+    422,'CANDIDATE_PROSPECTIVE_PLAN_ACCESS_REQUIRED');
+    const frozen={schema_version:CANDIDATE_PROSPECTIVE_PLAN_VERSION,case_id:row.id,completion_hash:completed.completion_hash,
+      candidate_hash:registered.candidate_hash,baseline_hash:row.baseline_hash,policy:structuredClone(data.policy),bindings,
+      schedule:structuredClone(data.schedule),evaluation_policy:{status:'PREDECLARED',...evaluationPolicy,policy_hash:objectHash(evaluationPolicy)},
+      access:structuredClone(data.access),declared_by:actor.id,declared_at_utc:new Date().toISOString(),
+      state:'FUTURE_DATA_INCOMPLETE',executable_dataset:false,
+      authority:{automatic_strategy_change:false,candidate_approved:false,paper_authorized:false,live_authorized:false,automatic_promotion:false}};
+    const prospectivePlanHash=objectHash(frozen),content=JSON.stringify({...frozen,prospective_plan_hash:prospectivePlanHash}),contentHash=digest(content);
+    const artifactId=`test-candidate-prospective-${prospectivePlanHash.slice(7,31)}`;
+    const brain=this.b.config.identities.find(entry=>entry.role==='BRAIN' && entry.strategy_ids.includes(row.strategy_id) && entry.instance_ids.includes(row.instance_id));
+    requireThat(brain,409,'CANDIDATE_REVIEW_RECIPIENT_REQUIRED');
+    this.b.writeArtifact(actor,{artifact_id:artifactId,case_id:row.id,run_id:row.run_id,recipient_id:brain.identity_id,
+      kind:'VALIDATION_REPORT',media_type:'application/json',content,content_encoding:'utf8',content_hash:contentHash,
+      candidate_hash:row.candidate_hash,dependency_ids:[completed.plan_artifact_id,registered.candidate_artifact_id]});
+    const recorded={...frozen,prospective_plan_hash:prospectivePlanHash,artifact_id:artifactId,content_hash:contentHash};
+    this.b.event(row.id,CANDIDATE_PROSPECTIVE_PLAN_ACTION,actor,recorded);
+    const nextAction='Keep the future holdout sealed. The source owner must later prove complete qualified coverage and obtain release before executable candidate governance can be registered.';
+    this.db.prepare('UPDATE ow_cases SET revision=revision+1,waiting_on=? WHERE id=?').run(nextAction,row.id);
+    return {case_id:row.id,revision:row.revision+1,status:'PROSPECTIVE_RESERVED',prospective_plan_hash:prospectivePlanHash,
+      artifact_id:artifactId,executable_dataset:false,next_action:nextAction};
+  }
   register(actor,row,completed,registered,data){
-    exactKeys(data,['case_id','expected_revision','completion_hash','candidate_hash','baseline_hash','policy','bindings','universe','evaluation_policy','access']);
+    const prospective=this.prospectivePlan(row.id);
+    exactKeys(data,['case_id','expected_revision','completion_hash','candidate_hash','baseline_hash','policy','bindings','universe','evaluation_policy','access',
+      ...(prospective?['prospective_plan_hash']:[])]);
     this.b.expect(row,data.expected_revision);this.b.active(row);this.b.baseline(row);
     requireThat(row.stage==='HISTORICAL_VALIDATION',409,'CANDIDATE_GOVERNANCE_STAGE_REQUIRED');
     requireThat(!this.governance(row.id),409,'CANDIDATE_GOVERNANCE_ALREADY_REGISTERED');
@@ -146,21 +235,27 @@ export class OperationalCandidateGovernance {
       && bindings.baseline.execution.binary_hash!==bindings.candidate.execution.binary_hash,
     409,'CANDIDATE_GOVERNANCE_DISTINCT_CANDIDATE_REQUIRED');
     const universe=this.validateUniverse(row,data.universe);
-    exactKeys(data.evaluation_policy,['policy_id','favorable_performance_required','minimum_positive_tests','maximum_negative_tests',
-      'minimum_cumulative_net_pnl_delta','minimum_candidate_trade_count','no_benefit_when_thresholds_fail','metric_contract']);
-    const ep=data.evaluation_policy;
-    requireThat(typeof ep.policy_id==='string' && /^[A-Za-z0-9_.:-]{1,120}$/.test(ep.policy_id)
-      && ep.favorable_performance_required===true && Number.isInteger(ep.minimum_positive_tests) && ep.minimum_positive_tests>0
-      && ep.minimum_positive_tests<=TESTS.length && Number.isInteger(ep.maximum_negative_tests) && ep.maximum_negative_tests>=0
-      && Number.isFinite(ep.minimum_cumulative_net_pnl_delta) && Number.isInteger(ep.minimum_candidate_trade_count)
-      && ep.minimum_candidate_trade_count>=0 && ep.no_benefit_when_thresholds_fail===true,422,'CANDIDATE_GOVERNANCE_EVALUATION_POLICY_REQUIRED');
-    requireThat(objectHash(ep.metric_contract)===objectHash(candidateMetricContract()),422,'CANDIDATE_GOVERNANCE_METRIC_CONTRACT_REQUIRED');
+    const ep=this.validateEvaluationPolicy(data.evaluation_policy);
     exactKeys(data.access,['status','attestation_hash']);
     requireThat(['FRESH_UNEXPOSED','POSSIBLY_SPENT'].includes(data.access.status) && validHash(data.access.attestation_hash),422,'CANDIDATE_GOVERNANCE_ACCESS_ATTESTATION_REQUIRED');
+    if(prospective){
+      requireThat(data.prospective_plan_hash===prospective.prospective_plan_hash
+        && objectHash(data.policy)===objectHash(prospective.policy)
+        && objectHash(bindings)===objectHash(prospective.bindings)
+        && objectHash(ep)===objectHash((({status,policy_hash,...value})=>value)(prospective.evaluation_policy))
+        && Date.parse(prospective.declared_at_utc)<Date.parse(prospective.schedule.holdout_start_utc)
+        && Date.now()>=Date.parse(prospective.schedule.holdout_end_utc),409,'CANDIDATE_GOVERNANCE_PROSPECTIVE_PLAN_CONFLICT');
+      const holdout=universe.segments.filter(segment=>segment.test_kind==='OOS_HOLDOUT' && segment.eligible);
+      requireThat(holdout.length>0
+        && Math.min(...holdout.map(segment=>Date.parse(segment.scored_start_utc)))===Date.parse(prospective.schedule.holdout_start_utc)
+        && Math.max(...holdout.map(segment=>Date.parse(segment.scored_end_utc)))===Date.parse(prospective.schedule.holdout_end_utc),
+      409,'CANDIDATE_GOVERNANCE_PROSPECTIVE_INTERVAL_CONFLICT');
+    }
     const frozen={schema_version:CANDIDATE_GOVERNANCE_VERSION,case_id:row.id,completion_hash:completed.completion_hash,
       candidate_hash:registered.candidate_hash,baseline_hash:row.baseline_hash,policy:structuredClone(data.policy),bindings,universe,
       universe_hash:objectHash(universe),evaluation_policy:{status:'PREDECLARED',...structuredClone(ep),policy_hash:objectHash(ep)},
-      access:structuredClone(data.access),registered_by:actor.id,registered_at_utc:new Date().toISOString(),
+      access:structuredClone(data.access),prospective_plan_hash:prospective?.prospective_plan_hash || null,
+      registered_by:actor.id,registered_at_utc:new Date().toISOString(),
       authority:{automatic_strategy_change:false,candidate_approved:false,paper_authorized:false,live_authorized:false,automatic_promotion:false}};
     const governanceHash=objectHash(frozen),content=JSON.stringify({...frozen,governance_hash:governanceHash}),contentHash=digest(content);
     const artifactId=`test-candidate-governance-${governanceHash.slice(7,31)}`;

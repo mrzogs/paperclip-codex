@@ -5,8 +5,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { digest, exactKeys, id, noSecrets, objectHash, requireThat } from './common.mjs';
 
 export const CANDIDATE_DISPATCH_VERSION='ocean-operational-candidate-dispatch/v2';
-export const CANDIDATE_VALIDATION_VERSION='ocean-operational-candidate-validation/v3';
-export const CANDIDATE_VALIDATION_PLAN_VERSION='ocean-operational-candidate-validation/v4';
+export const CANDIDATE_VALIDATION_VERSION='ocean-operational-candidate-validation/v4';
+export const CANDIDATE_VALIDATION_PLAN_VERSION='ocean-operational-candidate-validation/v5';
 const ORIGIN='OPERATIONAL_RESEARCH_CONTINUATION';
 const leaseAction='operational.candidate.dispatch.lease';
 const completionAction='operational.candidate.dispatch.completed';
@@ -382,7 +382,7 @@ export class OperationalCandidateDispatch {
   }
 
   validationPerform(action,actor,input){
-    requireThat(['governance','exposure','plan','result','complete'].includes(action),404,'UNKNOWN_CANDIDATE_VALIDATION_ACTION');
+    requireThat(['prospective','governance','exposure','plan','result','complete'].includes(action),404,'UNKNOWN_CANDIDATE_VALIDATION_ACTION');
     exactKeys(input,['message_id','data']);id(input.message_id);noSecrets(input,this.b.environment);
     requireThat(input.data && typeof input.data==='object',422,'DATA_REQUIRED');
     const data=input.data,message=`candidate-validation:${input.message_id}`,requestHash=objectHash({action,data});
@@ -399,7 +399,8 @@ export class OperationalCandidateDispatch {
       const approved=this.b.approved(row,'DEVELOPMENT',null,actor.id);
       requireThat(REQUIRED_TESTS.every(kind=>approved.binding.authorized_tests.includes(kind)),409,'CANDIDATE_REQUIRED_TEST_AUTHORITY_MISSING');
       let result;
-      if(action==='governance')result=this.b.operationalCandidateGovernance.register(actor,row,completed,registered,data);
+      if(action==='prospective')result=this.b.operationalCandidateGovernance.declareProspectivePlan(actor,row,completed,registered,data);
+      else if(action==='governance')result=this.b.operationalCandidateGovernance.register(actor,row,completed,registered,data);
       else if(action==='exposure')result=this.b.operationalCandidateGovernance.reserveExposure(actor,row,data);
       else if(action==='plan')result=this.recordValidationPlan(actor,row,completed,registered,data);
       else if(action==='result')result=this.recordValidationResult(actor,row,completed,registered,data);
@@ -452,8 +453,10 @@ export class OperationalCandidateDispatch {
       if(test.candidate_execution_version===completed.candidate.candidate_version
         && test.candidate_execution_hash===registered.candidate_hash)
         requireThat(test.candidate_execution_source_hash===completed.candidate.source_hash,409,'CANDIDATE_VALIDATION_CANDIDATE_SOURCE_CONFLICT');
-      exactKeys(test.cost_model,['schema_version','broker_profile','product','fee_tier','currency','total_fee_per_side','effective_from','source_reference','source_type']);
+      exactKeys(test.cost_model,['schema_version','fee_model_version','fee_schedule_hash','broker_profile','product','fee_tier','currency','total_fee_per_side','effective_from','source_reference','source_type']);
       requireThat(typeof test.cost_model.schema_version==='string' && typeof test.cost_model.broker_profile==='string'
+        && typeof test.cost_model.fee_model_version==='string' && test.cost_model.fee_model_version.trim().length>0
+        && validHash(test.cost_model.fee_schedule_hash)
         && typeof test.cost_model.product==='string' && typeof test.cost_model.fee_tier==='string'
         && test.cost_model.currency==='USD' && Number.isFinite(test.cost_model.total_fee_per_side)
         && test.cost_model.total_fee_per_side>=0 && Number.isFinite(Date.parse(test.cost_model.effective_from))
@@ -671,14 +674,19 @@ export class OperationalCandidateDispatch {
           && metricKeys.every(key=>sameNumber(Number(snapshot.metrics?.[key]),Number(value[key])))
           && objectHash(qualityFlags(snapshot.context?.data_quality_flags))===objectHash([...value.data_quality_flags].sort()),
         409,'CANDIDATE_VALIDATION_RUN_SNAPSHOT_CONFLICT');
-        let cost;
+        let cost,feeContext;
         for(const file of sourceFiles.filter(item=>path.basename(item.path).toLowerCase()==='telemetry.sqlite')){
           try{
             const telemetry=new DatabaseSync(':memory:');
             try{
               telemetry.deserialize(file.bytes);
               const runExists=Number(telemetry.prepare('SELECT COUNT(*) AS n FROM replay_runs WHERE run_id=?').get(value.run_id)?.n || 0);
-              if(runExists===1)cost=telemetry.prepare(`SELECT COUNT(*) AS total_rows,
+              const contextTable=telemetry.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='replay_run_context'").get();
+              if(runExists===1 && contextTable){
+                const contextColumns=new Set(telemetry.prepare('PRAGMA table_info(replay_run_context)').all().map(column=>column.name));
+                if(contextColumns.has('fee_model_version') && contextColumns.has('fee_schedule_hash'))
+                  feeContext=telemetry.prepare('SELECT fee_model_version,fee_schedule_hash FROM replay_run_context WHERE run_id=?').get(value.run_id);
+                cost=telemetry.prepare(`SELECT COUNT(*) AS total_rows,
                 SUM(CASE WHEN trade_account='Sim1' AND is_simulated=1 AND strategy_id=? AND run_id=? THEN 1 ELSE 0 END) AS attributed_rows,
                 SUM(CASE WHEN fees_available=1 THEN 1 ELSE 0 END) AS fee_rows,
                 COALESCE(SUM(total_commission),0) AS total_fees,
@@ -687,13 +695,17 @@ export class OperationalCandidateDispatch {
                 MIN(fee_product_code) AS min_product,MAX(fee_product_code) AS max_product,
                 MIN(fee_tier) AS min_tier,MAX(fee_tier) AS max_tier,
                 MIN(fee_source_type) AS min_source_type,MAX(fee_source_type) AS max_source_type
-                 FROM trades WHERE run_id=? AND (? IS NULL OR trade_id<>?)`).get(row.strategy_id,value.run_id,value.run_id,
+                  FROM trades WHERE run_id=? AND (? IS NULL OR trade_id<>?)`).get(row.strategy_id,value.run_id,value.run_id,
                    value.boundary_cleanup_trade_id,value.boundary_cleanup_trade_id);
+              }
             }finally{telemetry.close();}
-            if(cost)break;
+            if(cost && feeContext)break;
           }catch{}
         }
         requireThat(cost,409,'CANDIDATE_VALIDATION_TELEMETRY_DATABASE_INVALID');
+        requireThat(feeContext?.fee_model_version===test.cost_model.fee_model_version
+          && feeContext?.fee_schedule_hash===test.cost_model.fee_schedule_hash,
+        409,'CANDIDATE_VALIDATION_FEE_CONTEXT_CONFLICT');
         requireThat(Number(cost.total_rows)===value.trade_count && Number(cost.attributed_rows)===Number(cost.total_rows)
           && sameNumber(Number(cost.total_fees),Number(value.fees))
           && (Number(cost.total_rows)===0 || (Number(cost.fee_rows)===Number(cost.total_rows)

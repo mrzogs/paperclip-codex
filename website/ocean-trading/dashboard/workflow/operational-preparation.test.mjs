@@ -35,6 +35,11 @@ function fixture(t,{legacy=()=>{},modern=null,completionPatch={},progressPatch={
   const binding={strategy_id:profile.strategy_id,strategy_code_hash:profile.strategy_code_hash,profile_hash:profile.profile_hash,
     state:'VERIFIED_FACTS_ONLY',instance};
   binding.binding_hash=sealedHash(binding,'binding_hash');b.config.operational_factual_bindings=[binding];
+  const physicalBindingFile=path.join(root,'replay-run-bridge.json');
+  fs.writeFileSync(physicalBindingFile,JSON.stringify({schema_version:'ocean-replay-run-bridge/v4',namespace:'OPERATIONAL',
+    strategy_id:profile.strategy_id,instance_id:instance.execution_instance_id,factual_binding_hash:binding.binding_hash,
+    expected_fee_model_version:'ocean-observed-cost-model/v1',expected_fee_schedule_hash:digest('mock-fee-schedule')}));
+  b.operationalLearning={physicalBindingFile};
   db.prepare('INSERT INTO ow_instances VALUES(?,?,?)').run(instance.execution_instance_id,profile.strategy_id,JSON.stringify(instance));
   const requested={start_utc:'2025-09-12T23:00:00Z',end_utc:'2025-09-30T23:00:00Z'};
   const manifest={...structuredClone(examples['dataset-manifest']),dataset_manifest_id:'mock-discovery-manifest',quality_status:'VERIFIED',gaps:[],
@@ -57,7 +62,8 @@ function fixture(t,{legacy=()=>{},modern=null,completionPatch={},progressPatch={
     interval:requested,prior_exposure:'UNTOUCHED',expires_at_utc:expires});
   context=review.context;
   const plan={selection:{strategy_id:context.strategy_id,instance_id:context.execution_instance_id,purpose:context.evidence_purpose,
-    permission_id:sourceId,partition_index:review.partition_index,interval:review.interval},context_hash:context.context_hash,operational_review:review};
+    permission_id:sourceId,partition_index:review.partition_index,interval:review.interval},context_hash:context.context_hash,
+    operational_review:review,execution_fee_context:preparation.feeContext(review)};
   plan.plan_hash=objectHash(plan);const coverageKey=digest('mock-exact-coverage');
   db.prepare('INSERT INTO ow_runs VALUES(?,?,?,4,?,?)').run(sourceId,context.strategy_id,context.execution_instance_id,'COMPLETED',JSON.stringify(context));
   db.prepare('INSERT INTO ow_run_plans VALUES(?,?,?)').run(sourceId,coverageKey,JSON.stringify(plan));
