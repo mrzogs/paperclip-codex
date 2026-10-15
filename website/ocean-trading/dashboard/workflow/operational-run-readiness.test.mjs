@@ -67,6 +67,8 @@ test('production Replay binding preserves chartbook provenance and exact v240 ca
   assert.equal(config.expected_strategy_version, 'v0.6.240');
   assert.equal(config.managed_candidate_id, 'v0.6.239-short-exclusion+v0.6.240-test-boundary-drain');
   assert.equal(config.expected_strategy_module_sha256, 'sha256:9a6189a438cb49c8a16b71cebc05372cab5f6f6002f2daa8ea780c33b9aef05f');
+  assert.equal(config.expected_telemetry_version, 'v0.5.52');
+  assert.equal(config.expected_telemetry_module_sha256, 'sha256:c683c8bebe06e4d9be8c43439ad985268ec569ab8a56c280809b1f22c5bcf30f');
 });
 
 test('fails closed when a pinned strategy module changes', t => {

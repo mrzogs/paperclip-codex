@@ -14,7 +14,7 @@
   "managed_candidate_id": "v0.6.239-short-exclusion+v0.6.240-test-boundary-drain",
   "expected_session_name": "All",
   "expected_session_timezone": "Europe/London",
-  "expected_telemetry_version": "v0.5.50",
+  "expected_telemetry_version": "v0.5.52",
   "expected_sierra_exe": "D:\\Trading\\SierraChart-Replay Two\\SierraChart_64.exe",
   "poll_seconds": 10,
   "state_file": "D:\\OceanTradingData\\website\\ocean-runtime\\replay-bridge-status.json",
@@ -35,6 +35,6 @@
   "expected_strategy_module_path": "D:\\Trading\\SierraChart-Replay Two\\Data\\CICD_VWAPPullback_v228_64.dll",
   "expected_strategy_module_sha256": "sha256:9a6189a438cb49c8a16b71cebc05372cab5f6f6002f2daa8ea780c33b9aef05f",
   "expected_telemetry_module_path": "D:\\Trading\\SierraChart-Replay Two\\Data\\CICD_VWAPPullback_Telemetry_v0526_64.dll",
-  "expected_telemetry_module_sha256": "sha256:313ae03b093d53b6ebb9f5efe56cf0362c83e0d370e1c5a091b6c370a23ea34b",
+  "expected_telemetry_module_sha256": "sha256:c683c8bebe06e4d9be8c43439ad985268ec569ab8a56c280809b1f22c5bcf30f",
   "source_preflight_status_path": "D:\\Trading\\SierraChart-Replay Two\\connector-control\\oql-vwap-replay-isolated\\vwap-replay-status.txt"
 }
