@@ -1465,16 +1465,19 @@ export class OperationalLearning {
       const token = this.token();
       await this.verifyIdentity(token);
       const registry = await this.registry(token);
+      let processingFailed = false;
       let run;
       while ((run = this.pendingRun(registry))) {
         try { await this.process(run, token, registry); }
         catch (error) {
           this.fail(run, error);
+          processingFailed = true;
           if (!LINEAGE_ERRORS.has(error.code)) break;
         }
       }
       await this.backend.operationalResearch?.flushOnce();
       await this.backend.operationalCandidateEvaluator?.flushOnce();
+      if (!processingFailed) this.lastError = null;
       return this.status();
     } finally { this.running = false; }
   }

@@ -19,6 +19,23 @@ test('learning telemetry reads fail fast enough to preserve website liveness', (
   assert.ok(TELEMETRY_READ_BUSY_TIMEOUT_MS > 0 && TELEMETRY_READ_BUSY_TIMEOUT_MS <= 100);
 });
 
+test('a healthy maintenance cycle clears stale transport degradation but preserves a current processing failure', async () => {
+  const maintenance = pendingRun => Object.assign(Object.create(OperationalLearning.prototype), {
+    enabled:true,running:false,lastError:'fetch failed',token:()=> 'protected-test-token-value-123456',
+    verifyIdentity:async()=>{},registry:async()=>({record_sha256:digest('registry')}),pendingRun,
+    backend:{operationalResearch:{flushOnce:async()=>{}},operationalCandidateEvaluator:{flushOnce:async()=>{}}},
+    status(){return {state:this.lastError?'DEGRADED':'READY',last_error:this.lastError};},
+  });
+  const recovered=maintenance(()=>null);
+  assert.deepEqual(await recovered.flushOnce(),{state:'READY',last_error:null});
+
+  const run={id:'operational-current-failure'};
+  const failed=maintenance(()=>run);
+  failed.process=async()=>{throw new Error('current failure');};
+  failed.fail=(_run,error)=>{failed.lastError=error.message;};
+  assert.deepEqual(await failed.flushOnce(),{state:'DEGRADED',last_error:'current failure'});
+});
+
 test('pending scan does not requalify an immutable completed continuation', () => {
   let classified = 0;
   const run={id:'operational-complete',strategy_id:strategyId,context_json:JSON.stringify({context_hash:digest('complete')})};
