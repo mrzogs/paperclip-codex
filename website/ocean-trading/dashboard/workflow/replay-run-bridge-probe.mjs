@@ -59,7 +59,7 @@ export function readReplayBridgeConfig(filename) {
     if (typeof value.expected_fee_model_version !== 'string' || !value.expected_fee_model_version.trim()
       || value.expected_fee_model_version.length > 200) fail('FEE_MODEL_VERSION_REJECTED');
     if (!/^sha256:[a-f0-9]{64}$/.test(value.expected_fee_schedule_hash)) fail('FEE_SCHEDULE_HASH_REJECTED');
-    if (!/^[A-Za-z0-9_.:-]{1,200}$/.test(value.managed_candidate_id)) fail('MANAGED_CANDIDATE_REJECTED');
+    if (!/^[A-Za-z0-9_.:+-]{1,200}$/.test(value.managed_candidate_id)) fail('MANAGED_CANDIDATE_REJECTED');
     if (!/^[A-Za-z0-9_. -]{1,100}$/.test(value.expected_session_name)
       || !/^[A-Za-z0-9_./+-]{1,100}$/.test(value.expected_session_timezone)) fail('SESSION_IDENTITY_REJECTED');
   } else if (!/^test-[A-Za-z0-9_.:-]+$/.test(value.instance_id)) fail('IDENTITY_SCOPE_REJECTED');
