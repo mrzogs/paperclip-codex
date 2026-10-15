@@ -20,6 +20,10 @@ Assert-Test (-not $launcher.Contains('Start-Process')) 'NORMAL_LAUNCHER_RETAINS_
 Assert-Test ($manager.Contains("Join-Path `$PSScriptRoot 'ocean-deployment.ps1'")) 'MANAGER_BYPASSES_DEPLOYMENT_MANIFEST'
 Assert-Test ($manager.Contains('function Get-ValidatedOceanDeployment')) 'MANAGER_DOES_NOT_LAZILY_VALIDATE_DEPLOYMENT'
 Assert-Test (-not $manager.Contains("`$Deployment = Get-OceanDeployment -ConfigPath")) 'STOP_AND_UNINSTALL_REQUIRE_A_VALID_DEPLOYMENT'
+Assert-Test ($manager.Contains("Join-Path (Get-ValidatedOceanDeployment).Dashboard 'monitor.mjs'")) 'MONITOR_MATCH_IS_NOT_BOUND_TO_DEPLOYED_DASHBOARD'
+Assert-Test ($manager.Contains("`$_.Name -ieq 'node.exe'")) 'MONITOR_MATCH_DOES_NOT_REQUIRE_NODE'
+Assert-Test ($manager.Contains('[regex]::Escape($monitorPath)')) 'MONITOR_PATH_IS_NOT_REGEX_SAFE'
+Assert-Test (-not $manager.Contains("'node(\.exe)?")) 'MONITOR_MATCH_RETAINS_BASENAME_ONLY_REGEX'
 Assert-Test ($manager.Contains("Join-Path `$Root 'scripts\run-hidden-service.vbs'")) 'MANAGER_BYPASSES_HIDDEN_LAUNCHER'
 foreach ($dependency in @('ocean-deployment.ps1','run-hidden-service.vbs','run-paperclip-supervised.ps1',
     'run-codex-bridge-supervised.ps1','run-ocean-monitor-supervised.ps1','run-ocean-website-supervised.ps1',
