@@ -231,10 +231,52 @@ function Get-MonitorProcesses {
     }
 }
 
+function Get-ReleaseMonitorCommandPattern {
+  $deploymentRoot = [IO.Path]::GetFullPath('D:\OceanTradingData\website\deployments').TrimEnd('\') + '\'
+  return [regex]::Escape($deploymentRoot) +
+    'ocean-[^\\"]+\\(?:paperclip-source\\)?website\\ocean-trading\\dashboard\\monitor\.mjs(?:["\s]|$)'
+}
+
+function Get-MonitorSupervisorCommandPattern {
+  return [regex]::Escape((Join-Path $Root 'scripts\run-ocean-monitor-supervised.ps1'))
+}
+
+function Get-MonitorOwnedProcessTree {
+  param(
+    [object[]]$Snapshot,
+    [object[]]$Roots
+  )
+
+  $owned = [Collections.Generic.HashSet[int]]::new()
+  foreach ($proc in $Roots) { [void]$owned.Add([int]$proc.ProcessId) }
+  do {
+    $added = $false
+    foreach ($proc in $Snapshot) {
+      if ($owned.Contains([int]$proc.ParentProcessId) -and $owned.Add([int]$proc.ProcessId)) {
+        $added = $true
+      }
+    }
+  } while ($added)
+  return @($Snapshot | Where-Object { $owned.Contains([int]$_.ProcessId) })
+}
+
 function Stop-MonitorProcesses {
-  foreach ($proc in @(Get-MonitorProcesses)) {
+  $snapshot = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+  $releaseMonitorPattern = Get-ReleaseMonitorCommandPattern
+  $supervisorPattern = Get-MonitorSupervisorCommandPattern
+  $roots = @($snapshot | Where-Object {
+    $commandLine = $_.CommandLine -as [string]
+    ($_.Name -ieq 'node.exe' -and $commandLine -match $releaseMonitorPattern) -or
+    ($_.Name -ieq 'powershell.exe' -and $commandLine -match $supervisorPattern)
+  })
+  $supervisorIds = [Collections.Generic.HashSet[int]]::new()
+  foreach ($proc in $roots | Where-Object { $_.Name -ieq 'powershell.exe' }) {
+    [void]$supervisorIds.Add([int]$proc.ProcessId)
+  }
+  $tree = @(Get-MonitorOwnedProcessTree -Snapshot $snapshot -Roots $roots)
+  foreach ($proc in @($tree | Sort-Object @{ Expression = { if ($supervisorIds.Contains([int]$_.ProcessId)) { 0 } else { 1 } } }, ProcessId)) {
     Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
-    Write-Output "Stopped Ocean monitor PID $($proc.ProcessId)."
+    Write-Output "Stopped Ocean monitor generation PID $($proc.ProcessId)."
   }
 }
 
