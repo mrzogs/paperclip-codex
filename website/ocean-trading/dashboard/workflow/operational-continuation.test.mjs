@@ -2107,6 +2107,7 @@ test('legacy candidate can start a fresh governed attempt without rewriting old 
       plan_hash:legacyPlanHash,governance_hash:null,tests:['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'].map(kind=>({kind}))});
     f.backend.db.prepare('UPDATE ow_cases SET waiting_on=? WHERE id=?').run(`Run OOS_HOLDOUT from validation plan ${legacyPlanHash}.`,child.id);
     const sourceBefore=structuredClone(f.backend.one('ow_cases',child.id));
+    f.setProof(false);
     const body={message_id:'test-candidate-fresh-attempt-two',data:{source_case_id:child.id,expected_revision:sourceBefore.revision,
       attempt_number:2,reason:'Legacy attempt planned evidence before candidate governance was available.'}};
     f.backend.auth.authenticate=()=>strategy;
