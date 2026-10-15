@@ -26,7 +26,7 @@ test('loopback readiness binds the deployed release and persistent learning work
     assert.deepEqual(readiness.workflow.deployment,{release_id:'test-release',source_commit:'a'.repeat(40),manifest_sha256:'b'.repeat(64)});
     assert.equal(readiness.workflow.state,'READY');assert.equal(readiness.workflow.schema_version,13);
     assert.deepEqual(readiness.workflow.operational_learning,{enabled:true,state:'READY',last_error:null});
-    assert.equal(readiness.workflow.candidate_evaluator.version,'ocean-operational-candidate-evaluator/v1');
+    assert.equal(readiness.workflow.candidate_evaluator.version,'ocean-operational-candidate-evaluator/v2');
     assert.ok(['READY','RUNNING'].includes(readiness.workflow.candidate_evaluator.state));
     assert.equal(readiness.workflow.candidate_evaluator.last_error,null);
   }finally{

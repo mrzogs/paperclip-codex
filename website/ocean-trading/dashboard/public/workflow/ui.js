@@ -506,6 +506,7 @@ function continuationTable(items) {
 function casePage(data) {
   const riskReview = data.planning?.kind === 'RISK_DISABLE_REVIEW';
   const candidateEvaluation = data.candidate_evaluation;
+  const candidateGovernance = data.candidate_governance || data.candidate_dispatch?.governance;
   const registeredCandidate = data.candidate_dispatch?.status === 'REGISTERED'
     && data.stage === 'HISTORICAL_VALIDATION';
   const executable = !data.planning && !(data.namespace==='OPERATIONAL' && data.research) && !['COMPLETED','PAUSED','FAILED','BLOCKED','CANCELLED'].includes(data.work_status) && data.stage !== 'CLOSED';
@@ -539,6 +540,14 @@ function casePage(data) {
        ['Candidate version',esc(data.candidate_dispatch.completion?.candidate_version || 'Not built')],
        ['Candidate hash',data.candidate_dispatch.completion?.candidate_hash?hash(data.candidate_dispatch.completion.candidate_hash):'Not registered'],
        ['Candidate scope',data.candidate_dispatch.status==='REGISTERED'?'Replay validation only':'No test, Paper, Live or promotion authority'],
+     ]:[]),
+     ...(candidateGovernance && candidateGovernance.status!=='NOT_DUE'?[
+       ['Candidate governance',badge(candidateGovernance.status)],
+       ['Governance policy',candidateGovernance.policy_id?esc(candidateGovernance.policy_id):'Not recorded'],
+       ['Evidence exposure',`${candidateGovernance.exposures?.length || 0} immutable reservation${candidateGovernance.exposures?.length===1?'':'s'}`],
+       ...(candidateGovernance.reason?[['Governance finding',esc(candidateGovernance.reason)]]:[]),
+       ...(candidateGovernance.next_action?[['Governance next action',esc(candidateGovernance.next_action)]]:[]),
+       ...(candidateGovernance.artifact_id?[['Governance artifact',link('artifacts',candidateGovernance.artifact_id)]]:[]),
      ]:[]),
      ...(candidateEvaluation && candidateEvaluation.status!=='NOT_DUE'?[
        ['Evidence evaluation',badge(candidateEvaluation.status)],

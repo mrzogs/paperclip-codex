@@ -17,6 +17,7 @@ import { readWorkflowView } from './ui-api.mjs';
 import { digest, objectHash } from './common.mjs';
 import { consumePlanningOnce } from '../../../../scripts/consume-ocean-proposal-planning.mjs';
 import { acceptedTestRevisionCompatible, OperationalCandidateDispatch, pendingTestRerunCompatible } from './operational-candidate-dispatch.mjs';
+import { candidateMetricContract, OperationalCandidateGovernance } from './operational-candidate-governance.mjs';
 import { CANDIDATE_EVALUATION_RESULT_VERSION, OperationalCandidateEvaluator } from './operational-candidate-evaluation.mjs';
 
 test('legacy accepted validation tests may add only execution source bindings during a v4 plan revision',()=>{
@@ -63,7 +64,9 @@ function fixture({insufficient=false,noChange=false,partial=false,prospective=fa
   const actor={id:'brain',role:'BRAIN',namespace:'OPERATIONAL',strategyIds:['s'],instanceIds:['i'],scopes:identity.scopes};
   const human={id:'wayne-ocean-ui',role:'HUMAN'};
   Object.assign(backend,{db:store.db,store,config:{identities:[identity,recipient],browser:{subject_id:human.id}},environment:{},
-    auth:{human:{state:'CONFIGURED'},bindingErrors:new Map()},validate:kind=>assert.ok(['artifact-manifest','approval-decision','handoff'].includes(kind)),runs:{managed:()=>false}});
+    auth:{human:{state:'CONFIGURED'},bindingErrors:new Map()},authFailureWindowMs:300000,authFailureThreshold:3,
+    authFailureTotals:{401:0,403:0},authFailureBuckets:new Map(),
+    validate:kind=>assert.ok(['artifact-manifest','approval-decision','handoff'].includes(kind)),runs:{managed:()=>false}});
   store.registerIdentity(identity);store.registerIdentity(recipient);
   const approvedPolicy={status:'APPROVED',policy_version:'1.0.0',minimum_comparable_trades:50,
     minimum_independent_sessions:20,maximum_data_quality_issues:0,contradictory_evidence_tolerance:0};
@@ -71,7 +74,7 @@ function fixture({insufficient=false,noChange=false,partial=false,prospective=fa
     ...(prospective?{evidence_policy:approvedPolicy}:{})}));
   backend.db.prepare('INSERT INTO ow_strategies VALUES(?,?,?,?,?)').run('s','p',1,baseline,JSON.stringify({strategy_name:'Isolated planning fixture'}));
   backend.db.prepare('INSERT INTO ow_instances VALUES(?,?,?)').run('i','s',JSON.stringify(prospective?{telemetry_producer_id:'telemetry'}:{}));
-  if(registerBaseline)backend.db.prepare('INSERT INTO ow_run_versions VALUES(?,?,?)').run('baseline-fixture','s',JSON.stringify({kind:'BASELINE',version:'v1',code_hash:baseline}));
+  if(registerBaseline)backend.db.prepare('INSERT INTO ow_run_versions VALUES(?,?,?)').run('baseline-fixture','s',JSON.stringify({kind:'BASELINE',version:'v0.1.1',code_hash:baseline}));
   const runs=['r1','r2','r3'];
   const contexts=Object.fromEntries(runs.map(run_id=>[run_id,{run_id,context_hash:digest(`context-${run_id}`),strategy_profile_id:'p',
     strategy_profile_version:'1',strategy_code_hash:baseline,strategy_config_hash:digest('config'),dataset_manifest_id:'discovery',
@@ -102,6 +105,7 @@ function fixture({insufficient=false,noChange=false,partial=false,prospective=fa
     classification:()=>({eligible:proof,reasons:proof?[]:['PHYSICAL_STRATEGY_DLL_HASH_CONFLICT'],
       telemetry:{bypassed:true,proof_basis:'EXPLICIT_MOCK_ONLY'}}),cohort:()=>bundle};
   backend.operationalResearch=new OperationalResearch(backend);
+  backend.operationalCandidateGovernance=new OperationalCandidateGovernance(backend);
   backend.operationalCandidateDispatch=new OperationalCandidateDispatch(backend);
   backend.operationalCandidateEvaluator=new OperationalCandidateEvaluator(backend);
   // Historical v4 continuation fixtures; prospective v5 has separate proof tests.
@@ -128,7 +132,7 @@ function fixture({insufficient=false,noChange=false,partial=false,prospective=fa
   return {backend,actor,human,bundle,rows,root,seed,capture,complete,
     get worker(){return backend.operationalResearch;},setProof(value){proof=value;},
     children:()=>backend.db.prepare("SELECT * FROM ow_cases WHERE json_extract(payload_json,'$.origin')=?").all(CONTINUATION_ORIGIN),
-    restart(){backend.operationalCandidateEvaluator.stop();store.close();store=new WorkflowStore(filename);backend.db=store.db;backend.store=store;backend.operationalResearch=new OperationalResearch(backend);backend.operationalResearch.version=version;backend.operationalCandidateDispatch=new OperationalCandidateDispatch(backend);backend.operationalCandidateEvaluator=new OperationalCandidateEvaluator(backend);},
+    restart(){backend.operationalCandidateEvaluator.stop();store.close();store=new WorkflowStore(filename);backend.db=store.db;backend.store=store;backend.operationalResearch=new OperationalResearch(backend);backend.operationalResearch.version=version;backend.operationalCandidateGovernance=new OperationalCandidateGovernance(backend);backend.operationalCandidateDispatch=new OperationalCandidateDispatch(backend);backend.operationalCandidateEvaluator=new OperationalCandidateEvaluator(backend);},
     close(){store.close();fs.rmSync(root,{recursive:true,force:true,maxRetries:5,retryDelay:100});}};
 }
 
@@ -1193,17 +1197,59 @@ const validationMatrix=(f,baselineHash)=>{
     [segment('holdout-m26','HOLDOUT','MNQM26_FUT_CME[M]','2026-05-01T00:00:00.000Z','2026-05-15T00:00:00.000Z','2026-06-14T23:00:00.000Z')]];
   const cost_model={schema_version:'ocean-observed-cost-model/v1',broker_profile:'Stage5_ActiveTrader',product:'MNQ',fee_tier:'active_trader',
     currency:'USD',total_fee_per_side:0.57,effective_from:'2026-01-01',source_reference:'fixture-observed-sierra-fees',source_type:'sierra_observed'};
-  return ['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'].map((kind,index)=>({kind,baseline_version:'v0.6.238',
-    baseline_strategy_hash:baselineHash,
-    baseline_execution_source_hash:digest(kind==='OOS_HOLDOUT'?'baseline-validation-source':'baseline-source'),
+  return ['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'].map((kind,index)=>({kind,
+    baseline_version:'v0.6.240-test-wrapper-baseline',
+    baseline_strategy_hash:digest('baseline-execution-binary'),
+    baseline_execution_source_hash:digest('baseline-execution-source'),
     candidate_version:candidateBuild().candidate_version,
-    candidate_execution_version:candidateBuild().candidate_version,candidate_execution_hash:candidateBuild().candidate_hash,
-    candidate_execution_source_hash:digest('candidate-source'),
+    candidate_execution_version:'v0.6.240-test-wrapper-short-disabled',
+    candidate_execution_hash:digest('candidate-execution-binary'),
+    candidate_execution_source_hash:digest('candidate-execution-source'),
     telemetry_version:'v0.5.47',
     telemetry_hash:digest('telemetry-v0547'),cost_model,cost_model_hash:objectHash(cost_model),
     acceptance:{evidence_integrity_only:true,favorable_performance_required:false,zero_trade_valid:true,costs_required:true,
       duplicate_check_required:true,completion_receipt_required:true},
     failure_rule:'FAIL or BLOCK when physical identity, attribution, cost, duplicate, zero-trade, completion, interval or database-read evidence is incomplete.',segments:groups[index]}));
+};
+const governanceInput=(f,child,completed,matrix)=>({message_id:'candidate-governance',data:{case_id:child.id,
+  expected_revision:f.backend.one('ow_cases',child.id).revision,completion_hash:completed.completion.completion_hash,
+  candidate_hash:candidateBuild().candidate_hash,baseline_hash:child.baseline_hash,
+  policy:{policy_id:'VWAP-CICD-OVERFIT-CONTROL-V1',card_id:'test-governance-card',card_hash:digest('test-governance-card'),
+    change_family:'direction-short-exclusion-v1',
+    attempt_number:1,change_class:'ENTRY_OR_FILTER_LOGIC'},
+  bindings:{baseline:{logical_provider:{version:'v0.1.1',code_hash:child.baseline_hash,
+    provider_version_id:'baseline-fixture',
+    provider_record_hash:objectHash(JSON.parse(f.backend.one('ow_run_versions','baseline-fixture').payload_json))},
+    behavior:{version:'v0.6.238',source_hash:digest('baseline-behavior-source'),
+      binary_hash:digest('baseline-behavior-binary'),build_receipt_hash:digest('baseline-behavior-build-receipt')},
+    execution:{version:matrix[0].baseline_version,source_hash:matrix[0].baseline_execution_source_hash,
+      binary_hash:matrix[0].baseline_strategy_hash,build_receipt_hash:digest('baseline-execution-build-receipt')},
+    configuration_hash:digest('baseline-config'),lineage_hash:digest('baseline-provider-to-behavior-lineage')},
+    candidate:{registered:{version:candidateBuild().candidate_version,
+      source_hash:candidateBuild().source_hash,binary_hash:candidateBuild().candidate_hash,
+      build_receipt_hash:candidateBuild().build_receipt_hash},behavior:{version:candidateBuild().candidate_version,
+      source_hash:candidateBuild().source_hash,binary_hash:candidateBuild().candidate_hash,
+      build_receipt_hash:candidateBuild().build_receipt_hash},execution:{version:matrix[0].candidate_execution_version,
+      source_hash:matrix[0].candidate_execution_source_hash,binary_hash:matrix[0].candidate_execution_hash,
+      build_receipt_hash:digest('candidate-execution-build-receipt')},configuration_hash:digest('baseline-config'),
+    diff_hash:digest('candidate-diff')}},
+  universe:{universe_id:'test-complete-eligible-universe',segments:matrix.flatMap(test=>test.segments.map(segment=>({
+    segment_id:segment.segment_id,test_kind:test.kind,use_class:['BACKTEST','ROBUSTNESS'].includes(test.kind)
+      ?'DISCOVERY_DESIGN':'CONFIRMATION_VERDICT_ONLY',dataset_id:segment.dataset_id,dataset_revision:segment.dataset_revision,
+    dataset_role:segment.dataset_role,dataset_manifest_hash:segment.dataset_manifest_hash,contract:segment.contract,
+    warmup_start_utc:segment.warmup_start_utc,scored_start_utc:segment.scored_start_utc,scored_end_utc:segment.scored_end_utc,
+    eligible:true,exclusion_reason:null})))},evaluation_policy:{policy_id:'test-positive-benefit-v1',
+    favorable_performance_required:true,minimum_positive_tests:3,maximum_negative_tests:0,
+    minimum_cumulative_net_pnl_delta:0,minimum_candidate_trade_count:1,no_benefit_when_thresholds_fail:true,
+    metric_contract:candidateMetricContract()},access:{status:'FRESH_UNEXPOSED',attestation_hash:digest('fresh-unexposed-attestation')}}});
+const directionMetrics=metrics=>metrics.short_trade_count===2?{
+  ALL:{trade_count:10,win_count:7,loss_count:3,gross_profit:120,gross_loss:-20,fees:20,net_pnl:80,profit_factor:6,max_drawdown:20,zero_trade_periods:1,risk_breach_count:0},
+  LONG:{trade_count:8,win_count:5,loss_count:3,gross_profit:100,gross_loss:-20,fees:16,net_pnl:64,profit_factor:5,max_drawdown:20,zero_trade_periods:1,risk_breach_count:0},
+  SHORT:{trade_count:2,win_count:2,loss_count:0,gross_profit:20,gross_loss:0,fees:4,net_pnl:16,profit_factor:null,max_drawdown:0,zero_trade_periods:0,risk_breach_count:0},
+}:{
+  ALL:{trade_count:8,win_count:6,loss_count:2,gross_profit:120,gross_loss:-10,fees:16,net_pnl:94,profit_factor:12,max_drawdown:10,zero_trade_periods:1,risk_breach_count:0},
+  LONG:{trade_count:8,win_count:6,loss_count:2,gross_profit:120,gross_loss:-10,fees:16,net_pnl:94,profit_factor:12,max_drawdown:10,zero_trade_periods:1,risk_breach_count:0},
+  SHORT:{trade_count:0,win_count:0,loss_count:0,gross_profit:0,gross_loss:0,fees:0,net_pnl:0,profit_factor:null,max_drawdown:0,zero_trade_periods:0,risk_breach_count:0},
 };
 const validationReport=(f,test,baselineHash)=>{
   const write=(name,content)=>{const file=path.join(f.root,name);fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,content);return {path:file,sha256:digest(content)};};
@@ -1221,14 +1267,19 @@ const validationReport=(f,test,baselineHash)=>{
       2,test.cost_model.broker_profile,test.cost_model.product,test.cost_model.fee_tier,test.cost_model.source_type);
     const bytes=db.serialize();db.close();fs.writeFileSync(file,bytes);return {path:file,sha256:digest(bytes)};
   };
-  const candidateContent=test.candidate_execution_hash===digest('candidate-validation-binary')?'candidate-validation-binary':'candidate-binary';
+  const effectiveCandidateVersion=test.candidate_execution_version ?? candidateBuild().candidate_version;
+  const effectiveCandidateHash=test.candidate_execution_hash ?? candidateBuild().candidate_hash;
+  const effectiveCandidateSourceHash=test.candidate_execution_source_hash ?? candidateBuild().source_hash;
+  const candidateContent=effectiveCandidateHash===digest('candidate-validation-binary')?'candidate-validation-binary'
+    :effectiveCandidateHash===digest('candidate-execution-binary')?'candidate-execution-binary':'candidate-binary';
+  const baselineContent=test.baseline_strategy_hash===digest('baseline-execution-binary')?'baseline-execution-binary':'baseline';
+  const baselineSourceContent=test.baseline_execution_source_hash===digest('baseline-execution-source')?'baseline-execution-source':'baseline-source';
+  const candidateSourceContent=effectiveCandidateSourceHash===digest('candidate-execution-source')?'candidate-execution-source':'candidate-source';
   const telemetryContent=test.telemetry_version==='v0.5.47'?'telemetry-v0547':`telemetry-${test.telemetry_version}`;
-  const baselineDll=write('baseline.dll','baseline'),candidateDll=write('candidate.dll',candidateContent),telemetryDll=write('telemetry.dll',telemetryContent);
+  const baselineDll=write('baseline.dll',baselineContent),candidateDll=write('candidate.dll',candidateContent),telemetryDll=write('telemetry.dll',telemetryContent);
   const segments=test.segments.map(segment=>{
-    const physical=(side,runId,dll,strategyVersion,tradeCount,metrics)=>{
-      const source=write(`${segment.segment_id}-${side}.cpp`,side==='baseline'
-        ?(test.kind==='OOS_HOLDOUT'?'baseline-validation-source':'baseline-source')
-        :(test.kind==='OOS_HOLDOUT'?'candidate-validation-source':'candidate-source'));
+    const physical=(side,runId,dll,strategyVersion,tradeCount,metrics,sourceContent)=>{
+      const source=write(`${segment.segment_id}-${side}.cpp`,sourceContent);
       const marker=write(`${segment.segment_id}-${side}.version.txt`,`${side}-marker-${segment.segment_id}`);
       const receiptContent=JSON.stringify({schema_version:'ocean-replay-test-completion/v1',run_id:runId,run_kind:'TEST',status:'COMPLETED',
         requested_replay_window:{start_chart_time:london(segment.warmup_start_utc),end_chart_time:london(segment.scored_end_utc)},
@@ -1252,26 +1303,28 @@ const validationReport=(f,test,baselineHash)=>{
     };
     const baselineMetrics={trade_count:10,gross_pnl:100,fees:20,net_pnl:80,short_trade_count:2,open_trade_count:0,zero_trade_periods:1};
     const candidateMetrics={trade_count:8,gross_pnl:110,fees:16,net_pnl:94,short_trade_count:0,open_trade_count:0,zero_trade_periods:1};
-    const baselinePhysical=physical('baseline',segment.baseline_run_id,baselineDll,test.baseline_version,10,baselineMetrics);
-    const candidatePhysical=physical('candidate',segment.candidate_run_id,candidateDll,test.candidate_execution_version,8,candidateMetrics);
+    const baselinePhysical=physical('baseline',segment.baseline_run_id,baselineDll,test.baseline_version,10,baselineMetrics,baselineSourceContent);
+    const candidatePhysical=physical('candidate',segment.candidate_run_id,candidateDll,effectiveCandidateVersion,8,candidateMetrics,candidateSourceContent);
     const versionNumber=value=>Number(/^v0\.6\.(\d+)/.exec(value)?.[1] || 0);
-    const markerRequired=test.kind==='OOS_HOLDOUT' || versionNumber(test.baseline_version)>=240
-      || versionNumber(test.candidate_execution_version)>=240;
+    const baselineMarkerRequired=test.kind==='OOS_HOLDOUT' || versionNumber(test.baseline_version)>=240;
+    const candidateMarkerRequired=test.kind==='OOS_HOLDOUT' || versionNumber(effectiveCandidateVersion)>=240;
     return {segment_id:segment.segment_id,baseline:{run_id:segment.baseline_run_id,strategy_version:test.baseline_version,
-      strategy_hash:baselineHash,telemetry_version:test.telemetry_version,telemetry_hash:test.telemetry_hash,trade_count:10,
+      strategy_hash:test.baseline_strategy_hash,telemetry_version:test.telemetry_version,telemetry_hash:test.telemetry_hash,trade_count:10,
       gross_pnl:100,fees:20,net_pnl:80,short_trade_count:2,zero_trade_periods:1,
+      direction_metrics:directionMetrics(baselineMetrics),
       terminal_trade_count:10,boundary_cleanup_trade_id:null,
       completion_receipt_hash:baselinePhysical.receipt.sha256,physical_hashes:baselinePhysical.hashes,data_quality_flags:[]},
-    candidate:{run_id:segment.candidate_run_id,strategy_version:test.candidate_execution_version,strategy_hash:test.candidate_execution_hash,
+    candidate:{run_id:segment.candidate_run_id,strategy_version:effectiveCandidateVersion,strategy_hash:effectiveCandidateHash,
       telemetry_version:test.telemetry_version,telemetry_hash:test.telemetry_hash,trade_count:8,gross_pnl:110,fees:16,net_pnl:94,
       short_trade_count:0,zero_trade_periods:1,terminal_trade_count:8,boundary_cleanup_trade_id:null,completion_receipt_hash:candidatePhysical.receipt.sha256,
+      direction_metrics:directionMetrics(candidateMetrics),
       physical_hashes:candidatePhysical.hashes,data_quality_flags:[]},
     source_files:[baselineDll,candidateDll,telemetryDll,baselinePhysical.source,
-      ...(markerRequired?[baselinePhysical.marker]:[]),baselinePhysical.receipt,baselinePhysical.snapshot,baselinePhysical.sqlite,candidatePhysical.source,
-      ...(markerRequired?[candidatePhysical.marker]:[]),candidatePhysical.receipt,candidatePhysical.snapshot,candidatePhysical.sqlite]};
+      ...(baselineMarkerRequired?[baselinePhysical.marker]:[]),baselinePhysical.receipt,baselinePhysical.snapshot,baselinePhysical.sqlite,candidatePhysical.source,
+      ...(candidateMarkerRequired?[candidatePhysical.marker]:[]),candidatePhysical.receipt,candidatePhysical.snapshot,candidatePhysical.sqlite]};
   });
-  const aggregate=name=>({strategy_version:name==='baseline'?test.baseline_version:test.candidate_execution_version,
-    strategy_hash:name==='baseline'?baselineHash:test.candidate_execution_hash,telemetry_version:test.telemetry_version,
+  const aggregate=name=>({strategy_version:name==='baseline'?test.baseline_version:effectiveCandidateVersion,
+    strategy_hash:name==='baseline'?test.baseline_strategy_hash:effectiveCandidateHash,telemetry_version:test.telemetry_version,
     telemetry_hash:test.telemetry_hash,...Object.fromEntries(['trade_count','gross_pnl','fees','net_pnl','short_trade_count','zero_trade_periods']
       .map(key=>[key,segments.reduce((sum,segment)=>sum+segment[name][key],0)])),data_quality_flags:[]});
   return {status:'PASS',segments,baseline:aggregate('baseline'),candidate:aggregate('candidate'),
@@ -1280,10 +1333,12 @@ const validationReport=(f,test,baselineHash)=>{
     comparison:{reported_delta:segments.length*14},contradictions:[],limitations:['TEST fixture',
       ...segments.flatMap(segment=>{
         const versionNumber=value=>Number(/^v0\.6\.(\d+)/.exec(value)?.[1] || 0);
-        const markerRequired=test.kind==='OOS_HOLDOUT' || versionNumber(test.baseline_version)>=240
-          || versionNumber(test.candidate_execution_version)>=240;
-        return markerRequired?[]:[`Marker bytes were not retained for ${segment.baseline.run_id}; the marker hash remains sealed in its completion receipt.`,
-          `Marker bytes were not retained for ${segment.candidate.run_id}; the marker hash remains sealed in its completion receipt.`];
+        const limitations=[];
+        if(test.kind!=='OOS_HOLDOUT' && versionNumber(test.baseline_version)<240)
+          limitations.push(`Marker bytes were not retained for ${segment.baseline.run_id}; the marker hash remains sealed in its completion receipt.`);
+        if(test.kind!=='OOS_HOLDOUT' && versionNumber(effectiveCandidateVersion)<240)
+          limitations.push(`Marker bytes were not retained for ${segment.candidate.run_id}; the marker hash remains sealed in its completion receipt.`);
+        return limitations;
       })],
     provenance:{cost_model:test.cost_model,cost_model_hash:test.cost_model_hash}};
 };
@@ -1560,6 +1615,7 @@ test('candidate completion survives restart and registration requires an approve
     assert.match(html,/Historical validation scope/);assert.match(html,/Replay candidate validation/);
     assert.match(html,/Candidate testing: DUE/);assert.match(html,/Historical validation/);
     assert.match(html,/Paper, Live and promotion remain disabled/);
+    assert.match(html,/Candidate governance: REQUIRED/);assert.match(html,/Register candidate governance before planning/);
     assert.doesNotMatch(html,/Candidate testing: NOT_DUE|Planning only; no candidate development or test permission/);
     assert.throws(()=>f.backend.mutate('artifact.write',strategy,{message_id:'test-generic-post-registration-write',data:{case_id:child.id}}),/OPERATIONAL_PLANNING_MUTATION_NOT_ENABLED/);
     const validationHttp=async(route,body)=>{
@@ -1570,16 +1626,43 @@ test('candidate completion survives restart and registration requires an approve
       return {status:response.statusCode,body:output};
     };
     let matrix=validationMatrix(f,child.baseline_hash);const registeredRow=f.backend.one('ow_cases',child.id);
-    const validationPlanInput={message_id:'candidate-validation-plan',data:{case_id:child.id,expected_revision:registeredRow.revision,
+    const planWithoutGovernance={message_id:'candidate-validation-plan-without-governance',data:{case_id:child.id,expected_revision:registeredRow.revision,
       completion_hash:completed.completion.completion_hash,candidate_hash:candidateBuild().candidate_hash,baseline_hash:child.baseline_hash,
       plan_artifact_id:returned.artifact_id,tests:matrix}};
+    assert.equal((await validationHttp('validation-plan',planWithoutGovernance)).body.error.code,'CANDIDATE_GOVERNANCE_REQUIRED');
+    const wrongBaselineProvider=governanceInput(f,child,completed,matrix);
+    wrongBaselineProvider.message_id='candidate-governance-wrong-baseline-provider';
+    wrongBaselineProvider.data.bindings.baseline.logical_provider.provider_record_hash=digest('wrong-provider-record');
+    assert.equal((await validationHttp('governance',wrongBaselineProvider)).body.error.code,'CANDIDATE_GOVERNANCE_BASELINE_PROVIDER_CONFLICT');
+    const governanceResponse=await validationHttp('governance',governanceInput(f,child,completed,matrix));
+    assert.equal(governanceResponse.status,200,JSON.stringify(governanceResponse.body));assert.equal(governanceResponse.body.status,'READY');
+    const governance=f.backend.readCase(f.human,child.id).candidate_governance;
+    assert.equal(governance.status,'READY');assert.equal(governance.policy_id,'VWAP-CICD-OVERFIT-CONTROL-V1');
+    const frozenGovernance=f.backend.operationalCandidateGovernance.governance(child.id);
+    assert.equal(frozenGovernance.bindings.baseline.logical_provider.version,'v0.1.1');
+    assert.equal(frozenGovernance.bindings.baseline.behavior.version,'v0.6.238');
+    assert.equal(frozenGovernance.bindings.baseline.execution.version,'v0.6.240-test-wrapper-baseline');
+    assert.notEqual(frozenGovernance.bindings.baseline.logical_provider.version,
+      frozenGovernance.bindings.baseline.behavior.version);
+    assert.notEqual(frozenGovernance.bindings.baseline.behavior.version,
+      frozenGovernance.bindings.baseline.execution.version);
+    assert.equal(frozenGovernance.bindings.candidate.registered.version,candidateBuild().candidate_version);
+    assert.equal(frozenGovernance.bindings.candidate.behavior.version,candidateBuild().candidate_version);
+    assert.equal(frozenGovernance.bindings.candidate.execution.version,'v0.6.240-test-wrapper-short-disabled');
+    assert.notEqual(frozenGovernance.bindings.candidate.behavior.version,
+      frozenGovernance.bindings.candidate.execution.version);
+    const validationPlanInput={message_id:'candidate-validation-plan',data:{...planWithoutGovernance.data,
+      expected_revision:f.backend.one('ow_cases',child.id).revision}};
+    const universeMismatch=structuredClone(validationPlanInput);universeMismatch.message_id='candidate-validation-plan-universe-mismatch';
+    universeMismatch.data.tests[0].segments[0].segment_id='test-valid-but-unregistered-segment';
+    assert.equal((await validationHttp('validation-plan',universeMismatch)).body.error.code,'CANDIDATE_GOVERNANCE_UNIVERSE_BINDING_CONFLICT');
     const outside=structuredClone(validationPlanInput);outside.message_id='candidate-validation-plan-outside';outside.data.tests[0].segments[0].scored_end_utc='2025-09-13T00:00:00.000Z';
     assert.equal((await validationHttp('validation-plan',outside)).body.error.code,'CANDIDATE_VALIDATION_PARTITION_CONFLICT');
     const duplicate=structuredClone(validationPlanInput);duplicate.message_id='candidate-validation-plan-duplicate';duplicate.data.tests[0].segments[1].baseline_run_id=duplicate.data.tests[0].segments[0].baseline_run_id;
     assert.equal((await validationHttp('validation-plan',duplicate)).body.error.code,'CANDIDATE_VALIDATION_RUN_DUPLICATE');
     const unregisteredSource=structuredClone(validationPlanInput);unregisteredSource.message_id='candidate-validation-plan-unregistered-source';
     unregisteredSource.data.tests[0].candidate_execution_source_hash=digest('unregistered-candidate-source');
-    assert.equal((await validationHttp('validation-plan',unregisteredSource)).body.error.code,'CANDIDATE_VALIDATION_CANDIDATE_SOURCE_CONFLICT');
+    assert.equal((await validationHttp('validation-plan',unregisteredSource)).body.error.code,'CANDIDATE_GOVERNANCE_EXECUTION_BINDING_CONFLICT');
     const validationPlanResponse=await validationHttp('validation-plan',validationPlanInput);
     assert.equal(validationPlanResponse.status,200);let validationPlan=validationPlanResponse.body;
     assert.equal(validationPlan.status,'PLANNED');assert.equal(validationPlan.holdout_state,'SEALED');
@@ -1592,9 +1675,6 @@ test('candidate completion survives restart and registration requires an approve
     const revisedInput=structuredClone(validationPlanInput);revisedInput.message_id='candidate-validation-plan-revision';
     revisedInput.data.expected_revision=validationPlan.revision;revisedInput.data.supersedes_plan_hash=validationPlan.plan_hash;
     revisedInput.data.tests[0].failure_rule+=' Corrected before execution.';
-    revisedInput.data.tests.at(-1).candidate_execution_version='v0.6.240-test-boundary-drain-short-exclusion-candidate';
-    revisedInput.data.tests.at(-1).candidate_execution_hash=digest('candidate-validation-binary');
-    revisedInput.data.tests.at(-1).candidate_execution_source_hash=digest('candidate-validation-source');
     const revisedResponse=await validationHttp('validation-plan',revisedInput);assert.equal(revisedResponse.status,200);
     const originalPlanHash=validationPlan.plan_hash;validationPlan=revisedResponse.body;matrix=revisedInput.data.tests;
     assert.equal(validationPlan.plan_revision,2);assert.equal(validationPlan.supersedes_plan_hash,originalPlanHash);
@@ -1603,14 +1683,21 @@ test('candidate completion survives restart and registration requires an approve
     assert.equal(secondSealedPlan.owner_id,firstSealedPlan.owner_id);
     assert.equal(secondSealedPlan.decision_id,firstSealedPlan.decision_id);
     assert.ok(Date.parse(secondSealedPlan.created_at_utc)>=Date.parse(firstSealedPlan.created_at_utc));
+    const noExposureRow=f.backend.one('ow_cases',child.id),noExposureTest=matrix[0];
+    const noExposure=await validationHttp('validation-results',{message_id:'candidate-result-without-exposure',data:{
+      case_id:child.id,expected_revision:noExposureRow.revision,plan_hash:validationPlan.plan_hash,kind:noExposureTest.kind,
+      result:validationReport(f,noExposureTest,child.baseline_hash)}});
+    assert.equal(noExposure.status,409);assert.equal(noExposure.body.error.code,'CANDIDATE_GOVERNANCE_EXPOSURE_REQUIRED');
     const legacyTest=structuredClone(matrix[0]);delete legacyTest.candidate_execution_version;delete legacyTest.candidate_execution_hash;
+    legacyTest.candidate_execution_source_hash=candidateBuild().source_hash;
     const legacyReport=f.backend.operationalCandidateDispatch.validateResult(f.backend.one('ow_cases',child.id),
       f.backend.operationalCandidateDispatch.completion(child.id),
       f.backend.operationalCandidateDispatch.registration(child.id),{...validationPlan,tests:[legacyTest]},legacyTest,
-      validationReport(f,matrix[0],child.baseline_hash));
+      validationReport(f,legacyTest,child.baseline_hash));
     assert.equal(legacyReport.execution_bindings.candidate.logical_hash,candidateBuild().candidate_hash);
     assert.equal(legacyReport.execution_bindings.candidate.strategy_version,candidateBuild().candidate_version);
     assert.equal(legacyReport.execution_bindings.candidate.runs[0].physical_hashes.strategy_dll_hash,candidateBuild().candidate_hash);
+    assert.equal(legacyReport.execution_bindings.candidate.runs[0].marker_bytes_available,false);
     const early=f.backend.one('ow_cases',child.id),earlyTest=matrix.at(-1);
     const earlyResponse=await validationHttp('validation-results',{message_id:'early-holdout',data:{
       case_id:child.id,expected_revision:early.revision,plan_hash:validationPlan.plan_hash,kind:'OOS_HOLDOUT',
@@ -1659,16 +1746,45 @@ test('candidate completion survives restart and registration requires an approve
         retuned.data.tests[1].candidate_execution_source_hash=digest('retuned-source-after-backtest');
         assert.equal((await validationHttp('validation-plan',retuned)).body.error.code,'CANDIDATE_VALIDATION_PLAN_REVISION_NOT_ALLOWED');
       }
+      const exposureRow=f.backend.one('ow_cases',child.id),wrongGovernanceExposure={message_id:`candidate-exposure-wrong-governance-${test.kind}`,data:{
+        case_id:child.id,expected_revision:exposureRow.revision,plan_hash:validationPlan.plan_hash,
+        governance_hash:digest('wrong-governance'),kind:test.kind,exposure_id:`test-exposure-wrong-${test.kind.toLowerCase()}`,
+        segment_ids:test.segments.map(segment=>segment.segment_id),retry_of_exposure_id:null}};
+      assert.equal((await validationHttp('exposures',wrongGovernanceExposure)).body.error.code,'CANDIDATE_GOVERNANCE_REQUIRED');
+      const exposure=await validationHttp('exposures',{message_id:`candidate-exposure-${test.kind}`,data:{
+        case_id:child.id,expected_revision:exposureRow.revision,plan_hash:validationPlan.plan_hash,
+        governance_hash:governance.governance_hash,kind:test.kind,exposure_id:`test-exposure-${test.kind.toLowerCase()}`,
+        segment_ids:test.segments.map(segment=>segment.segment_id),retry_of_exposure_id:null}});
+      assert.equal(exposure.status,200,JSON.stringify(exposure.body));assert.equal(exposure.body.status,'EXPOSURE_RESERVED');
+      if(index===0){
+        const duplicateExposure=structuredClone(exposure.data || {case_id:child.id,plan_hash:validationPlan.plan_hash,
+          governance_hash:governance.governance_hash,kind:test.kind,exposure_id:`test-exposure-${test.kind.toLowerCase()}`,
+          segment_ids:test.segments.map(segment=>segment.segment_id),retry_of_exposure_id:null});
+        duplicateExposure.expected_revision=f.backend.one('ow_cases',child.id).revision;
+        assert.equal((await validationHttp('exposures',{message_id:'candidate-exposure-duplicate',data:duplicateExposure})).body.error.code,
+          'CANDIDATE_GOVERNANCE_EXPOSURE_DUPLICATE');
+        const unboundRetry={...duplicateExposure,exposure_id:'test-exposure-backtest-retry',retry_of_exposure_id:null};
+        assert.equal((await validationHttp('exposures',{message_id:'candidate-exposure-unbound-retry',data:unboundRetry})).body.error.code,
+          'CANDIDATE_GOVERNANCE_TECHNICAL_RETRY_REQUIRED');
+      }
       const currentRow=f.backend.one('ow_cases',child.id),input={message_id:`candidate-validation-result-${test.kind}`,data:{
         case_id:child.id,expected_revision:currentRow.revision,plan_hash:validationPlan.plan_hash,kind:test.kind,
         result:validationReport(f,test,child.baseline_hash)}};
-      if(index===0){const invalid=structuredClone(input);invalid.message_id='candidate-validation-incomplete-pass';invalid.data.result.checks.fees_reconciled=false;
+      if(index===0){
+        const missingDirection=structuredClone(input);missingDirection.message_id='candidate-validation-missing-direction-metrics';
+        delete missingDirection.data.result.segments[0].candidate.direction_metrics;
+        assert.equal((await validationHttp('validation-results',missingDirection)).body.error.code,'CANDIDATE_VALIDATION_DIRECTION_METRICS_REQUIRED');
+        const inconsistentDirection=structuredClone(input);inconsistentDirection.message_id='candidate-validation-inconsistent-direction-metrics';
+        inconsistentDirection.data.result.segments[0].candidate.direction_metrics.ALL.trade_count+=1;
+        assert.equal((await validationHttp('validation-results',inconsistentDirection)).body.error.code,'CANDIDATE_VALIDATION_DIRECTION_METRIC_CONFLICT');
+        const invalid=structuredClone(input);invalid.message_id='candidate-validation-incomplete-pass';invalid.data.result.checks.fees_reconciled=false;
         const invalidResponse=await validationHttp('validation-results',invalid);
         assert.equal(invalidResponse.status,409);assert.equal(invalidResponse.body.error.code,'CANDIDATE_VALIDATION_PASS_EVIDENCE_INCOMPLETE');
         const disclosed=f.backend.operationalCandidateDispatch.validateResult(f.backend.one('ow_cases',child.id),
           f.backend.operationalCandidateDispatch.completion(child.id),f.backend.operationalCandidateDispatch.registration(child.id),
           {...validationPlan,tests:[test]},test,input.data.result);
-        assert.equal(disclosed.execution_bindings.candidate.runs[0].marker_bytes_available,false);
+        assert.equal(disclosed.execution_bindings.baseline.runs[0].marker_bytes_available,true);
+        assert.equal(disclosed.execution_bindings.candidate.runs[0].marker_bytes_available,true);
         const wrongRun=structuredClone(input);wrongRun.message_id='candidate-validation-wrong-run';wrongRun.data.result.segments[0].baseline.run_id='test-wrong-baseline-run';
         assert.equal((await validationHttp('validation-results',wrongRun)).body.error.code,'CANDIDATE_VALIDATION_RUN_BINDING_CONFLICT');
         const wrongAggregate=structuredClone(input);wrongAggregate.message_id='candidate-validation-wrong-aggregate';wrongAggregate.data.result.candidate.net_pnl+=1;
@@ -1723,8 +1839,7 @@ test('candidate completion survives restart and registration requires an approve
           f.backend.operationalCandidateDispatch.completion(child.id),f.backend.operationalCandidateDispatch.registration(child.id),
           {...validationPlan,tests:[test]},test,missingMarker),/CANDIDATE_VALIDATION_PHYSICAL_SOURCE_BINDING_CONFLICT/);
         const logicalAsExecution=structuredClone(input);logicalAsExecution.message_id='candidate-validation-logical-hash-is-not-execution-hash';
-        logicalAsExecution.data.result.segments[0].candidate.strategy_version=candidateBuild().candidate_version;
-        logicalAsExecution.data.result.segments[0].candidate.strategy_hash=candidateBuild().candidate_hash;
+        logicalAsExecution.data.result.segments[0].candidate.strategy_hash=digest('candidate-logical-only-not-execution');
         assert.equal((await validationHttp('validation-results',logicalAsExecution)).body.error.code,'CANDIDATE_VALIDATION_PHYSICAL_BINDING_CONFLICT');
       }
       if(index===3)assert.equal(f.backend.db.prepare('SELECT COUNT(*) n FROM ow_events WHERE action=?').get('operational.candidate.validation.holdout_released').n,0);
@@ -1734,14 +1849,18 @@ test('candidate completion survives restart and registration requires an approve
       if(index===0){
         const report=JSON.parse(Buffer.from(f.backend.one('ow_artifacts',recorded.artifact_id).content).toString());
         assert.equal(report.execution_bindings.candidate.logical_hash,candidateBuild().candidate_hash);
-        assert.equal(report.execution_bindings.candidate.strategy_version,candidateBuild().candidate_version);
-        assert.equal(report.execution_bindings.candidate.runs[0].physical_hashes.strategy_dll_hash,candidateBuild().candidate_hash);
+        assert.equal(report.execution_bindings.candidate.strategy_version,test.candidate_execution_version);
+        assert.equal(report.execution_bindings.candidate.runs[0].physical_hashes.strategy_dll_hash,test.candidate_execution_hash);
+        assert.notEqual(report.execution_bindings.candidate.logical_hash,
+          report.execution_bindings.candidate.runs[0].physical_hashes.strategy_dll_hash);
       }
       if(index===3){
         const report=JSON.parse(Buffer.from(f.backend.one('ow_artifacts',recorded.artifact_id).content).toString());
         assert.equal(report.execution_bindings.candidate.logical_hash,candidateBuild().candidate_hash);
-        assert.equal(report.execution_bindings.candidate.strategy_version,'v0.6.240-test-boundary-drain-short-exclusion-candidate');
-        assert.equal(report.execution_bindings.candidate.runs[0].physical_hashes.strategy_dll_hash,digest('candidate-validation-binary'));
+        assert.equal(report.execution_bindings.candidate.strategy_version,test.candidate_execution_version);
+        assert.equal(report.execution_bindings.candidate.runs[0].physical_hashes.strategy_dll_hash,test.candidate_execution_hash);
+        assert.notEqual(report.execution_bindings.candidate.logical_hash,
+          report.execution_bindings.candidate.runs[0].physical_hashes.strategy_dll_hash);
       }
     }
     assert.equal(f.backend.db.prepare('SELECT COUNT(*) n FROM ow_events WHERE action=?').get('operational.candidate.validation.holdout_released').n,1);
@@ -1766,17 +1885,19 @@ test('candidate completion survives restart and registration requires an approve
         const sourceArtifacts=f.backend.operationalCandidateEvaluator.expectedSourceEchoes(request);
         const brainAuthority={strategy_changed:false,candidate_approved:false,candidate_promoted:false,paper_authorized:false,
           live_authorized:false,runtime_trade_decision_dependency:false};
-        const content=JSON.stringify({schema_version:'brain-candidate-evaluation-content/v1',
+        const policyMetrics=f.backend.operationalCandidateEvaluator.policyAssessment(request,sourceArtifacts);
+        const content=JSON.stringify({schema_version:'brain-candidate-evaluation-content/v2',
           strategy:{project:request.project,strategy_id:request.strategy_id,strategy_name:request.strategy_name,
             strategy_profile_id:request.strategy_profile_id,strategy_version:request.strategy_version,
             execution_instance_id:request.execution_instance_id},
           registry_reconciliation_id:request.registry_reconciliation_id,registry_record_sha256:request.registry_record_sha256,
-          bindings,evaluation_policy:request.evaluation_policy,
+          bindings,evaluation_policy:request.evaluation_policy,candidate_governance:{envelope:request.candidate_governance,
+            content:JSON.parse(request.candidate_governance.content_json)},
           validation_plan_predecessors:request.validation_plan_predecessors.map(envelope=>
             ({envelope,content:JSON.parse(envelope.content_json)})),validation_plan:JSON.parse(request.validation_plan.content_json),
           validation_completion:JSON.parse(request.validation_completion.content_json),
           source_artifacts:sourceArtifacts.map((echo,index)=>({echo,content:JSON.parse(request.source_artifacts[index].content_json)})),
-          dataset_provenance:{partition_id:'isolated-test'},conclusion:{type:'BENEFIT_NOT_ESTABLISHED',reasons:[],metrics:{}},
+          dataset_provenance:{partition_id:'isolated-test'},conclusion:{type:'BENEFIT_NOT_ESTABLISHED',reasons:[],metrics:policyMetrics},
           correlation:request.correlation,authority:brainAuthority,human_governance_required:true});
         const response={schema_version:CANDIDATE_EVALUATION_RESULT_VERSION,record_id:'reasoning-isolated-candidate-evaluation',
           relative_path:'reasoning/isolated-candidate-evaluation.md',content,content_sha256:digest(content),

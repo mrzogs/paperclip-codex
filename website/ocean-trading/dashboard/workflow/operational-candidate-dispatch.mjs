@@ -25,6 +25,8 @@ const exactObjectKeys=(value,keys)=>value && typeof value==='object' && !Array.i
 const sameNumber=(left,right)=>Math.abs(left-right)<=1e-6;
 const contractKey=value=>String(value).replace(/\[M\]$/,'');
 const metricKeys=Object.freeze(['trade_count','gross_pnl','fees','net_pnl','short_trade_count','zero_trade_periods']);
+const directionMetricKeys=Object.freeze(['trade_count','win_count','loss_count','gross_profit','gross_loss','fees','net_pnl',
+  'profit_factor','max_drawdown','zero_trade_periods','risk_breach_count']);
 const physicalHashKeys=Object.freeze(['strategy_source_hash','strategy_dll_hash','strategy_marker_hash','completion_receipt_hash']);
 const candidateExecutionVersion=(test,completed)=>test.candidate_execution_version || test.candidate_version || completed.candidate.candidate_version;
 const candidateExecutionHash=(test,registered)=>test.candidate_execution_hash || registered.candidate_hash;
@@ -121,6 +123,7 @@ export class OperationalCandidateDispatch {
         && validHash(test?.baseline_execution_source_hash) && validHash(test?.candidate_execution_source_hash)
         && report.schema_version===CANDIDATE_VALIDATION_VERSION && report.case_id===row.id
         && report.plan_hash===plan.plan_hash && report.plan_artifact_id===plan.plan_artifact_id
+        && (!plan.governance_hash || report.governance_hash===plan.governance_hash)
         && report.completion_hash===completed?.completion_hash
         && report.candidate_hash===row.candidate_hash && report.baseline_hash===row.baseline_hash
         && report.status==='PASS' && report.evidence_integrity_passed===true
@@ -240,10 +243,12 @@ export class OperationalCandidateDispatch {
     if(payload.origin!==ORIGIN || payload.kind!=='PROPOSAL_PLANNING')return null;
     const completed=this.completion(row.id),registered=this.registration(row.id),lease=this.latest(row.id),now=Date.now();
     const validation=this.validationPlan(row.id),validationComplete=this.validationCompletion(row.id);
+    const governance=this.b.operationalCandidateGovernance.statusForCase(row,this);
     return {schema_version:CANDIDATE_DISPATCH_VERSION,status:registered?'REGISTERED':completed?'BUILT_PENDING_REVIEW':lease && lease.lease_until_ms>now?'IN_PROGRESS':'READY',
       recipient_id:completed?.recipient_id || lease?.owner_id || null,plan_artifact_id:completed?.plan_artifact_id || lease?.plan_artifact_id || null,
       completion:completed?this.publicCompletion(completed):null,registration:registered || null,
-      validation:validation?{schema_version:validation.schema_version || CANDIDATE_VALIDATION_VERSION,plan_hash:validation.plan_hash,
+      governance,validation:validation?{schema_version:validation.schema_version || CANDIDATE_VALIDATION_VERSION,plan_hash:validation.plan_hash,
+        governance_hash:validation.governance_hash || null,
         status:validationComplete?'COMPLETED':'PLANNED',tests:validation.tests.map(test=>({kind:test.kind,
           state:test.kind==='OOS_HOLDOUT' && !this.activeHoldoutRelease(row.id)?'SEALED':'RELEASED'}))}:null};
   }
@@ -377,7 +382,7 @@ export class OperationalCandidateDispatch {
   }
 
   validationPerform(action,actor,input){
-    requireThat(['plan','result','complete'].includes(action),404,'UNKNOWN_CANDIDATE_VALIDATION_ACTION');
+    requireThat(['governance','exposure','plan','result','complete'].includes(action),404,'UNKNOWN_CANDIDATE_VALIDATION_ACTION');
     exactKeys(input,['message_id','data']);id(input.message_id);noSecrets(input,this.b.environment);
     requireThat(input.data && typeof input.data==='object',422,'DATA_REQUIRED');
     const data=input.data,message=`candidate-validation:${input.message_id}`,requestHash=objectHash({action,data});
@@ -394,7 +399,9 @@ export class OperationalCandidateDispatch {
       const approved=this.b.approved(row,'DEVELOPMENT',null,actor.id);
       requireThat(REQUIRED_TESTS.every(kind=>approved.binding.authorized_tests.includes(kind)),409,'CANDIDATE_REQUIRED_TEST_AUTHORITY_MISSING');
       let result;
-      if(action==='plan')result=this.recordValidationPlan(actor,row,completed,registered,data);
+      if(action==='governance')result=this.b.operationalCandidateGovernance.register(actor,row,completed,registered,data);
+      else if(action==='exposure')result=this.b.operationalCandidateGovernance.reserveExposure(actor,row,data);
+      else if(action==='plan')result=this.recordValidationPlan(actor,row,completed,registered,data);
       else if(action==='result')result=this.recordValidationResult(actor,row,completed,registered,data);
       else result=this.completeValidation(actor,row,completed,registered,data);
       this.db.prepare('INSERT INTO ow_inbox VALUES(?,?,?,?)').run(actor.id,message,requestHash,JSON.stringify(result));
@@ -488,13 +495,14 @@ export class OperationalCandidateDispatch {
       return {...structuredClone(test),segments};
     });
     requireThat(tests.at(-1).segments.every(segment=>segment.dataset_role==='HOLDOUT'),422,'CANDIDATE_VALIDATION_HOLDOUT_REQUIRED');
+    const governance=this.b.operationalCandidateGovernance.requirePlanReady(row,tests,{existing:Boolean(existing)});
     const now=new Date().toISOString();
     const createdAt=existing && Date.parse(now)<Date.parse(existing.created_at_utc)?existing.created_at_utc:now;
     const frozen={schema_version:CANDIDATE_VALIDATION_PLAN_VERSION,case_id:row.id,plan_revision:(existing?.plan_revision || 1)+(existing?1:0),
       supersedes_plan_hash:existing?.plan_hash || null,plan_artifact_id:completed.plan_artifact_id,
       completion_hash:completed.completion_hash,candidate_hash:registered.candidate_hash,baseline_hash:row.baseline_hash,
       decision_id:existing?.decision_id || approvedDecisionId(this.b.approved(row,'DEVELOPMENT')),
-      owner_id:existing?.owner_id || actor.id,tests,
+      owner_id:existing?.owner_id || actor.id,governance_hash:governance.governance_hash,tests,
       authority:{...authority,authorized_tests:REQUIRED_TESTS,execution_environment:'REPLAY'},created_at_utc:createdAt};
     const plan={...frozen,plan_hash:objectHash(frozen)};
     this.b.event(row.id,validationPlanAction,actor,plan);
@@ -506,7 +514,7 @@ export class OperationalCandidateDispatch {
     this.db.prepare('UPDATE ow_cases SET revision=revision+1,waiting_on=? WHERE id=?').run(nextAction,row.id);
     return {case_id:row.id,revision:row.revision+1,status:'PLANNED',plan_revision:plan.plan_revision,
       supersedes_plan_hash:plan.supersedes_plan_hash,plan_hash:plan.plan_hash,next_test:nextTest,
-      holdout_state:'SEALED',next_action:nextAction};
+      governance_hash:plan.governance_hash,holdout_state:'SEALED',next_action:nextAction};
   }
 
   recordValidationResult(actor,row,completed,registered,data){
@@ -520,6 +528,7 @@ export class OperationalCandidateDispatch {
     if(reconciliation)return reconciliation;
     const expected=REQUIRED_TESTS.find(kind=>tasks.find(task=>task.kind===kind)?.status==='NOT_RUN');
     requireThat(data.kind===expected,409,'CANDIDATE_VALIDATION_ORDER_CONFLICT');
+    this.b.operationalCandidateGovernance.requireExposure(row,plan,data.kind);
     if(data.kind==='OOS_HOLDOUT'){
       requireThat(REQUIRED_TESTS.slice(0,3).every(kind=>tasks.find(task=>task.kind===kind)?.status==='PASS'),409,'CANDIDATE_HOLDOUT_NOT_RELEASED');
       if(!this.activeHoldoutRelease(row.id))this.b.event(row.id,holdoutReleaseAction,actor,{schema_version:CANDIDATE_VALIDATION_VERSION,
@@ -567,7 +576,8 @@ export class OperationalCandidateDispatch {
       const evidence={};
       for(const name of ['baseline','candidate']){
         const value=segmentResult[name];
-        exactKeys(value,['run_id','strategy_version','strategy_hash','telemetry_version','telemetry_hash','trade_count','gross_pnl','fees','net_pnl','short_trade_count','zero_trade_periods','terminal_trade_count','boundary_cleanup_trade_id','completion_receipt_hash','physical_hashes','data_quality_flags']);
+        exactKeys(value,['run_id','strategy_version','strategy_hash','telemetry_version','telemetry_hash','trade_count','gross_pnl','fees','net_pnl','short_trade_count','zero_trade_periods','terminal_trade_count','boundary_cleanup_trade_id','completion_receipt_hash','physical_hashes','data_quality_flags',
+          ...(plan.governance_hash?['direction_metrics']:[])]);
         id(value.run_id,true);for(const key of ['strategy_hash','telemetry_hash','completion_receipt_hash'])requireThat(validHash(value[key]),422,'CANDIDATE_VALIDATION_EVIDENCE_HASH_REQUIRED');
         exactKeys(value.physical_hashes,physicalHashKeys);
         requireThat(physicalHashKeys.every(key=>validHash(value.physical_hashes[key]))
@@ -586,6 +596,7 @@ export class OperationalCandidateDispatch {
           && (value.boundary_cleanup_trade_id===null || (typeof value.boundary_cleanup_trade_id==='string' && value.boundary_cleanup_trade_id.length>0))
           && (value.terminal_trade_count===value.trade_count)===(value.boundary_cleanup_trade_id===null)
           && sameNumber(value.net_pnl,value.gross_pnl-value.fees) && Array.isArray(value.data_quality_flags),422,'CANDIDATE_VALIDATION_METRIC_INVALID');
+        if(plan.governance_hash)this.validateDirectionMetrics(value.direction_metrics,value);
         requireThat(value.strategy_version===(name==='baseline'?test.baseline_version:candidateExecutionVersion(test,completed))
           && value.strategy_hash===(name==='baseline'?test.baseline_strategy_hash:candidateExecutionHash(test,registered))
           && value.telemetry_version===test.telemetry_version && value.telemetry_hash===test.telemetry_hash,
@@ -739,6 +750,7 @@ export class OperationalCandidateDispatch {
       && sameNumber(result.comparison.reported_delta,result.candidate.net_pnl-result.baseline.net_pnl)
       && Array.isArray(result.contradictions) && Array.isArray(result.limitations),409,'CANDIDATE_VALIDATION_COMPARISON_CONFLICT');
     return {schema_version:CANDIDATE_VALIDATION_VERSION,case_id:row.id,plan_hash:plan.plan_hash,
+      governance_hash:plan.governance_hash || null,
       plan_artifact_id:completed.plan_artifact_id,completion_hash:completed.completion_hash,candidate_hash:registered.candidate_hash,
       baseline_hash:row.baseline_hash,test,execution_bindings:{
         baseline:{logical_hash:row.baseline_hash,strategy_version:test.baseline_version,runs:bindingRuns.baseline},
@@ -747,9 +759,40 @@ export class OperationalCandidateDispatch {
       recorded_at_utc:new Date().toISOString(),authority:{...authority,execution_environment:'REPLAY'}};
   }
 
+  validateDirectionMetrics(value,aggregate){
+    requireThat(exactObjectKeys(value,['ALL','LONG','SHORT']),422,'CANDIDATE_VALIDATION_DIRECTION_METRICS_REQUIRED');
+    for(const direction of ['ALL','LONG','SHORT']){
+      const metrics=value[direction];exactKeys(metrics,directionMetricKeys);
+      for(const key of directionMetricKeys.filter(key=>key!=='profit_factor'))requireThat(Number.isFinite(metrics[key]),422,'CANDIDATE_VALIDATION_DIRECTION_METRIC_INVALID');
+      requireThat(Number.isInteger(metrics.trade_count) && metrics.trade_count>=0
+        && Number.isInteger(metrics.win_count) && metrics.win_count>=0
+        && Number.isInteger(metrics.loss_count) && metrics.loss_count>=0
+        && metrics.win_count+metrics.loss_count<=metrics.trade_count
+        && Number.isInteger(metrics.zero_trade_periods) && metrics.zero_trade_periods>=0
+        && Number.isInteger(metrics.risk_breach_count) && metrics.risk_breach_count>=0
+        && metrics.gross_profit>=0 && metrics.gross_loss<=0 && metrics.fees>=0 && metrics.max_drawdown>=0
+        && (Number.isFinite(metrics.profit_factor) || (metrics.profit_factor===null && metrics.gross_loss===0))
+        && (metrics.gross_loss===0 || sameNumber(metrics.profit_factor,metrics.gross_profit/Math.abs(metrics.gross_loss)))
+        && sameNumber(metrics.net_pnl,metrics.gross_profit+metrics.gross_loss-metrics.fees),
+      422,'CANDIDATE_VALIDATION_DIRECTION_METRIC_INVALID');
+    }
+    const all=value.ALL,long=value.LONG,short=value.SHORT;
+    requireThat(all.trade_count===aggregate.trade_count && short.trade_count===aggregate.short_trade_count
+      && long.trade_count+short.trade_count===all.trade_count
+      && long.win_count+short.win_count===all.win_count && long.loss_count+short.loss_count===all.loss_count
+      && sameNumber(long.gross_profit+short.gross_profit,all.gross_profit)
+      && sameNumber(long.gross_loss+short.gross_loss,all.gross_loss)
+      && sameNumber(long.fees+short.fees,all.fees) && sameNumber(all.fees,aggregate.fees)
+      && sameNumber(long.net_pnl+short.net_pnl,all.net_pnl) && sameNumber(all.net_pnl,aggregate.net_pnl)
+      && all.zero_trade_periods===aggregate.zero_trade_periods,
+    409,'CANDIDATE_VALIDATION_DIRECTION_METRIC_CONFLICT');
+  }
+
   completeValidation(actor,row,completed,registered,data){
     exactKeys(data,['case_id','expected_revision','plan_hash']);
     const plan=this.validationPlan(row.id);requireThat(plan && data.plan_hash===plan.plan_hash,409,'CANDIDATE_VALIDATION_PLAN_REQUIRED');
+    requireThat(plan.governance_hash && this.b.operationalCandidateGovernance.governance(row.id)?.governance_hash===plan.governance_hash,
+      409,'CANDIDATE_GOVERNANCE_REQUIRED');
     this.b.expect(row,data.expected_revision);this.b.active(row);this.b.baseline(row);
     requireThat(row.stage==='HISTORICAL_VALIDATION',409,'CANDIDATE_VALIDATION_STAGE_REQUIRED');
     const tasks=this.db.prepare('SELECT kind,status,artifact_id FROM ow_tasks WHERE case_id=?').all(row.id);
@@ -759,6 +802,7 @@ export class OperationalCandidateDispatch {
     const next=this.b.transition(actor,{case_id:row.id,expected_revision:row.revision,action:'advance',to_stage:'CANDIDATE_EVALUATION',
       artifact_id:null,artifact_ids:null,decision_id:null,owner_id:null,next_action:null});
     const completion={schema_version:CANDIDATE_VALIDATION_VERSION,case_id:row.id,plan_hash:plan.plan_hash,
+      governance_hash:plan.governance_hash,
       candidate_hash:registered.candidate_hash,completion_hash:completed.completion_hash,
       artifacts:REQUIRED_TESTS.map(kind=>({kind,artifact_id:tasks.find(task=>task.kind===kind).artifact_id})),
       completed_at_utc:new Date().toISOString(),next_stage:'CANDIDATE_EVALUATION',authority:{...authority,execution_environment:'REPLAY'}};

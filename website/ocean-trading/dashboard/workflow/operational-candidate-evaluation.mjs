@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { canonical, digest, objectHash, requireThat } from './common.mjs';
 
-export const CANDIDATE_EVALUATOR_VERSION='ocean-operational-candidate-evaluator/v1';
-export const CANDIDATE_EVALUATION_REQUEST_VERSION='ocean-candidate-evaluation-request/v1';
-export const CANDIDATE_EVALUATION_RESULT_VERSION='ocean-candidate-evaluation-result/v1';
+export const CANDIDATE_EVALUATOR_VERSION='ocean-operational-candidate-evaluator/v2';
+export const CANDIDATE_EVALUATION_REQUEST_VERSION='ocean-candidate-evaluation-request/v2';
+export const CANDIDATE_EVALUATION_RESULT_VERSION='ocean-candidate-evaluation-result/v2';
 
 const completionAction='operational.candidate.validation.completed';
 const requiredKinds=Object.freeze(['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT']);
@@ -60,7 +60,8 @@ export class OperationalCandidateEvaluator {
     requireThat(row.stage==='CANDIDATE_EVALUATION' && !['PAUSED','CANCELLED','COMPLETED'].includes(row.work_status),409,'CANDIDATE_EVALUATION_STAGE_REQUIRED');
     this.b.baseline(row);
     requireThat(payload?.schema_version && payload.case_id===row.id && payload.candidate_hash===row.candidate_hash
-      && validHash(payload.plan_hash) && Array.isArray(payload.artifacts) && payload.artifacts.length===requiredKinds.length,
+      && validHash(payload.plan_hash) && validHash(payload.governance_hash)
+      && Array.isArray(payload.artifacts) && payload.artifacts.length===requiredKinds.length,
     409,'CANDIDATE_EVALUATION_COMPLETION_CONFLICT');
     requireThat(requiredKinds.every((kind,index)=>payload.artifacts[index]?.kind===kind),409,'CANDIDATE_EVALUATION_ARTIFACT_ORDER_CONFLICT');
     return {row,envelope,payload};
@@ -179,6 +180,9 @@ export class OperationalCandidateEvaluator {
     const strategy=this.b.one('ow_strategies',row.strategy_id),profile=this.b.one('ow_profiles',strategy.profile_id);
     const profilePayload=JSON.parse(profile.payload_json),run=this.b.one('ow_runs',row.run_id),instance=this.b.one('ow_instances',row.instance_id);
     const planLineage=this.planLineage(row,planPayload);
+    const governance=this.b.operationalCandidateGovernance.governance(row.id);
+    requireThat(governance && governance.governance_hash===payload.governance_hash
+      && planPayload.governance_hash===governance.governance_hash,409,'CANDIDATE_EVALUATION_GOVERNANCE_CONFLICT');
     const completionContent=canonical(payload),completionContentHash=digest(completionContent);
     const completionDigest=completionContentHash.slice(7,31);
     const completionArtifactId=`candidate-validation-completion-${completionDigest}`;
@@ -192,9 +196,8 @@ export class OperationalCandidateEvaluator {
         content_json:completionContent,content_sha256:completionContentHash},
       validation_plan_predecessors:planLineage.predecessors,validation_plan:planLineage.current,
       candidate:{completion:completed,registration:registered,artifact:this.artifactEnvelope(row,registered.candidate_artifact_id,'CANDIDATE')},
-      evaluation_policy:{status:'NOT_PREDECLARED',policy_id:null,policy_hash:null,favorable_performance_required:null,
-        minimum_positive_tests:null,maximum_negative_tests:null,minimum_cumulative_net_pnl_delta:null,
-        minimum_candidate_trade_count:null,no_benefit_when_thresholds_fail:null},validation_artifacts:artifacts,authority};
+      candidate_governance:this.artifactEnvelope(row,governance.artifact_id,'VALIDATION_REPORT'),
+      evaluation_policy:this.b.operationalCandidateGovernance.evaluationPolicy(row),validation_artifacts:artifacts,authority};
     return snapshot;
   }
   capture(job){
@@ -215,7 +218,7 @@ export class OperationalCandidateEvaluator {
       strategy_name:snapshot.strategy.name,strategy_version:snapshot.strategy.profile_version,
       execution_instance_id:snapshot.case.instance_id,registry_reconciliation_id:registry.reconciliation_id,
       registry_record_sha256:registry.record_sha256,baseline_hash:snapshot.case.baseline_hash,candidate_hash:snapshot.case.candidate_hash,
-      evaluation_policy:snapshot.evaluation_policy,
+      evaluation_policy:snapshot.evaluation_policy,candidate_governance:(({parsed,...item})=>item)(snapshot.candidate_governance),
       validation_plan:snapshot.validation_plan,
       validation_completion:snapshot.validation_completion,source_artifacts:snapshot.validation_artifacts.map(({parsed,...item})=>item),
       correlation:{event_id:`candidate-evaluation:${job.id}`,job_id:job.id}};
@@ -242,12 +245,30 @@ export class OperationalCandidateEvaluator {
       completion_artifact_id:request.validation_completion.artifact_id,
       completion_event_id:request.validation_completion.event_id,
       completion_content_sha256:request.validation_completion.content_sha256,
+      governance_artifact_id:request.candidate_governance.artifact_id,
+      governance_manifest_sha256:request.candidate_governance.manifest_sha256,
+      governance_content_sha256:request.candidate_governance.content_sha256,
       baseline_hash:request.baseline_hash,candidate_hash:request.candidate_hash};
     if(predecessors.length) bindings.plan_lineage={plan_revision:plan.plan_revision,predecessor_count:predecessors.length,
         first_plan_hash:predecessors[0]?.plan_hash || request.validation_plan.plan_hash,
         current_plan_hash:request.validation_plan.plan_hash,
         lineage_sha256:digest(canonical({predecessors:lineage,current:request.validation_plan})),predecessors};
     return bindings;
+  }
+  policyAssessment(request,echoes=this.expectedSourceEchoes(request)){
+    const policy=request.evaluation_policy;
+    if(policy.status!=='PREDECLARED')return null;
+    const deltas=echoes.map(item=>item.candidate_net_pnl-item.baseline_net_pnl);
+    requireThat(deltas.every(Number.isFinite) && echoes.every(item=>Number.isFinite(item.candidate_trade_count)),
+      409,'CANDIDATE_EVALUATION_POLICY_INPUT_INVALID');
+    const positive=deltas.filter(value=>value>1e-6).length,negative=deltas.filter(value=>value< -1e-6).length;
+    const cumulativeDelta=deltas.reduce((sum,value)=>sum+value,0);
+    const candidateTrades=echoes.reduce((sum,item)=>sum+item.candidate_trade_count,0);
+    const thresholdsMet=positive>=policy.minimum_positive_tests && negative<=policy.maximum_negative_tests
+      && cumulativeDelta>=policy.minimum_cumulative_net_pnl_delta && candidateTrades>=policy.minimum_candidate_trade_count;
+    return {schema_version:'ocean-candidate-evaluation-policy-assessment/v1',tests_evaluated:echoes.length,
+      positive_tests:positive,negative_tests:negative,neutral_tests:echoes.length-positive-negative,
+      cumulative_net_pnl_delta:cumulativeDelta,candidate_trade_count:candidateTrades,thresholds_met:thresholdsMet};
   }
   verifyResponse(response,request){
     let content;try{content=JSON.parse(response?.content || '');}catch{}
@@ -256,11 +277,16 @@ export class OperationalCandidateEvaluator {
       :['BENEFIT_NOT_ESTABLISHED','MORE_EVIDENCE_REQUIRED'];
     const bindings=this.expectedBindings(request);
     const echoes=this.expectedSourceEchoes(request);
+    const assessment=this.policyAssessment(request,echoes);
+    const conclusionAllowedByPolicy=!assessment
+      || (response?.conclusion_type!=='BENEFIT_SUPPORTED' || assessment.thresholds_met)
+      && (response?.conclusion_type!=='NO_BENEFIT'
+        || (!assessment.thresholds_met && request.evaluation_policy.no_benefit_when_thresholds_fail===true));
     const responseKeys=['schema_version','record_id','relative_path','content','content_sha256','conclusion_type','bindings',
       'evaluation_policy','source_artifacts','correlation','authority','human_governance_required','readback'];
     const lineage=request.validation_plan_predecessors || [];
     const contentKeys=['schema_version','strategy','registry_reconciliation_id','registry_record_sha256','bindings',
-      'evaluation_policy','validation_plan','validation_completion','source_artifacts','dataset_provenance','conclusion',
+      'evaluation_policy','candidate_governance','validation_plan','validation_completion','source_artifacts','dataset_provenance','conclusion',
       'correlation','authority','human_governance_required'];
     if(lineage.length) contentKeys.push('validation_plan_predecessors');
     const strategy={project:request.project,strategy_id:request.strategy_id,strategy_name:request.strategy_name,
@@ -280,14 +306,17 @@ export class OperationalCandidateEvaluator {
       && response.human_governance_required===true && response.readback?.verified===true
       && response.readback.record_id===response.record_id && response.readback.relative_path===response.relative_path
       && response.readback.content_sha256===response.content_sha256
-      && content?.schema_version==='brain-candidate-evaluation-content/v1'
+       && content?.schema_version==='brain-candidate-evaluation-content/v2'
       && objectHash(content.strategy)===objectHash(strategy)
       && content.registry_reconciliation_id===request.registry_reconciliation_id
       && content.registry_record_sha256===request.registry_record_sha256
-      && content?.conclusion?.type===response.conclusion_type && Array.isArray(content?.conclusion?.reasons)
+      && conclusionAllowedByPolicy && content?.conclusion?.type===response.conclusion_type && Array.isArray(content?.conclusion?.reasons)
       && content.conclusion.metrics && typeof content.conclusion.metrics==='object' && !Array.isArray(content.conclusion.metrics)
+      && (!assessment || objectHash(content.conclusion.metrics)===objectHash(assessment))
       && objectHash(content?.bindings)===objectHash(bindings)
       && objectHash(content?.evaluation_policy)===objectHash(request.evaluation_policy)
+      && objectHash(content?.candidate_governance)===objectHash({envelope:request.candidate_governance,
+        content:JSON.parse(request.candidate_governance.content_json)})
       && predecessors && (!lineage.length || objectHash(content?.validation_plan_predecessors)===objectHash(predecessors))
       && plan && completion && objectHash(content?.validation_plan)===objectHash(plan)
       && objectHash(content?.validation_completion)===objectHash(completion)
@@ -358,7 +387,8 @@ export class OperationalCandidateEvaluator {
       const brainContent=JSON.parse(response.content);
       const result={schema_version:CANDIDATE_EVALUATOR_VERSION,pipeline_status:'PIPELINE_COMPLETED',
         benefit_conclusion:response.conclusion_type,case_id:row.id,job_id:job.id,plan_hash:current.plan_hash,
-        candidate_hash:current.candidate_hash,conclusion:response.conclusion_type,brain_record:{record_id:response.record_id,
+        candidate_hash:current.candidate_hash,governance_hash:snapshot.candidate_governance.parsed.governance_hash,
+        conclusion:response.conclusion_type,brain_record:{record_id:response.record_id,
           relative_path:response.relative_path,content_hash:response.content_sha256},evaluation:{schema_version:brainContent.schema_version,
           bindings:response.bindings,evaluation_policy:response.evaluation_policy,conclusion:brainContent.conclusion,
           source_artifacts:response.source_artifacts.map(item=>({kind:item.kind,artifact_id:item.artifact_id,
