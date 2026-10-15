@@ -124,9 +124,12 @@ function createOperationalFixture() {
     expected_chartbook_path: chartbook,
     expected_chart_number: 1,
     expected_chartbook_sha256: `sha256:${'9'.repeat(64)}`,
+    expected_controller_version: 'v0.2.3-read-only-study-input-export',
     time_basis: 'UTC source records; Sierra chart display time preserved',
     session_calendar_revision: 'observed-mnq-maintenance-2100-2200z-20260928',
     fill_model_version: 'Sierra Chart Replay native simulation',
+    expected_fee_model_version: 'ocean-observed-cost-model/v1',
+    expected_fee_schedule_hash: `sha256:${'5'.repeat(64)}`,
     managed_candidate_id: 'v0.6.234-managed-lineage',
     expected_session_name: 'All',
     expected_session_timezone: 'Europe/London',
@@ -188,7 +191,12 @@ function createManagedStatusFixture(t, overrides = {}) {
     selection: { strategy_id: context.strategy_id, instance_id: fixture.instanceId },
     context_hash: context.context_hash,
     operational_review: { context, factual_binding_hash: fixture.config.factual_binding_hash },
+    execution_fee_context: {
+      schema_version:'ocean-operational-fee-context/v1',fee_model_version:fixture.config.expected_fee_model_version,
+      fee_schedule_hash:fixture.config.expected_fee_schedule_hash,source_binding_hash:fixture.config.factual_binding_hash,
+    },
   };
+  plan.execution_fee_context.fee_context_hash=sealedHash(plan.execution_fee_context,'fee_context_hash');
   plan.plan_hash = sealedHash(plan, 'plan_hash');
   const workflow = new DatabaseSync(fixture.workflowDb);
   try {
@@ -211,14 +219,16 @@ function createManagedStatusFixture(t, overrides = {}) {
       UPDATE sierra_instance SET last_seen_utc=strftime('%Y-%m-%d %H:%M:%S','now');
       CREATE TABLE replay_run_context (run_id TEXT, candidate_id TEXT, dataset_id TEXT, dataset_role TEXT,
         strategy_profile_id TEXT, strategy_profile_version TEXT, strategy_code_hash TEXT,
-        strategy_config_hash TEXT, context_hash TEXT, session_name TEXT, session_timezone TEXT);
+        strategy_config_hash TEXT, context_hash TEXT, session_name TEXT, session_timezone TEXT,
+        fee_model_version TEXT, fee_schedule_hash TEXT);
     `);
-    telemetry.prepare('INSERT INTO replay_run_context VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(
+    telemetry.prepare('INSERT INTO replay_run_context VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run(
       fixture.runId, fixture.config.managed_candidate_id,
       `${context.dataset_manifest_id}:${context.dataset_manifest_revision}`, context.dataset_partition,
       context.strategy_profile_id, context.strategy_profile_version, context.strategy_code_hash,
       context.strategy_config_hash, context.context_hash, fixture.config.expected_session_name,
-      fixture.config.expected_session_timezone,
+      fixture.config.expected_session_timezone, fixture.config.expected_fee_model_version,
+      fixture.config.expected_fee_schedule_hash,
     );
   } finally { telemetry.close(); }
   writeProducerStatus(fixture, overrides);
@@ -342,6 +352,16 @@ test('v4 probe rejects a test namespace instance', t => {
   fs.writeFileSync(fixture.configFile, JSON.stringify({ ...fixture.config, instance_id: 'test-cicd-vwap-pull-back-replay-two-v014' }));
   assert.throws(() => execFileSync(process.execPath, [probe, fixture.configFile], { encoding: 'utf8', stdio: 'pipe' }), error => {
     assert.match(String(error.stderr), /IDENTITY_SCOPE_REJECTED/);
+    return true;
+  });
+});
+
+test('v4 probe requires an exact configured controller version', t => {
+  const fixture = createOperationalFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  fs.writeFileSync(fixture.configFile, JSON.stringify({ ...fixture.config, expected_controller_version: 'latest' }));
+  assert.throws(() => execFileSync(process.execPath, [probe, fixture.configFile], { encoding: 'utf8', stdio: 'pipe' }), error => {
+    assert.match(String(error.stderr), /CONTROLLER_VERSION_REJECTED/);
     return true;
   });
 });
@@ -510,6 +530,8 @@ function createRunningStartFixture(t) {
     telemetryStrategyProfileVersion: context.strategy_profile_version, telemetryStrategyCodeHash: context.strategy_code_hash,
     telemetryStrategyConfigHash: context.strategy_config_hash, telemetrySessionName: fixture.config.expected_session_name,
     telemetrySessionTimezone: fixture.config.expected_session_timezone,
+    telemetryFeeModelVersion: fixture.config.expected_fee_model_version,
+    telemetryFeeScheduleHash: fixture.config.expected_fee_schedule_hash,
   };
   const db = new DatabaseSync(fixture.telemetryDb);
   try {
@@ -532,7 +554,7 @@ function createRunningStartFixture(t) {
   const commandId = `oql-managed-status-${'a'.repeat(32)}`;
   const request = {schema:'ocean-trading.sierra-replay-controller.command.v1',commandId,action:'status',chartNumber:1,
     saveChartbook:false,expectedInstanceDataFolder:path.join(fixture.directory,'Data')};
-  const receipt = {schema:'ocean-trading.sierra-replay-controller.status.v1',controllerVersion:'v0.2.1-cicd-vwap-time-basis',
+  const receipt = {schema:'ocean-trading.sierra-replay-controller.status.v1',controllerVersion:fixture.config.expected_controller_version,
     commandId,action:'status',status:'status',chartNumber:1,chartbookPath:fixture.config.expected_chartbook_path,
     statusFilePath:controllerFile,instanceDataFolder:request.expectedInstanceDataFolder,
     isReplayRunning:true,replayStatus:1,chartReplayStatus:1,error:null,currentChartDateTime:'2025-08-18 14:03:00'};
@@ -562,6 +584,16 @@ test('v4 running-start proof survives probe restart with identical retained star
 });
 
 const rewriteJson=(file,change)=>fs.writeFileSync(file,JSON.stringify({...JSON.parse(fs.readFileSync(file,'utf8')),...change}));
+const rewriteRunPlan=(fixture,change)=>{
+  const db=new DatabaseSync(fixture.workflowDb);
+  try{
+    const row=db.prepare('SELECT payload_json FROM ow_run_plans WHERE id=?').get(fixture.runId);
+    const plan=JSON.parse(row.payload_json);
+    change(plan);
+    plan.plan_hash=sealedHash(plan,'plan_hash');
+    db.prepare('UPDATE ow_run_plans SET payload_json=? WHERE id=?').run(JSON.stringify(plan),fixture.runId);
+  }finally{db.close();}
+};
 for(const [name,mutate] of [
   ['missing attempt table',f=>updateDatabase(f.telemetryDb,'DROP TABLE replay_run_attempts')],
   ['missing attempt',f=>updateDatabase(f.telemetryDb,'DELETE FROM replay_run_attempts')],
@@ -572,11 +604,20 @@ for(const [name,mutate] of [
   ['different start command',f=>updateDatabase(f.telemetryDb,"UPDATE replay_run_attempts SET start_command_id='other-command'")],
   ['different recorded DLL',f=>updateDatabase(f.telemetryDb,"UPDATE replay_runs SET dll_hash='wrong-hash'")],
   ['different context',f=>updateDatabase(f.telemetryDb,"UPDATE replay_run_context SET context_hash='wrong-hash'")],
+  ['missing run-plan fee context',f=>rewriteRunPlan(f,plan=>{delete plan.execution_fee_context})],
+  ['different run-plan fee context',f=>rewriteRunPlan(f,plan=>{
+    plan.execution_fee_context.fee_schedule_hash=`sha256:${'4'.repeat(64)}`;
+    plan.execution_fee_context.fee_context_hash=sealedHash(plan.execution_fee_context,'fee_context_hash');
+  })],
+  ['different fee model',f=>updateDatabase(f.telemetryDb,"UPDATE replay_run_context SET fee_model_version='wrong-model'")],
+  ['different fee schedule',f=>updateDatabase(f.telemetryDb,"UPDATE replay_run_context SET fee_schedule_hash='sha256:wrong'")],
   ['different account',f=>updateDatabase(f.telemetryDb,"UPDATE account_snapshot SET trade_account='Sim2'")],
   ['stale account',f=>updateDatabase(f.telemetryDb,"UPDATE account_snapshot SET snapshot_utc='2026-01-01'")],
   ['different raw run',f=>fs.writeFileSync(f.commandFile,fs.readFileSync(f.commandFile,'utf8').replace(`telemetryRunId=${f.runId}`,'telemetryRunId=other-run'))],
   ['different raw DLL',f=>fs.writeFileSync(f.commandFile,fs.readFileSync(f.commandFile,'utf8').replace(f.start.telemetryDllSha256,'sha256:wrong'))],
   ['different raw account',f=>fs.writeFileSync(f.commandFile,fs.readFileSync(f.commandFile,'utf8').replace('tradeAccount=Sim1','tradeAccount=Sim2'))],
+  ['different raw fee model',f=>fs.writeFileSync(f.commandFile,fs.readFileSync(f.commandFile,'utf8').replace(f.start.telemetryFeeModelVersion,'wrong-model'))],
+  ['different raw fee schedule',f=>fs.writeFileSync(f.commandFile,fs.readFileSync(f.commandFile,'utf8').replace(f.start.telemetryFeeScheduleHash,'sha256:wrong'))],
   ['duplicate raw command field',f=>fs.appendFileSync(f.commandFile,'commandId=other-start\n')],
   ['stale controller',f=>{const old=new Date(Date.now()-600000);fs.utimesSync(f.controllerFile,old,old)}],
   ['future controller',f=>{const future=new Date(Date.now()+60000);fs.utimesSync(f.controllerFile,future,future)}],
