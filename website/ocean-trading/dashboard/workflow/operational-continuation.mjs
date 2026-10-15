@@ -364,6 +364,79 @@ export class OperationalContinuation {
     }
     return links;
   }
+  freshCandidateAttempt(actor,input) {
+    exactKeys(input,['message_id','data']);id(input.message_id);noSecrets(input,this.backend.environment);
+    const data=input.data;exactKeys(data,['source_case_id','expected_revision','attempt_number','reason']);
+    requireThat(actor.role==='STRATEGY' && actor.namespace==='OPERATIONAL',403,'CANDIDATE_OPERATIONAL_STRATEGY_REQUIRED');
+    requireThat(Number.isInteger(data.attempt_number) && data.attempt_number>=2,422,'CANDIDATE_FRESH_ATTEMPT_NUMBER_REQUIRED');
+    requireThat(typeof data.reason==='string' && data.reason.trim().length>0 && data.reason.length<=400,
+      422,'CANDIDATE_FRESH_ATTEMPT_REASON_REQUIRED');
+    const message=`candidate-fresh-attempt:${input.message_id}`,requestHash=objectHash(data);
+    return this.backend.store.transaction(()=>{
+      const previous=this.db.prepare('SELECT * FROM ow_inbox WHERE producer_id=? AND message_id=?').get(actor.id,message);
+      if(previous){requireThat(previous.payload_hash===requestHash,409,'DUPLICATE_CONFLICT');return JSON.parse(previous.result_json);}
+      const sourceRow=this.backend.one('ow_cases',id(data.source_case_id)),sourcePayload=JSON.parse(sourceRow.payload_json);
+      requireThat(sourcePayload.origin===CONTINUATION_ORIGIN && sourcePayload.kind==='PROPOSAL_PLANNING',
+        409,'CANDIDATE_FRESH_ATTEMPT_SOURCE_REQUIRED');
+      this.backend.authorize(actor,'event.write',sourceRow.strategy_id,sourceRow.instance_id);
+      this.backend.authorize(actor,'artifact.write',sourceRow.strategy_id,sourceRow.instance_id);
+      this.backend.expect(sourceRow,data.expected_revision);
+      const completion=this.backend.operationalCandidateDispatch.completion(sourceRow.id);
+      const registration=this.registeredCandidate(sourceRow);
+      requireThat(completion && registration && registration.candidate_hash===completion.candidate.candidate_hash,
+        409,'CANDIDATE_FRESH_ATTEMPT_REGISTERED_SOURCE_REQUIRED');
+      const governance=this.backend.operationalCandidateGovernance.statusForCase(sourceRow,this.backend.operationalCandidateDispatch);
+      requireThat(['LEGACY_INCOMPLETE','POSSIBLY_SPENT'].includes(governance.status),
+        409,'CANDIDATE_FRESH_ATTEMPT_NOT_DUE');
+      const sourceArtifact=this.backend.artifactFor(sourceRow,sourcePayload.lineage_artifact_id,'RECOMMENDATION');
+      const sourceFrozen=JSON.parse(Buffer.from(sourceArtifact.content).toString('utf8'));
+      requireThat(sourceFrozen.schema_version===VERSION && sourceFrozen.support_hash===sourcePayload.support_hash
+        && objectHash(sourceFrozen.support)===sourcePayload.support_hash,409,'CONTINUATION_LINEAGE_CONFLICT');
+      const source=this.source(this.backend.one('ow_research_jobs',sourceFrozen.source.job_id));
+      requireThat(source && objectHash(source.reference)===objectHash(sourceFrozen.source)
+        && this.items(source).some(item=>objectHash({...source.binding,...item})===sourcePayload.support_hash),
+      409,'CONTINUATION_SOURCE_LINEAGE_CONFLICT');
+      const duplicate=this.db.prepare(`SELECT id FROM ow_cases WHERE json_extract(payload_json,'$.origin')=?
+        AND json_extract(payload_json,'$.attempt.retry_of_case_id')=?
+        AND json_extract(payload_json,'$.attempt.attempt_number')=? LIMIT 1`)
+        .get(CONTINUATION_ORIGIN,sourceRow.id,data.attempt_number);
+      requireThat(!duplicate,409,'CANDIDATE_FRESH_ATTEMPT_DUPLICATE');
+      const attempt={attempt_number:data.attempt_number,retry_of_case_id:sourceRow.id,
+        candidate_completion_hash:completion.completion_hash,reason:data.reason.trim()};
+      const support={...structuredClone(sourceFrozen.support),attempt};
+      const fingerprint=objectHash(support),suffix=fingerprint.slice('sha256:'.length);
+      const caseId=`research-plan-${suffix}`,artifactId=`test-research-lineage-${suffix}`,taskId=`${caseId}:plan`;
+      requireThat(!this.db.prepare('SELECT id FROM ow_cases WHERE id=?').get(caseId),409,'CANDIDATE_FRESH_ATTEMPT_DUPLICATE');
+      const frozen={schema_version:VERSION,support_hash:fingerprint,support,source:source.reference,authority:noAuthority};
+      const payload={origin:CONTINUATION_ORIGIN,registry_revision:source.binding.registry_revision,
+        kind:'PROPOSAL_PLANNING',support_hash:fingerprint,lineage_artifact_id:artifactId,
+        task_kind:'PROPOSAL_PLAN_REVIEW',attempt,authority:noAuthority};
+      const planningOwner=this.plans.forCase(sourceRow)?.returned?.planning_owner_id || sourceRow.owner_id;
+      const owner=this.ownerCurrent(planningOwner,sourceRow)?planningOwner
+        :this.backend.config.browser?.subject_id || planningOwner;
+      this.db.prepare("INSERT INTO ow_cases VALUES(?,?,?,?,1,'RESEARCH','READY',?,NULL,?,?,?)")
+        .run(caseId,sourceRow.strategy_id,sourceRow.instance_id,sourceRow.run_id,sourceRow.baseline_hash,
+          owner,this.action('PROPOSAL_PLANNING',owner,sourceFrozen.support.requirement),JSON.stringify(payload));
+      this.backend.writeArtifact(actor,{artifact_id:artifactId,case_id:caseId,run_id:sourceRow.run_id,
+        recipient_id:source.recipient,kind:'RECOMMENDATION',media_type:'application/json',
+        content:JSON.stringify(frozen),content_hash:digest(JSON.stringify(frozen)),candidate_hash:null,dependency_ids:[]});
+      this.backend.event(caseId,'operational.research.planning.created',actor,{kind:'PROPOSAL_PLANNING',
+        support_hash:fingerprint,source:source.reference,owner_id:owner,task_id:taskId,attempt,authority:noAuthority});
+      this.db.prepare('INSERT INTO ow_tasks VALUES(?,?,?,?,?,1)')
+        .run(taskId,caseId,'PROPOSAL_PLAN_REVIEW','NOT_RUN',artifactId);
+      const sourceCase=this.backend.one('ow_cases',source.reference.case_id);
+      this.backend.event(sourceCase.id,LINK,actor,{continuation_case_id:caseId,support_hash:fingerprint,
+        source:source.reference,attempt});
+      this.backend.event(sourceRow.id,'operational.candidate.fresh-attempt.created',actor,{fresh_case_id:caseId,
+        support_hash:fingerprint,attempt,authority:noAuthority});
+      const row=this.backend.one('ow_cases',caseId);this.refresh(row,actor);
+      const result={case_id:caseId,revision:row.revision,status:'READY',support_hash:fingerprint,
+        attempt,source_case_id:sourceRow.id,next_action:this.backend.one('ow_cases',caseId).waiting_on,
+        authority:noAuthority};
+      this.db.prepare('INSERT INTO ow_inbox VALUES(?,?,?,?)').run(actor.id,message,requestHash,JSON.stringify(result));
+      return result;
+    });
+  }
   reconcileEvidence(source,actor) {
     const registry=this.backend.operationalLearning.registryContext;
     if(registry?.record_sha256 && registry.record_sha256!==source.binding.registry_record_sha256)return;
@@ -423,20 +496,32 @@ export class OperationalContinuation {
       const artifact=this.backend.artifactFor(row,payload.lineage_artifact_id);
       const frozen=JSON.parse(Buffer.from(artifact.content).toString('utf8'));
       if(payload.kind==='EVIDENCE_FOLLOW_UP')evidenceRemediation=this.research.remediation(frozen.support.requirement);
+      const attempt=frozen.support.attempt || null,baseSupport=structuredClone(frozen.support);
+      delete baseSupport.attempt;
       requireThat(frozen.schema_version===VERSION && frozen.support_hash===payload.support_hash
         && objectHash(frozen.support)===payload.support_hash
         && objectHash(frozen.authority)===objectHash(noAuthority)
         && objectHash(payload)===objectHash({origin:CONTINUATION_ORIGIN,registry_revision:frozen.support.registry_revision,
           kind:frozen.support.kind,support_hash:frozen.support_hash,lineage_artifact_id:artifact.id,
-          task_kind:frozen.support.task_kind,authority:noAuthority}),
+          task_kind:frozen.support.task_kind,...(attempt?{attempt}:{}),authority:noAuthority}),
       409,'CONTINUATION_LINEAGE_CONFLICT');
       const job=this.backend.one('ow_research_jobs',frozen.source.job_id);
       source=this.source(job,{requireCurrentProvenance:!registeredCandidate});
       if(payload.kind==='PROPOSAL_PLANNING' && source)
         requireDirectionExclusionExposure(source.report,frozen.support.requirement);
       requireThat(source && objectHash(source.reference)===objectHash(frozen.source)
-        && this.items(source).some(item=>objectHash({...source.binding,...item})===payload.support_hash),
+        && this.items(source).some(item=>objectHash({...source.binding,...item})===objectHash(baseSupport)),
       409,'CONTINUATION_SOURCE_LINEAGE_CONFLICT');
+      if(attempt){
+        requireThat(payload.kind==='PROPOSAL_PLANNING' && Number.isInteger(attempt.attempt_number)
+          && attempt.attempt_number>=2 && typeof attempt.reason==='string' && attempt.reason.length>0
+          && typeof attempt.retry_of_case_id==='string' && typeof attempt.candidate_completion_hash==='string',
+        409,'CANDIDATE_FRESH_ATTEMPT_LINEAGE_CONFLICT');
+        const retry=this.backend.one('ow_cases',attempt.retry_of_case_id),completion=this.backend.operationalCandidateDispatch.completion(retry.id);
+        requireThat(retry.strategy_id===row.strategy_id && retry.instance_id===row.instance_id
+          && retry.baseline_hash===row.baseline_hash && completion?.completion_hash===attempt.candidate_completion_hash,
+        409,'CANDIDATE_FRESH_ATTEMPT_LINEAGE_CONFLICT');
+      }
       if(payload.kind==='RISK_DISABLE_REVIEW')riskReview=frozen.support.requirement;
       requireThat(row.strategy_id===source.row.strategy_id && row.instance_id===source.row.instance_id
         && row.baseline_hash===source.row.baseline_hash && (row.candidate_hash===null || registeredCandidate),

@@ -2056,6 +2056,112 @@ function workerFixture(f){
     close(){fs.rmSync(root,{recursive:true,force:true});}};
 }
 
+test('legacy candidate can start a fresh governed attempt without rewriting old evidence or changing the candidate',async()=>{
+  const f=fixture({ownerScopes:['read','artifact.write','case.transition','event.write']});try{
+    f.complete();const child=f.children()[0],sourcePlan=plans(f).perform('plans',f.actor,planInput(claimPlan(f)));
+    const strategy={id:'strategy',role:'STRATEGY',namespace:'OPERATIONAL',strategyIds:['s'],instanceIds:['i'],
+      scopes:['read','artifact.write','case.transition','event.write']};
+    const buildCandidate=(caseId,label)=>{
+      const work=f.backend.operationalCandidateDispatch.read(strategy,caseId);
+      const claim=f.backend.operationalCandidateDispatch.perform('claim',strategy,{message_id:`${label}-claim`,data:{case_id:caseId,
+        expected_revision:work.revision,plan_artifact_id:work.dispatch.plan_artifact_id,dispatch_hash:work.dispatch.dispatch_hash}});
+      return {work,claim,complete:(candidate,message=`${label}-complete`)=>f.backend.operationalCandidateDispatch.perform('complete',strategy,
+        {message_id:message,data:{case_id:caseId,expected_revision:claim.revision,plan_artifact_id:claim.dispatch.plan_artifact_id,
+          dispatch_hash:claim.dispatch.dispatch_hash,lease_id:claim.lease_id,candidate}})};
+    };
+    const approveAndRegister=(caseId,artifactId,completed,label)=>{
+      let work=f.backend.operationalCandidateDispatch.read(strategy,caseId);
+      let row=f.backend.mutate('case.transition',f.human,{message_id:`${label}-review-transition`,data:{case_id:caseId,
+        expected_revision:work.revision,action:'advance',to_stage:'DEVELOPMENT_REVIEW',artifact_id:artifactId,
+        artifact_ids:null,decision_id:null,owner_id:null,next_action:null}});
+      const request=f.backend.mutate('approval.request',f.human,{message_id:`${label}-review-request`,data:{
+        request_id:`${label}-review`,case_id:caseId,expected_revision:row.revision,gate:'DEVELOPMENT',artifact_id:artifactId,
+        recipient_id:'strategy',authorized_tests:['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'],
+        expires_at_utc:new Date(Date.now()+3600000).toISOString()}});
+      const decision=f.backend.mutate('approval.decide',f.human,{message_id:`${label}-review-decision`,data:{
+        decision_id:`${label}-decision`,request_id:request.request_id,case_id:caseId,expected_revision:request.revision,
+        snapshot_hash:request.snapshot_hash,decision:'APPROVED',reason:'Approve exact Replay-only validation; Paper, Live and promotion remain disabled.'}});
+      row=f.backend.mutate('case.transition',f.human,{message_id:`${label}-handoff-transition`,data:{case_id:caseId,
+        expected_revision:decision.revision,action:'advance',to_stage:'DEVELOPMENT_HANDOFF',artifact_id:null,
+        artifact_ids:null,decision_id:decision.decision_id,owner_id:null,next_action:null}});
+      let handoff=f.backend.mutate('handoff.create',f.human,{message_id:`${label}-handoff-create`,data:{
+        handoff_id:`${label}-handoff`,case_id:caseId,decision_id:decision.decision_id,gate:'DEVELOPMENT',
+        recipient_id:'strategy',authorized_test:'BACKTEST'}});
+      handoff=f.backend.handoffEvent(f.human,{handoff_id:handoff.handoff_id,expected_revision:handoff.revision,
+        state:'READY',result_artifact_id:null,reason:null});
+      handoff=f.backend.handoffEvent(f.human,{handoff_id:handoff.handoff_id,expected_revision:handoff.revision,
+        state:'DISPATCHED',result_artifact_id:null,reason:null});
+      work=f.backend.operationalCandidateDispatch.read(strategy,caseId);
+      f.backend.operationalCandidateDispatch.perform('acknowledge',strategy,{message_id:`${label}-ack`,data:{case_id:caseId,
+        expected_revision:row.revision,plan_artifact_id:work.dispatch.plan_artifact_id,dispatch_hash:work.dispatch.dispatch_hash,
+        completion_hash:completed.completion.completion_hash,handoff_id:handoff.handoff_id,handoff_revision:handoff.revision}});
+      handoff=f.backend.one('ow_handoffs',handoff.handoff_id);
+      return f.backend.operationalCandidateDispatch.perform('register',strategy,{message_id:`${label}-register`,data:{case_id:caseId,
+        expected_revision:row.revision,plan_artifact_id:work.dispatch.plan_artifact_id,dispatch_hash:work.dispatch.dispatch_hash,
+        completion_hash:completed.completion.completion_hash,handoff_id:handoff.id}});
+    };
+    const sourceBuild=buildCandidate(child.id,'test-fresh-source'),sourceCompleted=sourceBuild.complete(candidateBuild());
+    approveAndRegister(child.id,sourcePlan.artifact_id,sourceCompleted,'test-fresh-source');
+    const legacyPlanHash=digest('legacy-validation-plan-for-fresh-attempt');
+    f.backend.event(child.id,'operational.candidate.validation.plan',strategy,{schema_version:'ocean-operational-candidate-validation/v2',
+      plan_hash:legacyPlanHash,governance_hash:null,tests:['BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT'].map(kind=>({kind}))});
+    f.backend.db.prepare('UPDATE ow_cases SET waiting_on=? WHERE id=?').run(`Run OOS_HOLDOUT from validation plan ${legacyPlanHash}.`,child.id);
+    const sourceBefore=structuredClone(f.backend.one('ow_cases',child.id));
+    const body={message_id:'test-candidate-fresh-attempt-two',data:{source_case_id:child.id,expected_revision:sourceBefore.revision,
+      attempt_number:2,reason:'Legacy attempt planned evidence before candidate governance was available.'}};
+    f.backend.auth.authenticate=()=>strategy;
+    const callFresh=async value=>{
+      const request={method:'POST',headers:{'content-type':'application/json'},socket:{remoteAddress:'127.0.0.1'},
+        async *[Symbol.asyncIterator](){yield Buffer.from(JSON.stringify(value));}};
+      let output;const response={setHeader(){},end(result){output=JSON.parse(result);},statusCode:200};
+      await f.backend.handle(request,response,new URL('http://127.0.0.1/api/workflow/operational/v1/candidates/fresh-attempt'));
+      return {status:response.statusCode,body:output};
+    };
+    const created=await callFresh(body);assert.equal(created.status,200,JSON.stringify(created.body));
+    const fresh=created.body;assert.equal(fresh.status,'READY');assert.equal(fresh.attempt.attempt_number,2);
+    assert.equal(fresh.attempt.retry_of_case_id,child.id);assert.notEqual(fresh.case_id,child.id);
+    assert.deepEqual(fresh.authority,{automatic_strategy_change:false,candidate_approved:false,
+      paper_authorized:false,live_authorized:false});
+    const freshRow=f.backend.one('ow_cases',fresh.case_id),freshPayload=JSON.parse(freshRow.payload_json);
+    assert.equal(freshRow.stage,'RESEARCH');assert.equal(freshRow.work_status,'READY');assert.equal(freshRow.candidate_hash,null);
+    assert.equal(freshPayload.attempt.candidate_completion_hash,sourceCompleted.completion.completion_hash);
+    assert.equal(f.backend.readCase(f.human,fresh.case_id).candidate_governance.status,'NOT_DUE');
+    assert.equal(f.backend.operationalResearch.continuations.plans.queue(f.actor).items.some(item=>item.case_id===fresh.case_id),true,
+      JSON.stringify(f.backend.readCase(f.human,fresh.case_id).planning));
+    assert.deepEqual((await callFresh(body)).body,fresh);
+    const duplicate=await callFresh({...body,message_id:'test-candidate-fresh-attempt-two-duplicate'});
+    assert.equal(duplicate.status,409);assert.equal(duplicate.body.error.code,'CANDIDATE_FRESH_ATTEMPT_DUPLICATE');
+    const sourceAfter=f.backend.one('ow_cases',child.id);
+    assert.equal(sourceAfter.revision,sourceBefore.revision);assert.equal(sourceAfter.stage,sourceBefore.stage);
+    assert.equal(sourceAfter.candidate_hash,sourceBefore.candidate_hash);
+
+    const freshQueue=plans(f).queue(f.actor),freshItem=freshQueue.items.find(item=>item.case_id===fresh.case_id);
+    assert.ok(freshItem,JSON.stringify(freshQueue));
+    const freshClaim=plans(f).perform('claim',f.actor,{message_id:'test-fresh-two-plan-claim',data:{
+      case_id:freshItem.case_id,expected_revision:freshItem.revision,support_hash:freshItem.support_hash}});
+    const freshPlan=plans(f).perform('plans',f.actor,planInput(freshClaim,'test-fresh-two-plan-return'));
+    const freshBuild=buildCandidate(fresh.case_id,'test-fresh-two');
+    assert.throws(()=>freshBuild.complete({...candidateBuild(),change_summary:'Different candidate bytes are not reusable.'},'test-fresh-two-wrong'),
+      /CANDIDATE_FRESH_ATTEMPT_IDENTITY_CONFLICT/);
+    const freshCompleted=freshBuild.complete(candidateBuild());
+    approveAndRegister(fresh.case_id,freshPlan.artifact_id,freshCompleted,'test-fresh-two');
+    const matrix=validationMatrix(f,freshRow.baseline_hash),wrongAttempt=governanceInput(f,freshRow,freshCompleted,matrix);
+    wrongAttempt.message_id='test-fresh-two-wrong-governance-attempt';
+    wrongAttempt.data.expected_revision=f.backend.one('ow_cases',fresh.case_id).revision;
+    assert.throws(()=>f.backend.operationalCandidateGovernance.register(strategy,f.backend.one('ow_cases',fresh.case_id),
+      f.backend.operationalCandidateDispatch.completion(fresh.case_id),f.backend.operationalCandidateDispatch.registration(fresh.case_id),wrongAttempt.data),
+      /CANDIDATE_GOVERNANCE_ATTEMPT_CONFLICT/);
+    const governed=structuredClone(wrongAttempt);governed.message_id='test-fresh-two-governance';governed.data.policy.attempt_number=2;
+    const result=f.backend.operationalCandidateGovernance.register(strategy,f.backend.one('ow_cases',fresh.case_id),
+      f.backend.operationalCandidateDispatch.completion(fresh.case_id),f.backend.operationalCandidateDispatch.registration(fresh.case_id),governed.data);
+    assert.equal(result.status,'READY');assert.equal(f.backend.readCase(f.human,fresh.case_id).candidate_governance.attempt_number,2);
+    assert.equal(f.backend.readCase(f.human,child.id).candidate_governance.status,'LEGACY_INCOMPLETE');
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_approval_requests WHERE gate IN ('PAPER','LIVE')").get().n,0);
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_handoffs WHERE json_extract(payload_json,'$.gate') IN ('PAPER','LIVE')").get().n,0);
+    assert.equal(f.backend.db.prepare("SELECT COUNT(*) n FROM ow_artifacts WHERE kind IN ('BACKTEST','ROBUSTNESS','WALK_FORWARD','OOS_HOLDOUT')").get().n,0);
+  }finally{f.close();}
+});
+
 test('real planning consumer returns exact owned brief once and reconciles lost successful responses after restart',async()=>{
   for(const lost of ['claim','plans',null]){
     const f=fixture(),w=workerFixture(f);try{
