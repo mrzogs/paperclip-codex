@@ -16,6 +16,7 @@ try {
   [IO.File]::WriteAllText($binding,'{"schema_version":"test-binding/v1"}',[Text.UTF8Encoding]::new($false))
   $bindingHash = (Get-FileHash -LiteralPath $binding -Algorithm SHA256).Hash.ToLowerInvariant()
   $runtimePaths = @('server.mjs','monitor.mjs','workflow\backend.mjs',
+    'workflow\operational-candidate-governance.mjs',
     'workflow\operational-candidate-evaluation.mjs','workflow\operational-candidate-dispatch.mjs',
     'public\workflow\ui.js')
   $runtimeFiles = @($runtimePaths | ForEach-Object {
@@ -61,6 +62,16 @@ try {
   ).Replace('-','').ToLowerInvariant()
   Assert-Test ((Get-OceanDeploymentFileMapHash -Entries $orderingFixture) -ceq $expectedOrderingHash) `
     'FILE_MAP_ORDER_WAS_NOT_ORDINAL'
+
+  $missingGovernance = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
+  $missingGovernance.files = @($missingGovernance.files | Where-Object { $_.relative_path -cne 'workflow\operational-candidate-governance.mjs' })
+  $missingGovernance.file_map_sha256 = Get-OceanDeploymentFileMapHash -Entries $missingGovernance.files
+  $missingGovernanceManifest = Join-Path $fixture 'deployment-missing-governance.json'
+  [IO.File]::WriteAllText($missingGovernanceManifest,($missingGovernance | ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))
+  $governanceFailure = $null
+  try { $null = Get-OceanDeployment -ConfigPath $missingGovernanceManifest } catch { $governanceFailure = $_.Exception.Message }
+  Assert-Test ($governanceFailure -eq 'Ocean deployment runtime binding is missing or invalid: workflow\operational-candidate-governance.mjs') `
+    'MISSING_CANDIDATE_GOVERNANCE_WAS_ACCEPTED'
 
   $wrongRuntimeHash = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
   $wrongRuntimeHash.files[0].sha256 = '0' * 64

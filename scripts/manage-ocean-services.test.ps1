@@ -20,6 +20,10 @@ Assert-Test (-not $launcher.Contains('Start-Process')) 'NORMAL_LAUNCHER_RETAINS_
 Assert-Test ($manager.Contains("Join-Path `$PSScriptRoot 'ocean-deployment.ps1'")) 'MANAGER_BYPASSES_DEPLOYMENT_MANIFEST'
 Assert-Test ($manager.Contains('function Get-ValidatedOceanDeployment')) 'MANAGER_DOES_NOT_LAZILY_VALIDATE_DEPLOYMENT'
 Assert-Test (-not $manager.Contains("`$Deployment = Get-OceanDeployment -ConfigPath")) 'STOP_AND_UNINSTALL_REQUIRE_A_VALID_DEPLOYMENT'
+Assert-Test ($manager.Contains("candidate_evaluator.version -ceq 'ocean-operational-candidate-evaluator/v2'")) `
+  'MANAGER_DOES_NOT_REQUIRE_CANDIDATE_EVALUATOR_V2'
+Assert-Test (-not $manager.Contains("candidate_evaluator.version -ceq 'ocean-operational-candidate-evaluator/v1'")) `
+  'MANAGER_STILL_ACCEPTS_CANDIDATE_EVALUATOR_V1'
 Assert-Test ($manager.Contains("Join-Path (Get-ValidatedOceanDeployment).Dashboard 'monitor.mjs'")) 'MONITOR_MATCH_IS_NOT_BOUND_TO_DEPLOYED_DASHBOARD'
 Assert-Test ($manager.Contains("`$_.Name -ieq 'node.exe'")) 'MONITOR_MATCH_DOES_NOT_REQUIRE_NODE'
 Assert-Test ($manager.Contains('[regex]::Escape($monitorPath)')) 'MONITOR_PATH_IS_NOT_REGEX_SAFE'

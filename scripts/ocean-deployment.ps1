@@ -55,6 +55,7 @@ function Get-OceanDeployment {
     'server.mjs',
     'monitor.mjs',
     'workflow\backend.mjs',
+    'workflow\operational-candidate-governance.mjs',
     'workflow\operational-candidate-evaluation.mjs',
     'workflow\operational-candidate-dispatch.mjs',
     'public\workflow\ui.js'
