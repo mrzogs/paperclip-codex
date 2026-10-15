@@ -392,7 +392,10 @@ export class OperationalContinuation {
       const sourceFrozen=JSON.parse(Buffer.from(sourceArtifact.content).toString('utf8'));
       requireThat(sourceFrozen.schema_version===VERSION && sourceFrozen.support_hash===sourcePayload.support_hash
         && objectHash(sourceFrozen.support)===sourcePayload.support_hash,409,'CONTINUATION_LINEAGE_CONFLICT');
-      const source=this.source(this.backend.one('ow_research_jobs',sourceFrozen.source.job_id));
+      // A retry is anchored to the source case's sealed, registered candidate.
+      // Current Research qualification may legitimately move on after that build.
+      const source=this.source(this.backend.one('ow_research_jobs',sourceFrozen.source.job_id),
+        {requireCurrentProvenance:false});
       requireThat(source && objectHash(source.reference)===objectHash(sourceFrozen.source)
         && this.items(source).some(item=>objectHash({...source.binding,...item})===sourcePayload.support_hash),
       409,'CONTINUATION_SOURCE_LINEAGE_CONFLICT');
@@ -506,7 +509,9 @@ export class OperationalContinuation {
           task_kind:frozen.support.task_kind,...(attempt?{attempt}:{}),authority:noAuthority}),
       409,'CONTINUATION_LINEAGE_CONFLICT');
       const job=this.backend.one('ow_research_jobs',frozen.source.job_id);
-      source=this.source(job,{requireCurrentProvenance:!registeredCandidate});
+      // Fresh attempts reuse the exact registered candidate from retry_of_case_id;
+      // they do not reinterpret the historical Research result as a new proposal.
+      source=this.source(job,{requireCurrentProvenance:!(registeredCandidate || attempt)});
       if(payload.kind==='PROPOSAL_PLANNING' && source)
         requireDirectionExclusionExposure(source.report,frozen.support.requirement);
       requireThat(source && objectHash(source.reference)===objectHash(frozen.source)
@@ -517,9 +522,11 @@ export class OperationalContinuation {
           && attempt.attempt_number>=2 && typeof attempt.reason==='string' && attempt.reason.length>0
           && typeof attempt.retry_of_case_id==='string' && typeof attempt.candidate_completion_hash==='string',
         409,'CANDIDATE_FRESH_ATTEMPT_LINEAGE_CONFLICT');
-        const retry=this.backend.one('ow_cases',attempt.retry_of_case_id),completion=this.backend.operationalCandidateDispatch.completion(retry.id);
+        const retry=this.backend.one('ow_cases',attempt.retry_of_case_id),completion=this.backend.operationalCandidateDispatch.completion(retry.id),
+          registration=this.registeredCandidate(retry);
         requireThat(retry.strategy_id===row.strategy_id && retry.instance_id===row.instance_id
-          && retry.baseline_hash===row.baseline_hash && completion?.completion_hash===attempt.candidate_completion_hash,
+          && retry.baseline_hash===row.baseline_hash && completion?.completion_hash===attempt.candidate_completion_hash
+          && registration?.candidate_hash===completion.candidate.candidate_hash,
         409,'CANDIDATE_FRESH_ATTEMPT_LINEAGE_CONFLICT');
       }
       if(payload.kind==='RISK_DISABLE_REVIEW')riskReview=frozen.support.requirement;

@@ -42,7 +42,8 @@ export class OperationalProposalPlan {
     requireThat(!held.has(row.work_status),409,'PROPOSAL_DISPOSITION_HELD');
     const artifact=this.b.artifactFor(row,payload.lineage_artifact_id,'RECOMMENDATION');
     const frozen=JSON.parse(Buffer.from(artifact.content).toString('utf8'));
-    const source=this.c.source(this.b.one('ow_research_jobs',frozen.source.job_id));
+    const source=this.c.source(this.b.one('ow_research_jobs',frozen.source.job_id),
+      {requireCurrentProvenance:!payload.attempt});
     return {row,payload,frozen,source};
   }
   template(work){
