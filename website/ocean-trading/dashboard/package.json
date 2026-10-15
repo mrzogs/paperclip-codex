@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "test:quant": "node --test quant-terminal-integration.test.mjs && npm --prefix quant-terminal test",
     "generate": "node build-manifest.mjs",
     "symbol:paper": "node update-sierra-symbol.mjs",
     "start": "node server.mjs"

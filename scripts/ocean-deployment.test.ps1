@@ -18,7 +18,10 @@ try {
   $runtimePaths = @('server.mjs','monitor.mjs','workflow\backend.mjs',
     'workflow\operational-candidate-governance.mjs',
     'workflow\operational-candidate-evaluation.mjs','workflow\operational-candidate-dispatch.mjs',
-    'public\workflow\ui.js')
+    'public\workflow\ui.js','public\index.html','public\app.js')
+  $runtimePaths += @(Get-ChildItem -LiteralPath (Join-Path $dashboard 'quant-terminal') -Recurse -File |
+    Where-Object { $_.FullName -notmatch '\\(?:data|node_modules)\\' } |
+    ForEach-Object { $_.FullName.Substring($dashboard.Length + 1) })
   $runtimeFiles = @($runtimePaths | ForEach-Object {
     [pscustomobject][ordered]@{relative_path=$_;sha256=(Get-FileHash -LiteralPath (Join-Path $dashboard $_) -Algorithm SHA256).Hash.ToLowerInvariant()}
   })
@@ -74,6 +77,21 @@ try {
     'FILE_MAP_ORDER_WAS_NOT_ORDINAL'
 
   $missingGovernance = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
+  foreach ($requiredQuantFile in @('quant-terminal\server.js','quant-terminal\lib\proxy.js',
+      'quant-terminal\public\js\chart.js','public\index.html')) {
+    $missingQuant = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
+    $missingQuant.files = @($missingQuant.files | Where-Object { $_.relative_path -cne $requiredQuantFile })
+    $missingQuant.file_map_sha256 = Get-OceanDeploymentFileMapHash -Entries $missingQuant.files
+    $missingQuantManifest = Join-Path $fixture 'deployment-missing-quant.json'
+    [IO.File]::WriteAllText($missingQuantManifest,($missingQuant | ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))
+    $quantFailure = $null
+    try { $null = Get-OceanDeployment -ConfigPath $missingQuantManifest } catch { $quantFailure = $_.Exception.Message }
+    Assert-Test ($quantFailure -eq "Ocean deployment runtime binding is missing or invalid: $requiredQuantFile") `
+      "MISSING_QUANT_FILE_WAS_ACCEPTED: $requiredQuantFile"
+  }
+  $supervisorSource = Get-Content -LiteralPath (Join-Path $scriptsRoot 'run-ocean-website-supervised.ps1') -Raw
+  Assert-Test ($supervisorSource.Contains("`$env:QT_DATA_DIR = Join-Path (Split-Path -Parent `$Runtime) 'quant-terminal'")) `
+    'QUANT_STATE_IS_NOT_PINNED_OUTSIDE_RELEASE'
   $missingGovernance.files = @($missingGovernance.files | Where-Object { $_.relative_path -cne 'workflow\operational-candidate-governance.mjs' })
   $missingGovernance.file_map_sha256 = Get-OceanDeploymentFileMapHash -Entries $missingGovernance.files
   $missingGovernanceManifest = Join-Path $fixture 'deployment-missing-governance.json'

@@ -59,7 +59,15 @@ function Get-OceanDeployment {
     'workflow\operational-candidate-governance.mjs',
     'workflow\operational-candidate-evaluation.mjs',
     'workflow\operational-candidate-dispatch.mjs',
-    'public\workflow\ui.js'
+    'public\workflow\ui.js',
+    'public\index.html',
+    'public\app.js',
+    'quant-terminal\server.js',
+    'quant-terminal\package.json',
+    'quant-terminal\public\index.html',
+    'quant-terminal\public\js\app.js',
+    'quant-terminal\public\js\api.js',
+    'quant-terminal\public\vendor\lightweight-charts.standalone.production.js'
   )
   $runtimeFiles = @($deployment.files)
   $validatedRuntimeFiles = @()
@@ -93,6 +101,26 @@ function Get-OceanDeployment {
     if ($entry.Count -ne 1) {
       throw "Ocean deployment runtime binding is missing or invalid: $relativePath"
     }
+  }
+  # A release must retain the entire embedded app, not merely a navigation link.
+  foreach ($subdirectory in @('lib','public','custom')) {
+    $quantRoot = Join-Path $dashboard "quant-terminal\$subdirectory"
+    if (-not (Test-Path -LiteralPath $quantRoot -PathType Container)) {
+      throw "Ocean Quant Terminal directory is missing: $subdirectory"
+    }
+    foreach ($file in @(Get-ChildItem -LiteralPath $quantRoot -File -Recurse)) {
+      $relativePath = $file.FullName.Substring($dashboard.TrimEnd('\').Length + 1)
+      if (-not $seenRuntimeFiles.ContainsKey($relativePath)) {
+        throw "Ocean deployment runtime binding is missing or invalid: $relativePath"
+      }
+    }
+  }
+  $navSource = Get-Content -LiteralPath (Join-Path $dashboard 'public\index.html') -Raw
+  $serverSource = Get-Content -LiteralPath (Join-Path $dashboard 'server.mjs') -Raw
+  if ($navSource -notmatch 'href="/quant-terminal/"' -or
+      $serverSource -notmatch 'handleQuantTerminalRequest\(req, res' -or
+      $serverSource -notmatch 'initializeQuantTerminal\(') {
+    throw 'Ocean deployment is missing the embedded Quant Terminal integration.'
   }
   if (-not (Test-OceanLocalAbsolutePath $sourceRoot) -or
       -not (Test-Path -LiteralPath $sourceRoot -PathType Container)) {

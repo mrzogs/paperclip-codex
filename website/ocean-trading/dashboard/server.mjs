@@ -11,6 +11,7 @@ import { workflowFromEnvironment } from "./workflow/backend.mjs";
 import { installWebsiteControl } from "./workflow/process-control.mjs";
 import { reconcileOperationalReplayRunSettings } from "./workflow/operational-run-readiness.mjs";
 import { readVwapContinuousImprovementState } from "./workflow/vwap-continuous-improvement-monitor.mjs";
+import { handleQuantTerminalRequest, initializeQuantTerminal, stopQuantTerminal } from "./quant-terminal/server.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -3473,6 +3474,19 @@ const server = http.createServer((req, res) => {
     return;
   }
   const requestUrl = new URL(req.url, `http://${req.headers.host || "127.0.0.1"}`);
+  if (requestUrl.pathname === "/quant-terminal") {
+    res.writeHead(308, { Location: `/quant-terminal/${requestUrl.search}`, "Cache-Control": "no-store" });
+    res.end();
+    return;
+  }
+  if (requestUrl.pathname.startsWith("/quant-terminal/")) {
+    void handleQuantTerminalRequest(req, res, { basePath: "/quant-terminal" }).catch((error) => {
+      if (res.writableEnded) return;
+      if (!res.headersSent) res.writeHead(500, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(JSON.stringify({ error: "Quant Terminal request failed", message: String(error?.message || error) }));
+    });
+    return;
+  }
   if (requestUrl.pathname === "/api/workflow" || requestUrl.pathname.startsWith("/api/workflow/")) {
     if (workflowBackend) {
       void workflowBackend.handle(req, res, requestUrl);
@@ -3934,12 +3948,16 @@ server.on("close", () => {
   if (workflowRetryTimer) clearTimeout(workflowRetryTimer);
   workflowRetryTimer = null;
   workflowBackend?.close();
+  stopQuantTerminal();
 });
 installWebsiteControl(server, __dirname, () => Boolean(workflowBackend));
 
 if (process.env.NODE_ENV !== "test") {
   server.listen(PORT, () => {
     startManifestFreshnessPoll();
+    void initializeQuantTerminal()
+      .then(({ version, dataDir }) => console.log(`Quant Terminal ${version} mounted at /quant-terminal/ (data: ${dataDir})`))
+      .catch((error) => console.error(`Quant Terminal startup failed: ${String(error?.message || error)}`));
     console.log(`Ocean Trading local dashboard running on http://localhost:${PORT}`);
     console.log("Manifest endpoint: /api/manifest");
     console.log("Rebuild endpoint: /api/rebuild");
