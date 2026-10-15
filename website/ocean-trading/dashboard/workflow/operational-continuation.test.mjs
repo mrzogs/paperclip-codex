@@ -1565,11 +1565,15 @@ test('candidate completion survives restart and registration requires an approve
     assert.throws(()=>f.backend.mutate('approval.request',f.human,{message_id:'test-candidate-review-missing-holdout',data:{...approvalData,
       authorized_tests:['BACKTEST','ROBUSTNESS','WALK_FORWARD']}}),/OPERATIONAL_PLANNING_MUTATION_NOT_ENABLED/);
     const request=f.backend.mutate('approval.request',f.human,{message_id:'test-candidate-review-request',data:approvalData});
+    const requestRow=f.backend.one('ow_approval_requests',request.request_id),requestSnapshot=JSON.parse(requestRow.snapshot_json);
+    assert.equal(requestRow.candidate_hash,candidateBuild().candidate_hash);
+    assert.equal(requestSnapshot.candidate_hash,candidateBuild().candidate_hash);
     const decisionData={decision_id:'test-candidate-decision',request_id:request.request_id,case_id:child.id,
       expected_revision:request.revision,snapshot_hash:request.snapshot_hash,decision:'APPROVED',reason:'Approve exact Replay-only validation; Paper, Live and promotion remain disabled.'};
     assert.throws(()=>f.backend.mutate('approval.decide',f.human,{message_id:'test-candidate-decision-wrong-snapshot',data:{...decisionData,
       snapshot_hash:digest('wrong-snapshot')}}),/OPERATIONAL_PLANNING_MUTATION_NOT_ENABLED/);
     const decision=f.backend.mutate('approval.decide',f.human,{message_id:'test-candidate-decision',data:decisionData});
+    assert.equal(JSON.parse(f.backend.one('ow_decisions',decision.decision_id).binding_json).candidate_hash,candidateBuild().candidate_hash);
     const handoffTransition={case_id:child.id,expected_revision:decision.revision,action:'advance',to_stage:'DEVELOPMENT_HANDOFF',
       artifact_id:null,artifact_ids:null,decision_id:decision.decision_id,owner_id:null,next_action:null};
     assert.throws(()=>f.backend.mutate('case.transition',f.human,{message_id:'test-candidate-handoff-wrong-decision',data:{...handoffTransition,

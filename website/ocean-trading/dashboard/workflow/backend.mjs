@@ -645,10 +645,18 @@ export class WorkflowBackend {
     const kind = { ONBOARDING: "EVIDENCE", DEVELOPMENT: "RECOMMENDATION", SHADOW: "EVALUATION", PRODUCTION: "DEPLOYMENT_PLAN", ROLLBACK: "ROLLBACK_PLAN" }[data.gate];
     const artifact = this.artifactFor(row, data.artifact_id, kind);
     requireThat(artifact.recipient_id === data.recipient_id, 409, "WRONG_RECIPIENT");
-    const requestHash = objectHash({ case_id: row.id, gate: data.gate, artifact_hash: JSON.parse(artifact.manifest_json).content_hash, baseline_hash: row.baseline_hash, candidate_hash: row.candidate_hash, recipient_id: data.recipient_id, authorized_tests: data.authorized_tests });
+    let candidateHash = row.candidate_hash;
+    const payload = JSON.parse(row.payload_json);
+    if (!candidateHash && data.gate === "DEVELOPMENT" && payload.origin === CONTINUATION_ORIGIN && payload.kind === "PROPOSAL_PLANNING") {
+      const completed = this.operationalCandidateDispatch?.completion(row.id);
+      requireThat(completed && completed.plan_artifact_id === artifact.id && completed.recipient_id === data.recipient_id, 409, "CANDIDATE_COMPLETION_BINDING_REQUIRED");
+      candidateHash = completed.candidate?.candidate_hash;
+      requireThat(/^sha256:[a-f0-9]{64}$/.test(candidateHash || ""), 409, "CANDIDATE_COMPLETION_BINDING_REQUIRED");
+    }
+    const requestHash = objectHash({ case_id: row.id, gate: data.gate, artifact_hash: JSON.parse(artifact.manifest_json).content_hash, baseline_hash: row.baseline_hash, candidate_hash: candidateHash, recipient_id: data.recipient_id, authorized_tests: data.authorized_tests });
     requireThat(!this.db.prepare("SELECT id FROM ow_approval_requests WHERE request_hash=? AND state IN ('PENDING','MORE_EVIDENCE')").get(requestHash), 409, "UNCHANGED_REQUEST_ALREADY_SUBMITTED");
-    const snapshot = { ...data, strategy_id: row.strategy_id, baseline_hash: row.baseline_hash, candidate_hash: row.candidate_hash, content_hash: JSON.parse(artifact.manifest_json).content_hash, namespace: "TEST" };
-    this.db.prepare("INSERT INTO ow_approval_requests VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(data.request_id, row.id, data.gate, artifact.id, objectHash(snapshot), row.baseline_hash, row.candidate_hash, data.recipient_id, JSON.stringify(data.authorized_tests), TABLE.gate_scope_categories[data.gate], 1, "PENDING", data.expires_at_utc, requestHash, JSON.stringify(snapshot));
+    const snapshot = { ...data, strategy_id: row.strategy_id, baseline_hash: row.baseline_hash, candidate_hash: candidateHash, content_hash: JSON.parse(artifact.manifest_json).content_hash, namespace: "TEST" };
+    this.db.prepare("INSERT INTO ow_approval_requests VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(data.request_id, row.id, data.gate, artifact.id, objectHash(snapshot), row.baseline_hash, candidateHash, data.recipient_id, JSON.stringify(data.authorized_tests), TABLE.gate_scope_categories[data.gate], 1, "PENDING", data.expires_at_utc, requestHash, JSON.stringify(snapshot));
     this.db.prepare("UPDATE ow_cases SET revision=revision+1,owner_id='wayne-ocean-ui',waiting_on='HUMAN_DECISION' WHERE id=?").run(row.id);
     this.event(row.id, "approval.request", actor, { request_id: data.request_id, snapshot });
     return { request_id: data.request_id, case_id: row.id, snapshot_hash: objectHash(snapshot), state: "PENDING", revision: row.revision + 1, authorizes_work: false };
@@ -666,7 +674,7 @@ export class WorkflowBackend {
     if (data.decision !== "MORE_EVIDENCE") {
       const decision = { schema_version: RELEASE, decision_id: data.decision_id, request_id: request.id, decision: data.decision, scope: request.scope, snapshot_hash: request.snapshot_hash, decided_by: "Wayne", decided_via: "AUTHORISED_OCEAN_UI", decided_at_utc: new Date().toISOString(), reason: data.reason, expires_at_utc: request.expires_at_utc };
       this.validate("approval-decision", decision);
-      const binding = { case_id: row.id, strategy_id: row.strategy_id, instance_id: row.instance_id, gate: request.gate, artifact_id: request.artifact_id, baseline_hash: row.baseline_hash, candidate_hash: row.candidate_hash, recipient_id: request.recipient_id, authorized_tests: JSON.parse(request.tests_json), namespace: "TEST", operational_action_allowed: false };
+      const binding = { case_id: row.id, strategy_id: row.strategy_id, instance_id: row.instance_id, gate: request.gate, artifact_id: request.artifact_id, baseline_hash: row.baseline_hash, candidate_hash: request.candidate_hash, recipient_id: request.recipient_id, authorized_tests: JSON.parse(request.tests_json), namespace: "TEST", operational_action_allowed: false };
       this.db.prepare("INSERT INTO ow_decisions VALUES(?,?,?,?,?)").run(decision.decision_id, request.id, row.id, JSON.stringify(binding), JSON.stringify(decision));
     }
     if (data.decision === "MORE_EVIDENCE") this.db.prepare("INSERT INTO ow_tasks VALUES(?,?,?,'NOT_RUN',NULL,1) ON CONFLICT(case_id,kind) DO UPDATE SET status='NOT_RUN',artifact_id=NULL").run(`${row.id}:RESEARCH_MORE_EVIDENCE`, row.id, "RESEARCH_MORE_EVIDENCE");
@@ -706,6 +714,7 @@ export class WorkflowBackend {
           const development = this.approved(row, "DEVELOPMENT");
           requireThat(JSON.parse(artifact.dependencies_json).includes(development.binding.artifact_id), 409, "CANDIDATE_RECOMMENDATION_DEPENDENCY_REQUIRED");
           requireThat(/^sha256:[a-f0-9]{64}$/.test(artifact.candidate_hash || ""), 422, "CANDIDATE_HASH_REQUIRED");
+          if (development.binding.candidate_hash) requireThat(artifact.candidate_hash === development.binding.candidate_hash, 409, "CANDIDATE_APPROVAL_HASH_MISMATCH");
           candidate = artifact.candidate_hash;
         }
       }
@@ -763,7 +772,7 @@ export class WorkflowBackend {
     const strategy = this.one("ow_strategies", row.strategy_id);
     const artifact = this.artifactFor(row, approval.binding.artifact_id);
     const manifest = JSON.parse(artifact.manifest_json);
-    const instruction = ["# Ocean Approved TEST Handoff", "", "S20 synthetic acceptance only. No actual candidate changes, Sierra commands or live-money actions are authorised.", "", `Case: ${row.id}`, `Strategy: ${row.strategy_id}`, `Profile reference: ${strategy.profile_id}`, `Instance: ${row.instance_id}`, `Run: ${row.run_id}`, `Gate: ${data.gate}`, `Recommendation/artifact: ${artifact.id}`, `Artifact content hash: ${manifest.content_hash}`, `Request: ${approval.payload.request_id}`, `Decision: ${approval.decision.id}`, `Decision snapshot hash: ${approval.payload.snapshot_hash}`, `Baseline: ${row.baseline_hash}`, `Candidate: ${row.candidate_hash || "not yet developed"}`, `Intended recipient: ${data.recipient_id}`, `Permitted tests: ${approval.binding.authorized_tests.join(", ")}`, `Dependency artifact IDs: ${JSON.parse(artifact.dependencies_json).join(", ") || "none"}`, "", "## Verification Before Work", "Re-read the authenticated Ocean decision and immutable artifact. Refuse expired, revoked, changed-baseline, wrong-instance or wrong-recipient authority. Download is not acknowledgement. Existing chat/tooling binding remains PENDING S23; this TEST instruction is not a production handoff.", "", "## Approved Concept, Evidence, Risks And Scope", "The following is the exact approved snapshot; absent supporting/contradicting evidence or risks are not invented.", "", Buffer.from(artifact.content).toString("utf8"), ""].join("\n");
+    const instruction = ["# Ocean Approved TEST Handoff", "", "S20 synthetic acceptance only. No actual candidate changes, Sierra commands or live-money actions are authorised.", "", `Case: ${row.id}`, `Strategy: ${row.strategy_id}`, `Profile reference: ${strategy.profile_id}`, `Instance: ${row.instance_id}`, `Run: ${row.run_id}`, `Gate: ${data.gate}`, `Recommendation/artifact: ${artifact.id}`, `Artifact content hash: ${manifest.content_hash}`, `Request: ${approval.payload.request_id}`, `Decision: ${approval.decision.id}`, `Decision snapshot hash: ${approval.payload.snapshot_hash}`, `Baseline: ${row.baseline_hash}`, `Candidate: ${approval.binding.candidate_hash || row.candidate_hash || "not yet developed"}`, `Intended recipient: ${data.recipient_id}`, `Permitted tests: ${approval.binding.authorized_tests.join(", ")}`, `Dependency artifact IDs: ${JSON.parse(artifact.dependencies_json).join(", ") || "none"}`, "", "## Verification Before Work", "Re-read the authenticated Ocean decision and immutable artifact. Refuse expired, revoked, changed-baseline, wrong-instance or wrong-recipient authority. Download is not acknowledgement. Existing chat/tooling binding remains PENDING S23; this TEST instruction is not a production handoff.", "", "## Approved Concept, Evidence, Risks And Scope", "The following is the exact approved snapshot; absent supporting/contradicting evidence or risks are not invented.", "", Buffer.from(artifact.content).toString("utf8"), ""].join("\n");
     const payload = { namespace: "TEST", gate: data.gate, authorized_test: data.authorized_test, download_is_acknowledgement: false, actual_execution_allowed: false, instruction_md: instruction, instruction_hash: digest(instruction) };
     this.db.prepare("INSERT INTO ow_handoffs VALUES(?,?,?,?,?,1,'CREATED',?)").run(data.handoff_id, row.id, approval.binding.artifact_id, approval.decision.id, data.recipient_id, JSON.stringify(payload));
     this.event(row.id, "handoff.create", actor, { handoff_id: data.handoff_id });
