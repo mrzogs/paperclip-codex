@@ -20,21 +20,33 @@ const brainAuthority = Object.freeze({
   runtime_trade_decision_dependency: false,
 });
 
-function exchange(conclusion, policyStatus = 'NOT_PREDECLARED') {
+function exchange(conclusion, policyStatus = 'NOT_PREDECLARED', policyOverride = {}) {
   const executionBindings={baseline:{logical_hash:digest('baseline'),strategy_version:'baseline-v1',runs:[]},
     candidate:{logical_hash:digest('candidate'),strategy_version:'candidate-v1',runs:[]}};
   const artifactContent=JSON.stringify({baseline:{net_pnl:10},candidate:{net_pnl:12,trade_count:3},execution_bindings:executionBindings,
     contradictions:[],limitations:[]});
   const sourceArtifact={kind:'BACKTEST',artifact_id:'test-backtest',manifest_json:'{}',manifest_sha256:digest('{}'),
     content_json:artifactContent,content_sha256:digest(artifactContent)};
+  const governanceContent=JSON.stringify({schema_version:'ocean-operational-candidate-governance/v5',
+    governance_hash:digest('governance')});
+  const candidateGovernance={kind:'VALIDATION_REPORT',artifact_id:'test-governance',manifest_json:'{}',
+    manifest_sha256:digest('governance-manifest'),content_json:governanceContent,content_sha256:digest(governanceContent)};
   const plan={schema_version:CANDIDATE_VALIDATION_PLAN_VERSION,plan_revision:1};
   const completion={schema_version:'ocean-operational-candidate-validation/v3',next_stage:'CANDIDATE_EVALUATION'};
+  const predeclaredPolicy={status:'PREDECLARED',policy_id:'test-benefit-policy',policy_hash:digest('test-benefit-policy'),
+    favorable_performance_required:true,minimum_positive_tests:1,maximum_negative_tests:0,
+    minimum_cumulative_net_pnl_delta:1,minimum_candidate_trade_count:1,no_benefit_when_thresholds_fail:true,
+    metric_contract:{schema_version:'ocean-candidate-metric-contract/v1'},...policyOverride};
+  const evaluationPolicy=policyStatus==='PREDECLARED'?predeclaredPolicy:{status:policyStatus};
+  const assessment=policyStatus==='PREDECLARED'?{schema_version:'ocean-candidate-evaluation-policy-assessment/v1',
+    tests_evaluated:1,positive_tests:1,negative_tests:0,neutral_tests:0,cumulative_net_pnl_delta:2,candidate_trade_count:3,
+    thresholds_met:2>=evaluationPolicy.minimum_cumulative_net_pnl_delta && 3>=evaluationPolicy.minimum_candidate_trade_count}:{};
   const request = {
     project:'cicd-vwap-pull-back-strategy',case_id:'test-case',strategy_id:'cicd-vwap-pull-back-strategy',
     strategy_name:'VWAP Pullback',strategy_profile_id:'test-profile',strategy_version:'v0.1.0',
     execution_instance_id:'test-instance',registry_reconciliation_id:null,registry_record_sha256:null,
     baseline_hash:digest('baseline'),candidate_hash:digest('candidate'),
-    evaluation_policy: { status: policyStatus },
+    evaluation_policy:evaluationPolicy,candidate_governance:candidateGovernance,
     validation_plan:{artifact_id:'test-plan',plan_hash:digest('plan'),content_json:JSON.stringify(plan),
       content_sha256:digest(JSON.stringify(plan)),hash_basis_json:null},
     validation_completion:{artifact_id:'test-completion',event_id:'ocean-event-1',content_json:JSON.stringify(completion),
@@ -45,19 +57,22 @@ function exchange(conclusion, policyStatus = 'NOT_PREDECLARED') {
   const bindings={case_id:request.case_id,plan_artifact_id:'test-plan',plan_hash:request.validation_plan.plan_hash,
     plan_content_sha256:request.validation_plan.content_sha256,completion_artifact_id:'test-completion',
     completion_event_id:'ocean-event-1',completion_content_sha256:request.validation_completion.content_sha256,
+    governance_artifact_id:candidateGovernance.artifact_id,governance_manifest_sha256:candidateGovernance.manifest_sha256,
+    governance_content_sha256:candidateGovernance.content_sha256,
     baseline_hash:request.baseline_hash,candidate_hash:request.candidate_hash};
   const sourceArtifacts=[{kind:'BACKTEST',artifact_id:'test-backtest',manifest_sha256:sourceArtifact.manifest_sha256,
     content_sha256:sourceArtifact.content_sha256,execution_bindings:executionBindings,baseline_net_pnl:10,candidate_net_pnl:12,
     candidate_trade_count:3,contradiction_count:0,limitation_count:0}];
   const content = JSON.stringify({
-    schema_version:'brain-candidate-evaluation-content/v1',
+    schema_version:'brain-candidate-evaluation-content/v2',
     strategy:{project:request.project,strategy_id:request.strategy_id,strategy_name:request.strategy_name,
       strategy_profile_id:request.strategy_profile_id,strategy_version:request.strategy_version,
       execution_instance_id:request.execution_instance_id},
     registry_reconciliation_id:null,registry_record_sha256:null,bindings,evaluation_policy:request.evaluation_policy,
+    candidate_governance:{envelope:candidateGovernance,content:JSON.parse(governanceContent)},
     validation_plan:plan,validation_completion:completion,
     source_artifacts:[{echo:sourceArtifacts[0],content:JSON.parse(artifactContent)}],dataset_provenance:{partition_id:'test'},
-    conclusion:{type:conclusion,reasons:[],metrics:{}},correlation:request.correlation,
+    conclusion:{type:conclusion,reasons:[],metrics:assessment},correlation:request.correlation,
     authority:brainAuthority,human_governance_required:true,
   });
   const response = {
@@ -106,7 +121,18 @@ test('declared policy still requires exact lineage, source echo and no-authority
     withContent(response,content=>{content.source_artifacts[0].echo.content_sha256=digest('other-embedded-source');}),
     withContent(response,content=>{delete content.source_artifacts[0].content;}),
     withContent(response,content=>{content.source_artifacts[0].content.candidate.net_pnl=999;}),
+    withContent(response,content=>{content.conclusion.metrics.cumulative_net_pnl_delta=999;}),
   ]) assert.throws(() => evaluator.verifyResponse(changed, request), /CANDIDATE_EVALUATION_BRAIN_RESPONSE_INVALID/);
+});
+
+test('declared numerical policy independently rejects contradictory Brain conclusions', () => {
+  const evaluator=Object.create(OperationalCandidateEvaluator.prototype);
+  const favorable=exchange('NO_BENEFIT','PREDECLARED');
+  assert.throws(()=>evaluator.verifyResponse(favorable.response,favorable.request),/CANDIDATE_EVALUATION_BRAIN_RESPONSE_INVALID/);
+  const failingBenefit=exchange('BENEFIT_SUPPORTED','PREDECLARED',{minimum_cumulative_net_pnl_delta:3});
+  assert.throws(()=>evaluator.verifyResponse(failingBenefit.response,failingBenefit.request),/CANDIDATE_EVALUATION_BRAIN_RESPONSE_INVALID/);
+  const failingNoBenefit=exchange('NO_BENEFIT','PREDECLARED',{minimum_cumulative_net_pnl_delta:3});
+  assert.equal(objectHash(evaluator.verifyResponse(failingNoBenefit.response,failingNoBenefit.request)),objectHash(failingNoBenefit.response));
 });
 
 test('legacy PASS evidence is reopened from the first incompatible test instead of becoming a Brain blocker', () => {
