@@ -92,6 +92,8 @@ try {
   $supervisorSource = Get-Content -LiteralPath (Join-Path $scriptsRoot 'run-ocean-website-supervised.ps1') -Raw
   Assert-Test ($supervisorSource.Contains("`$env:QT_DATA_DIR = Join-Path (Split-Path -Parent `$Runtime) 'quant-terminal'")) `
     'QUANT_STATE_IS_NOT_PINNED_OUTSIDE_RELEASE'
+  Assert-Test ($supervisorSource.Contains("`$env:QT_CUSTOM_DIR = Join-Path `$env:QT_DATA_DIR 'custom'")) `
+    'CUSTOM_INDICATORS_ARE_NOT_PINNED_OUTSIDE_RELEASE'
   $missingGovernance.files = @($missingGovernance.files | Where-Object { $_.relative_path -cne 'workflow\operational-candidate-governance.mjs' })
   $missingGovernance.file_map_sha256 = Get-OceanDeploymentFileMapHash -Entries $missingGovernance.files
   $missingGovernanceManifest = Join-Path $fixture 'deployment-missing-governance.json'

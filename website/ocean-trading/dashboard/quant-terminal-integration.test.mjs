@@ -9,6 +9,7 @@ test('Ocean hosts Quant routes and saved state on its own listener across restar
   process.env.NODE_ENV = 'test';
   process.env.OCEAN_WORKFLOW_ENABLED = '0';
   process.env.QT_DATA_DIR = data;
+  process.env.QT_CUSTOM_DIR = path.join(data, 'custom');
   const { server } = await import('./server.mjs');
   const listen = async () => {
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -36,6 +37,12 @@ test('Ocean hosts Quant routes and saved state on its own listener across restar
       method: 'PUT', headers: { 'Content-Type': 'application/json', 'x-qt': '1' }, body: JSON.stringify(saved),
     });
     assert.equal(update.status, 200);
+    const custom = await fetch(`${base}/quant-terminal/api/custom`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-qt': '1' },
+      body: JSON.stringify({ name: 'Persistence probe', code: 'export default { name: "Persistence probe", overlay: true, params: [], calc(bars) { return bars.map(b => ({time:b.time,value:b.close})); } };' }),
+    });
+    assert.equal(custom.status, 200, await custom.text());
+    assert.ok(fs.existsSync(path.join(data, 'custom/persistence-probe.js')));
     assert.equal((await fetch(`${base}/quant-terminal/api/shutdown`, {
       method: 'POST', headers: { 'x-qt': '1' },
     })).status, 404);
@@ -43,6 +50,8 @@ test('Ocean hosts Quant routes and saved state on its own listener across restar
     base = await listen();
     const state = await (await fetch(`${base}/quant-terminal/api/state`)).json();
     assert.deepEqual(state.watchlists, saved.watchlists);
+    const indicators = await (await fetch(`${base}/quant-terminal/api/custom`)).json();
+    assert.ok(indicators.some(row => row.file === 'persistence-probe.js'));
     assert.match(fs.readFileSync(new URL('./public/app.js', import.meta.url), 'utf8'), /ensureNavLink\(nav, "quant-terminal"/);
   } finally {
     if (server.listening) await close();

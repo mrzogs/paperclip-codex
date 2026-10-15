@@ -22,7 +22,7 @@ import { relaunchForProxy, proxyNote } from "./lib/proxy.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(ROOT, "public");
-const CUSTOM = path.join(ROOT, "custom");
+const CUSTOM = process.env.QT_CUSTOM_DIR || path.join(ROOT, "custom");
 const VERSION = JSON.parse(
   fs.readFileSync(path.join(ROOT, "package.json"), "utf8"),
 ).version;
@@ -131,7 +131,21 @@ const slug = (s) =>
 const customErrors = {};
 
 function listCustom() {
+  const fresh = !fs.existsSync(CUSTOM);
   fs.mkdirSync(CUSTOM, { recursive: true });
+  if (process.env.QT_CUSTOM_DIR) {
+    // External user-authored modules are persistent state, not release assets.
+    if (fresh) {
+      for (const file of fs.readdirSync(path.join(ROOT, "custom"))) {
+        if (file.endsWith(".js")) fs.copyFileSync(path.join(ROOT, "custom", file), path.join(CUSTOM, file), fs.constants.COPYFILE_EXCL);
+      }
+    }
+    try {
+      fs.writeFileSync(path.join(CUSTOM, "package.json"), '{"type":"module"}\n', { flag: "wx" });
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+    }
+  }
   return fs
     .readdirSync(CUSTOM)
     .filter((f) => f.endsWith(".js"))

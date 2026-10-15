@@ -34,5 +34,9 @@ therefore concealed missing terminal routes. Refreshing the browser could not fi
 The supervisor pins `QT_DATA_DIR` to `D:\OceanTradingData\website\quant-terminal`.
 Layouts, watchlists, drawings, alerts and paper accounts must never be shipped in
 Git or placed under a disposable release. Preserve existing files on migration.
+User-authored indicators use `QT_CUSTOM_DIR` under that persistent data directory,
+not the immutable bundled `custom/` directory. This also prevents ordinary editor
+saves from invalidating the release's source hashes. Bundled examples seed only
+a newly created external custom directory; existing user files are not overwritten.
 Keep the existing website/workflow databases, physical binding and other services
 unchanged. No live trading connection is authorized by this integration.

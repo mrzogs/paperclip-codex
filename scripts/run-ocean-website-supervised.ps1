@@ -478,6 +478,7 @@ function Initialize-WebsiteEnvironment {
   $env:DASHBOARD_PORT = '3102'
   # User layouts/alerts/paper account must not live in disposable release folders.
   $env:QT_DATA_DIR = Join-Path (Split-Path -Parent $Runtime) 'quant-terminal'
+  $env:QT_CUSTOM_DIR = Join-Path $env:QT_DATA_DIR 'custom'
   $env:OCEAN_TRADING_MONITOR_DEFAULT_ON = '0'
   $env:OCEAN_WORKFLOW_ENABLED = if ($disabled) { '0' } else { '1' }
   $env:OCEAN_WORKFLOW_CONFIG = Join-Path $WorkflowRoot 'operator-state.dpapi'
