@@ -1255,26 +1255,42 @@ export class OperationalLearning {
     };
   }
 
-  pendingRun(registry) {
+  health() {
+    return {
+      enabled: this.enabled,
+      state: !this.enabled ? 'DISABLED' : this.lastError ? 'DEGRADED' : this.identityVerified ? 'READY' : 'STARTING',
+      strategy_id: this.strategyId,
+      last_success_utc: this.lastSuccessUtc,
+      last_error: this.lastError,
+      registry: this.registryContext,
+      running: this.running,
+    };
+  }
+
+  async pendingRun(registry) {
     const now = Date.now();
-    return this.db.prepare("SELECT * FROM ow_runs WHERE state='COMPLETED' AND id NOT LIKE 'test-%' ORDER BY rowid").all()
-      .find(run => {
-        if((this.strategyId && run.strategy_id!==this.strategyId)
-          || (this.retry.get(`${run.id}:${registry.record_sha256}`)?.nextAttemptMs || 0)>now)return false;
-        const stored=this.resultFor(run.id,registry.record_sha256);
-        const context=JSON.parse(run.context_json);
-        if(stored?.callback?.status==='COMPLETED'
-          && this.currentContinuationResult(stored,registry.record_sha256,context.context_hash)
-          && this.continuationRecorded(run,stored) && this.completionEventRecorded(run,stored.result))return false;
-        const classification=this.classification(run);
-        if(!classification.eligible)return false;
-        if(this.lineageBlock(run,stored,registry.record_sha256)
-          && !this.lineageRetryReady(run,stored,registry,classification))return false;
-        if(stored?.callback?.status!=='COMPLETED')return true;
-        if(!classification.telemetry.verified || classification.telemetry.bypassed)return false;
-        if(!this.currentContinuationResult(stored,registry.record_sha256,classification.context?.context_hash))return false;
-        return !this.continuationRecorded(run,stored) || !this.completionEventRecorded(run,stored.result);
-      }) || null;
+    const rows = this.db.prepare("SELECT * FROM ow_runs WHERE state='COMPLETED' AND id NOT LIKE 'test-%' ORDER BY rowid").all();
+    for (const run of rows) {
+      // Classification opens the telemetry evidence store. Yield between runs so
+      // loopback readiness and browser requests remain responsive during scans.
+      await new Promise(resolve => setImmediate(resolve));
+      if((this.strategyId && run.strategy_id!==this.strategyId)
+        || (this.retry.get(`${run.id}:${registry.record_sha256}`)?.nextAttemptMs || 0)>now)continue;
+      const stored=this.resultFor(run.id,registry.record_sha256);
+      const context=JSON.parse(run.context_json);
+      if(stored?.callback?.status==='COMPLETED'
+        && this.currentContinuationResult(stored,registry.record_sha256,context.context_hash)
+        && this.continuationRecorded(run,stored) && this.completionEventRecorded(run,stored.result))continue;
+      const classification=this.classification(run);
+      if(!classification.eligible)continue;
+      if(this.lineageBlock(run,stored,registry.record_sha256)
+        && !this.lineageRetryReady(run,stored,registry,classification))continue;
+      if(stored?.callback?.status!=='COMPLETED')return run;
+      if(!classification.telemetry.verified || classification.telemetry.bypassed)continue;
+      if(!this.currentContinuationResult(stored,registry.record_sha256,classification.context?.context_hash))continue;
+      if(!this.continuationRecorded(run,stored) || !this.completionEventRecorded(run,stored.result))return run;
+    }
+    return null;
   }
 
   ensureContinuation(run, actor, result, details) {
@@ -1459,7 +1475,9 @@ export class OperationalLearning {
   }
 
   async flushOnce() {
-    if (!this.enabled || this.running) return this.status();
+    const health = () => typeof this.health === 'function'
+      ? this.health() : OperationalLearning.prototype.health.call(this);
+    if (!this.enabled || this.running) return health();
     this.running = true;
     try {
       const token = this.token();
@@ -1467,7 +1485,7 @@ export class OperationalLearning {
       const registry = await this.registry(token);
       let processingFailed = false;
       let run;
-      while ((run = this.pendingRun(registry))) {
+      while ((run = await this.pendingRun(registry))) {
         try { await this.process(run, token, registry); }
         catch (error) {
           this.fail(run, error);
@@ -1478,7 +1496,7 @@ export class OperationalLearning {
       await this.backend.operationalResearch?.flushOnce();
       await this.backend.operationalCandidateEvaluator?.flushOnce();
       if (!processingFailed) this.lastError = null;
-      return this.status();
+      return health();
     } finally { this.running = false; }
   }
 }
