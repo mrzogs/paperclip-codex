@@ -20,6 +20,7 @@ test('loopback readiness binds the deployed release and persistent learning work
     const origin=`http://127.0.0.1:${server.address().port}`;
     backend=new WorkflowBackend({...operation.next.config,allowed_origins:[origin]},environment);
     backend.operationalLearning.enabled=true;backend.operationalLearning.identityVerified=true;backend.operationalLearning.lastError=null;
+    backend.operationalLearning.status=()=>{throw new Error('readiness must not enumerate learning evidence');};
     const response=await fetch(`${origin}/api/workflow/readiness`,{headers:{Origin:origin}});
     assert.equal(response.status,200);
     const readiness=await response.json();

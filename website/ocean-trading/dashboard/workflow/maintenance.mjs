@@ -21,13 +21,15 @@ function resolveProtectedOperatorHost() {
 }
 export const protectedOperatorHost=resolveProtectedOperatorHost();
 export const protectedOperatorTimeoutMs=90_000;
+export const protectedOperatorCommitTimeoutMs=900_000;
 export function protectedOperation(action,root) {
   return new Promise((resolve,reject)=>{
     const child=spawn(protectedOperatorHost,
       ['-NoProfile','-NonInteractive','-File',command,'-Action',action,'-Root',root],
       {windowsHide:true,stdio:['ignore','pipe','pipe']});
     let output=''; let bytes=0;
-    const timer=setTimeout(()=>{child.kill();reject(new Error('PROTECTED_OPERATION_TIMEOUT'));},protectedOperatorTimeoutMs);
+    const timeoutMs=['Commit','Maintenance'].includes(action) ? protectedOperatorCommitTimeoutMs : protectedOperatorTimeoutMs;
+    const timer=setTimeout(()=>{child.kill();reject(new Error('PROTECTED_OPERATION_TIMEOUT'));},timeoutMs);
     child.stdout.on('data',value=>{bytes+=value.length;if(bytes>262144)child.kill();else output+=value;});
     child.stderr.resume();
     child.on('error',()=>{clearTimeout(timer);reject(new Error('PROTECTED_OPERATION_UNAVAILABLE'));});

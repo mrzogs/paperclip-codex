@@ -24,7 +24,7 @@ test('a healthy maintenance cycle clears stale transport degradation but preserv
     enabled:true,running:false,lastError:'fetch failed',token:()=> 'protected-test-token-value-123456',
     verifyIdentity:async()=>{},registry:async()=>({record_sha256:digest('registry')}),pendingRun,
     backend:{operationalResearch:{flushOnce:async()=>{}},operationalCandidateEvaluator:{flushOnce:async()=>{}}},
-    status(){return {state:this.lastError?'DEGRADED':'READY',last_error:this.lastError};},
+    health(){return {state:this.lastError?'DEGRADED':'READY',last_error:this.lastError};},
   });
   const recovered=maintenance(()=>null);
   assert.deepEqual(await recovered.flushOnce(),{state:'READY',last_error:null});
@@ -36,8 +36,9 @@ test('a healthy maintenance cycle clears stale transport degradation but preserv
   assert.deepEqual(await failed.flushOnce(),{state:'DEGRADED',last_error:'current failure'});
 });
 
-test('pending scan does not requalify an immutable completed continuation', () => {
+test('pending scan yields and does not requalify an immutable completed continuation', async () => {
   let classified = 0;
+  let yielded = false;
   const run={id:'operational-complete',strategy_id:strategyId,context_json:JSON.stringify({context_hash:digest('complete')})};
   const stored={result:{result_id:'result-complete'},callback:{status:'COMPLETED'}};
   const learner=Object.assign(Object.create(OperationalLearning.prototype),{
@@ -45,7 +46,9 @@ test('pending scan does not requalify an immutable completed continuation', () =
     currentContinuationResult:()=>true,continuationRecorded:()=>true,completionEventRecorded:()=>true,
     classification:()=>{classified+=1;throw new Error('completed continuation must not be requalified');},
   });
-  assert.equal(learner.pendingRun({record_sha256:digest('registry')}),null);
+  setImmediate(()=>{yielded=true;});
+  assert.equal(await learner.pendingRun({record_sha256:digest('registry')}),null);
+  assert.equal(yielded,true);
   assert.equal(classified,0);
 });
 
@@ -360,7 +363,7 @@ for(const conclusion of ['NO_CHANGE','BLOCKED','RECOMMENDATION']) {
         assert.equal(f.rows('ow_operational_brain_callbacks').length,boundary==='event'?1:0);
         f.unfault();f.addRun('production-later','02');f.restart();
         assert.notEqual(objectHash(f.learner.cohort(f.trigger()).cohort),objectHash(f.requests[0].cohort));
-        assert.equal(f.learner.pendingRun(f.registry)?.id,f.trigger().id);
+        assert.equal((await f.learner.pendingRun(f.registry))?.id,f.trigger().id);
         await f.learner.process(f.trigger(),'isolated-test-token',f.registry);
         f.restart();await f.learner.process(f.trigger(),'isolated-test-token',f.registry);
         assert.equal(f.requests.length,1,'stored result never dispatches Brain again');
@@ -469,7 +472,8 @@ test('production file SQLite: blocked legacy A does not starve B in the batch or
       content,content_sha256:digest(content),correlation:input.correlation});
     f.addRun('production-later','02');f.restart();
     f.backend.operationalResearch.stop(); // This test exercises the learning worker, not external Research dispatch.
-    const first=await f.learner.flushOnce();
+    await f.learner.flushOnce();
+    const first=f.learner.status();
     assert.equal(first.items.find(row=>row.run_id===run.id).stage,'BLOCKED');
     assert.equal(first.items.find(row=>row.run_id==='production-later').stage,'COMPLETE');
     assert.deepEqual(f.requests.map(request=>request.trigger.run_id),['production-later']);
@@ -479,7 +483,7 @@ test('production file SQLite: blocked legacy A does not starve B in the batch or
     assert.equal(children.length,1);assert.equal(children[0].run_id,'production-later');
     for(let restart=0;restart<2;restart++) {
       f.restart();f.backend.operationalResearch.stop();
-      assert.equal(f.learner.pendingRun(f.registry),null,'unrecoverable A is not leased again');
+      assert.equal(await f.learner.pendingRun(f.registry),null,'unrecoverable A is not leased again');
       await f.learner.flushOnce();
       assert.equal(f.learner.statusForRun(run.id).last_error,'OPERATIONAL_LEARNING_ORIGINAL_INPUT_REQUIRED');
       assert.match(f.learner.statusForRun(run.id).next_action,/exact original immutable analysis input/);
@@ -513,13 +517,13 @@ for(const boundary of ['child','callback']) {
       assert.equal(JSON.parse(block.payload_json).payload.reason,'OPERATIONAL_LEARNING_INPUT_LINEAGE_CONFLICT');
       f.restart();f.backend.operationalResearch.stop();
       const before=f.rows('ow_events');
-      assert.equal(f.learner.pendingRun(f.registry),null);
+      assert.equal(await f.learner.pendingRun(f.registry),null);
       await f.learner.flushOnce();assert.deepEqual(f.rows('ow_events'),before);
       assert.deepEqual(f.requests.map(request=>request.trigger.run_id),[f.trigger().id,'production-later']);
       // Restore current owner configuration, not immutable rows or workflow statuses.
       f.backend.config.identities=[f.brain,...f.backend.config.identities.filter(row=>row.role!=='BRAIN')];
       f.brain.revoked=true;f.restart();
-      assert.equal(f.learner.pendingRun(f.registry),null,'revoked original owner is not recovery');
+      assert.equal(await f.learner.pendingRun(f.registry),null,'revoked original owner is not recovery');
       delete f.brain.revoked;f.restart();f.backend.operationalResearch.stop();
       const originalSummary=f.learner.runSummary;
       f.learner.runSummary=run=>{
@@ -527,10 +531,10 @@ for(const boundary of ['child','callback']) {
         if(run.id===f.trigger().id)value.summary.completion_hash=digest('changed-original-source');
         return value;
       };
-      assert.equal(f.learner.pendingRun(f.registry),null,'restored owner cannot hide changed original source proof');
+      assert.equal(await f.learner.pendingRun(f.registry),null,'restored owner cannot hide changed original source proof');
       f.learner.runSummary=originalSummary;
       const checkEvents=f.rows('ow_events');
-      assert.equal(f.learner.pendingRun(f.registry)?.id,f.trigger().id,'exact restoration is detected without status clears');
+      assert.equal((await f.learner.pendingRun(f.registry))?.id,f.trigger().id,'exact restoration is detected without status clears');
       assert.deepEqual(f.rows('ow_events'),checkEvents,'selection is read-only');
       await f.learner.flushOnce();f.restart();f.backend.operationalResearch.stop();
       await f.learner.flushOnce();
@@ -602,9 +606,9 @@ test('production SQLite: immutable conflicting terminal envelope remains blocked
     assert.equal(f.requests.length,1);
     const conflictEvent=f.rows('ow_events').find(row=>row.action==='operational.learning.complete');
     f.addRun('production-later','02');f.restart();f.backend.operationalResearch.stop();
-    assert.equal(f.learner.pendingRun(f.registry)?.id,'production-later','malformed terminal proof is not recovery');
+    assert.equal((await f.learner.pendingRun(f.registry))?.id,'production-later','malformed terminal proof is not recovery');
     await f.learner.flushOnce();f.restart();
-    assert.equal(f.learner.pendingRun(f.registry),null);
+    assert.equal(await f.learner.pendingRun(f.registry),null);
     assert.equal(f.learner.statusForRun(f.trigger().id).stage,'BLOCKED');
     assert.deepEqual(f.rows('ow_events').find(row=>row.id===conflictEvent.id),conflictEvent);
     assert.deepEqual(f.requests.map(request=>request.trigger.run_id),[f.trigger().id,'production-later']);
@@ -680,13 +684,13 @@ test('EXPLICIT MOCK: a real SQLite child insert failure leaves callback pending;
     assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_cases').get().n,0);
     f.db.exec('DROP TRIGGER isolated_child_fault');
     f.restart();
-    assert.equal(f.learner.pendingRun(f.registry)?.id,f.trigger);
+    assert.equal((await f.learner.pendingRun(f.registry))?.id,f.trigger);
     await f.learner.flushOnce();
     assert.equal(f.requests.length,1,'restart must not call Brain again');
     assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_operational_brain_callbacks').get().n,1);
     assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_cases').get().n,1);
     assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_events WHERE action=?').get('operational.learning.complete').n,1);
-    assert.equal(f.learner.pendingRun(f.registry),null);
+    assert.equal(await f.learner.pendingRun(f.registry),null);
     await f.learner.process(f.db.prepare('SELECT * FROM ow_runs WHERE id=?').get(f.trigger),'isolated-test-token',f.registry);
     assert.equal(f.requests.length,1);
     assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_cases').get().n,1);
@@ -707,7 +711,7 @@ test('EXPLICIT MOCK: callback SQLite failure retains one durable child and resta
     assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_operational_brain_callbacks').get().n,0);
     f.db.exec('DROP TRIGGER isolated_callback_fault');
     f.restart();
-    assert.equal(f.learner.pendingRun(f.registry)?.id,f.trigger);
+    assert.equal((await f.learner.pendingRun(f.registry))?.id,f.trigger);
     await f.learner.flushOnce();
     assert.equal(f.requests.length,1);
     assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_cases').get().n,1);
@@ -738,14 +742,14 @@ for(const conclusionType of ['NO_CHANGE','BLOCKED','RECOMMENDATION']) {
       assert.equal(before.continuation_case_id,null);
       assert.equal(before.continuation_artifact_id,null);
       assert.match(before.next_action,/same immutable result/);
-      assert.equal(f.learner.pendingRun(f.registry)?.id,f.trigger);
+      assert.equal((await f.learner.pendingRun(f.registry))?.id,f.trigger);
       await f.learner.flushOnce();
       assert.equal(f.requests.length,1,'recovery must not call Brain again');
       assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_cases').get().n,1);
       assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_research_jobs').get().n,1);
       assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_operational_brain_callbacks').get().n,1);
       assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_events WHERE action=?').get('operational.learning.complete').n,1);
-      assert.equal(f.learner.pendingRun(f.registry),null);
+      assert.equal(await f.learner.pendingRun(f.registry),null);
     }finally{f.close();}
   });
 }
@@ -758,7 +762,7 @@ test('EXPLICIT MOCK: missing completion event is repaired once without duplicati
     await f.learner.process(f.db.prepare('SELECT * FROM ow_runs WHERE id=?').get(f.trigger),'isolated-test-token',f.registry);
     f.db.prepare("DELETE FROM ow_events WHERE action='operational.learning.complete'").run();
     f.restart();
-    assert.equal(f.learner.pendingRun(f.registry)?.id,f.trigger);
+    assert.equal((await f.learner.pendingRun(f.registry))?.id,f.trigger);
     await f.learner.flushOnce();
     assert.equal(f.requests.length,1);
     assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_cases').get().n,1);
@@ -768,7 +772,7 @@ test('EXPLICIT MOCK: missing completion event is repaired once without duplicati
   }finally{f.close();}
 });
 
-test('EXPLICIT MOCK: completed older-format callback stays historical and is not silently requeued',()=>{
+test('EXPLICIT MOCK: completed older-format callback stays historical and is not silently requeued',async()=>{
   const f=fixture({currentProofMock:true});
   try {
     const context=JSON.parse(f.db.prepare('SELECT context_json FROM ow_runs WHERE id=?').get(f.trigger).context_json);
@@ -776,9 +780,9 @@ test('EXPLICIT MOCK: completed older-format callback stays historical and is not
     f.db.prepare('INSERT INTO ow_operational_brain_results VALUES(?,?,?)').run('older-format-result',f.trigger,
       JSON.stringify({result_id:'older-format-result',context_hash:context.context_hash,content}));
     f.db.prepare('INSERT INTO ow_operational_brain_callbacks VALUES(?,?)').run('older-format-result',JSON.stringify({status:'COMPLETED'}));
-    assert.equal(f.learner.pendingRun(f.registry)?.id,f.prior);
+    assert.equal((await f.learner.pendingRun(f.registry))?.id,f.prior);
     f.db.prepare("UPDATE ow_runs SET state='FAILED' WHERE id=?").run(f.prior);
-    assert.equal(f.learner.pendingRun(f.registry),null);
+    assert.equal(await f.learner.pendingRun(f.registry),null);
     f.learner.registryContext=f.registry;
     assert.equal(f.learner.statusForRun(f.trigger).stage,'COMPLETE');
     assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ow_cases').get().n,0);

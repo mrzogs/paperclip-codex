@@ -68,8 +68,24 @@ function Encode-State($Value,[string]$File) {
   $stream = New-Object IO.FileStream($File,[IO.FileMode]::Create,[IO.FileAccess]::Write,[IO.FileShare]::None,4096,[IO.FileOptions]::WriteThrough)
   try { $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
 }
+function Get-CoreTimeoutMilliseconds([string]$Mode) {
+  if ($Mode -cne 'commit') { return 60000 }
+
+  $seconds = 900
+  $override = [Environment]::GetEnvironmentVariable('OCEAN_WORKFLOW_COMMIT_TIMEOUT_SECONDS')
+  if (-not [string]::IsNullOrWhiteSpace($override)) {
+    $parsed = 0
+    if (-not [int]::TryParse($override,[ref]$parsed) -or $parsed -lt 60 -or $parsed -gt 3600) {
+      throw 'OCEAN_WORKFLOW_COMMIT_TIMEOUT_SECONDS must be an integer from 60 through 3600.'
+    }
+    $seconds = $parsed
+  }
+  [int]($seconds * 1000)
+}
 function Invoke-Core($Value) {
   $json = ConvertTo-Json -InputObject $Value -Depth 50 -Compress
+  $mode = [string]$Value.mode
+  $timeoutMilliseconds = Get-CoreTimeoutMilliseconds $mode
   $psi = New-Object Diagnostics.ProcessStartInfo
   $psi.FileName = $Node
   $psi.Arguments = '--disable-warning=ExperimentalWarning "' + $Module + '"'
@@ -87,10 +103,10 @@ function Invoke-Core($Value) {
     throw 'Protected workflow core input timed out.'
   }
   $p.StandardInput.Close()
-  if (-not $p.WaitForExit(60000)) {
+  if (-not $p.WaitForExit($timeoutMilliseconds)) {
     try { $p.Kill($true) } catch { if (-not $p.HasExited) { $p.Kill() } }
     try { $p.WaitForExit(5000) | Out-Null } catch {}
-    throw 'Protected workflow core operation timed out.'
+    throw "Protected workflow core $mode operation timed out after $([int]($timeoutMilliseconds / 1000)) seconds."
   }
   $output = $outputTask.GetAwaiter().GetResult()
   $err = $errorTask.GetAwaiter().GetResult()
@@ -105,12 +121,17 @@ function Assert-ReadOnlyFile([string]$File) {
     if ($rule.AccessControlType -eq 'Allow' -and $ruleSid -notin @($Sid,'S-1-5-18')) { throw 'Unexpected principal in protected operator file ACL.' }
   }
 }
+function Get-HandoffFileStem($Identity) {
+  if ($Identity.identity_id -match '^[A-Za-z0-9_.-]+$') { return [string]$Identity.identity_id }
+  if ($Identity.credential_ref -match '^[A-Za-z0-9_.-]+$') { return [string]$Identity.credential_ref }
+  throw 'Identity has no safe handoff filename.'
+}
 function Publish-Handoffs($State) {
   $directory = Join-Path $Root 'handoffs'
   New-Item -ItemType Directory -Path $directory -Force | Out-Null
   foreach ($identity in $State.config.identities) {
-    if ($identity.identity_id -notmatch '^[A-Za-z0-9_.-]+$') { throw 'Unsafe identity handoff path.' }
-    $target = Join-Path $directory "$($identity.identity_id).dpapi"
+    $stem = Get-HandoffFileStem $identity
+    $target = Join-Path $directory "$stem.dpapi"
     $candidate = "$target.next"
     $token = if ($identity.revoked) { $null } else { $State.environment.($identity.credential_ref) }
     Encode-State @{identity_id=$identity.identity_id;credential_ref=$identity.credential_ref;token=$token;expires_at_utc=$identity.expires_at_utc;credential_version=$identity.credential_version;revoked=[bool]$identity.revoked;audience=$identity.audience;owner=$identity.owner} $candidate
@@ -187,10 +208,10 @@ try {
         $null = Invoke-Core @{mode='probe-verify';state=$state;identity_id=$IdentityId;response=$response}
         @{ status='PASS'; test_type='ACTUAL_DEPLOYED_OCEAN_LOCAL_OPERATOR_PROBE'; observed_at_utc=[DateTimeOffset]::UtcNow.ToString('o'); identity=$response.identity; integration_readiness=$response.integration_readiness; consumer_acceptance='NOT_VERIFIED_BY_THIS_LOCAL_PROBE' } | ConvertTo-Json -Depth 12
       } else {
-        if ($IdentityId -notmatch '^[A-Za-z0-9_.:-]+$' -or $IdentityId.Contains(':')) { throw 'Identity is unsuitable for a protected handoff filename.' }
         $handoffs = Join-Path $Root 'handoffs'
         New-Item -ItemType Directory -Path $handoffs -Force | Out-Null
-        $target = Join-Path $handoffs "$IdentityId.dpapi"
+        $stem = Get-HandoffFileStem $identity
+        $target = Join-Path $handoffs "$stem.dpapi"
         Publish-Handoffs $state
         @{protected_handoff=$target;identity_id=$IdentityId;credential_ref=$identity.credential_ref;encryption='Windows DPAPI CurrentUser';plaintext_exported=$false} | ConvertTo-Json
       }
