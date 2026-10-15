@@ -61,6 +61,11 @@ test('accepts Sierra chartbook persistence while preserving the initial provenan
   assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM ow_run_settings').get().n,1);
 });
 
+test('production Replay binding preserves the registered initial chartbook fingerprint', () => {
+  const config = JSON.parse(fs.readFileSync(new URL('../config/replay-run-bridge.json', import.meta.url), 'utf8'));
+  assert.equal(config.expected_chartbook_sha256, 'sha256:b3c288dec46d0e5f582a4d56d6d8b71338946f26b6dd080fb1ce6c71e19d7445');
+});
+
 test('fails closed when a pinned strategy module changes', t => {
   const f=fixture();t.after(()=>{f.db.close();fs.rmSync(f.root,{recursive:true,force:true});});
   fs.writeFileSync(f.config.expected_strategy_module_path,'changed strategy module');
