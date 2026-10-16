@@ -7,7 +7,7 @@ import {
   selectReplayTradeLogFallbackAccounts,
   visibleReplayTrades,
 } from "./replay-session-scope.mjs";
-import { withManifestBuildLock } from "./manifest-build-lock.mjs";
+import { manifestBuildLockFile, withManifestBuildLock } from "./manifest-build-lock.mjs";
 import { configuredProcessTimeoutMs } from "./process-timeouts.mjs";
 import { readProjectPaperTelemetry } from "./project-paper-telemetry.mjs";
 
@@ -6334,10 +6334,21 @@ function buildReplayMonitor() {
   };
 }
 
+function profileManifestStage(name, operation) {
+  if (process.env.OCEAN_MANIFEST_PROFILE !== "1") return operation();
+  const startedAt = performance.now();
+  try {
+    return operation();
+  } finally {
+    const elapsedMs = Math.round(performance.now() - startedAt);
+    console.error(`[manifest-profile] ${name}: ${elapsedMs}ms`);
+  }
+}
+
 function buildDashboardManifest() {
-  const ledger = parseLedger();
-  const daily = parseDailyReport();
-  const researchRuns = pickLatestResearchRuns();
+  const ledger = profileManifestStage("parse-ledger", () => parseLedger());
+  const daily = profileManifestStage("parse-daily-report", () => parseDailyReport());
+  const researchRuns = profileManifestStage("research-runs", () => pickLatestResearchRuns());
   const strategyCatalog = [
     ...parseSierraStudyCatalog(),
     ...parseCachedBacktestStrategyCatalog(),
@@ -6452,8 +6463,8 @@ function buildDashboardManifest() {
   };
   manifest.dataSources = buildSourceAudit(manifest, paperclipNative);
 
-  writeJsonAtomic(OUTPUT_FILE, manifest);
-  persistManifestToSqlite();
+  profileManifestStage("write-manifest", () => writeJsonAtomic(OUTPUT_FILE, manifest));
+  profileManifestStage("persist-sqlite", () => persistManifestToSqlite());
   return manifest;
 }
 
@@ -6475,7 +6486,7 @@ function persistManifestToSqlite() {
   });
 }
 
-const manifest = await withManifestBuildLock(path.join(ROOT, "dashboard", "data", "manifest-build.lock"), buildDashboardManifest);
+const manifest = await withManifestBuildLock(manifestBuildLockFile(SQLITE_FILE), buildDashboardManifest);
 console.log(`Generated dashboard manifest -> ${OUTPUT_FILE}`);
 console.log(`Ledger file: ${manifest.ledger.sourceFiles[0] || "missing"}`);
 console.log(`Daily file: ${manifest.dailyReport?.path || "missing"}`);

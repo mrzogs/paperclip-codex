@@ -3,7 +3,12 @@ import json
 import os
 import sqlite3
 import sys
+import time
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
+
+from sqlite_write_lock import SqliteWriteLock
 
 
 def configured_busy_timeout_ms():
@@ -13,6 +18,61 @@ def configured_busy_timeout_ms():
     except ValueError:
         timeout_ms = 120000
     return max(1000, min(timeout_ms, 600000))
+
+
+class PublicationTracer:
+    def __init__(self, manifest_path, db_path, generated_at):
+        self.enabled = os.environ.get("OCEAN_SQLITE_PROFILE") == "1"
+        configured_path = os.environ.get("OCEAN_SQLITE_PUBLICATION_TRACE_FILE", "").strip()
+        self.trace_path = Path(configured_path) if configured_path else None
+        self.context = {
+            "pid": os.getpid(),
+            "parent_pid": os.getppid(),
+            "manifest_path": str(manifest_path),
+            "database_path": str(db_path),
+            "generated_at_utc": generated_at,
+            "release_id": os.environ.get("OCEAN_DEPLOYMENT_RELEASE_ID"),
+            "source_commit": os.environ.get("OCEAN_DEPLOYMENT_SOURCE_COMMIT"),
+        }
+
+    def emit(self, stage, event, **details):
+        if not self.enabled:
+            return
+        payload = {
+            "at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "stage": stage,
+            "event": event,
+            **self.context,
+            **details,
+        }
+        line = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        print(f"[sqlite-publication] {line}", file=sys.stderr, flush=True)
+        if self.trace_path:
+            try:
+                self.trace_path.parent.mkdir(parents=True, exist_ok=True)
+                with self.trace_path.open("a", encoding="utf-8") as trace_file:
+                    trace_file.write(line + "\n")
+                    trace_file.flush()
+            except OSError as error:
+                print(f"[sqlite-publication] trace-write-error: {error}", file=sys.stderr, flush=True)
+
+    @contextmanager
+    def stage(self, name):
+        started = time.monotonic()
+        self.emit(name, "start")
+        try:
+            yield
+        except BaseException as error:
+            self.emit(
+                name,
+                "error",
+                elapsed_ms=round((time.monotonic() - started) * 1000, 3),
+                error_type=type(error).__name__,
+                error=str(error),
+            )
+            raise
+        else:
+            self.emit(name, "complete", elapsed_ms=round((time.monotonic() - started) * 1000, 3))
 
 
 def stable_id(*parts):
@@ -810,32 +870,71 @@ def persist(manifest_path, db_path):
     db_path.parent.mkdir(parents=True, exist_ok=True)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     generated_at = manifest.get("generatedAtUtc") or ""
+    tracer = PublicationTracer(manifest_path, db_path, generated_at)
+    tracer.emit("publication", "start")
 
     busy_timeout_ms = configured_busy_timeout_ms()
-    conn = sqlite3.connect(db_path, timeout=busy_timeout_ms / 1000)
-    conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
+    writer_lock = SqliteWriteLock(
+        db_path,
+        owner={
+            "writer": "persist-sqlite",
+            "manifest_path": str(manifest_path),
+            "generated_at_utc": generated_at,
+            "release_id": os.environ.get("OCEAN_DEPLOYMENT_RELEASE_ID"),
+            "source_commit": os.environ.get("OCEAN_DEPLOYMENT_SOURCE_COMMIT"),
+        },
+    )
+    with tracer.stage("database-writer-lock"):
+        lock_owner = writer_lock.acquire()
+    tracer.emit("database-writer-lock", "acquired", owner=lock_owner)
     try:
-        create_schema(conn)
-        with conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO current_manifest(id, generated_at_utc, payload_json) VALUES (1, ?, ?)",
-                (generated_at, as_json(manifest)),
-            )
-            clear_current_tables(conn)
-            insert_source_files(conn, manifest, generated_at)
-            insert_strategy_catalog(conn, manifest, generated_at)
-            insert_performance(conn, manifest, generated_at)
-            insert_closed_trades(conn, manifest, generated_at)
-            insert_trade_fills(conn, manifest, generated_at)
-            insert_open_positions(conn, manifest, generated_at)
-            insert_research(conn, manifest, generated_at)
-            insert_strategy_lifecycle(conn, manifest, generated_at)
-            insert_daily_report(conn, manifest, generated_at)
-            insert_paperclip_native(conn, manifest, generated_at)
-            insert_source_audit(conn, manifest, generated_at)
-            insert_uploads(conn, dashboard_dir, generated_at)
+        with tracer.stage("connect"):
+            conn = sqlite3.connect(db_path, timeout=busy_timeout_ms / 1000)
+        try:
+            with tracer.stage("configure-busy-timeout"):
+                conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
+            with tracer.stage("create-schema"):
+                create_schema(conn)
+            with tracer.stage("write-transaction"):
+                with conn:
+                    with tracer.stage("write-current-manifest"):
+                        conn.execute(
+                            "INSERT OR REPLACE INTO current_manifest(id, generated_at_utc, payload_json) VALUES (1, ?, ?)",
+                            (generated_at, as_json(manifest)),
+                        )
+                    with tracer.stage("clear-current-tables"):
+                        clear_current_tables(conn)
+                    with tracer.stage("insert-source-files"):
+                        insert_source_files(conn, manifest, generated_at)
+                    with tracer.stage("insert-strategy-catalog"):
+                        insert_strategy_catalog(conn, manifest, generated_at)
+                    with tracer.stage("insert-performance"):
+                        insert_performance(conn, manifest, generated_at)
+                    with tracer.stage("insert-closed-trades"):
+                        insert_closed_trades(conn, manifest, generated_at)
+                    with tracer.stage("insert-trade-fills"):
+                        insert_trade_fills(conn, manifest, generated_at)
+                    with tracer.stage("insert-open-positions"):
+                        insert_open_positions(conn, manifest, generated_at)
+                    with tracer.stage("insert-research"):
+                        insert_research(conn, manifest, generated_at)
+                    with tracer.stage("insert-strategy-lifecycle"):
+                        insert_strategy_lifecycle(conn, manifest, generated_at)
+                    with tracer.stage("insert-daily-report"):
+                        insert_daily_report(conn, manifest, generated_at)
+                    with tracer.stage("insert-paperclip-native"):
+                        insert_paperclip_native(conn, manifest, generated_at)
+                    with tracer.stage("insert-source-audit"):
+                        insert_source_audit(conn, manifest, generated_at)
+                    with tracer.stage("insert-uploads"):
+                        insert_uploads(conn, dashboard_dir, generated_at)
+        finally:
+            with tracer.stage("close"):
+                conn.close()
     finally:
-        conn.close()
+        with tracer.stage("database-writer-lock-release"):
+            writer_lock.release()
+    tracer.emit("publication", "complete")
 
 
 if __name__ == "__main__":

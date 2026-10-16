@@ -3,6 +3,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from sqlite_write_lock import SqliteWriteLock
+
 
 def as_json(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
@@ -318,13 +320,17 @@ def main(argv):
     payload_path = Path(argv[2])
     db_path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.loads(payload_path.read_text(encoding="utf-8"))
-    conn = sqlite3.connect(db_path)
-    try:
-        create_schema(conn)
-        with conn:
-            replace_run(conn, payload)
-    finally:
-        conn.close()
+    with SqliteWriteLock(
+        db_path,
+        owner={"writer": "confluence-accuracy-sqlite", "run_id": payload.get("run", {}).get("id")},
+    ):
+        conn = sqlite3.connect(db_path)
+        try:
+            create_schema(conn)
+            with conn:
+                replace_run(conn, payload)
+        finally:
+            conn.close()
     print(json.dumps({"ok": True, "runId": payload["run"]["id"]}))
     return 0
 
