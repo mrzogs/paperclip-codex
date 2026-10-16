@@ -1,8 +1,18 @@
 import hashlib
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
+
+
+def configured_busy_timeout_ms():
+    raw = os.environ.get("OCEAN_SQLITE_BUSY_TIMEOUT_MS", "120000")
+    try:
+        timeout_ms = int(raw)
+    except ValueError:
+        timeout_ms = 120000
+    return max(1000, min(timeout_ms, 600000))
 
 
 def stable_id(*parts):
@@ -21,9 +31,11 @@ def as_json(payload):
 
 
 def create_schema(conn):
+    current_journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    if str(current_journal_mode).lower() != "wal":
+        conn.execute("PRAGMA journal_mode = WAL")
     conn.executescript(
         """
-        PRAGMA journal_mode = WAL;
         PRAGMA foreign_keys = ON;
 
         CREATE TABLE IF NOT EXISTS current_manifest (
@@ -799,7 +811,9 @@ def persist(manifest_path, db_path):
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     generated_at = manifest.get("generatedAtUtc") or ""
 
-    conn = sqlite3.connect(db_path)
+    busy_timeout_ms = configured_busy_timeout_ms()
+    conn = sqlite3.connect(db_path, timeout=busy_timeout_ms / 1000)
+    conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
     try:
         create_schema(conn)
         with conn:

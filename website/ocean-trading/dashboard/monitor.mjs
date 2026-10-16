@@ -3,6 +3,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { configuredProcessTimeoutMs } from "./process-timeouts.mjs";
 import {
   loadVwapPaperSim1EmailConfig,
   scanVwapPaperSim1EmailEvents,
@@ -925,7 +926,7 @@ async function rebuild(reason) {
     cwd: __dirname,
     stdio: "ignore",
     env: process.env,
-    timeout: 90000,
+    timeout: configuredProcessTimeoutMs("OCEAN_MANIFEST_BUILD_TIMEOUT_MS", 300000),
     windowsHide: true,
   });
   await notifyNewClosedTrades(reason);

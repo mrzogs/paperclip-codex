@@ -8,6 +8,7 @@ import {
   visibleReplayTrades,
 } from "./replay-session-scope.mjs";
 import { withManifestBuildLock } from "./manifest-build-lock.mjs";
+import { configuredProcessTimeoutMs } from "./process-timeouts.mjs";
 import { readProjectPaperTelemetry } from "./project-paper-telemetry.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -6469,7 +6470,7 @@ function persistManifestToSqlite() {
   execFileSync(PYTHON_EXECUTABLE, [SQLITE_PERSIST_SCRIPT, OUTPUT_FILE, SQLITE_FILE], {
     cwd: ROOT,
     stdio: "inherit",
-    timeout: 30000,
+    timeout: configuredProcessTimeoutMs("OCEAN_SQLITE_PERSIST_PROCESS_TIMEOUT_MS", 180000),
     windowsHide: true,
   });
 }

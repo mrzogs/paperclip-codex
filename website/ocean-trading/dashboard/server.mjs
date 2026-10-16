@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import { applyReplayClearsToSession, clearReplayAccount } from "./replay-session-scope.mjs";
+import { configuredProcessTimeoutMs } from "./process-timeouts.mjs";
 import { shouldWebsiteScheduleManifestRebuild } from "./manifest-refresh-policy.mjs";
 import { workflowFromEnvironment } from "./workflow/backend.mjs";
 import { installWebsiteControl } from "./workflow/process-control.mjs";
@@ -331,7 +332,10 @@ function rebuildManifestAsync() {
   // Builder processes share a lock, including monitor-triggered publications.
   return new Promise((resolve, reject) => {
     execFile(process.execPath, [path.join(__dirname, "build-manifest.mjs")], {
-      cwd: __dirname, windowsHide: true, timeout: 90000, maxBuffer: 4 * 1024 * 1024,
+      cwd: __dirname,
+      windowsHide: true,
+      timeout: configuredProcessTimeoutMs("OCEAN_MANIFEST_BUILD_TIMEOUT_MS", 300000),
+      maxBuffer: 4 * 1024 * 1024,
     }, (error, output) => {
       cachedManifestPayload = null;
       cachedManifestSignature = null;
