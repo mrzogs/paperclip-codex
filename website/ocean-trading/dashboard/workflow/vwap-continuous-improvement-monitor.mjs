@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { detectRecurringVwapFailures, VWAP_STRATEGY_ID } from './vwap-continuous-improvement.mjs';
 
@@ -77,6 +77,36 @@ export function readVwapLearningRows(source,config) {
   return JSON.parse(result.stdout||'[]').map(row=>normalize(row,source,config));
 }
 
+export function readVwapLearningRowsAsync(source,config) {
+  if(!fs.existsSync(source.database_path))return Promise.reject(new Error('VWAP_SOURCE_DATABASE_MISSING:'+source.id));
+  const timeoutMs=Number(config.source_read_timeout_ms||15000);
+  return new Promise((resolve,reject)=>{
+    let settled=false;
+    let hardTimeout=null;
+    const finish=(error,value)=>{
+      if(settled)return;
+      settled=true;
+      clearTimeout(hardTimeout);
+      if(error)reject(error);else resolve(value);
+    };
+    const child=execFile(process.execPath,[SQLITE_READER,source.database_path,config.strategy_id],{
+      encoding:'utf8',timeout:timeoutMs,maxBuffer:64*1024*1024,windowsHide:true,
+    },(error,stdout,stderr)=>{
+      if(error)return finish(new Error('VWAP_SOURCE_READ_FAILED:'+source.id+':'+(error.code||error.message)));
+      try{finish(null,JSON.parse(stdout||'[]').map(row=>normalize(row,source,config)));}
+      catch(parseError){finish(new Error('VWAP_SOURCE_READ_FAILED:'+source.id+':'+String(parseError?.message||parseError)));}
+    });
+    // Node's synchronous child runner can remain blocked on Windows after a
+    // timed-out descendant. Keep the monitor event loop free and own a second,
+    // independent deadline so auxiliary learning reads cannot stop core scans.
+    hardTimeout=setTimeout(()=>{
+      child.kill();
+      finish(new Error('VWAP_SOURCE_READ_FAILED:'+source.id+':ETIMEDOUT'));
+    },timeoutMs+1000);
+    hardTimeout.unref?.();
+  });
+}
+
 function publicDetector(result) {
   return {disposition:result.disposition,analysis_hash:result.analysis_hash,next_action:result.next_action||null,
     investigation_queue:result.investigation_queue||[],source_trade_ids:result.source_trade_ids||[],
@@ -122,7 +152,7 @@ export async function dispatchVwapImprovementEvent(config,event) {
   return {triggered:true,issue_id:issue.id,issue_identifier:issue.identifier||null,wakeup_id:wakeup?.id||null,target_agent_id:trigger.agent_id};
 }
 
-export async function scanVwapContinuousImprovement({config,stateFile,reason='periodic_scan',force=false,dispatch=dispatchVwapImprovementEvent}={}) {
+export async function scanVwapContinuousImprovement({config,stateFile,reason='periodic_scan',force=false,dispatch=dispatchVwapImprovementEvent,readSource=readVwapLearningRowsAsync}={}) {
   if(!config?.enabled)return {enabled:false,skipped:true,reason:'disabled'};
   const previous=readJson(stateFile,{})||{},checkedAt=nowUtc();
   const signatures=config.sources.flatMap(source=>sqliteSignatures(source.database_path)),signature=digest(signatures);
@@ -135,7 +165,7 @@ export async function scanVwapContinuousImprovement({config,stateFile,reason='pe
     const sources=[];
     for(const source of config.sources){
       writeJson(stateFile,{...readJson(stateFile,{}),current_source_id:source.id});
-      sources.push({source,rows:readVwapLearningRows(source,config)});
+      sources.push({source,rows:await readSource(source,config)});
     }
     const rows=sources.flatMap(item=>item.rows);
     const ids=new Set(rows.map(row=>row.trade_id)),prior=new Set(previous.observed_trade_ids||[]),newIds=[...ids].filter(id=>!prior.has(id)).sort();
