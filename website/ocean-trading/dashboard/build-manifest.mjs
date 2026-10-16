@@ -10,6 +10,7 @@ import {
 import { manifestBuildLockFile, withManifestBuildLock } from "./manifest-build-lock.mjs";
 import { configuredProcessTimeoutMs } from "./process-timeouts.mjs";
 import { readProjectPaperTelemetry } from "./project-paper-telemetry.mjs";
+import { publishSqliteWithRetry } from "./sqlite-publication.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const REPLAY_CONNECTOR_RELATIVE_PATH = path.join("connectors", "sierra-chart", "src", "replay-orchestration.mjs");
@@ -6478,11 +6479,17 @@ function persistManifestToSqlite() {
     return;
   }
   fs.mkdirSync(path.dirname(SQLITE_FILE), { recursive: true });
-  execFileSync(PYTHON_EXECUTABLE, [SQLITE_PERSIST_SCRIPT, OUTPUT_FILE, SQLITE_FILE], {
+  const totalTimeoutMs = configuredProcessTimeoutMs("OCEAN_SQLITE_PERSIST_PROCESS_TIMEOUT_MS", 180000);
+  publishSqliteWithRetry({
+    executable: PYTHON_EXECUTABLE,
+    args: [SQLITE_PERSIST_SCRIPT, OUTPUT_FILE, SQLITE_FILE],
     cwd: ROOT,
-    stdio: "inherit",
-    timeout: configuredProcessTimeoutMs("OCEAN_SQLITE_PERSIST_PROCESS_TIMEOUT_MS", 180000),
-    windowsHide: true,
+    totalTimeoutMs,
+    attemptTimeoutMs: configuredProcessTimeoutMs(
+      "OCEAN_SQLITE_PERSIST_ATTEMPT_TIMEOUT_MS",
+      Math.min(45000, totalTimeoutMs),
+      { maximumMs: totalTimeoutMs },
+    ),
   });
 }
 

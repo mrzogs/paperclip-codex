@@ -895,12 +895,16 @@ def persist(manifest_path, db_path):
                 conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
             with tracer.stage("create-schema"):
                 create_schema(conn)
+            with tracer.stage("serialize-manifest"):
+                manifest_json = as_json(manifest)
             with tracer.stage("write-transaction"):
                 with conn:
+                    with tracer.stage("begin-write-transaction"):
+                        conn.execute("BEGIN IMMEDIATE")
                     with tracer.stage("write-current-manifest"):
                         conn.execute(
                             "INSERT OR REPLACE INTO current_manifest(id, generated_at_utc, payload_json) VALUES (1, ?, ?)",
-                            (generated_at, as_json(manifest)),
+                            (generated_at, manifest_json),
                         )
                     with tracer.stage("clear-current-tables"):
                         clear_current_tables(conn)
