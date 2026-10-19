@@ -11,7 +11,8 @@
   "routing": {
     "mode": "BLOCK_UNTIL_EXACT_PROJECT_ROUTE",
     "required_project_root": "C:\\Users\\wayne\\OneDrive\\Documents\\Brady - Optimization",
-    "brain_credential_ref": "D:\\Paperclip-codex\\workspaces\\hermes-brain-console\\secrets\\clients\\trading-cicd-vwap-pull-back-strategy.token",
+    "brain_credential_ref": "D:\\Paperclip-codex\\workspaces\\hermes-brain-console\\secrets\\clients\\cicd-vwap-pull-back-strategy-dev.token",
+    "required_agent_model": "gpt-6.1-sol",
     "paperclip_project_id": null,
     "paperclip_project_workspace_id": null
   },

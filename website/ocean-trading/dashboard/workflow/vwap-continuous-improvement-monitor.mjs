@@ -8,6 +8,7 @@ import { detectRecurringVwapFailures, VWAP_STRATEGY_ID } from './vwap-continuous
 export const VWAP_MONITOR_SCHEMA = 'ocean-vwap-continuous-improvement-monitor-state/v1';
 const REQUIRED_CAUSAL_FIELDS = ['setup_id','session_name','side','regime_label','vwap_reclaim_state'];
 const LEARNING_ROLES = new Set(['DISCOVERY','PAPER','PAPER_ELIGIBLE']);
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SQLITE_READER = path.join(path.dirname(fileURLToPath(import.meta.url)),'vwap-sqlite-reader.mjs');
 const nowUtc = () => new Date().toISOString();
 const digest = value => 'sha256:' + crypto.createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex');
@@ -72,8 +73,9 @@ export function loadVwapContinuousImprovementConfig(configFile) {
     ||config.brain_identity?.strategy!==config.strategy_id)throw new Error('VWAP_MONITOR_BRAIN_IDENTITY_MISMATCH');
   if(config.routing?.mode!=='BLOCK_UNTIL_EXACT_PROJECT_ROUTE'||typeof config.routing?.required_project_root!=='string'
     ||typeof config.routing?.brain_credential_ref!=='string'
-    ||!(config.routing?.paperclip_project_id===null||typeof config.routing?.paperclip_project_id==='string')
-    ||!(config.routing?.paperclip_project_workspace_id===null||typeof config.routing?.paperclip_project_workspace_id==='string'))throw new Error('VWAP_MONITOR_ROUTING_BOUNDARY_INVALID');
+    ||typeof config.routing?.required_agent_model!=='string'
+    ||!(config.routing?.paperclip_project_id===null||UUID.test(config.routing?.paperclip_project_id||''))
+    ||!(config.routing?.paperclip_project_workspace_id===null||UUID.test(config.routing?.paperclip_project_workspace_id||'')))throw new Error('VWAP_MONITOR_ROUTING_BOUNDARY_INVALID');
   if(!Array.isArray(config.sources)||!config.sources.length)throw new Error('VWAP_MONITOR_SOURCES_REQUIRED');
   const safe=config.safety;
   if(safe?.production_version!==null||safe?.automatic_approval_enabled!==false||safe?.brain_normal_ingestion!=='OFF'||safe?.live_real_enabled!==false||safe?.real_order_routing!=='PROHIBITED')throw new Error('VWAP_MONITOR_SAFETY_BOUNDARY_INVALID');
@@ -163,10 +165,20 @@ export async function dispatchVwapImprovementEvent(config,event) {
   const base=String(trigger.api_base_url||'http://127.0.0.1:3100/api').replace(/\/+$/,''),timeout=Number(trigger.timeout_ms||15000);
   const routing=config.routing||{},target=await requestJson(base+'/agents/'+trigger.agent_id,{},timeout);
   const samePath=(left,right)=>path.win32.normalize(String(left||'')).toLowerCase()===path.win32.normalize(String(right||'')).toLowerCase();
-  const routeReady=samePath(target?.adapterConfig?.cwd,routing.required_project_root)
-    && target?.metadata?.active_strategy_id===event.strategy_id && target?.permissions?.canUseSecrets===true
-    && typeof routing.paperclip_project_id==='string'&&routing.paperclip_project_id.length>0
-    && typeof routing.paperclip_project_workspace_id==='string'&&routing.paperclip_project_workspace_id.length>0;
+  const agentReady=samePath(target?.adapterConfig?.cwd,routing.required_project_root)
+    && target?.adapterConfig?.model===routing.required_agent_model
+    && target?.metadata?.active_strategy_id===event.strategy_id
+    && target?.metadata?.brain_project===brain.project && target?.metadata?.brain_domain===brain.domain
+    && target?.metadata?.brain_credential_ref===routing.brain_credential_ref
+    && target?.permissions?.canUseSecrets===true;
+  let project=null,workspace=null;
+  if(agentReady&&UUID.test(routing.paperclip_project_id||'')&&UUID.test(routing.paperclip_project_workspace_id||'')){
+    project=await requestJson(base+'/projects/'+routing.paperclip_project_id,{},timeout);
+    const workspaces=await requestJson(base+'/projects/'+routing.paperclip_project_id+'/workspaces',{},timeout);
+    workspace=(Array.isArray(workspaces)?workspaces:workspaces?.items||[]).find(row=>row.id===routing.paperclip_project_workspace_id)||null;
+  }
+  const routeReady=agentReady && project?.id===routing.paperclip_project_id && project?.companyId===trigger.company_id
+    && workspace?.projectId===routing.paperclip_project_id && samePath(workspace?.cwd,routing.required_project_root);
   const routingState=routeReady?'EXACT_PROJECT_READY':'BLOCKED_EXACT_PROJECT_ROUTE_REQUIRED';
   const title='[VWAP CI]['+event.strategy_id+'] '+event.kind+' '+event.event_id;
   const listed=await requestJson(base+'/companies/'+trigger.company_id+'/issues?limit=100',{},timeout);
@@ -175,11 +187,12 @@ export async function dispatchVwapImprovementEvent(config,event) {
   if(!issue)issue=await requestJson(base+'/companies/'+trigger.company_id+'/issues',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
     title,description:['Exact strategy ID: '+event.strategy_id,'Brain project: '+brain.project,'Brain domain: '+brain.domain,
       'Required project root: '+routing.required_project_root,'Brain credential reference: '+routing.brain_credential_ref,
+      'Required agent model: '+routing.required_agent_model,
       'Paperclip project ID: '+(routing.paperclip_project_id||'NOT_PROVISIONED'),
       'Paperclip project workspace ID: '+(routing.paperclip_project_workspace_id||'NOT_PROVISIONED'),
       'Routing state: '+routingState,
       'Isolation: operate only on this exact strategy and Brain project. Do not substitute or access any sibling strategy, project, pod, token, registry, source tree, or evidence. Stop on any active_strategy_id/project/domain mismatch.',
-      routeReady?'Exact project routing was verified for the configured target agent.':'Keep this issue blocked. The configured coordinator may contain and route the incident only; do not create or wake a child until its agent cwd, active_strategy_id, and secret permission are bound to the exact CICD project root and credential reference.',''].concat(transportTest
+      routeReady?'Exact project routing was verified for the configured target agent.':'Keep this issue blocked. The configured coordinator may contain and route the incident only; do not create or wake a child until the Paperclip project/workspace, agent cwd/model, active_strategy_id, Brain project/domain/credential reference, and secret permission are bound to the exact CICD project.',''].concat(transportTest
       ? ['End-to-end transport test from the Ocean Trading website monitor.','','Event: '+event.event_id,'Purpose: prove issue creation, coordinator assignment, and wakeup delivery.','','No strategy, Sierra, approval, promotion, Paper, or Live action is authorized by this test. Close this issue after acknowledging receipt.']
       : degraded
       ? ['Ocean Trading website could not interrogate the bound VWAP telemetry database after repeated attempts.','','Event: '+event.event_id,'Failure: '+event.error,'Consecutive failures: '+event.consecutive_failures,'',event.next_action]
@@ -195,7 +208,8 @@ export async function dispatchVwapImprovementEvent(config,event) {
     payload:{issueId:issue.id,eventId:event.event_id,analysisHash:event.analysis_hash,origin:'ocean-trading-website-monitor',
       strategyId:event.strategy_id,brainProject:brain.project,brainDomain:brain.domain,isolationScope:'EXACT_STRATEGY_ONLY',
       requiredProjectRoot:routing.required_project_root,brainCredentialRef:routing.brain_credential_ref,
-      paperclipProjectId:routing.paperclip_project_id,paperclipProjectWorkspaceId:routing.paperclip_project_workspace_id,routingState},idempotencyKey:event.event_id})},timeout):null;
+      requiredAgentModel:routing.required_agent_model,paperclipProjectId:routing.paperclip_project_id,
+      paperclipProjectWorkspaceId:routing.paperclip_project_workspace_id,routingState},idempotencyKey:event.event_id})},timeout):null;
   return {triggered:true,issue_id:issue.id,issue_identifier:issue.identifier||null,wakeup_id:wakeup?.id||null,target_agent_id:trigger.agent_id,routing_state:routingState};
 }
 
