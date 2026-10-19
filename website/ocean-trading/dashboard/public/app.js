@@ -2277,7 +2277,7 @@ function renderDashboardPerformanceCalendar(manifest, mode = defaultDashboardPer
           </div>
           <div>
             <span>Source logs</span>
-            <strong>${escapeHtml(mode === "paper" ? "PATrading paper telemetry SQLite trades table" : "PATrading live SQLite trades table")}</strong>
+            <strong>${escapeHtml(mode === "paper" ? "PATrading Paper + CICD VWAP Sim1 telemetry SQLite trades tables" : "PATrading live SQLite trades table")}</strong>
           </div>
           <div>
             <span>Summation</span>
