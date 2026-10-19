@@ -13,17 +13,17 @@ function fixture() {
   db.exec("CREATE TABLE ocean_trade_causal_v1 (trade_id INTEGER PRIMARY KEY, instance_id TEXT, instance_name TEXT, instance_role TEXT, environment TEXT, trade_account TEXT, is_simulated INTEGER, symbol TEXT, run_id TEXT, strategy_id TEXT, strategy_name TEXT, strategy_version TEXT, direction TEXT, status TEXT, entry_datetime TEXT, exit_datetime TEXT, net_profit_loss REAL, max_favourable_excursion REAL, max_adverse_excursion REAL, context_status TEXT, setup_id TEXT, session_name TEXT, side TEXT, regime_label TEXT, volatility_label TEXT, vwap_reclaim_state TEXT, dataset_role TEXT, mfe_points REAL, mae_points REAL, quality_flags TEXT, updated_utc TEXT)");
   db.close();
   const config={schema_version:'ocean-vwap-continuous-improvement-monitor/v1',enabled:true,strategy_id:'cicd-vwap-pull-back-strategy',strategy_name:'VWAP Pullback',baseline_existing_trades_on_first_run:true,
-    critical_quality_flags:['dataset_role_missing','vol_state_missing'],sources:[{id:'fixture-replay',environment:'REPLAY',account:'Sim1',database_path:dbFile,run_assignments:{'run-discovery':'DISCOVERY'}}],
+    critical_quality_flags:['dataset_role_missing','raw_managed_context_conflict','strategy_version_mismatch','vol_state_missing'],sources:[{id:'fixture-replay',environment:'REPLAY',account:'Sim1',database_path:dbFile,run_assignments:{'run-discovery':'DISCOVERY'}}],
     trigger:{enabled:true,api_base_url:'http://127.0.0.1:9/api',company_id:'company',agent_id:'agent'},
     safety:{production_version:null,automatic_approval_enabled:false,brain_normal_ingestion:'OFF',live_real_enabled:false,real_order_routing:'PROHIBITED'}};
   return {root,dbFile,stateFile,config};
 }
-function insertRows(dbFile,start,count,{role=null,quality='',setup='london-long',loss=true}={}) {
+function insertRows(dbFile,start,count,{role=null,quality='',setup='london-long',loss=true,runId='run-discovery',environment='replay'}={}) {
   const db=new DatabaseSync(dbFile);
   const insert=db.prepare('INSERT INTO ocean_trade_causal_v1 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
   for(let i=0;i<count;i++){
     const id=start+i,day=String(1+(id%25)).padStart(2,'0');
-    insert.run(id,'instance','Replay Two','replay','replay','Sim1',1,'MNQZ26_FUT_CME','run-discovery','cicd-vwap-pull-back-strategy','VWAP Pullback','v0.6.236','long','closed','2026-09-'+day+'T08:00:00Z','2026-09-'+day+'T08:05:00Z',loss?-100:100,20,-30,'complete',setup,'London','long','Trend Up','normal','long_above_vwap',role,20,-30,quality,new Date(Date.UTC(2026,8,1,0,0,id)).toISOString());
+    insert.run(id,'instance',environment==='paper'?'Paper Sim1':'Replay Two',environment,environment,'Sim1',1,'MNQZ26_FUT_CME',runId,'cicd-vwap-pull-back-strategy','VWAP Pullback','v0.6.236','long','closed','2026-09-'+day+'T08:00:00Z','2026-09-'+day+'T08:05:00Z',loss?-100:100,20,-30,'complete',setup,'London','long','Trend Up','normal','long_above_vwap',role,20,-30,quality,new Date(Date.UTC(2026,8,1,0,0,id)).toISOString());
   }
   db.close();
 }
@@ -38,6 +38,13 @@ test('first scan baselines rows and incomplete telemetry fails closed',async()=>
   const f=fixture();insertRows(f.dbFile,1,60,{quality:'vol_state_missing'});let calls=0;
   const state=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async()=>{calls++;}});
   assert.equal(state.baseline_applied,true);assert.equal(state.disposition,'INSUFFICIENT_EVIDENCE');assert.equal(state.sources[0].observed_trade_count,60);assert.equal(state.sources[0].eligible_trade_count,0);assert.equal(calls,0);
+});
+test('raw and managed identity conflict fails closed even if context status claims complete',async()=>{
+  const f=fixture();insertRows(f.dbFile,1,60,{role:'DISCOVERY',quality:'raw_managed_context_conflict|strategy_version_mismatch'});
+  const state=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async()=>({triggered:false})});
+  assert.equal(state.detector.sufficiency.discovery_trade_count,60);
+  assert.equal(state.detector.sufficiency.blockers[0].code,'TELEMETRY_OR_IDENTITY_GAPS');
+  assert.equal(state.eligible_trade_count,0);
 });
 test('new discovery evidence triggers once and unchanged scans stay local',async()=>{
   const f=fixture();insertRows(f.dbFile,1,50);let calls=0;
@@ -54,6 +61,50 @@ test('validation rows never select thresholds or wake an agent',async()=>{
   const f=fixture();insertRows(f.dbFile,1,60,{role:'VALIDATION'});let calls=0;
   const state=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async()=>{calls++;}});
   assert.equal(state.disposition,'INSUFFICIENT_EVIDENCE');assert.equal(state.detector.sufficiency.discovery_trade_count,0);assert.equal(calls,0);
+});
+test('embedded DISCOVERY cannot override the frozen Replay run-role map',async()=>{
+  const f=fixture();insertRows(f.dbFile,1,60,{role:'DISCOVERY',runId:'test-cand-v240-holdout-m26-202605'});let calls=0,kind=null;
+  const dispatch=async(_config,event)=>{calls++;kind=event.kind;return {triggered:true};};
+  const first=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch});
+  assert.equal(first.detector.sufficiency.discovery_trade_count,0);
+  assert.equal(first.eligible_trade_count,0);
+  assert.equal(calls,0);
+  insertRows(f.dbFile,61,1,{role:'DISCOVERY',runId:'test-cand-v240-holdout-m26-202605'});
+  const second=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch});
+  assert.equal(second.detector.sufficiency.discovery_trade_count,0);
+  assert.equal(second.disposition,'INSUFFICIENT_EVIDENCE');
+  assert.equal(kind,'EVIDENCE_BLOCKED');
+  assert.equal(calls,1);
+  await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch});
+  assert.equal(calls,1);
+});
+test('conflicting embedded role cannot override an assigned discovery run',async()=>{
+  const f=fixture();insertRows(f.dbFile,1,60,{role:'VALIDATION'});
+  const state=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async()=>({triggered:false})});
+  assert.equal(state.detector.sufficiency.discovery_trade_count,0);
+  assert.equal(state.eligible_trade_count,0);
+});
+test('missing Replay run-role map never falls back to the embedded label',async()=>{
+  const f=fixture();delete f.config.sources[0].run_assignments;insertRows(f.dbFile,1,60,{role:'DISCOVERY'});
+  const state=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async()=>({triggered:false})});
+  assert.equal(state.detector.sufficiency.discovery_trade_count,0);
+  assert.equal(state.role_issue_count,60);
+  assert.equal(state.eligible_trade_count,0);
+});
+test('new unassigned Paper trades raise one provenance recovery, not a strategy investigation',async()=>{
+  const f=fixture();f.config.sources=[{id:'fixture-paper',environment:'PAPER',account:'Sim1',database_path:f.dbFile,require_explicit_dataset_role:true}];
+  insertRows(f.dbFile,1,1,{environment:'paper'});let calls=0,kind=null;
+  const dispatch=async(_config,event)=>{calls++;kind=event.kind;return {triggered:true};};
+  await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch});
+  insertRows(f.dbFile,2,1,{environment:'paper'});
+  const state=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch});
+  assert.equal(state.disposition,'INSUFFICIENT_EVIDENCE');
+  assert.equal(state.paper_provenance_issue_count,2);
+  assert.match(state.next_action,/PAPER_PROVENANCE_BLOCKED/);
+  assert.equal(kind,'EVIDENCE_BLOCKED');
+  assert.equal(calls,1);
+  await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch});
+  assert.equal(calls,1);
 });
 test('actionable evidence reaches issue and wakeup HTTP endpoints',async()=>{
   const f=fixture();insertRows(f.dbFile,1,50);await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async()=>({triggered:false})});insertRows(f.dbFile,51,10);
@@ -80,6 +131,17 @@ test('a degraded monitor retries unchanged databases and recovers',async()=>{
   const recovered=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:false,dispatch:async()=>({triggered:false})});
   assert.equal(recovered.status,'HEALTHY');assert.equal(recovered.skipped_unchanged,false);assert.equal(recovered.consecutive_failures,0);assert.equal(recovered.database_query_count,healthy.database_query_count+1);
 });
+test('a frozen role-map change rechecks unchanged databases',async()=>{
+  const f=fixture();insertRows(f.dbFile,1,5,{role:'DISCOVERY'});
+  const before=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async()=>({triggered:false})});
+  f.config.sources[0].run_assignments={'another-run':'DISCOVERY'};
+  const after=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:false,dispatch:async()=>({triggered:false})});
+  assert.equal(after.skipped_unchanged,false);
+  assert.equal(after.database_query_count,before.database_query_count+1);
+  assert.equal(after.role_issue_count,5);
+  assert.equal(after.eligible_trade_count,0);
+  assert.match(after.next_action,/REPLAY_RUN_ROLE_PROVENANCE_BLOCKED/);
+});
 test('source interrogation yields the event loop while an auxiliary read is pending',async()=>{
   const f=fixture();let timerObserved=false;
   const pending=scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async()=>({triggered:false}),
@@ -93,4 +155,19 @@ test('transport test reaches the normal issue and wakeup path without authorizin
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));f.config.trigger.api_base_url='http://127.0.0.1:'+server.address().port+'/api';
   const receipt=await dispatchVwapImprovementEvent(f.config,{kind:'TRANSPORT_TEST',event_id:'vwap-ci-e2e-fixture',analysis_hash:'sha256:test',transport_test:true,new_trade_ids:[],investigation_queue:[],next_action:'none'});await new Promise(resolve=>server.close(resolve));
   assert.equal(receipt.triggered,true);assert.match(requests[1].body.description,/No strategy, Sierra, approval, promotion, Paper, or Live action is authorized/);assert.equal(requests[2].body.triggerDetail,'system');assert.equal(requests[2].body.reason,'vwap_continuous_improvement_transport_test');
+});
+test('evidence blocker reaches recovery issue and wakeup without strategy authority',async()=>{
+  const f=fixture(),requests=[],server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{requests.push({url:req.url,method:req.method,body:body?JSON.parse(body):null});res.setHeader('content-type','application/json');if(req.method==='GET')res.end('[]');else if(req.url.includes('/issues'))res.end(JSON.stringify({id:'issue-blocked',identifier:'OCEA-BLOCKED'}));else res.end(JSON.stringify({id:'wake-blocked'}));});});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));f.config.trigger.api_base_url='http://127.0.0.1:'+server.address().port+'/api';
+  try {
+    insertRows(f.dbFile,1,50,{role:'DISCOVERY',runId:'unregistered-holdout'});
+    await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true});
+    insertRows(f.dbFile,51,1,{role:'DISCOVERY',runId:'unregistered-holdout'});
+    const state=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true});
+    assert.equal(state.last_trigger_receipt.triggered,true);
+    assert.equal(state.last_trigger_receipt.issue_identifier,'OCEA-BLOCKED');
+    assert.deepEqual(requests.map(item=>item.method+' '+item.url),['GET /api/companies/company/issues?limit=100','POST /api/companies/company/issues','POST /api/agents/agent/wakeup?companyId=company']);
+    assert.match(requests[1].body.description,/do not relabel historical validation\/holdout trades/);
+    assert.match(requests[1].body.description,/no automatic approval/);
+  } finally { await new Promise(resolve=>server.close(resolve)); }
 });
