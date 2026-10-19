@@ -37,8 +37,13 @@ function utc(value) {
 function flags(value) { return new Set(String(value||'').split(/[|,;]/).map(item=>item.trim().toLowerCase()).filter(Boolean)); }
 function roleFor(row,source) {
   const direct=String(row.dataset_role||'').trim().toUpperCase();
-  if(direct)return direct;
   const assigned=source.run_assignments?.[String(row.run_id||'')];
+  if(String(source.environment||'').toUpperCase()==='REPLAY'){
+    if(!assigned)return 'UNREGISTERED_RUN';
+    const role=String(assigned).toUpperCase();
+    return direct&&direct!==role?'ROLE_CONFLICT':role;
+  }
+  if(direct)return direct;
   if(assigned)return String(assigned).toUpperCase();
   return source.require_explicit_dataset_role===true?'UNASSIGNED':String(source.default_dataset_role||'UNASSIGNED').toUpperCase();
 }
@@ -121,6 +126,17 @@ function detectorEvent(detector,newTradeIds) {
     new_trade_ids:newTradeIds,source_trade_ids:detector.source_trade_ids,investigation_queue:detector.investigation_queue,next_action:detector.next_action,
     safety:{production_version:null,automatic_approval_enabled:false,live_real_enabled:false,real_order_routing:'PROHIBITED'}};
 }
+function evidenceBlockerEvent(detector,rows) {
+  const blockers=detector.sufficiency.blockers.map(item=>item.code).sort();
+  const roleIssues=rows.filter(row=>row.dataset_role==='UNREGISTERED_RUN'||row.dataset_role==='ROLE_CONFLICT');
+  const sourceIds=[...new Set(roleIssues.map(row=>row.source_id))].sort();
+  const analysisHash=digest({blockers,sourceIds,roleIssueKinds:[...new Set(roleIssues.map(row=>row.dataset_role))].sort()});
+  return {schema_version:'ocean-vwap-continuous-improvement-event/v1',event_id:'vwap-ci-evidence-'+analysisHash.slice(7,23),
+    strategy_id:VWAP_STRATEGY_ID,kind:'EVIDENCE_BLOCKED',created_at_utc:nowUtc(),analysis_hash:analysisHash,
+    blockers,role_issue_count:roleIssues.length,source_ids:sourceIds,
+    next_action:'Investigate source telemetry and frozen run-role provenance. Preserve original rows; do not relabel historical validation/holdout trades, backfill missing facts, change strategy rules, or authorize promotion.',
+    safety:{production_version:null,automatic_approval_enabled:false,live_real_enabled:false,real_order_routing:'PROHIBITED'}};
+}
 async function requestJson(url,options,timeoutMs) {
   const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),timeoutMs);
   try {
@@ -137,12 +153,14 @@ export async function dispatchVwapImprovementEvent(config,event) {
   const title='[VWAP CI] '+event.kind+' '+event.event_id;
   const listed=await requestJson(base+'/companies/'+trigger.company_id+'/issues?limit=100',{},timeout);
   let issue=(Array.isArray(listed)?listed:listed?.items||[]).find(item=>item.title===title);
-  const degraded=event.kind==='MONITOR_DEGRADED',transportTest=event.transport_test===true;
+  const degraded=event.kind==='MONITOR_DEGRADED',evidenceBlocked=event.kind==='EVIDENCE_BLOCKED',transportTest=event.transport_test===true;
   if(!issue)issue=await requestJson(base+'/companies/'+trigger.company_id+'/issues',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
     title,description:(transportTest
       ? ['End-to-end transport test from the Ocean Trading website monitor.','','Event: '+event.event_id,'Purpose: prove issue creation, coordinator assignment, and wakeup delivery.','','No strategy, Sierra, approval, promotion, Paper, or Live action is authorized by this test. Close this issue after acknowledging receipt.']
       : degraded
       ? ['Ocean Trading website could not interrogate the bound VWAP telemetry database after repeated attempts.','','Event: '+event.event_id,'Failure: '+event.error,'Consecutive failures: '+event.consecutive_failures,'',event.next_action]
+      : evidenceBlocked
+      ? ['Ocean Trading website can read VWAP trades, but evidence integrity prevents the deterministic learner from acting.','','Event: '+event.event_id,'Blockers: '+event.blockers.join(', '),'Replay run-role issues: '+event.role_issue_count,'Affected sources: '+event.source_ids.join(', '),'',event.next_action]
       : ['Ocean Trading website detected new eligible VWAP evidence and ran the frozen deterministic detector.','','Event: '+event.event_id,'Analysis: '+event.analysis_hash,'New trades: '+event.new_trade_ids.length,'Patterns: '+event.investigation_queue.length,'',event.next_action])
       .concat(['','Safety: no automatic approval, production_version remains null, LIVE_REAL and real-order routing are prohibited.']).join('\n'),
     priority:'high',status:'todo',assigneeAgentId:trigger.agent_id})},timeout);
@@ -155,7 +173,11 @@ export async function dispatchVwapImprovementEvent(config,event) {
 export async function scanVwapContinuousImprovement({config,stateFile,reason='periodic_scan',force=false,dispatch=dispatchVwapImprovementEvent,readSource=readVwapLearningRowsAsync}={}) {
   if(!config?.enabled)return {enabled:false,skipped:true,reason:'disabled'};
   const previous=readJson(stateFile,{})||{},checkedAt=nowUtc();
-  const signatures=config.sources.flatMap(source=>sqliteSignatures(source.database_path)),signature=digest(signatures);
+  const signatures=config.sources.flatMap(source=>sqliteSignatures(source.database_path));
+  const signature=digest({normalization_version:'frozen-replay-role-map/v1',signatures,
+    sources:config.sources.map(source=>({id:source.id,environment:source.environment,account:source.account,
+      run_assignments:source.run_assignments||null,require_explicit_dataset_role:source.require_explicit_dataset_role===true,
+      default_dataset_role:source.default_dataset_role||null})),critical_quality_flags:config.critical_quality_flags||[]});
   if(!force&&previous.status==='HEALTHY'&&previous.database_signature===signature){
     const unchanged={...previous,last_checked_at_utc:checkedAt,last_check_reason:reason,skipped_unchanged:true};
     writeJson(stateFile,unchanged);return unchanged;
@@ -176,15 +198,33 @@ export async function scanVwapContinuousImprovement({config,stateFile,reason='pe
       receipt=await dispatch(config,detectorEvent(detector,newIds));
       if(receipt?.triggered)lastHash=detector.analysis_hash;
     }
+    const hasQualityBlocker=detector.sufficiency.blockers.some(item=>item.code==='TELEMETRY_OR_IDENTITY_GAPS'||item.code==='STRATEGY_ID_MISMATCH');
+    const hasRoleIssue=rows.some(row=>row.dataset_role==='UNREGISTERED_RUN'||row.dataset_role==='ROLE_CONFLICT');
+    let lastEvidenceBlockerHash=previous.last_triggered_evidence_blocker_hash||null;
+    if(!baseline&&detector.disposition==='INSUFFICIENT_EVIDENCE'&&(hasQualityBlocker||hasRoleIssue)){
+      const event=evidenceBlockerEvent(detector,rows);
+      if(event.analysis_hash!==lastEvidenceBlockerHash){
+        receipt=await dispatch(config,event);
+        if(receipt?.triggered)lastEvidenceBlockerHash=event.analysis_hash;
+      }
+    }
     const eligible=row=>row.telemetry_complete&&row.identity_verified&&LEARNING_ROLES.has(row.dataset_role);
+    const roleIssueCount=rows.filter(row=>row.dataset_role==='UNREGISTERED_RUN'||row.dataset_role==='ROLE_CONFLICT').length;
+    const nextAction=roleIssueCount
+      ? 'REPLAY_RUN_ROLE_PROVENANCE_BLOCKED: reconcile each run with its frozen dataset role; do not trust embedded DISCOVERY labels or rewrite history.'
+      : detector.next_action||detector.sufficiency.blockers.map(item=>item.code).join(', ');
     const state={schema_version:VWAP_MONITOR_SCHEMA,strategy_id:config.strategy_id,strategy_name:config.strategy_name||'VWAP Pullback',enabled:true,status:'HEALTHY',
       initialized_at_utc:previous.initialized_at_utc||checkedAt,last_checked_at_utc:checkedAt,last_database_interrogation_at_utc:checkedAt,last_check_reason:reason,
       skipped_unchanged:false,database_query_count:Number(previous.database_query_count||0)+1,database_signature:signature,
-      sources:sources.map(item=>({id:item.source.id,environment:item.source.environment,account:item.source.account,database_path:item.source.database_path,observed_trade_count:item.rows.length,eligible_trade_count:item.rows.filter(eligible).length,latest_trade_id:item.rows.at(-1)?.trade_id||null})),
+      sources:sources.map(item=>({id:item.source.id,environment:item.source.environment,account:item.source.account,database_path:item.source.database_path,
+        observed_trade_count:item.rows.length,eligible_trade_count:item.rows.filter(eligible).length,
+        role_issue_count:item.rows.filter(row=>row.dataset_role==='UNREGISTERED_RUN'||row.dataset_role==='ROLE_CONFLICT').length,
+        latest_trade_id:item.rows.at(-1)?.trade_id||null})),
       observed_trade_count:rows.length,eligible_trade_count:rows.filter(eligible).length,new_trade_count:baseline?0:newIds.length,last_observed_new_trade_ids:baseline?[]:newIds,
-      observed_trade_ids:[...ids].sort(),detector,disposition:detector.disposition,next_action:detector.next_action||detector.sufficiency.blockers.map(item=>item.code).join(', '),baseline_applied:baseline,
+      observed_trade_ids:[...ids].sort(),detector,disposition:detector.disposition,next_action:nextAction,role_issue_count:roleIssueCount,baseline_applied:baseline,
       current_phase:null,current_source_id:null,
-      last_trigger_receipt:receipt||previous.last_trigger_receipt||null,last_triggered_analysis_hash:lastHash,consecutive_failures:0,last_error:null,
+      last_trigger_receipt:receipt||previous.last_trigger_receipt||null,last_triggered_analysis_hash:lastHash,
+      last_triggered_evidence_blocker_hash:lastEvidenceBlockerHash,consecutive_failures:0,last_error:null,
       recent_events:[...(previous.recent_events||[]),{at_utc:checkedAt,reason,disposition:detector.disposition,new_trade_count:newIds.length,database_query:true,trigger:receipt}].slice(-25),safety:config.safety};
     writeJson(stateFile,state);return state;
   } catch(error) {

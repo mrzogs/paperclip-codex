@@ -5,7 +5,7 @@
   "strategy_name": "VWAP Pullback",
   "baseline_existing_trades_on_first_run": true,
   "source_read_timeout_ms": 15000,
-  "critical_quality_flags": ["code_hash_missing", "config_hash_missing", "context_hash_missing", "dataset_identity_missing", "dataset_missing", "dataset_role_missing", "strategy_hash_missing", "vol_state_missing"],
+  "critical_quality_flags": ["code_hash_missing", "config_hash_missing", "context_hash_missing", "dataset_identity_missing", "dataset_missing", "dataset_role_missing", "raw_managed_context_conflict", "strategy_hash_missing", "strategy_version_mismatch", "vol_state_missing"],
   "sources": [
     {
       "id": "replay-two-v013",
