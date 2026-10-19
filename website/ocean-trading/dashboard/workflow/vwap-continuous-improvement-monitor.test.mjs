@@ -18,12 +18,12 @@ function fixture() {
     safety:{production_version:null,automatic_approval_enabled:false,brain_normal_ingestion:'OFF',live_real_enabled:false,real_order_routing:'PROHIBITED'}};
   return {root,dbFile,stateFile,config};
 }
-function insertRows(dbFile,start,count,{role=null,quality='',setup='london-long',loss=true,runId='run-discovery'}={}) {
+function insertRows(dbFile,start,count,{role=null,quality='',setup='london-long',loss=true,runId='run-discovery',environment='replay'}={}) {
   const db=new DatabaseSync(dbFile);
   const insert=db.prepare('INSERT INTO ocean_trade_causal_v1 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
   for(let i=0;i<count;i++){
     const id=start+i,day=String(1+(id%25)).padStart(2,'0');
-    insert.run(id,'instance','Replay Two','replay','replay','Sim1',1,'MNQZ26_FUT_CME',runId,'cicd-vwap-pull-back-strategy','VWAP Pullback','v0.6.236','long','closed','2026-09-'+day+'T08:00:00Z','2026-09-'+day+'T08:05:00Z',loss?-100:100,20,-30,'complete',setup,'London','long','Trend Up','normal','long_above_vwap',role,20,-30,quality,new Date(Date.UTC(2026,8,1,0,0,id)).toISOString());
+    insert.run(id,'instance',environment==='paper'?'Paper Sim1':'Replay Two',environment,environment,'Sim1',1,'MNQZ26_FUT_CME',runId,'cicd-vwap-pull-back-strategy','VWAP Pullback','v0.6.236','long','closed','2026-09-'+day+'T08:00:00Z','2026-09-'+day+'T08:05:00Z',loss?-100:100,20,-30,'complete',setup,'London','long','Trend Up','normal','long_above_vwap',role,20,-30,quality,new Date(Date.UTC(2026,8,1,0,0,id)).toISOString());
   }
   db.close();
 }
@@ -90,6 +90,21 @@ test('missing Replay run-role map never falls back to the embedded label',async(
   assert.equal(state.detector.sufficiency.discovery_trade_count,0);
   assert.equal(state.role_issue_count,60);
   assert.equal(state.eligible_trade_count,0);
+});
+test('new unassigned Paper trades raise one provenance recovery, not a strategy investigation',async()=>{
+  const f=fixture();f.config.sources=[{id:'fixture-paper',environment:'PAPER',account:'Sim1',database_path:f.dbFile,require_explicit_dataset_role:true}];
+  insertRows(f.dbFile,1,1,{environment:'paper'});let calls=0,kind=null;
+  const dispatch=async(_config,event)=>{calls++;kind=event.kind;return {triggered:true};};
+  await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch});
+  insertRows(f.dbFile,2,1,{environment:'paper'});
+  const state=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch});
+  assert.equal(state.disposition,'INSUFFICIENT_EVIDENCE');
+  assert.equal(state.paper_provenance_issue_count,2);
+  assert.match(state.next_action,/PAPER_PROVENANCE_BLOCKED/);
+  assert.equal(kind,'EVIDENCE_BLOCKED');
+  assert.equal(calls,1);
+  await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch});
+  assert.equal(calls,1);
 });
 test('actionable evidence reaches issue and wakeup HTTP endpoints',async()=>{
   const f=fixture();insertRows(f.dbFile,1,50);await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async()=>({triggered:false})});insertRows(f.dbFile,51,10);
