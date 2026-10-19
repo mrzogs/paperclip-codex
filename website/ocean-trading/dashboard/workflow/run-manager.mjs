@@ -239,12 +239,20 @@ export class RunManager {
     this.b.event(data.run_id,'run-manager.prepare',actor,{context_hash:context.context_hash,plan_hash:plan.plan_hash,actual_sierra_start:false});
     return this.read(actor,data.run_id);
   }
-  load(actor,runId,scope='read') {
+  load(actor,runId,scope='read',{allowTerminalHistoricalBindingProjection=false}={}) {
     const run=this.b.one('ow_runs',runId);this.b.authorize(actor,scope,run.strategy_id,run.instance_id);
     const record=this.managed(runId);requireThat(record,409,'MANAGED_RUN_REQUIRED');const stored=parse(record);
     requireThat(sealedHash(stored,'plan_hash')===stored.plan_hash,409,'RUN_PLAN_HASH_MISMATCH');
-    const plan=this.runtimePlan(stored,record.coverage_key);
-    return {run,plan,context:JSON.parse(run.context_json)};
+    let plan,historicalProjection=null;
+    try { plan=this.runtimePlan(stored,record.coverage_key); }
+    catch(error) {
+      const historical=allowTerminalHistoricalBindingProjection===true && TERMINAL.includes(run.state)
+        && stored.operational_review && error?.code==='OPERATIONAL_FACTUAL_BINDING_CHANGED';
+      if(!historical)throw error;
+      plan=stored;
+      historicalProjection={status:'READ_ONLY_STALE_BINDING',reason:error.code,protected_actions_allowed:false};
+    }
+    return {run,plan,context:JSON.parse(run.context_json),historicalProjection};
   }
   runtimePlan(plan,coverageKey) {
     if(!plan.operational_review)return plan;
@@ -394,8 +402,8 @@ export class RunManager {
     if(proof)requireThat(sealedHash(proof,'proof_hash')===proof.proof_hash,409,'IMMUTABLE_FAILURE_PROOF_CONFLICT');
     return proof || null;
   }
-  read(actor,runId) {
-    const {run,plan,context}=this.load(actor,runId);const lease=this.db.prepare('SELECT * FROM ow_run_leases WHERE id=?').get(runId);
+  read(actor,runId,options={}) {
+    const {run,plan,context,historicalProjection}=this.load(actor,runId,'read',options);const lease=this.db.prepare('SELECT * FROM ow_run_leases WHERE id=?').get(runId);
     // Expose persisted intent, not new authority: finish still checks producer,
     // live lease, revision and drain, and COMPLETED still requires full coverage.
     const ending=run.state==='COMPLETING'?this.db.prepare("SELECT id,actor_role,payload_json FROM ow_events WHERE entity_id=? AND action='run-manager.end' ORDER BY id DESC LIMIT 1").get(runId):null;
@@ -428,7 +436,7 @@ export class RunManager {
       }catch(error){execution={...execution,status:'FAILURE_RECONCILIATION_UNVERIFIED',reason:error.code || 'FAILURE_SOURCE_READ_FAILED',
         next_owner:'Scoped ReplayBridge telemetry producer',next_action:'Verify the exact current runner failure, terminal logger attempt and physical stop before reconciliation. No completed coverage is granted.'};}
     }
-    return {api_version:RUN_API,namespace,actual_ingestion:namespace==='OPERATIONAL'?'SCOPED_EVENT_ONLY':'OFF',run_id:run.id,state:run.state,revision:run.revision,context,plan,context_status:contextStatus,end_request:endRequest,execution,lease:lease?{owner_id:lease.owner_id,heartbeat_utc:lease.heartbeat_utc,expires_ms:lease.expires_ms,expired:lease.expires_ms<=Date.now()}:null,...this.summary(run,plan),reservation_is_actual_sierra_start:false};
+    return {api_version:RUN_API,namespace,actual_ingestion:namespace==='OPERATIONAL'?'SCOPED_EVENT_ONLY':'OFF',run_id:run.id,state:run.state,revision:run.revision,context,plan,context_status:contextStatus,historical_projection:historicalProjection,end_request:endRequest,execution,lease:lease?{owner_id:lease.owner_id,heartbeat_utc:lease.heartbeat_utc,expires_ms:lease.expires_ms,expired:lease.expires_ms<=Date.now()}:null,...this.summary(run,plan),reservation_is_actual_sierra_start:false};
   }
   runReadiness(strategy,versions,instances,settings,permissions) {
     const currentVersions=versions.filter(version=>version.strategy_id===strategy.strategy_id && !version.blocked);

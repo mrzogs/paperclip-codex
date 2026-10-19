@@ -204,9 +204,17 @@ function Stop-WebsiteGracefully {
   $stateFile = Join-Path $Runtime 'website-process.json'
   $stopFile = Join-Path $Runtime 'website-stop.json'
   $listeners = @(Get-NetTCPConnection -State Listen -LocalPort 3102 -ErrorAction SilentlyContinue)
-  if (-not $listeners.Count) { return }
+  $websiteProcessIds = @($listeners | ForEach-Object { [int]$_.OwningProcess } | Sort-Object -Unique)
+  $state = $null
   if (Test-Path -LiteralPath $stateFile) {
     $state = Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json
+    if ($state.pid -and ([int]$state.pid -notin $websiteProcessIds)) { $websiteProcessIds += [int]$state.pid }
+  }
+  if (-not $listeners.Count) {
+    Stop-WebsiteOwnedMonitorProcesses -WebsiteProcessIds $websiteProcessIds
+    return
+  }
+  if ($state) {
     $owned = @($listeners | Where-Object { $_.OwningProcess -eq $state.pid })
     if ($owned.Count) {
       [IO.File]::WriteAllText($stopFile, ($state | Select-Object pid,nonce | ConvertTo-Json -Compress))
@@ -215,6 +223,7 @@ function Stop-WebsiteGracefully {
     }
   }
   Stop-PortProcess 3102 'server\.mjs' 'Ocean website'
+  Stop-WebsiteOwnedMonitorProcesses -WebsiteProcessIds $websiteProcessIds
 }
 
 function Get-MonitorProcesses {
@@ -239,6 +248,23 @@ function Get-ReleaseMonitorCommandPattern {
 
 function Get-MonitorSupervisorCommandPattern {
   return [regex]::Escape((Join-Path $Root 'scripts\run-ocean-monitor-supervised.ps1'))
+}
+
+function Stop-WebsiteOwnedMonitorProcesses {
+  param([int[]]$WebsiteProcessIds)
+  if (-not $WebsiteProcessIds.Count) { return }
+  $owners = [Collections.Generic.HashSet[int]]::new()
+  foreach ($processId in $WebsiteProcessIds) { if ($processId -gt 0) { [void]$owners.Add($processId) } }
+  $releaseMonitorPattern = Get-ReleaseMonitorCommandPattern
+  $owned = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.Name -ieq 'node.exe' -and
+    $owners.Contains([int]$_.ParentProcessId) -and
+    ($_.CommandLine -as [string]) -match $releaseMonitorPattern
+  })
+  foreach ($proc in $owned) {
+    Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+    Write-Output "Stopped website-owned Ocean monitor PID $($proc.ProcessId) from retired website PID $($proc.ParentProcessId)."
+  }
 }
 
 function Get-MonitorOwnedProcessTree {
