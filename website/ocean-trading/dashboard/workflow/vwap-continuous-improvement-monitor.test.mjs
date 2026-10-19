@@ -7,6 +7,9 @@ import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { dispatchVwapImprovementEvent, loadVwapContinuousImprovementConfig, scanVwapContinuousImprovement } from './vwap-continuous-improvement-monitor.mjs';
 
+const PROJECT_ID='11111111-1111-4111-8111-111111111111';
+const WORKSPACE_ID='22222222-2222-4222-8222-222222222222';
+
 function fixture() {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'ocean-vwap-monitor-')),dbFile=path.join(root,'telemetry.sqlite'),stateFile=path.join(root,'state.json');
   const db=new DatabaseSync(dbFile);
@@ -15,7 +18,7 @@ function fixture() {
   const config={schema_version:'ocean-vwap-continuous-improvement-monitor/v1',enabled:true,strategy_id:'cicd-vwap-pull-back-strategy',strategy_name:'VWAP Pullback',baseline_existing_trades_on_first_run:true,
     brain_identity:{domain:'trading-strategy',project:'cicd-vwap-pull-back-strategy',strategy:'cicd-vwap-pull-back-strategy'},
     routing:{mode:'BLOCK_UNTIL_EXACT_PROJECT_ROUTE',required_project_root:'C:\\CICD-VWAP',brain_credential_ref:'D:\\secrets\\cicd-vwap.token',
-      paperclip_project_id:'cicd-project',paperclip_project_workspace_id:'cicd-workspace'},
+      required_agent_model:'gpt-6.1-sol',paperclip_project_id:PROJECT_ID,paperclip_project_workspace_id:WORKSPACE_ID},
     critical_quality_flags:['dataset_role_missing','raw_managed_context_conflict','strategy_version_mismatch','vol_state_missing'],sources:[{id:'fixture-replay',environment:'REPLAY',account:'Sim1',database_path:dbFile,run_assignments:{'run-discovery':'DISCOVERY'}}],
     trigger:{enabled:true,api_base_url:'http://127.0.0.1:9/api',company_id:'company',agent_id:'agent'},
     safety:{production_version:null,automatic_approval_enabled:false,brain_normal_ingestion:'OFF',live_real_enabled:false,real_order_routing:'PROHIBITED'}};
@@ -31,7 +34,14 @@ function insertRows(dbFile,start,count,{role=null,quality='',setup='london-long'
   db.close();
 }
 function exactRoutingAgent(config) {
-  return {adapterConfig:{cwd:config.routing.required_project_root},metadata:{active_strategy_id:config.strategy_id},permissions:{canUseSecrets:true}};
+  return {adapterConfig:{cwd:config.routing.required_project_root,model:config.routing.required_agent_model},metadata:{active_strategy_id:config.strategy_id,
+    brain_project:config.brain_identity.project,brain_domain:config.brain_identity.domain,brain_credential_ref:config.routing.brain_credential_ref},permissions:{canUseSecrets:true}};
+}
+function exactRoutingResource(url,config) {
+  if(url==='/api/agents/agent')return exactRoutingAgent(config);
+  if(url==='/api/projects/'+PROJECT_ID)return {id:PROJECT_ID,companyId:config.trigger.company_id};
+  if(url==='/api/projects/'+PROJECT_ID+'/workspaces')return [{id:WORKSPACE_ID,projectId:PROJECT_ID,cwd:config.routing.required_project_root}];
+  return undefined;
 }
 
 test('config enforces non-live safety boundaries',()=>{
@@ -118,18 +128,19 @@ test('new unassigned Paper trades raise one provenance recovery, not a strategy 
 });
 test('actionable evidence reaches issue and wakeup HTTP endpoints',async()=>{
   const f=fixture();insertRows(f.dbFile,1,50);await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async()=>({triggered:false})});insertRows(f.dbFile,51,10);
-  const requests=[],server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{requests.push({url:req.url,method:req.method,body:body?JSON.parse(body):null});res.setHeader('content-type','application/json');if(req.url==='/api/agents/agent')res.end(JSON.stringify(exactRoutingAgent(f.config)));else if(req.method==='GET')res.end('[]');else if(req.url.includes('/issues'))res.end(JSON.stringify({id:'issue-1',identifier:'OCEA-TEST'}));else res.end(JSON.stringify({id:'wake-1'}));});});
+  const requests=[],server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{requests.push({url:req.url,method:req.method,body:body?JSON.parse(body):null});res.setHeader('content-type','application/json');const resource=exactRoutingResource(req.url,f.config);if(resource!==undefined)res.end(JSON.stringify(resource));else if(req.method==='GET')res.end('[]');else if(req.url.includes('/issues'))res.end(JSON.stringify({id:'issue-1',identifier:'OCEA-TEST'}));else res.end(JSON.stringify({id:'wake-1'}));});});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));f.config.trigger.api_base_url='http://127.0.0.1:'+server.address().port+'/api';
   const state=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true});await new Promise(resolve=>server.close(resolve));
   assert.equal(state.last_trigger_receipt.triggered,true);
-  assert.deepEqual(requests.map(item=>item.method+' '+item.url),['GET /api/agents/agent','GET /api/companies/company/issues?limit=100','POST /api/companies/company/issues','POST /api/agents/agent/wakeup?companyId=company']);
-  assert.equal(requests[2].body.status,'todo');assert.equal(requests[3].body.idempotencyKey.startsWith('vwap-ci-'),true);
-  assert.equal(requests[2].body.projectId,'cicd-project');assert.equal(requests[2].body.projectWorkspaceId,'cicd-workspace');
-  assert.match(requests[2].body.description,/Exact strategy ID: cicd-vwap-pull-back-strategy/);
-  assert.match(requests[2].body.description,/Brain project: cicd-vwap-pull-back-strategy/);
-  assert.match(requests[2].body.description,/Do not substitute or access any sibling strategy/);
-  assert.deepEqual({strategyId:requests[3].body.payload.strategyId,brainProject:requests[3].body.payload.brainProject,
-    brainDomain:requests[3].body.payload.brainDomain,isolationScope:requests[3].body.payload.isolationScope},{
+  assert.deepEqual(requests.map(item=>item.method+' '+item.url),['GET /api/agents/agent','GET /api/projects/'+PROJECT_ID,
+    'GET /api/projects/'+PROJECT_ID+'/workspaces','GET /api/companies/company/issues?limit=100','POST /api/companies/company/issues','POST /api/agents/agent/wakeup?companyId=company']);
+  assert.equal(requests[4].body.status,'todo');assert.equal(requests[5].body.idempotencyKey.startsWith('vwap-ci-'),true);
+  assert.equal(requests[4].body.projectId,PROJECT_ID);assert.equal(requests[4].body.projectWorkspaceId,WORKSPACE_ID);
+  assert.match(requests[4].body.description,/Exact strategy ID: cicd-vwap-pull-back-strategy/);
+  assert.match(requests[4].body.description,/Brain project: cicd-vwap-pull-back-strategy/);
+  assert.match(requests[4].body.description,/Do not substitute or access any sibling strategy/);
+  assert.deepEqual({strategyId:requests[5].body.payload.strategyId,brainProject:requests[5].body.payload.brainProject,
+    brainDomain:requests[5].body.payload.brainDomain,isolationScope:requests[5].body.payload.isolationScope},{
     strategyId:'cicd-vwap-pull-back-strategy',brainProject:'cicd-vwap-pull-back-strategy',brainDomain:'trading-strategy',isolationScope:'EXACT_STRATEGY_ONLY'});
 });
 test('dispatch fails closed before HTTP when the event strategy identity differs',async()=>{
@@ -162,6 +173,28 @@ test('correct agent identity remains blocked until exact Paperclip project bindi
     assert.equal(requests[2].body.projectId,null);assert.equal(requests[2].body.projectWorkspaceId,null);
     assert.match(requests[2].body.description,/Paperclip project ID: NOT_PROVISIONED/);
     assert.equal(requests.length,3);
+  } finally { await new Promise(resolve=>server.close(resolve)); }
+});
+test('a substituted Brain credential scope blocks before project routing or wakeup',async()=>{
+  const f=fixture(),requests=[],server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{requests.push({url:req.url,method:req.method,body:body?JSON.parse(body):null});res.setHeader('content-type','application/json');if(req.url==='/api/agents/agent')res.end(JSON.stringify({...exactRoutingAgent(f.config),metadata:{...exactRoutingAgent(f.config).metadata,brain_credential_ref:'D:\\secrets\\another-project.token'}}));else if(req.method==='GET')res.end('[]');else res.end(JSON.stringify({id:'issue-wrong-credential',identifier:'OCEA-WRONG-CREDENTIAL'}));});});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));f.config.trigger.api_base_url='http://127.0.0.1:'+server.address().port+'/api';
+  try {
+    const receipt=await dispatchVwapImprovementEvent(f.config,{kind:'EVIDENCE_BLOCKED',event_id:'credential-mismatch',strategy_id:f.config.strategy_id,
+      analysis_hash:'sha256:test',blockers:[],role_issue_count:1,paper_provenance_issue_count:0,source_ids:['fixture'],next_action:'repair credential scope'});
+    assert.equal(receipt.routing_state,'BLOCKED_EXACT_PROJECT_ROUTE_REQUIRED');assert.equal(receipt.wakeup_id,null);
+    assert.equal(requests.some(item=>item.url.startsWith('/api/projects/')),false);
+    assert.equal(requests.some(item=>item.url.includes('/wakeup')),false);
+  } finally { await new Promise(resolve=>server.close(resolve)); }
+});
+test('configured project IDs remain blocked when the Paperclip workspace root is different',async()=>{
+  const f=fixture(),requests=[],server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{requests.push({url:req.url,method:req.method,body:body?JSON.parse(body):null});res.setHeader('content-type','application/json');if(req.url==='/api/agents/agent')res.end(JSON.stringify(exactRoutingAgent(f.config)));else if(req.url==='/api/projects/'+PROJECT_ID)res.end(JSON.stringify({id:PROJECT_ID,companyId:f.config.trigger.company_id}));else if(req.url==='/api/projects/'+PROJECT_ID+'/workspaces')res.end(JSON.stringify([{id:WORKSPACE_ID,projectId:PROJECT_ID,cwd:'D:\\ExternalRepos\\ocean-quant-lab'}]));else if(req.method==='GET')res.end('[]');else res.end(JSON.stringify({id:'issue-wrong-workspace',identifier:'OCEA-WRONG-WORKSPACE'}));});});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));f.config.trigger.api_base_url='http://127.0.0.1:'+server.address().port+'/api';
+  try {
+    const receipt=await dispatchVwapImprovementEvent(f.config,{kind:'EVIDENCE_BLOCKED',event_id:'workspace-mismatch',strategy_id:f.config.strategy_id,
+      analysis_hash:'sha256:test',blockers:[],role_issue_count:1,paper_provenance_issue_count:0,source_ids:['fixture'],next_action:'repair route'});
+    assert.equal(receipt.routing_state,'BLOCKED_EXACT_PROJECT_ROUTE_REQUIRED');assert.equal(receipt.wakeup_id,null);
+    assert.equal(requests.at(-1).body.status,'blocked');assert.equal(requests.at(-1).body.projectId,null);
+    assert.equal(requests.some(item=>item.url.includes('/wakeup')),false);
   } finally { await new Promise(resolve=>server.close(resolve)); }
 });
 test('repeated database failure wakes the coordinator once',async()=>{
@@ -200,13 +233,13 @@ test('source interrogation yields the event loop while an auxiliary read is pend
   assert.equal(timerObserved,true);assert.equal(state.status,'HEALTHY');assert.equal(state.sources[0].observed_trade_count,0);
 });
 test('transport test reaches the normal issue and wakeup path without authorizing strategy action',async()=>{
-  const f=fixture(),requests=[],server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{requests.push({url:req.url,method:req.method,body:body?JSON.parse(body):null});res.setHeader('content-type','application/json');if(req.url==='/api/agents/agent')res.end(JSON.stringify(exactRoutingAgent(f.config)));else if(req.method==='GET')res.end('[]');else if(req.url.includes('/issues'))res.end(JSON.stringify({id:'issue-test',identifier:'OCEA-E2E'}));else res.end(JSON.stringify({id:'wake-test'}));});});
+  const f=fixture(),requests=[],server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{requests.push({url:req.url,method:req.method,body:body?JSON.parse(body):null});res.setHeader('content-type','application/json');const resource=exactRoutingResource(req.url,f.config);if(resource!==undefined)res.end(JSON.stringify(resource));else if(req.method==='GET')res.end('[]');else if(req.url.includes('/issues'))res.end(JSON.stringify({id:'issue-test',identifier:'OCEA-E2E'}));else res.end(JSON.stringify({id:'wake-test'}));});});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));f.config.trigger.api_base_url='http://127.0.0.1:'+server.address().port+'/api';
   const receipt=await dispatchVwapImprovementEvent(f.config,{kind:'TRANSPORT_TEST',event_id:'vwap-ci-e2e-fixture',strategy_id:f.config.strategy_id,analysis_hash:'sha256:test',transport_test:true,new_trade_ids:[],investigation_queue:[],next_action:'none'});await new Promise(resolve=>server.close(resolve));
-  assert.equal(receipt.triggered,true);assert.match(requests[2].body.description,/No strategy, Sierra, approval, promotion, Paper, or Live action is authorized/);assert.equal(requests[3].body.triggerDetail,'system');assert.equal(requests[3].body.reason,'vwap_continuous_improvement_transport_test');
+  assert.equal(receipt.triggered,true);assert.match(requests[4].body.description,/No strategy, Sierra, approval, promotion, Paper, or Live action is authorized/);assert.equal(requests[5].body.triggerDetail,'system');assert.equal(requests[5].body.reason,'vwap_continuous_improvement_transport_test');
 });
 test('evidence blocker reaches recovery issue and wakeup without strategy authority',async()=>{
-  const f=fixture(),requests=[],server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{requests.push({url:req.url,method:req.method,body:body?JSON.parse(body):null});res.setHeader('content-type','application/json');if(req.url==='/api/agents/agent')res.end(JSON.stringify(exactRoutingAgent(f.config)));else if(req.method==='GET')res.end('[]');else if(req.url.includes('/issues'))res.end(JSON.stringify({id:'issue-blocked',identifier:'OCEA-BLOCKED'}));else res.end(JSON.stringify({id:'wake-blocked'}));});});
+  const f=fixture(),requests=[],server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{requests.push({url:req.url,method:req.method,body:body?JSON.parse(body):null});res.setHeader('content-type','application/json');const resource=exactRoutingResource(req.url,f.config);if(resource!==undefined)res.end(JSON.stringify(resource));else if(req.method==='GET')res.end('[]');else if(req.url.includes('/issues'))res.end(JSON.stringify({id:'issue-blocked',identifier:'OCEA-BLOCKED'}));else res.end(JSON.stringify({id:'wake-blocked'}));});});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));f.config.trigger.api_base_url='http://127.0.0.1:'+server.address().port+'/api';
   try {
     insertRows(f.dbFile,1,50,{role:'DISCOVERY',runId:'unregistered-holdout'});
@@ -215,8 +248,9 @@ test('evidence blocker reaches recovery issue and wakeup without strategy author
     const state=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true});
     assert.equal(state.last_trigger_receipt.triggered,true);
     assert.equal(state.last_trigger_receipt.issue_identifier,'OCEA-BLOCKED');
-    assert.deepEqual(requests.map(item=>item.method+' '+item.url),['GET /api/agents/agent','GET /api/companies/company/issues?limit=100','POST /api/companies/company/issues','POST /api/agents/agent/wakeup?companyId=company']);
-    assert.match(requests[2].body.description,/do not relabel historical validation\/holdout trades/);
-    assert.match(requests[2].body.description,/no automatic approval/);
+    assert.deepEqual(requests.map(item=>item.method+' '+item.url),['GET /api/agents/agent','GET /api/projects/'+PROJECT_ID,
+      'GET /api/projects/'+PROJECT_ID+'/workspaces','GET /api/companies/company/issues?limit=100','POST /api/companies/company/issues','POST /api/agents/agent/wakeup?companyId=company']);
+    assert.match(requests[4].body.description,/do not relabel historical validation\/holdout trades/);
+    assert.match(requests[4].body.description,/no automatic approval/);
   } finally { await new Promise(resolve=>server.close(resolve)); }
 });

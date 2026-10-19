@@ -22,6 +22,7 @@ test("discovers every configured project Paper telemetry database for monitor si
       mode: "BLOCK_UNTIL_EXACT_PROJECT_ROUTE",
       required_project_root: "C:\\CICD-VWAP",
       brain_credential_ref: "D:\\secrets\\cicd-vwap.token",
+      required_agent_model: "gpt-6.1-sol",
       paperclip_project_id: null,
       paperclip_project_workspace_id: null,
     },
