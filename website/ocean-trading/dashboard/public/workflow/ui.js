@@ -120,7 +120,8 @@ function caseTable(items) {
 function runTable(items) {
   return table(['Run / strategy', 'State', 'Instance', 'Declared / observed', 'Purpose'], items.map(row => {
     const context = row.context; const observed = row.events.find(event => event.payload?.observed_handshake)?.payload.observed_handshake.source_state || context.observed_source_state;
-    return [link('runs', context.run_id) + `<div class='subline'>${esc(row.strategy_name)}</div>`, badge(row.state), esc(context.execution_instance_id), `${esc(context.expected_environment)} / ${esc(observed.environment)}`, esc(human(context.evidence_purpose))];
+    const historical = row.manager?.historical_projection;
+    return [link('runs', context.run_id) + `<div class='subline'>${esc(row.strategy_name)}</div>`, badge(row.state) + (historical ? `<div class='subline'>Historical · read only</div>` : ''), esc(context.execution_instance_id), `${esc(context.expected_environment)} / ${esc(observed.environment)}`, esc(human(context.evidence_purpose))];
   }));
 }
 function approvalTable(items) {

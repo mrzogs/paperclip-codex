@@ -13,6 +13,9 @@ function fixture() {
   db.exec("CREATE TABLE ocean_trade_causal_v1 (trade_id INTEGER PRIMARY KEY, instance_id TEXT, instance_name TEXT, instance_role TEXT, environment TEXT, trade_account TEXT, is_simulated INTEGER, symbol TEXT, run_id TEXT, strategy_id TEXT, strategy_name TEXT, strategy_version TEXT, direction TEXT, status TEXT, entry_datetime TEXT, exit_datetime TEXT, net_profit_loss REAL, max_favourable_excursion REAL, max_adverse_excursion REAL, context_status TEXT, setup_id TEXT, session_name TEXT, side TEXT, regime_label TEXT, volatility_label TEXT, vwap_reclaim_state TEXT, dataset_role TEXT, mfe_points REAL, mae_points REAL, quality_flags TEXT, updated_utc TEXT)");
   db.close();
   const config={schema_version:'ocean-vwap-continuous-improvement-monitor/v1',enabled:true,strategy_id:'cicd-vwap-pull-back-strategy',strategy_name:'VWAP Pullback',baseline_existing_trades_on_first_run:true,
+    brain_identity:{domain:'trading-strategy',project:'cicd-vwap-pull-back-strategy',strategy:'cicd-vwap-pull-back-strategy'},
+    routing:{mode:'BLOCK_UNTIL_EXACT_PROJECT_ROUTE',required_project_root:'C:\\CICD-VWAP',brain_credential_ref:'D:\\secrets\\cicd-vwap.token',
+      paperclip_project_id:'cicd-project',paperclip_project_workspace_id:'cicd-workspace'},
     critical_quality_flags:['dataset_role_missing','raw_managed_context_conflict','strategy_version_mismatch','vol_state_missing'],sources:[{id:'fixture-replay',environment:'REPLAY',account:'Sim1',database_path:dbFile,run_assignments:{'run-discovery':'DISCOVERY'}}],
     trigger:{enabled:true,api_base_url:'http://127.0.0.1:9/api',company_id:'company',agent_id:'agent'},
     safety:{production_version:null,automatic_approval_enabled:false,brain_normal_ingestion:'OFF',live_real_enabled:false,real_order_routing:'PROHIBITED'}};
@@ -27,10 +30,17 @@ function insertRows(dbFile,start,count,{role=null,quality='',setup='london-long'
   }
   db.close();
 }
+function exactRoutingAgent(config) {
+  return {adapterConfig:{cwd:config.routing.required_project_root},metadata:{active_strategy_id:config.strategy_id},permissions:{canUseSecrets:true}};
+}
 
 test('config enforces non-live safety boundaries',()=>{
   const f=fixture(),file=path.join(f.root,'config.json');fs.writeFileSync(file,JSON.stringify(f.config));
   assert.equal(loadVwapContinuousImprovementConfig(file).strategy_id,'cicd-vwap-pull-back-strategy');
+  fs.writeFileSync(file,JSON.stringify({...f.config,brain_identity:{...f.config.brain_identity,project:'oql-vwap-wave-pullback'}}));
+  assert.throws(()=>loadVwapContinuousImprovementConfig(file),/BRAIN_IDENTITY_MISMATCH/);
+  fs.writeFileSync(file,JSON.stringify({...f.config,routing:{...f.config.routing,paperclip_project_id:undefined}}));
+  assert.throws(()=>loadVwapContinuousImprovementConfig(file),/ROUTING_BOUNDARY_INVALID/);
   fs.writeFileSync(file,JSON.stringify({...f.config,safety:{...f.config.safety,automatic_approval_enabled:true}}));
   assert.throws(()=>loadVwapContinuousImprovementConfig(file),/SAFETY_BOUNDARY/);
 });
@@ -108,12 +118,51 @@ test('new unassigned Paper trades raise one provenance recovery, not a strategy 
 });
 test('actionable evidence reaches issue and wakeup HTTP endpoints',async()=>{
   const f=fixture();insertRows(f.dbFile,1,50);await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async()=>({triggered:false})});insertRows(f.dbFile,51,10);
-  const requests=[],server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{requests.push({url:req.url,method:req.method,body:body?JSON.parse(body):null});res.setHeader('content-type','application/json');if(req.method==='GET')res.end('[]');else if(req.url.includes('/issues'))res.end(JSON.stringify({id:'issue-1',identifier:'OCEA-TEST'}));else res.end(JSON.stringify({id:'wake-1'}));});});
+  const requests=[],server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{requests.push({url:req.url,method:req.method,body:body?JSON.parse(body):null});res.setHeader('content-type','application/json');if(req.url==='/api/agents/agent')res.end(JSON.stringify(exactRoutingAgent(f.config)));else if(req.method==='GET')res.end('[]');else if(req.url.includes('/issues'))res.end(JSON.stringify({id:'issue-1',identifier:'OCEA-TEST'}));else res.end(JSON.stringify({id:'wake-1'}));});});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));f.config.trigger.api_base_url='http://127.0.0.1:'+server.address().port+'/api';
   const state=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true});await new Promise(resolve=>server.close(resolve));
   assert.equal(state.last_trigger_receipt.triggered,true);
-  assert.deepEqual(requests.map(item=>item.method+' '+item.url),['GET /api/companies/company/issues?limit=100','POST /api/companies/company/issues','POST /api/agents/agent/wakeup?companyId=company']);
-  assert.equal(requests[2].body.idempotencyKey.startsWith('vwap-ci-'),true);
+  assert.deepEqual(requests.map(item=>item.method+' '+item.url),['GET /api/agents/agent','GET /api/companies/company/issues?limit=100','POST /api/companies/company/issues','POST /api/agents/agent/wakeup?companyId=company']);
+  assert.equal(requests[2].body.status,'todo');assert.equal(requests[3].body.idempotencyKey.startsWith('vwap-ci-'),true);
+  assert.equal(requests[2].body.projectId,'cicd-project');assert.equal(requests[2].body.projectWorkspaceId,'cicd-workspace');
+  assert.match(requests[2].body.description,/Exact strategy ID: cicd-vwap-pull-back-strategy/);
+  assert.match(requests[2].body.description,/Brain project: cicd-vwap-pull-back-strategy/);
+  assert.match(requests[2].body.description,/Do not substitute or access any sibling strategy/);
+  assert.deepEqual({strategyId:requests[3].body.payload.strategyId,brainProject:requests[3].body.payload.brainProject,
+    brainDomain:requests[3].body.payload.brainDomain,isolationScope:requests[3].body.payload.isolationScope},{
+    strategyId:'cicd-vwap-pull-back-strategy',brainProject:'cicd-vwap-pull-back-strategy',brainDomain:'trading-strategy',isolationScope:'EXACT_STRATEGY_ONLY'});
+});
+test('dispatch fails closed before HTTP when the event strategy identity differs',async()=>{
+  const f=fixture();
+  await assert.rejects(()=>dispatchVwapImprovementEvent(f.config,{kind:'EVIDENCE_BLOCKED',event_id:'wrong-strategy',
+    strategy_id:'vwap_wave_pullback_balanced_nasdaq_v0434',analysis_hash:'sha256:test',blockers:[],role_issue_count:0,
+    paper_provenance_issue_count:0,source_ids:[],next_action:'none'}),/DISPATCH_IDENTITY_MISMATCH/);
+});
+test('wrong coordinator workspace creates only a blocked containment issue',async()=>{
+  const f=fixture(),requests=[],server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{requests.push({url:req.url,method:req.method,body:body?JSON.parse(body):null});res.setHeader('content-type','application/json');if(req.url==='/api/agents/agent')res.end(JSON.stringify({adapterConfig:{cwd:'D:\\ExternalRepos\\ocean-quant-lab'},metadata:{active_strategy_id:'vwap_wave_pullback_balanced_nasdaq_v0434'},permissions:{canUseSecrets:false}}));else if(req.method==='GET')res.end('[]');else if(req.url.includes('/issues'))res.end(JSON.stringify({id:'issue-blocked-route',identifier:'OCEA-ROUTE'}));else res.end(JSON.stringify({id:'unexpected-wake'}));});});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));f.config.trigger.api_base_url='http://127.0.0.1:'+server.address().port+'/api';
+  try {
+    const receipt=await dispatchVwapImprovementEvent(f.config,{kind:'EVIDENCE_BLOCKED',event_id:'routing-blocked',strategy_id:f.config.strategy_id,
+      analysis_hash:'sha256:test',blockers:[],role_issue_count:1,paper_provenance_issue_count:0,source_ids:['fixture'],next_action:'reconcile'});
+    assert.equal(receipt.routing_state,'BLOCKED_EXACT_PROJECT_ROUTE_REQUIRED');
+    assert.equal(requests[2].body.status,'blocked');assert.match(requests[2].body.description,/Keep this issue blocked/);
+    assert.equal(requests[2].body.projectId,null);assert.equal(requests[2].body.projectWorkspaceId,null);
+    assert.deepEqual(requests.map(item=>item.method+' '+item.url),['GET /api/agents/agent','GET /api/companies/company/issues?limit=100','POST /api/companies/company/issues']);
+    assert.equal(receipt.wakeup_id,null);
+  } finally { await new Promise(resolve=>server.close(resolve)); }
+});
+test('correct agent identity remains blocked until exact Paperclip project bindings exist',async()=>{
+  const f=fixture();f.config.routing.paperclip_project_id=null;f.config.routing.paperclip_project_workspace_id=null;
+  const requests=[],server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{requests.push({url:req.url,method:req.method,body:body?JSON.parse(body):null});res.setHeader('content-type','application/json');if(req.url==='/api/agents/agent')res.end(JSON.stringify(exactRoutingAgent(f.config)));else if(req.method==='GET')res.end('[]');else res.end(JSON.stringify({id:'issue-unprovisioned',identifier:'OCEA-UNPROVISIONED'}));});});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));f.config.trigger.api_base_url='http://127.0.0.1:'+server.address().port+'/api';
+  try {
+    const receipt=await dispatchVwapImprovementEvent(f.config,{kind:'EVIDENCE_BLOCKED',event_id:'project-unprovisioned',strategy_id:f.config.strategy_id,
+      analysis_hash:'sha256:test',blockers:[],role_issue_count:1,paper_provenance_issue_count:0,source_ids:['fixture'],next_action:'provision'});
+    assert.equal(receipt.routing_state,'BLOCKED_EXACT_PROJECT_ROUTE_REQUIRED');assert.equal(receipt.wakeup_id,null);
+    assert.equal(requests[2].body.projectId,null);assert.equal(requests[2].body.projectWorkspaceId,null);
+    assert.match(requests[2].body.description,/Paperclip project ID: NOT_PROVISIONED/);
+    assert.equal(requests.length,3);
+  } finally { await new Promise(resolve=>server.close(resolve)); }
 });
 test('repeated database failure wakes the coordinator once',async()=>{
   const f=fixture();f.config.sources[0].database_path=path.join(f.root,'missing.sqlite');f.config.trigger.failure_threshold=3;let calls=0;const events=[];
@@ -151,13 +200,13 @@ test('source interrogation yields the event loop while an auxiliary read is pend
   assert.equal(timerObserved,true);assert.equal(state.status,'HEALTHY');assert.equal(state.sources[0].observed_trade_count,0);
 });
 test('transport test reaches the normal issue and wakeup path without authorizing strategy action',async()=>{
-  const f=fixture(),requests=[],server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{requests.push({url:req.url,method:req.method,body:body?JSON.parse(body):null});res.setHeader('content-type','application/json');if(req.method==='GET')res.end('[]');else if(req.url.includes('/issues'))res.end(JSON.stringify({id:'issue-test',identifier:'OCEA-E2E'}));else res.end(JSON.stringify({id:'wake-test'}));});});
+  const f=fixture(),requests=[],server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{requests.push({url:req.url,method:req.method,body:body?JSON.parse(body):null});res.setHeader('content-type','application/json');if(req.url==='/api/agents/agent')res.end(JSON.stringify(exactRoutingAgent(f.config)));else if(req.method==='GET')res.end('[]');else if(req.url.includes('/issues'))res.end(JSON.stringify({id:'issue-test',identifier:'OCEA-E2E'}));else res.end(JSON.stringify({id:'wake-test'}));});});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));f.config.trigger.api_base_url='http://127.0.0.1:'+server.address().port+'/api';
-  const receipt=await dispatchVwapImprovementEvent(f.config,{kind:'TRANSPORT_TEST',event_id:'vwap-ci-e2e-fixture',analysis_hash:'sha256:test',transport_test:true,new_trade_ids:[],investigation_queue:[],next_action:'none'});await new Promise(resolve=>server.close(resolve));
-  assert.equal(receipt.triggered,true);assert.match(requests[1].body.description,/No strategy, Sierra, approval, promotion, Paper, or Live action is authorized/);assert.equal(requests[2].body.triggerDetail,'system');assert.equal(requests[2].body.reason,'vwap_continuous_improvement_transport_test');
+  const receipt=await dispatchVwapImprovementEvent(f.config,{kind:'TRANSPORT_TEST',event_id:'vwap-ci-e2e-fixture',strategy_id:f.config.strategy_id,analysis_hash:'sha256:test',transport_test:true,new_trade_ids:[],investigation_queue:[],next_action:'none'});await new Promise(resolve=>server.close(resolve));
+  assert.equal(receipt.triggered,true);assert.match(requests[2].body.description,/No strategy, Sierra, approval, promotion, Paper, or Live action is authorized/);assert.equal(requests[3].body.triggerDetail,'system');assert.equal(requests[3].body.reason,'vwap_continuous_improvement_transport_test');
 });
 test('evidence blocker reaches recovery issue and wakeup without strategy authority',async()=>{
-  const f=fixture(),requests=[],server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{requests.push({url:req.url,method:req.method,body:body?JSON.parse(body):null});res.setHeader('content-type','application/json');if(req.method==='GET')res.end('[]');else if(req.url.includes('/issues'))res.end(JSON.stringify({id:'issue-blocked',identifier:'OCEA-BLOCKED'}));else res.end(JSON.stringify({id:'wake-blocked'}));});});
+  const f=fixture(),requests=[],server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{requests.push({url:req.url,method:req.method,body:body?JSON.parse(body):null});res.setHeader('content-type','application/json');if(req.url==='/api/agents/agent')res.end(JSON.stringify(exactRoutingAgent(f.config)));else if(req.method==='GET')res.end('[]');else if(req.url.includes('/issues'))res.end(JSON.stringify({id:'issue-blocked',identifier:'OCEA-BLOCKED'}));else res.end(JSON.stringify({id:'wake-blocked'}));});});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));f.config.trigger.api_base_url='http://127.0.0.1:'+server.address().port+'/api';
   try {
     insertRows(f.dbFile,1,50,{role:'DISCOVERY',runId:'unregistered-holdout'});
@@ -166,8 +215,8 @@ test('evidence blocker reaches recovery issue and wakeup without strategy author
     const state=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true});
     assert.equal(state.last_trigger_receipt.triggered,true);
     assert.equal(state.last_trigger_receipt.issue_identifier,'OCEA-BLOCKED');
-    assert.deepEqual(requests.map(item=>item.method+' '+item.url),['GET /api/companies/company/issues?limit=100','POST /api/companies/company/issues','POST /api/agents/agent/wakeup?companyId=company']);
-    assert.match(requests[1].body.description,/do not relabel historical validation\/holdout trades/);
-    assert.match(requests[1].body.description,/no automatic approval/);
+    assert.deepEqual(requests.map(item=>item.method+' '+item.url),['GET /api/agents/agent','GET /api/companies/company/issues?limit=100','POST /api/companies/company/issues','POST /api/agents/agent/wakeup?companyId=company']);
+    assert.match(requests[2].body.description,/do not relabel historical validation\/holdout trades/);
+    assert.match(requests[2].body.description,/no automatic approval/);
   } finally { await new Promise(resolve=>server.close(resolve)); }
 });

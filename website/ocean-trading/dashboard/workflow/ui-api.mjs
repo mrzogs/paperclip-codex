@@ -50,8 +50,8 @@ export function readWorkflowView(backend, actor, route) {
   const strategyName = (value) => parse(backend.one('ow_strategies', value)).strategy_name;
   const operationalReleases = () => new OperationalPreparation(backend).list(actor).items;
   const caseRow = (value) => ({ ...backend.readCase(actor, value.id), strategy_name: strategyName(value.strategy_id), priority: value.stage === 'ROLLBACK_REVIEW' ? 'URGENT_REVIEW' : null });
-  const runRow = (value) => ({
-    ...backend.readRun(actor, value.id),
+  const runRow = (value, options = {}) => ({
+    ...backend.readRun(actor, value.id, options),
     strategy_name: strategyName(value.strategy_id),
     learning: backend.operationalLearning?.statusForRun(value.id) || null,
   });
@@ -127,7 +127,8 @@ export function readWorkflowView(backend, actor, route) {
     const projected = key === onboardingProjection.strategy_id ? onboardingProjection : null;
     requireThat(stored || projected, 404, 'ENTITY_NOT_FOUND');
     const strategy = stored ? mergeOnboarding(projected, strategyRow(stored)) : onboardingStrategyRow(projected);
-    const runs = db.prepare('SELECT * FROM ow_runs WHERE strategy_id=? ORDER BY rowid DESC LIMIT 200').all(key).map(runRow);
+    const runs = db.prepare('SELECT * FROM ow_runs WHERE strategy_id=? ORDER BY rowid DESC LIMIT 200').all(key)
+      .map(value => runRow(value, { allowTerminalHistoricalBindingProjection: true }));
     const instances = db.prepare('SELECT payload_json FROM ow_instances WHERE strategy_id=?').all(key).map(row => parse(row));
     return { ...stamp, ...strategy, runs, runs_total: db.prepare('SELECT COUNT(*) AS n FROM ow_runs WHERE strategy_id=?').get(key).n, instances: instances.length ? instances : projected?.instance?.execution_instance_id ? [projected.instance] : [] };
   }

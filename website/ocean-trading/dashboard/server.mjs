@@ -3974,6 +3974,7 @@ server.on("close", () => {
   workflowRetryTimer = null;
   workflowBackend?.close();
   stopQuantTerminal();
+  if (monitorProcess && !monitorProcess.killed && monitorProcess.exitCode === null) stopMonitor();
 });
 installWebsiteControl(server, __dirname, () => Boolean(workflowBackend));
 

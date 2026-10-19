@@ -35,6 +35,16 @@ Assert-Test ($manager.Contains("Join-Path `$Root 'scripts\run-ocean-monitor-supe
   'MONITOR_RESTART_CANNOT_FIND_PRIOR_SUPERVISORS'
 Assert-Test ($manager.Contains('function Get-MonitorOwnedProcessTree')) 'MONITOR_RESTART_DOES_NOT_CLEAN_CHILD_PROCESSES'
 Assert-Test ($manager.Contains('Stopped Ocean monitor generation PID')) 'MONITOR_RESTART_STILL_STOPS_ONLY_CURRENT_MONITOR'
+Assert-Test ($manager.Contains('function Stop-WebsiteOwnedMonitorProcesses')) 'WEBSITE_RESTART_CANNOT_RETIRE_ITS_DETACHED_MONITOR'
+Assert-Test ($manager.Contains('Stop-WebsiteOwnedMonitorProcesses -WebsiteProcessIds $websiteProcessIds')) `
+  'WEBSITE_RESTART_DOES_NOT_RETIRE_ITS_DETACHED_MONITOR'
+$ownedStart = $manager.IndexOf('function Stop-WebsiteOwnedMonitorProcesses')
+$ownedEnd = $manager.IndexOf('function Get-MonitorOwnedProcessTree', $ownedStart)
+$ownedMonitorStop = $manager.Substring($ownedStart, $ownedEnd - $ownedStart)
+Assert-Test ($ownedMonitorStop.Contains("`$_.Name -ieq 'node.exe'")) 'WEBSITE_MONITOR_RETIREMENT_ACCEPTS_NON_NODE_PROCESSES'
+Assert-Test ($ownedMonitorStop.Contains('ParentProcessId')) 'WEBSITE_MONITOR_RETIREMENT_IS_NOT_BOUND_TO_WEBSITE_PARENT'
+Assert-Test ($ownedMonitorStop.Contains('Get-ReleaseMonitorCommandPattern')) 'WEBSITE_MONITOR_RETIREMENT_IS_NOT_BOUND_TO_IMMUTABLE_RELEASE_PATHS'
+Assert-Test (-not $ownedMonitorStop.Contains('OceanTrading-Monitor')) 'WEBSITE_RESTART_TOUCHES_GENERIC_MONITOR_TASK'
 Assert-Test ($manager.Contains('function Write-MonitorStoppedState')) 'MANAGED_MONITOR_STOP_DOES_NOT_PUBLISH_STOPPED_STATE'
 Assert-Test ($manager.Contains("`$next['running'] = `$false")) 'MANAGED_MONITOR_STOP_LEAVES_RUNNING_STATE_TRUE'
 Assert-Test ($manager.Contains("`$next['pid'] = `$null")) 'MANAGED_MONITOR_STOP_LEAVES_STALE_PID'

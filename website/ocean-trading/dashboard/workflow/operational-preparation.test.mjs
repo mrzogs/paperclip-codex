@@ -105,6 +105,23 @@ function rejects(f,code){
   assert.deepEqual(unchanged(f),before);
 }
 
+test('terminal historical runs permit an explicit read-only stale-binding projection only',t=>{
+  const f=fixture(t),before=unchanged(f);
+  f.b.config.operational_factual_bindings=[];
+  assert.throws(()=>f.b.readRun(actor,sourceId),error=>error.code==='OPERATIONAL_FACTUAL_BINDING_CHANGED');
+  const projected=f.b.readRun(actor,sourceId,{allowTerminalHistoricalBindingProjection:true});
+  assert.equal(projected.state,'COMPLETED');
+  assert.equal(projected.manager.context_status,'OPERATIONAL_FACTUAL_BINDING_CHANGED');
+  assert.deepEqual(projected.manager.historical_projection,{
+    status:'READ_ONLY_STALE_BINDING',reason:'OPERATIONAL_FACTUAL_BINDING_CHANGED',protected_actions_allowed:false,
+  });
+  assert.deepEqual(unchanged(f),before,'read-only projection must not mutate the workflow ledger');
+  f.db.prepare("UPDATE ow_runs SET state='ACTIVE' WHERE id=?").run(sourceId);
+  assert.throws(()=>f.b.readRun(actor,sourceId,{allowTerminalHistoricalBindingProjection:true}),
+    error=>error.code==='OPERATIONAL_FACTUAL_BINDING_CHANGED');
+  assert.throws(()=>f.b.runs.load(actor,sourceId,'event.write'),error=>error.code==='OPERATIONAL_FACTUAL_BINDING_CHANGED');
+});
+
 test('preserved legacy activation permits only a READY reprocess with fresh UNKNOWN source state',t=>{
   const f=fixture(t),before=unchanged(f),result=f.preparation.reprocess(actor,f.input);
   assert.equal(result.state,'READY');assert.equal(result.actual_source_start,false);assert.equal(result.original_run_unchanged,true);

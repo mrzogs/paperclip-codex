@@ -888,9 +888,9 @@ export class WorkflowBackend {
     catch (error) { if (!(error instanceof WorkflowError)) throw error; blockedReason = error.code; }
     return { decision: JSON.parse(decision.payload_json), binding, current_test_authority: current, operational_action_allowed: false, blocked_reason: blockedReason, revoked: !!this.db.prepare("SELECT decision_id FROM ow_decision_revocations WHERE decision_id=?").get(decision.id), baseline_current: row.baseline_hash === this.one("ow_strategies", row.strategy_id).baseline_hash };
   }
-  readRun(actor, runId) {
+  readRun(actor, runId, options = {}) {
     const run = this.one("ow_runs", runId); this.authorize(actor, "read", run.strategy_id, run.instance_id);
-    const manager=this.runs.managed(run.id) ? this.runs.read(actor,run.id) : null;
+    const manager=this.runs.managed(run.id) ? this.runs.read(actor,run.id,options) : null;
     const receiptCounts={
       workflow:this.db.prepare('SELECT COUNT(*) n FROM ow_operational_receipts WHERE run_id=?').get(run.id).n,
       trades:this.db.prepare('SELECT COUNT(*) n FROM ow_operational_trade_events WHERE run_id=?').get(run.id).n,
