@@ -25,11 +25,42 @@ test("reports an active isolated Paper telemetry database", () => {
     );
     CREATE TABLE orders (id INTEGER);
     CREATE TABLE fills (id INTEGER);
-    CREATE TABLE trades (trade_id INTEGER, trade_account TEXT, status TEXT, strategy_id TEXT, strategy_name TEXT, strategy_version TEXT);
+    CREATE TABLE trades (
+      trade_id INTEGER, instance_name TEXT, trade_account TEXT, account_type_guess TEXT,
+      is_simulated INTEGER, symbol TEXT, instrument TEXT, contract TEXT,
+      strategy_id TEXT, strategy_name TEXT, strategy_version TEXT, attribution_confidence TEXT,
+      direction TEXT, status TEXT, entry_datetime TEXT, exit_datetime TEXT,
+      initial_quantity REAL, max_quantity REAL, final_quantity REAL,
+      average_entry_price REAL, average_exit_price REAL,
+      initial_stop_price REAL, final_stop_price REAL,
+      initial_target_price REAL, final_target_price REAL, exit_classification TEXT,
+      gross_points REAL, gross_ticks REAL, gross_currency_value REAL,
+      total_commission REAL, net_profit_loss REAL, profit_loss REAL,
+      opening_order_id INTEGER, closing_order_id INTEGER, text_tag TEXT,
+      order_action_source TEXT, created_utc TEXT, updated_utc TEXT
+    );
     INSERT INTO sierra_instance VALUES ('PaperTrading_CICD_VWAP_Pullback', 'paper');
     INSERT INTO logger_health VALUES (1, 'logger_started version=v0.5.26');
     INSERT INTO account_snapshot VALUES (1, 'PaperTrading_CICD_VWAP_Pullback', 'paper', 'Sim1', 'simulation', 1, '2026-10-01 14:45:00', '2026-10-01 14:45:00');
     INSERT INTO instrument_snapshot VALUES (1, 'PaperTrading_CICD_VWAP_Pullback', 'Sim1', 'MNQZ26_FUT_CME', '2026-10-01 14:45:00');
+    INSERT INTO trades VALUES (
+      1, 'PaperTrading_CICD_VWAP_Pullback', 'Sim1', 'simulation', 1,
+      'MNQZ26_FUT_CME', 'MNQZ26_FUT_CME', 'Z26',
+      'cicd-vwap-pull-back-strategy', 'VWAP Pullback', 'v0.6.235', 'definite',
+      'long', 'closed', NULL, NULL, 2, 2, 0, 30000, 30001,
+      29900, 30000.5, 30600, 30600, 'stop', 1, 8, 4, 2.28, 1.72, 1.72,
+      100, 102, 'VWAP Pullback Long', 'Trade simulation fill',
+      '2026-10-01 14:40:00', '2026-10-01 14:44:00'
+    );
+    INSERT INTO trades VALUES (
+      2, 'PaperTrading_CICD_VWAP_Pullback', 'Sim1', 'simulation', 1,
+      'MNQZ26_FUT_CME', 'MNQZ26_FUT_CME', 'Z26',
+      'cicd-vwap-pull-back-strategy', 'VWAP Pullback', 'v0.6.235', 'definite',
+      'short', 'open', NULL, NULL, 1, 1, 1, 30005, NULL,
+      30100, 30100, 29400, 29400, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+      103, NULL, 'VWAP Pullback Short', 'Trade simulation fill',
+      '2026-10-01 14:44:30', '2026-10-01 14:45:00'
+    );
   `);
   db.close();
 
@@ -39,8 +70,15 @@ test("reports an active isolated Paper telemetry database", () => {
   assert.equal(status.account, "Sim1");
   assert.equal(status.symbol, "MNQZ26_FUT_CME");
   assert.equal(status.loggerVersion, "v0.5.26");
-  assert.deepEqual(status.counts, { accountSnapshots: 1, orders: 0, fills: 0, trades: 0, openTrades: 0, legacyOpenTrades: 0, unattributedOpenTrades: 0 });
-  assert.match(status.isolation, /not merged/i);
+  assert.deepEqual(status.counts, { accountSnapshots: 1, orders: 0, fills: 0, trades: 2, openTrades: 1, legacyOpenTrades: 0, unattributedOpenTrades: 0 });
+  assert.equal(status.closedTrades.length, 1);
+  assert.equal(status.closedTrades[0].tradeId, "cicd-vwap-paper-sqlite-1");
+  assert.equal(status.closedTrades[0].realizedPnlDollars, 1.72);
+  assert.equal(status.openPositions.length, 1);
+  assert.equal(status.openPositions[0].account, "Sim1");
+  assert.equal(status.openPositions[0].strategyId, "cicd-vwap-pull-back-strategy");
+  assert.equal(status.closedNetProfitLossDollars, 1.72);
+  assert.match(status.isolation, /separate observed CICD VWAP Paper feed/i);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

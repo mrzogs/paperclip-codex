@@ -1418,7 +1418,7 @@ function abbreviateStrategyName(value) {
 
 function selectedModeTrades(manifest, mode) {
   if (mode === "paper") {
-    return paperClosedTrades(manifest);
+    return paperObservedClosedTrades(manifest);
   }
   return liveClosedTrades(manifest);
 }
@@ -1454,7 +1454,7 @@ function liveClosedTrades(manifest) {
 
 function performanceModulePnl(manifest, mode, dailyRows) {
   if (mode === "paper") {
-    return paperRealizedPnlSummary(manifest.tradingModes?.paper || {}).net;
+    return pnlSummary(selectedModeTrades(manifest, mode)).net;
   }
   return dailyRows.reduce((sum, row) => sum + row.netPnl, 0);
 }
@@ -1489,6 +1489,12 @@ function performanceModuleStats(manifest, mode) {
         })),
         ...(paper.openPositions || []).map((position) => ({
           strategyName: position.strategyName || position.owner || "Open Paper Position",
+          realizedPnlDollars: 0,
+          openQuantity: position.quantity,
+          active: true,
+        })),
+        ...(paper.projectTelemetry?.openPositions || []).map((position) => ({
+          strategyName: position.strategyName || "CICD VWAP Pullback",
           realizedPnlDollars: 0,
           openQuantity: position.quantity,
           active: true,
@@ -3100,6 +3106,15 @@ function paperClosedTrades(manifest) {
   return performanceTrades.length ? performanceTrades : (paper.closedTrades || []);
 }
 
+function paperObservedClosedTrades(manifest) {
+  const paper = manifest.tradingModes?.paper || {};
+  const projectTrades = Array.isArray(paper.projectTelemetry?.closedTrades)
+    ? paper.projectTelemetry.closedTrades
+    : [];
+  return [...new Map([...paperClosedTrades(manifest), ...projectTrades]
+    .map(trade => [trade?.sourceId || trade?.tradeId || JSON.stringify(trade), trade])).values()];
+}
+
 function paperRealizedPnlSummary(paper) {
   const trades = paperClosedTrades({ tradingModes: { paper } });
   return pnlSummary(trades);
@@ -4051,6 +4066,9 @@ function renderPaperDashboard(paper) {
   const otherPaper = separation.otherStrategies || {};
   const manualPaper = separation.manual || {};
   const projectTelemetry = paper.projectTelemetry || {};
+  const projectClosedTrades = projectTelemetry.closedTrades || [];
+  const projectOpenPositions = projectTelemetry.openPositions || [];
+  const projectPnl = pnlSummary(projectClosedTrades);
   return `
     <div class="journal-toolbar">
       <span>Account: ${escapeHtml(paper.account || "Sim1")}</span>
@@ -4073,7 +4091,7 @@ function renderPaperDashboard(paper) {
       ${summaryTile("Manual paper fills", manualPaper.trades?.length || 0, manualPaper.trades?.length ? "warn" : "good")}
     </div>
     <h2>Current Project Strategy Telemetry</h2>
-    <p class="section-note">This is the isolated VWAP Pullback Paper runtime status. It does not replace or add rows to the Paper calendar and ledger.</p>
+    <p class="section-note">This is the separately sourced VWAP Pullback Paper feed. Its Sim1 trades are included in monitoring views while approved-bundle totals remain unchanged.</p>
     <div class="tile-grid">
       ${summaryTile("VWAP Paper status", humanizeStatus(projectTelemetry.status || "missing"), projectTelemetry.healthy ? "good" : "warn")}
       ${summaryTile("Account", projectTelemetry.account || "n/a", projectTelemetry.account === "Sim1" ? "good" : "warn")}
@@ -4083,15 +4101,22 @@ function renderPaperDashboard(paper) {
       ${summaryTile("Orders / fills / trades", `${projectTelemetry.counts?.orders ?? 0} / ${projectTelemetry.counts?.fills ?? 0} / ${projectTelemetry.counts?.trades ?? 0}`)}
       ${summaryTile("Open / legacy-open trades", `${projectTelemetry.counts?.openTrades ?? 0} / ${projectTelemetry.counts?.legacyOpenTrades ?? 0}`, Number(projectTelemetry.counts?.legacyOpenTrades || 0) > 0 ? "warn" : "good")}
       ${summaryTile("Unattributed open trades", `${projectTelemetry.counts?.unattributedOpenTrades ?? 0}`, Number(projectTelemetry.counts?.unattributedOpenTrades || 0) > 0 ? "warn" : "good")}
+      ${summaryTile("Visible CICD closed P&L", formatCurrency(projectPnl.net), projectPnl.net < 0 ? "warn" : "good")}
     </div>
     ${keyValueTable([
       ["Dedicated instance", projectTelemetry.instanceName || "n/a"],
       ["Latest telemetry UTC", projectTelemetry.latestSnapshotUtc || "n/a"],
       ["Telemetry age", projectTelemetry.ageSeconds === null || projectTelemetry.ageSeconds === undefined ? "n/a" : `${projectTelemetry.ageSeconds} seconds`],
       ["Status warning", projectTelemetry.warning || "none"],
-      ["Isolation", projectTelemetry.isolation || "Status only; the existing Paper ledger remains authoritative."],
+      ["Isolation", projectTelemetry.isolation || "Observed CICD VWAP Paper rows are labeled separately; approved-bundle totals remain authoritative for approval status."],
       ["Dedicated telemetry DB", projectTelemetry.sqliteFile || "n/a"],
     ])}
+    <h2>CICD VWAP Paper Trades — Sim1</h2>
+    <p class="section-note">Sierra-observed trades from the dedicated CICD VWAP Paper telemetry database. They appear in the main Dashboard Paper selection, but remain separate from approved-bundle totals.</p>
+    <h3>Open CICD VWAP Position</h3>
+    ${projectOpenPositions.length ? renderOpenPositionTable(projectOpenPositions) : '<p class="empty">No CICD VWAP Sim1 position is currently open.</p>'}
+    <h3>Recent CICD VWAP Closed Trades</h3>
+    ${projectClosedTrades.length ? renderLiveClosedTradeTable(projectClosedTrades) : '<p class="empty">No closed CICD VWAP Sim1 trades have been observed yet.</p>'}
     <h2>Paper Account Size Source</h2>
     ${keyValueTable([
       ["Account monitor account", accountSize.account],

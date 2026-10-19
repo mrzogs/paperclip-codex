@@ -2120,6 +2120,7 @@ function parsePaperTradingPlan() {
       cleanStart ? PAPER_TRADING_CLEAN_START_FILE : null,
       ...(imported.sourceFiles || []),
       projectTelemetry.available ? VWAP_PROJECT_PAPER_SQLITE_FILE : null,
+      projectTelemetry.available && fs.existsSync(`${VWAP_PROJECT_PAPER_SQLITE_FILE}-wal`) ? `${VWAP_PROJECT_PAPER_SQLITE_FILE}-wal` : null,
     ].filter((file) => file && fs.existsSync(file)),
     account: sierraConfig.paper.account || "Sim1",
     instanceRoot: sierraConfig.paper.root || PAPER_SIERRA_ROOT,
@@ -2133,7 +2134,7 @@ function parsePaperTradingPlan() {
     status: statusText.includes("blocked pending final chart-level load confirmation")
       ? "blocked_pending_chart_level_load_confirmation"
       : "configured",
-    summary: "Dedicated paper dashboard for MNQ Sierra Chart simulation work. Paper calendar and ledger rows are read from the paper telemetry SQLite ledger only.",
+    summary: "Dedicated paper dashboard for MNQ Sierra Chart simulation work. Approved-bundle rows and the observed CICD VWAP Sim1 feed are displayed with separate source labels.",
     dataHygiene: hygiene,
     strategies,
     trades: imported.recentTrades || [],
@@ -2160,7 +2161,7 @@ function parsePaperTradingPlan() {
       sqliteFile: PATRADING_PAPER_SQLITE_FILE,
       cleanStart: "Clean-start filtering is not applied to the paper dashboard because the paper telemetry SQLite ledger is the source of truth.",
       attribution: "Strategy, account, side, quantity, prices, timestamps, status, and P/L come directly from the PATrading trades table.",
-      separation: "Paper dashboard calendar and right-hand ledger do not fall back to Sierra TradeActivityLogs.",
+      separation: "Approved-bundle totals remain sourced from PATrading telemetry. The CICD VWAP Sim1 telemetry feed is displayed separately and does not change bundle approval status.",
     },
     handoffSnippet: handoffText.split("\n").slice(0, 34).join("\n").trim(),
     statusSnippet: statusText.split("\n").slice(0, 42).join("\n").trim(),
