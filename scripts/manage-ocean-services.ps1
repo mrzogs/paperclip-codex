@@ -280,6 +280,53 @@ function Stop-MonitorProcesses {
   }
 }
 
+function Write-MonitorStoppedState([string]$Reason = 'managed-service-stop') {
+  try {
+    $dashboard = (Get-ValidatedOceanDeployment).Dashboard
+    $stateFile = Join-Path $dashboard 'data\monitor-state.json'
+    $previous = $null
+    if (Test-Path -LiteralPath $stateFile) {
+      try { $previous = Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json }
+      catch { $previous = $null }
+    }
+    $next = [ordered]@{}
+    if ($previous) {
+      foreach ($property in $previous.PSObject.Properties) { $next[$property.Name] = $property.Value }
+    }
+    $now = [DateTimeOffset]::UtcNow.ToString('o')
+    $events = @($next['recentEvents']) | Where-Object { $null -ne $_ }
+    $events += [pscustomobject]@{
+      atUtc = $now
+      level = 'info'
+      action = 'managed-stop'
+      message = 'Monitor worker stopped by the managed service controller'
+      reason = $Reason
+    }
+    $next['pid'] = $null
+    $next['running'] = $false
+    $next['status'] = 'stopped'
+    $next['error'] = $null
+    $next['stoppedAtUtc'] = $now
+    $next['updatedAtUtc'] = $now
+    $next['recentEvents'] = @($events | Select-Object -Last 20)
+    $directory = Split-Path -Parent $stateFile
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    $temporary = Join-Path $directory ".monitor-state.$PID.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+      [IO.File]::WriteAllText(
+        $temporary,
+        ($next | ConvertTo-Json -Depth 12),
+        [Text.UTF8Encoding]::new($false)
+      )
+      Move-Item -LiteralPath $temporary -Destination $stateFile -Force
+    } finally {
+      Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+  } catch {
+    Write-Warning "Could not publish the managed Ocean monitor stopped state: $($_.Exception.Message)"
+  }
+}
+
 function Get-ReplayBridgeProcesses {
   Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
     Where-Object {
@@ -303,7 +350,10 @@ function Stop-ComponentProcesses([string]$Name) {
       if ($pgPort) { Stop-PortProcess $pgPort 'postgres\.exe' 'embedded Postgres' }
     }
     'Website' { Stop-WebsiteGracefully }
-    'Monitor' { Stop-MonitorProcesses }
+    'Monitor' {
+      Stop-MonitorProcesses
+      Write-MonitorStoppedState
+    }
     'ReplayBridge' {
       Stop-ReplayBridgeProcesses
       Remove-Item -LiteralPath (Join-Path $Runtime 'replay-bridge-status.json') -Force -ErrorAction SilentlyContinue

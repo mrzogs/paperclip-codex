@@ -80,6 +80,14 @@ test('a degraded monitor retries unchanged databases and recovers',async()=>{
   const recovered=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:false,dispatch:async()=>({triggered:false})});
   assert.equal(recovered.status,'HEALTHY');assert.equal(recovered.skipped_unchanged,false);assert.equal(recovered.consecutive_failures,0);assert.equal(recovered.database_query_count,healthy.database_query_count+1);
 });
+test('source interrogation yields the event loop while an auxiliary read is pending',async()=>{
+  const f=fixture();let timerObserved=false;
+  const pending=scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async()=>({triggered:false}),
+    readSource:async()=>{await new Promise(resolve=>setTimeout(resolve,20));return [];}});
+  setTimeout(()=>{timerObserved=true;},0);
+  const state=await pending;
+  assert.equal(timerObserved,true);assert.equal(state.status,'HEALTHY');assert.equal(state.sources[0].observed_trade_count,0);
+});
 test('transport test reaches the normal issue and wakeup path without authorizing strategy action',async()=>{
   const f=fixture(),requests=[],server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{requests.push({url:req.url,method:req.method,body:body?JSON.parse(body):null});res.setHeader('content-type','application/json');if(req.method==='GET')res.end('[]');else if(req.url.includes('/issues'))res.end(JSON.stringify({id:'issue-test',identifier:'OCEA-E2E'}));else res.end(JSON.stringify({id:'wake-test'}));});});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));f.config.trigger.api_base_url='http://127.0.0.1:'+server.address().port+'/api';

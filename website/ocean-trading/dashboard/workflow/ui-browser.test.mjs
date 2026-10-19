@@ -55,6 +55,15 @@ try {
     const body=await page.locator('#content').innerText(); for(const text of ['Pass','Fail','Blocked','Not run','Review failed robustness result']) assert.ok(body.includes(text),text);
     await snapshot('case-blocked-desktop');
   });
+  await check('GOV-05: secondary approval-summary binding fault does not hide Strategies',async()=>{
+    await page.route('**/api/workflow/view/dashboard',route=>route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:{code:'OPERATIONAL_FACTUAL_BINDING_CHANGED'}})}));
+    await navigate('/improvement/strategies');
+    await waitText(page.locator('h1'),'Strategies'); await waitText(page.locator('tbody'),'VWAP Wave Pullback');
+    await waitText(page.locator('#notice'),"This page's records are available");
+    assert.ok((await page.locator('#notice').innerText()).includes('Protected actions remain blocked'));
+    await page.unroute('**/api/workflow/view/dashboard');
+    await page.locator('#refresh').click(); await page.locator('#notice').waitFor({state:'hidden'});
+  });
   await check('GOV-05: scoped approval confirmation and independent case state',async()=>{
     const before=await readCase(fixture.secondary.caseId);
     await navigate('/improvement/approvals/'+fixture.primary.approval.request_id);

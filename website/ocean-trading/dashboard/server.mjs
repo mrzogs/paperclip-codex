@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import { applyReplayClearsToSession, clearReplayAccount } from "./replay-session-scope.mjs";
+import { configuredProcessTimeoutMs } from "./process-timeouts.mjs";
 import { shouldWebsiteScheduleManifestRebuild } from "./manifest-refresh-policy.mjs";
 import { workflowFromEnvironment } from "./workflow/backend.mjs";
 import { installWebsiteControl } from "./workflow/process-control.mjs";
@@ -331,7 +332,10 @@ function rebuildManifestAsync() {
   // Builder processes share a lock, including monitor-triggered publications.
   return new Promise((resolve, reject) => {
     execFile(process.execPath, [path.join(__dirname, "build-manifest.mjs")], {
-      cwd: __dirname, windowsHide: true, timeout: 90000, maxBuffer: 4 * 1024 * 1024,
+      cwd: __dirname,
+      windowsHide: true,
+      timeout: configuredProcessTimeoutMs("OCEAN_MANIFEST_BUILD_TIMEOUT_MS", 300000),
+      maxBuffer: 4 * 1024 * 1024,
     }, (error, output) => {
       cachedManifestPayload = null;
       cachedManifestSignature = null;
@@ -460,7 +464,12 @@ function dashboardCalendarFreshnessInfo(mode = "paper") {
   const normalizedMode = mode === "live" ? "live" : "paper";
   const manifest = JSON.parse(buildManifest({ skipRebuildCheck: true, preferFile: true }));
   const tradingMode = manifest?.tradingModes?.[normalizedMode] || {};
-  const trades = Array.isArray(tradingMode.performanceClosedTrades) ? tradingMode.performanceClosedTrades : [];
+  const primaryTrades = Array.isArray(tradingMode.performanceClosedTrades) ? tradingMode.performanceClosedTrades : [];
+  const projectTrades = normalizedMode === "paper" && Array.isArray(tradingMode.projectTelemetry?.closedTrades)
+    ? tradingMode.projectTelemetry.closedTrades
+    : [];
+  const trades = [...new Map([...primaryTrades, ...projectTrades]
+    .map(trade => [trade?.sourceId || trade?.tradeId || JSON.stringify(trade), trade])).values()];
   const latestTrade = trades
     .map((trade) => ({
       account: trade?.account || null,
@@ -477,7 +486,10 @@ function dashboardCalendarFreshnessInfo(mode = "paper") {
   const sierraConfig = readSierraSymbolConfig();
   const telemetrySqliteFile = sierraConfig?.[normalizedMode]?.patradingSqliteFile
     || (normalizedMode === "live" ? PATRADING_LIVE_SQLITE_FILE : PATRADING_PAPER_SQLITE_FILE);
-  const latestTelemetryMtimeMs = sqliteInputFiles(telemetrySqliteFile)
+  const telemetryInputFiles = normalizedMode === "paper"
+    ? [...sqliteInputFiles(telemetrySqliteFile), ...sqliteInputFiles(VWAP_PROJECT_PAPER_SQLITE_FILE)]
+    : sqliteInputFiles(telemetrySqliteFile);
+  const latestTelemetryMtimeMs = telemetryInputFiles
     .reduce((latest, filePath) => Math.max(latest, fileMtimeMs(filePath)), 0);
   const latestSnapshot = Array.isArray(tradingMode.accountSnapshots)
     ? tradingMode.accountSnapshots[0] || null
@@ -2711,6 +2723,13 @@ function openTradesPayload() {
   const manifest = JSON.parse(buildManifest({ skipRebuildCheck: true, preferFile: true }));
   const live = manifest.tradingModes?.live || {};
   const paper = manifest.tradingModes?.paper || {};
+  const projectPaper = paper.projectTelemetry || {};
+  const mergeTrades = (...collections) => [...new Map(collections
+    .flatMap(collection => Array.isArray(collection) ? collection : [])
+    .map(trade => [trade?.sourceId || trade?.tradeId || JSON.stringify(trade), trade])).values()];
+  const paperOpenPositions = mergeTrades(paper.openPositions, projectPaper.openPositions);
+  const paperClosedTrades = mergeTrades(paper.closedTrades, projectPaper.closedTrades);
+  const paperPerformanceClosedTrades = mergeTrades(paper.performanceClosedTrades || paper.closedTrades, projectPaper.closedTrades);
   const today = new Date().toISOString().slice(0, 10);
   const isTodayTrade = (trade) => String(trade.exitAtUtc || trade.tradeDateUtc || "").slice(0, 10) === today;
   return {
@@ -2725,16 +2744,17 @@ function openTradesPayload() {
       dtcSnapshot: live.dtcSnapshot || null,
     },
     paper: {
-      openPositions: paper.openPositions || [],
-      closedTrades: paper.closedTrades || [],
-      performanceClosedTrades: paper.performanceClosedTrades || paper.closedTrades || [],
+      openPositions: paperOpenPositions,
+      closedTrades: paperClosedTrades,
+      performanceClosedTrades: paperPerformanceClosedTrades,
       trades: paper.trades || [],
       performanceTrades: paper.performanceTrades || paper.trades || [],
-      todayClosedTrades: (paper.performanceClosedTrades || []).filter(isTodayTrade),
+      todayClosedTrades: paperPerformanceClosedTrades.filter(isTodayTrade),
       accountMonitor: paper.accountMonitor || null,
       dtcSnapshot: paper.dtcSnapshot || null,
       fullLedgerFile: paper.fullLedgerFile || null,
       account: paper.account || "Sim1",
+      projectTelemetry: projectPaper,
     },
   };
 }
@@ -3817,11 +3837,16 @@ const server = http.createServer((req, res) => {
 
   if (req.url === "/api/open-trades") {
     try {
+      const payload = JSON.stringify(openTradesPayload());
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify(openTradesPayload()));
+      res.end(payload);
     } catch (error) {
-      res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ ok: false, error: String(error?.message || error) }));
+      if (!res.headersSent && !res.writableEnded) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+        res.end(JSON.stringify({ ok: false, error: String(error?.message || error) }));
+      } else if (!res.writableEnded) {
+        res.end();
+      }
     }
     return;
   }

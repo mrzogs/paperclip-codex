@@ -3,6 +3,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { configuredProcessTimeoutMs } from "./process-timeouts.mjs";
 import {
   loadVwapPaperSim1EmailConfig,
   scanVwapPaperSim1EmailEvents,
@@ -859,6 +860,18 @@ function sqliteSignatures(filePath, mode) {
   return signatures;
 }
 
+function vwapProjectPaperSqliteFiles(configFile = VWAP_IMPROVEMENT_CONFIG_FILE) {
+  try {
+    const config = loadVwapContinuousImprovementConfig(configFile);
+    return [...new Set((config.sources || [])
+      .filter(source => String(source.environment || "").toUpperCase() === "PAPER")
+      .map(source => String(source.database_path || "").trim())
+      .filter(Boolean))];
+  } catch {
+    return [];
+  }
+}
+
 function signatureForLogs() {
   const config = readSierraInstances({ configFile: SIERRA_SYMBOL_CONFIG_FILE });
   const liveLogDir = tradeActivityLogDir(config.live);
@@ -869,11 +882,15 @@ function signatureForLogs() {
   const replaySqliteFile = config.replay?.patradingSqliteFile || PATRADING_REPLAY_SQLITE_FILE;
   const liveSqliteSignatures = sqliteSignatures(liveSqliteFile, "live_sqlite");
   const paperSqliteSignatures = sqliteSignatures(paperSqliteFile, "paper_sqlite");
+  const projectPaperSqliteFiles = vwapProjectPaperSqliteFiles();
+  const projectPaperSqliteSignatures = projectPaperSqliteFiles
+    .flatMap(filePath => sqliteSignatures(filePath, "project_paper_sqlite"));
   const replaySqliteSignatures = sqliteSignatures(replaySqliteFile, "replay_sqlite");
   const logs = [
     fileSignature(path.join(__dirname, "data", "replay-monitor-clears.json"), "replay_clear"),
     ...liveSqliteSignatures,
     ...paperSqliteSignatures,
+    ...projectPaperSqliteSignatures,
     ...replaySqliteSignatures,
     ...listLogs(replayLogDir, (_entryPath, name) => isReplayLog(name)).map((item) => ({ ...item, mode: "replay" })),
   ].filter(Boolean);
@@ -883,6 +900,7 @@ function signatureForLogs() {
     liveSqliteFile,
     paperLogDir,
     paperSqliteFile,
+    projectPaperSqliteFiles,
     replayLogDir,
     replaySqliteFile,
     paperSymbol: config.paper.displaySymbol || config.paper.symbol || null,
@@ -925,7 +943,7 @@ async function rebuild(reason) {
     cwd: __dirname,
     stdio: "ignore",
     env: process.env,
-    timeout: 90000,
+    timeout: configuredProcessTimeoutMs("OCEAN_MANIFEST_BUILD_TIMEOUT_MS", 300000),
     windowsHide: true,
   });
   await notifyNewClosedTrades(reason);
@@ -1005,6 +1023,7 @@ export {
   notifyVwapPaperSim1Events,
   monitorVwapContinuousImprovement,
   queueClosedTradeEmailViaConnector,
+  vwapProjectPaperSqliteFiles,
 };
 
 function startMonitor() {

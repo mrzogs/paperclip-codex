@@ -7,8 +7,10 @@ import {
   selectReplayTradeLogFallbackAccounts,
   visibleReplayTrades,
 } from "./replay-session-scope.mjs";
-import { withManifestBuildLock } from "./manifest-build-lock.mjs";
+import { manifestBuildLockFile, withManifestBuildLock } from "./manifest-build-lock.mjs";
+import { configuredProcessTimeoutMs } from "./process-timeouts.mjs";
 import { readProjectPaperTelemetry } from "./project-paper-telemetry.mjs";
+import { publishSqliteWithRetry } from "./sqlite-publication.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const REPLAY_CONNECTOR_RELATIVE_PATH = path.join("connectors", "sierra-chart", "src", "replay-orchestration.mjs");
@@ -2118,6 +2120,7 @@ function parsePaperTradingPlan() {
       cleanStart ? PAPER_TRADING_CLEAN_START_FILE : null,
       ...(imported.sourceFiles || []),
       projectTelemetry.available ? VWAP_PROJECT_PAPER_SQLITE_FILE : null,
+      projectTelemetry.available && fs.existsSync(`${VWAP_PROJECT_PAPER_SQLITE_FILE}-wal`) ? `${VWAP_PROJECT_PAPER_SQLITE_FILE}-wal` : null,
     ].filter((file) => file && fs.existsSync(file)),
     account: sierraConfig.paper.account || "Sim1",
     instanceRoot: sierraConfig.paper.root || PAPER_SIERRA_ROOT,
@@ -2131,7 +2134,7 @@ function parsePaperTradingPlan() {
     status: statusText.includes("blocked pending final chart-level load confirmation")
       ? "blocked_pending_chart_level_load_confirmation"
       : "configured",
-    summary: "Dedicated paper dashboard for MNQ Sierra Chart simulation work. Paper calendar and ledger rows are read from the paper telemetry SQLite ledger only.",
+    summary: "Dedicated paper dashboard for MNQ Sierra Chart simulation work. Approved-bundle rows and the observed CICD VWAP Sim1 feed are displayed with separate source labels.",
     dataHygiene: hygiene,
     strategies,
     trades: imported.recentTrades || [],
@@ -2158,7 +2161,7 @@ function parsePaperTradingPlan() {
       sqliteFile: PATRADING_PAPER_SQLITE_FILE,
       cleanStart: "Clean-start filtering is not applied to the paper dashboard because the paper telemetry SQLite ledger is the source of truth.",
       attribution: "Strategy, account, side, quantity, prices, timestamps, status, and P/L come directly from the PATrading trades table.",
-      separation: "Paper dashboard calendar and right-hand ledger do not fall back to Sierra TradeActivityLogs.",
+      separation: "Approved-bundle totals remain sourced from PATrading telemetry. The CICD VWAP Sim1 telemetry feed is displayed separately and does not change bundle approval status.",
     },
     handoffSnippet: handoffText.split("\n").slice(0, 34).join("\n").trim(),
     statusSnippet: statusText.split("\n").slice(0, 42).join("\n").trim(),
@@ -6333,10 +6336,21 @@ function buildReplayMonitor() {
   };
 }
 
+function profileManifestStage(name, operation) {
+  if (process.env.OCEAN_MANIFEST_PROFILE !== "1") return operation();
+  const startedAt = performance.now();
+  try {
+    return operation();
+  } finally {
+    const elapsedMs = Math.round(performance.now() - startedAt);
+    console.error(`[manifest-profile] ${name}: ${elapsedMs}ms`);
+  }
+}
+
 function buildDashboardManifest() {
-  const ledger = parseLedger();
-  const daily = parseDailyReport();
-  const researchRuns = pickLatestResearchRuns();
+  const ledger = profileManifestStage("parse-ledger", () => parseLedger());
+  const daily = profileManifestStage("parse-daily-report", () => parseDailyReport());
+  const researchRuns = profileManifestStage("research-runs", () => pickLatestResearchRuns());
   const strategyCatalog = [
     ...parseSierraStudyCatalog(),
     ...parseCachedBacktestStrategyCatalog(),
@@ -6451,8 +6465,8 @@ function buildDashboardManifest() {
   };
   manifest.dataSources = buildSourceAudit(manifest, paperclipNative);
 
-  writeJsonAtomic(OUTPUT_FILE, manifest);
-  persistManifestToSqlite();
+  profileManifestStage("write-manifest", () => writeJsonAtomic(OUTPUT_FILE, manifest));
+  profileManifestStage("persist-sqlite", () => persistManifestToSqlite());
   return manifest;
 }
 
@@ -6466,15 +6480,21 @@ function persistManifestToSqlite() {
     return;
   }
   fs.mkdirSync(path.dirname(SQLITE_FILE), { recursive: true });
-  execFileSync(PYTHON_EXECUTABLE, [SQLITE_PERSIST_SCRIPT, OUTPUT_FILE, SQLITE_FILE], {
+  const totalTimeoutMs = configuredProcessTimeoutMs("OCEAN_SQLITE_PERSIST_PROCESS_TIMEOUT_MS", 180000);
+  publishSqliteWithRetry({
+    executable: PYTHON_EXECUTABLE,
+    args: [SQLITE_PERSIST_SCRIPT, OUTPUT_FILE, SQLITE_FILE],
     cwd: ROOT,
-    stdio: "inherit",
-    timeout: 30000,
-    windowsHide: true,
+    totalTimeoutMs,
+    attemptTimeoutMs: configuredProcessTimeoutMs(
+      "OCEAN_SQLITE_PERSIST_ATTEMPT_TIMEOUT_MS",
+      Math.min(45000, totalTimeoutMs),
+      { maximumMs: totalTimeoutMs },
+    ),
   });
 }
 
-const manifest = await withManifestBuildLock(path.join(ROOT, "dashboard", "data", "manifest-build.lock"), buildDashboardManifest);
+const manifest = await withManifestBuildLock(manifestBuildLockFile(SQLITE_FILE), buildDashboardManifest);
 console.log(`Generated dashboard manifest -> ${OUTPUT_FILE}`);
 console.log(`Ledger file: ${manifest.ledger.sourceFiles[0] || "missing"}`);
 console.log(`Daily file: ${manifest.dailyReport?.path || "missing"}`);

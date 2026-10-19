@@ -1,6 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 
+export function manifestBuildLockFile(databaseFile, override = process.env.OCEAN_MANIFEST_BUILD_LOCK_FILE) {
+  const configured = String(override || "").trim();
+  return configured ? path.resolve(configured) : `${path.resolve(databaseFile)}.manifest-build.lock`;
+}
+
 export async function withManifestBuildLock(lockFile, build, timeoutMs = 60000) {
   fs.mkdirSync(path.dirname(lockFile), { recursive: true });
   const deadline = Date.now() + timeoutMs;

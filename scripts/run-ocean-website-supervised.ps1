@@ -493,6 +493,9 @@ function Initialize-WebsiteEnvironment {
   $env:OCEAN_OPERATIONAL_LEARNING_COMPLETION_ROOT = Join-Path $WorkflowRoot 'evidence'
   $env:OCEAN_OPERATIONAL_LEARNING_PHYSICAL_BINDING_FILE = $PhysicalBindingFile
   $env:OCEAN_WEBSITE_CONTROL_ROOT = $Runtime
+  $env:OCEAN_MANIFEST_PROFILE = '1'
+  $env:OCEAN_SQLITE_PROFILE = '1'
+  $env:OCEAN_SQLITE_PUBLICATION_TRACE_FILE = Join-Path $Runtime 'sqlite-publication.jsonl'
   if ($Deployment) {
     $env:OCEAN_DEPLOYMENT_RELEASE_ID = $Deployment.ReleaseId
     $env:OCEAN_DEPLOYMENT_SOURCE_COMMIT = $Deployment.SourceCommit

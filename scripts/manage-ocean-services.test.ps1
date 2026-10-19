@@ -35,6 +35,10 @@ Assert-Test ($manager.Contains("Join-Path `$Root 'scripts\run-ocean-monitor-supe
   'MONITOR_RESTART_CANNOT_FIND_PRIOR_SUPERVISORS'
 Assert-Test ($manager.Contains('function Get-MonitorOwnedProcessTree')) 'MONITOR_RESTART_DOES_NOT_CLEAN_CHILD_PROCESSES'
 Assert-Test ($manager.Contains('Stopped Ocean monitor generation PID')) 'MONITOR_RESTART_STILL_STOPS_ONLY_CURRENT_MONITOR'
+Assert-Test ($manager.Contains('function Write-MonitorStoppedState')) 'MANAGED_MONITOR_STOP_DOES_NOT_PUBLISH_STOPPED_STATE'
+Assert-Test ($manager.Contains("`$next['running'] = `$false")) 'MANAGED_MONITOR_STOP_LEAVES_RUNNING_STATE_TRUE'
+Assert-Test ($manager.Contains("`$next['pid'] = `$null")) 'MANAGED_MONITOR_STOP_LEAVES_STALE_PID'
+Assert-Test ($manager.Contains('Write-MonitorStoppedState')) 'MONITOR_STOP_DOES_NOT_INVOKE_STOPPED_STATE_PUBLICATION'
 $releaseMonitorPattern = [regex]::Escape('D:\OceanTradingData\website\deployments\') +
   'ocean-[^\\"]+\\(?:paperclip-source\\)?website\\ocean-trading\\dashboard\\monitor\.mjs(?:["\s]|$)'
 Assert-Test ('node D:\OceanTradingData\website\deployments\ocean-r8\paperclip-source\website\ocean-trading\dashboard\monitor.mjs' -match $releaseMonitorPattern) `

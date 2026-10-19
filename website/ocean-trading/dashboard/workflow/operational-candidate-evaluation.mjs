@@ -84,9 +84,10 @@ export class OperationalCandidateEvaluator {
     return this.db.prepare('SELECT * FROM ow_candidate_evaluation_jobs WHERE id=?').get(id);
   }
   reconcile(){
-    for(const event of this.db.prepare(`SELECT e.* FROM ow_events e JOIN ow_cases c ON c.id=e.entity_id
-      WHERE e.action=? AND e.id=(SELECT MAX(latest.id) FROM ow_events latest WHERE latest.entity_id=e.entity_id AND latest.action=e.action)
-      AND c.stage='CANDIDATE_EVALUATION' AND c.work_status NOT IN ('PAUSED','CANCELLED','COMPLETED') ORDER BY e.id`).all(completionAction)){
+    for(const event of this.db.prepare(`SELECT e.* FROM ow_events e
+      JOIN (SELECT entity_id,MAX(id) AS id FROM ow_events WHERE action=? GROUP BY entity_id) latest ON latest.id=e.id
+      JOIN ow_cases c ON c.id=e.entity_id
+      WHERE c.stage='CANDIDATE_EVALUATION' AND c.work_status NOT IN ('PAUSED','CANCELLED','COMPLETED') ORDER BY e.id`).all(completionAction)){
       this.b.store.transaction(()=>{
         const payload=JSON.parse(event.payload_json).payload;
         const row=this.b.one('ow_cases',event.entity_id);

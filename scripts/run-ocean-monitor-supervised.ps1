@@ -5,10 +5,12 @@ $ErrorActionPreference = 'Stop'
 $currentScripts = [IO.Path]::GetFullPath($PSScriptRoot)
 $operationalScripts = [IO.Path]::GetFullPath('D:\Paperclip-codex\scripts')
 $sourceRoot = Split-Path -Parent $PSScriptRoot
+$Deployment = $null
 if ([StringComparer]::OrdinalIgnoreCase.Equals($currentScripts,$operationalScripts) -or
     -not (Test-Path -LiteralPath (Join-Path $sourceRoot '.git'))) {
   . (Join-Path $PSScriptRoot 'ocean-deployment.ps1')
-  $Dashboard = (Get-OceanDeployment).Dashboard
+  $Deployment = Get-OceanDeployment
+  $Dashboard = $Deployment.Dashboard
 } else {
   $Dashboard = Join-Path $sourceRoot 'website\ocean-trading\dashboard'
 }
@@ -38,6 +40,15 @@ $existing = @(Get-MonitorProcesses)
 if ($existing.Count) {
   Write-Output "Ocean monitor already running with PID(s): $($existing.ProcessId -join ', ')."
   exit 0
+}
+
+$env:OCEAN_MANIFEST_PROFILE = '1'
+$env:OCEAN_SQLITE_PROFILE = '1'
+$env:OCEAN_SQLITE_PUBLICATION_TRACE_FILE = 'D:\OceanTradingData\website\ocean-runtime\sqlite-publication.jsonl'
+if ($Deployment) {
+  $env:OCEAN_DEPLOYMENT_RELEASE_ID = $Deployment.ReleaseId
+  $env:OCEAN_DEPLOYMENT_SOURCE_COMMIT = $Deployment.SourceCommit
+  $env:OCEAN_DEPLOYMENT_MANIFEST_SHA256 = $Deployment.ManifestSha256
 }
 
 $stamp = Get-Date -Format 'yyyyMMddTHHmmss'

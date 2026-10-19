@@ -10,7 +10,7 @@ import {
   applyReplayClearsToSession,
   visibleReplayTrades,
 } from "./replay-session-scope.mjs";
-import { withManifestBuildLock } from "./manifest-build-lock.mjs";
+import { manifestBuildLockFile, withManifestBuildLock } from "./manifest-build-lock.mjs";
 
 const row = (id, day, account = "Sim1", overrides = {}) => ({
   telemetryTradeId: id, account, instanceId: "replay", symbol: "MNQU26",
@@ -159,4 +159,13 @@ test("concurrent manifest publications serialize and release their lock after fa
     await assert.rejects(withManifestBuildLock(lock, () => { throw new Error("test failure"); }));
     assert.equal(fs.existsSync(lock), false);
   } finally { fs.rmSync(directory, { recursive: true }); }
+});
+
+test("manifest build lock is stable across release directories sharing one database", () => {
+  const database = path.join(os.tmpdir(), "ocean-shared.sqlite");
+  assert.equal(manifestBuildLockFile(database), `${path.resolve(database)}.manifest-build.lock`);
+  assert.equal(
+    manifestBuildLockFile(database, path.join(os.tmpdir(), "operator-selected.lock")),
+    path.resolve(os.tmpdir(), "operator-selected.lock"),
+  );
 });
