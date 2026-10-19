@@ -3837,11 +3837,16 @@ const server = http.createServer((req, res) => {
 
   if (req.url === "/api/open-trades") {
     try {
+      const payload = JSON.stringify(openTradesPayload());
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify(openTradesPayload()));
+      res.end(payload);
     } catch (error) {
-      res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ ok: false, error: String(error?.message || error) }));
+      if (!res.headersSent && !res.writableEnded) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+        res.end(JSON.stringify({ ok: false, error: String(error?.message || error) }));
+      } else if (!res.writableEnded) {
+        res.end();
+      }
     }
     return;
   }
