@@ -86,6 +86,36 @@ test('projects the autonomous improvement program only when every safety boundar
   } finally { fs.rmSync(root, { recursive:true, force:true }); }
 });
 
+test('projects explicit and legacy current-action Paperclip approval references without treating agent UUIDs as approvals', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ocean-autonomous-approvals-'));
+  const programPath = path.join(root, 'autonomous-continuous-improvement-program.json');
+  const approvalId = 'd6bb0adb-2704-4e44-8aa8-011ee2b9baee';
+  const agentId = '75618a1a-a7ba-44bd-b391-48d58617433c';
+  const value = {
+    schema_version:'cicd-vwap-autonomous-continuous-improvement-program/v1', strategy_id:ONBOARDING_STRATEGY_ID,
+    program_id:'autonomous-test', status:'ACTIVE_IMPLEMENTATION', priority:'CRITICAL',
+    authorization:{ live_real:'PROHIBITED', real_order_routing:'PROHIBITED' },
+    fixed_boundaries:{ live_real_enabled:false, automatic_approval_enabled:false, production_version:null },
+    pipeline:[], acceptance_gates:{ total:0, complete:0 }, known_blockers:[],
+    required_human_approvals:[{ approval_id:approvalId, title:'Approve the dedicated coordinator', purpose:'Coordinator hiring gate' }],
+    next_action:`Obtain human approval for agent ${agentId} under approval ${approvalId}.`,
+  };
+  try {
+    fs.writeFileSync(programPath, JSON.stringify(value));
+    const result = readAutonomousImprovementProgram(root);
+    assert.deepEqual(result.required_human_approvals, [{
+      approval_id:approvalId, purpose:'Coordinator hiring gate', title:'Approve the dedicated coordinator', source:'program',
+    }]);
+
+    delete value.required_human_approvals;
+    fs.writeFileSync(programPath, JSON.stringify(value));
+    const legacy = readAutonomousImprovementProgram(root);
+    assert.equal(legacy.required_human_approvals.length, 1);
+    assert.equal(legacy.required_human_approvals[0].approval_id, approvalId);
+    assert.equal(legacy.required_human_approvals.some(item => item.approval_id === agentId), false);
+  } finally { fs.rmSync(root, { recursive:true, force:true }); }
+});
+
 test('prefers the deployed patrading controller status over legacy connector status', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ocean-replay-status-'));
   try {

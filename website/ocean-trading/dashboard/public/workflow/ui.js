@@ -19,7 +19,7 @@ const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(val
 const newId = prefix => `test-ui-${prefix}-${crypto.randomUUID()}`;
 const operationalId = prefix => `${prefix}-${crypto.randomUUID()}`;
 const icon = name => `<i data-lucide='${name}'></i>`;
-const badge = value => `<span class='badge ${/FAIL|BLOCK|REJECT|MISMATCH|REVOK|EXPIRED/.test(value) ? 'bad' : /PENDING|REVIEW|PAUSED|NOT_RUN|UNKNOWN|STALE/.test(value) ? 'warn' : /PASS|APPROVED|COMPLETE|ACKNOWLEDGED/.test(value) ? 'good' : 'neutral'}'>${esc(human(value))}</span>`;
+const badge = value => `<span class='badge ${/FAIL|BLOCK|REJECT|MISMATCH|REVOK|EXPIRED/.test(value) ? 'bad' : /PENDING|REVIEW|PAUSED|NOT_RUN|UNKNOWN|STALE|UNAVAILABLE/.test(value) ? 'warn' : /PASS|APPROVED|COMPLETE|ACKNOWLEDGED/.test(value) ? 'good' : 'neutral'}'>${esc(human(value))}</span>`;
 const link = (collection, key, label = key) => `<a data-route href='/improvement/${collection}/${encodeURIComponent(key)}'>${esc(label)}</a>`;
 const fullReportLink = key => `<a data-route href='/improvement/artifacts/${encodeURIComponent(key)}#full-research-report'>View full Research report</a>`;
 const empty = message => `<p class='empty'>${esc(message)}</p>`;
@@ -257,6 +257,11 @@ function strategyOnboardingPage(data) {
   const improvement = delivery.autonomous_improvement || { state:'NOT_CONFIGURED', status:'UNKNOWN', pipeline:[], blockers:[], next_action:null };
   const eventMonitor = delivery.event_monitor || { status:'NOT_STARTED', disposition:'UNKNOWN', sources:[], observed_trade_count:0, eligible_trade_count:0, new_trade_count:0 };
   const improvementActive = improvement.state === 'AVAILABLE';
+  const humanApprovals = Array.isArray(improvement.required_human_approvals) ? improvement.required_human_approvals : [];
+  const pendingHumanApprovals = humanApprovals.filter(item => ['PENDING','REVISION_REQUESTED'].includes(item.status));
+  const unavailableHumanApprovals = humanApprovals.filter(item => !item.authoritative);
+  const deniedHumanApprovals = humanApprovals.filter(item => ['REJECTED','CANCELLED'].includes(item.status));
+  const allHumanApprovalsApproved = humanApprovals.length > 0 && humanApprovals.every(item => item.authoritative && item.status === 'APPROVED');
   const campaign = delivery.replay_campaign || { state:'NOT_CONFIGURED', status:'NOT_STARTED', completed_windows:[], failed_windows:[], next_action:'Ocean is preparing the sealed Replay campaign.' };
   const registration = onboarding.registration;
   const runtime = onboarding.replay_runtime;
@@ -346,15 +351,37 @@ function strategyOnboardingPage(data) {
     <li class='${paperRuntimeActive || paperRuns.length ? 'current' : 'waiting'}'><span class='journey-marker'>3</span><div class='journey-copy'><div><h3>3. Paper forward testing</h3>${badge(paperState)}</div><p>After Replay evidence is reviewed, run the strategy in Paper. Completed Paper periods add trade and no-trade evidence continuously.</p><p class='journey-evidence'>${paperCompleted.length} completed run${paperCompleted.length === 1 ? '' : 's'} / ${paperTrades} trade${paperTrades === 1 ? '' : 's'} captured</p></div></li>
     <li class='${liveRuns.length ? 'current' : 'waiting'}'><span class='journey-marker'>4</span><div class='journey-copy'><div><h3>4. Live trading</h3>${badge(liveState)}</div><p>Live is a separate, explicit human decision after Replay and Paper evidence has been reviewed. Ocean never promotes a strategy automatically.</p></div></li>
   </ol>`;
-  const nextActionTitle = improvementActive ? 'Complete the autonomous improvement loop' : pendingAcceptanceGate?.title || governedAction?.title || (paperSafeCutoverPending ? 'Wait for the safe Paper cutover' : paperAttributionRequired ? 'Complete Paper trade attribution' : paperReconciliationRequired ? 'Reconcile Paper telemetry' : paperRuntimeActive ? 'Observe the Paper forward run' : campaign.status === 'COMPLETED' ? 'Evaluate the Replay-to-Paper gate' : campaign.status === 'FAILED' || campaign.state === 'ATTENTION_REQUIRED' ? 'Repair the bounded Replay failure' : campaign.status === 'RUNNING' ? `Replay ${campaign.current_window_id || 'window'} is running` : 'Continue the sealed Replay campaign');
+  const nextActionTitle = pendingHumanApprovals.length ? 'Review the required human approval'
+    : unavailableHumanApprovals.length ? 'Verify the required human approval'
+    : deniedHumanApprovals.length ? 'Resolve the required human approval'
+    : allHumanApprovalsApproved ? 'Human approval recorded'
+    : improvementActive ? 'Complete the autonomous improvement loop' : pendingAcceptanceGate?.title || governedAction?.title || (paperSafeCutoverPending ? 'Wait for the safe Paper cutover' : paperAttributionRequired ? 'Complete Paper trade attribution' : paperReconciliationRequired ? 'Reconcile Paper telemetry' : paperRuntimeActive ? 'Observe the Paper forward run' : campaign.status === 'COMPLETED' ? 'Evaluate the Replay-to-Paper gate' : campaign.status === 'FAILED' || campaign.state === 'ATTENTION_REQUIRED' ? 'Repair the bounded Replay failure' : campaign.status === 'RUNNING' ? `Replay ${campaign.current_window_id || 'window'} is running` : 'Continue the sealed Replay campaign');
   const nextActionHref = paperRuntimeActive ? '/paper-dashboard.html' : runtime.monitor.url;
   const nextActionLabel = paperRuntimeActive ? 'Open Paper Dashboard' : 'Open Replay Monitor';
-  const nextActionText = improvementActive ? improvement.next_action : pendingAcceptanceGate?.resolution_action || governedAction?.action || paperWorkstream?.next_action || campaign.next_action;
+  const programNextActionText = improvementActive ? improvement.next_action : pendingAcceptanceGate?.resolution_action || governedAction?.action || paperWorkstream?.next_action || campaign.next_action;
+  const nextActionText = pendingHumanApprovals.length ? `${pendingHumanApprovals.length} required Paperclip approval${pendingHumanApprovals.length === 1 ? ' is' : 's are'} awaiting a human decision. Ocean remains fail-closed.`
+    : unavailableHumanApprovals.length ? 'Ocean could not verify the current Paperclip approval status. No approval is inferred and protected actions remain blocked.'
+    : deniedHumanApprovals.length ? 'A required Paperclip approval was not granted. Review the linked decision before changing the program.'
+    : allHumanApprovalsApproved ? 'Paperclip confirms every approval referenced by the current program action is approved. Continue only through the remaining exact-binding and evidence gates; this does not approve a strategy change, Paper, Live, or promotion.'
+    : programNextActionText;
   const nextActionOwner = improvementActive ? 'Ocean continuous-improvement coordinator' : pendingAcceptanceGate?.owner || governedAction?.owner || null;
   const nextActionControls = improvementActive || pendingAcceptanceGate || governedAction ? '' : `<div class='actions'><a class='button primary' ${paperRuntimeActive ? '' : 'data-replay-monitor'} href='${esc(nextActionHref)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}${nextActionLabel}</a></div>`;
   const nextAction = onboardingComplete
     ? `<div class='strategy-next-action'><div><span>Current action</span><h3>${esc(nextActionTitle)}</h3><p>${esc(nextActionText)}</p>${nextActionOwner ? `<small>Owner: ${esc(nextActionOwner)}</small>` : ''}</div>${nextActionControls}</div>`
     : `<div class='strategy-next-action'><div><span>Current action</span><h3>Finish the simple setup</h3><p>${registration.can_register ? 'The setup is confirmed. Let Ocean finish the Replay preparation.' : setupConfirmed ? 'Ocean is recording the confirmed setup. Refresh when synchronization is complete.' : 'Review the detected strategy, account, contract, and Replay instance once.'}</p></div><div class='actions'>${setupAction}</div></div>`;
+  const humanApprovalBody = humanApprovals.map(item => {
+    const linkLabel = item.action_required ? 'Review approval in Paperclip' : 'Open approval record';
+    const detail = item.authoritative
+      ? item.status === 'APPROVED' ? `Approved${item.decided_at_utc ? ` ${date(item.decided_at_utc)}` : ''}. This resolves only this named governance gate.`
+        : item.status === 'PENDING' ? 'Awaiting a human decision in Paperclip. Ocean remains fail-closed.'
+          : item.status === 'REVISION_REQUESTED' ? 'Paperclip requires a revision before this gate can be reconsidered.'
+            : `Paperclip records this approval as ${human(item.status)}; no authority is granted.`
+      : 'Current Paperclip status is unavailable. No approval is inferred.';
+    return `<article class='human-approval-card' data-approval-id='${esc(item.approval_id)}'><div><span>Human approval</span><h3>${esc(item.title || item.purpose)}</h3><p>${esc(detail)}</p><small>${esc(item.purpose)}</small></div><div class='human-approval-state'>${badge(item.status)}<a class='button ${item.action_required ? 'primary' : ''}' href='${esc(item.url)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}${esc(linkLabel)}</a></div></article>`;
+  }).join('');
+  const humanApprovalSection = humanApprovals.length
+    ? section('Required human approvals', humanApprovalBody + `<p class='readonly-note'>${icon('shield-check')}Status is read live from Paperclip. Ocean cannot approve, reject, or change an approval from this page.</p>`, `<span class='muted'>${humanApprovals.length} referenced by the current program</span>`)
+    : '';
   const completionBanner = onboardingComplete
     ? `<div class='onboarding-complete-banner'>${icon('check')}<div><h2>Onboarding complete</h2><p>${improvementActive ? 'The non-live strategy is onboarded. Ocean is implementing and proving the continuous learning loop; candidate promotion still requires human approval and Live remains disabled.' : pendingAcceptanceGate ? 'Operational Replay discovery is complete. Paper remains Sim1 non-promotional while the remaining acceptance gate is resolved; Live remains a separate human-only decision.' : governedAction ? 'The CI/CD system is operational and the frozen data ladder is sealed. The next strategy change remains a governed human decision; Paper stays Sim1 non-promotional and Live stays disabled.' : paperRuntimeActive ? 'This strategy has progressed to Paper forward testing; Live remains a separate human-only decision.' : 'This strategy is ready to build history in Replay. Sierra running, stopped, or stale does not change this status.'}</p></div></div>`
     : '';
@@ -393,7 +420,8 @@ function strategyOnboardingPage(data) {
       [paperRuntimeActive ? 'Paper contract' : 'Replay contract', esc((paperRuntimeActive ? program.current_runtime_contracts?.paper : program.current_runtime_contracts?.replay) || instance.symbol)],
     ].map(([label,value]) => `<div><span>${esc(label)}</span><strong>${value}</strong></div>`).join('')}</div>`
     + nextAction
-    + section('CI/CD continuous run', campaignBody, `<span class='muted'>${esc(nextActionText)}</span>`)
+    + humanApprovalSection
+    + section('CI/CD continuous run', campaignBody, `<span class='muted'>${esc(programNextActionText)}</span>`)
     + section('Strategy journey', journey, `<span class='muted'>${noTradeRuns} completed zero-trade period${noTradeRuns === 1 ? '' : 's'} recorded</span>`)
     + (!onboardingComplete ? section('Setup progress', `<div class='progress-summary'><strong>${progress.complete} of ${progress.total} complete</strong><span>${Math.round(progress.complete / progress.total * 100)}%</span></div><div class='progress-bar' aria-label='${progress.complete} of ${progress.total} onboarding steps complete'><span style='width:${Math.round(progress.complete / progress.total * 100)}%'></span></div>${checklist}${registration.receipt && registration.state === 'REGISTERED' ? '' : registrationBody}`) : '')
     + `<details class='onboarding-system-details'><summary>Replay and system details</summary>${section('Replay runtime and advanced controls', activationBody)}${section('Obsidian Brain record', brainRows.length ? table(['Milestone','Receipt','State','Attempts','Record','Action'], brainRows) : empty('Created after setup confirmation.'))}${section('Source checks', facts([['Profile',badge(onboarding.profile.validity)],['Instance',badge(instance.status)],['Source',badge(source.status)],['Last verified',esc(date(source.last_verified_at_utc))]]) + sourceStatus)}</details>`;
