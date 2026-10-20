@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import {timedSync} from '../request-timing.mjs';
 import { API_VERSION, RELEASE, MAX_BODY_BYTES, WorkflowError, canonical, digest, exactKeys, future, id, noSecrets, objectHash, requireThat, sealedHash, strategyId } from "./common.mjs";
 import { OceanAuth } from "./auth.mjs";
 import { WorkflowStore } from "./store.mjs";
@@ -891,13 +892,13 @@ export class WorkflowBackend {
   }
   readRun(actor, runId, options = {}) {
     const run = this.one("ow_runs", runId); this.authorize(actor, "read", run.strategy_id, run.instance_id);
-    const manager=this.runs.managed(run.id) ? this.runs.read(actor,run.id,options) : null;
+    const manager=timedSync('workflow.run-manager-read',()=>this.runs.managed(run.id) ? this.runs.read(actor,run.id,options) : null);
     const receiptCounts={
-      workflow:this.db.prepare('SELECT COUNT(*) n FROM ow_operational_receipts WHERE run_id=?').get(run.id).n,
-      trades:this.db.prepare('SELECT COUNT(*) n FROM ow_operational_trade_events WHERE run_id=?').get(run.id).n,
-      analysis_complete:this.db.prepare(`SELECT COUNT(*) n FROM ow_operational_brain_callbacks c JOIN ow_operational_brain_results r ON r.id=c.result_id WHERE r.run_id=? AND json_extract(c.payload_json,'$.status')='COMPLETED'`).get(run.id).n,
+      workflow:timedSync('workflow.run-receipt-count',()=>this.db.prepare('SELECT COUNT(*) n FROM ow_operational_receipts WHERE run_id=?').get(run.id).n),
+      trades:timedSync('workflow.run-trade-count',()=>this.db.prepare('SELECT COUNT(*) n FROM ow_operational_trade_events WHERE run_id=?').get(run.id).n),
+      analysis_complete:timedSync('workflow.run-analysis-count',()=>this.db.prepare(`SELECT COUNT(*) n FROM ow_operational_brain_callbacks c JOIN ow_operational_brain_results r ON r.id=c.result_id WHERE r.run_id=? AND json_extract(c.payload_json,'$.status')='COMPLETED'`).get(run.id).n),
     };
-    return { context: JSON.parse(run.context_json), state: run.state, revision: run.revision, namespace: manager?.namespace || "TEST", reservation_is_actual_sierra_start: false, manager, receipt_counts:receiptCounts, events: this.db.prepare("SELECT payload_json FROM ow_events WHERE entity_id=? ORDER BY id DESC LIMIT 200").all(run.id).map((row) => JSON.parse(row.payload_json)) };
+    return { context: JSON.parse(run.context_json), state: run.state, revision: run.revision, namespace: manager?.namespace || "TEST", reservation_is_actual_sierra_start: false, manager, receipt_counts:receiptCounts, events: timedSync('workflow.run-events',()=>this.db.prepare("SELECT payload_json FROM ow_events WHERE entity_id=? ORDER BY id DESC LIMIT 200").all(run.id).map((row) => JSON.parse(row.payload_json))) };
   }
   readStrategyEntity(actor, table, entityId) {
     const row = this.one(table, entityId);
