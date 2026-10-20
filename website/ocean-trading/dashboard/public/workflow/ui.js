@@ -275,6 +275,10 @@ function strategyOnboardingPage(data) {
   const preflightOutcome = approvalDispatch.preflight_outcome || null;
   const preflightBlocked = approvalDispatch.status === 'PREFLIGHT_BLOCKED_PHYSICAL_BINDING'
     && preflightOutcome?.status === 'BLOCKED_PHYSICAL_BINDING_MISMATCH';
+  const stagingAuthority = approvalDispatch.staging_authority || null;
+  const stagingApprovalPending = stagingAuthority?.approval_status === 'PENDING' || stagingAuthority?.approval_status === 'REVISION_REQUESTED';
+  const stagingApprovalApproved = stagingAuthority?.approval_status === 'APPROVED';
+  const stagingApprovalNotGranted = stagingAuthority && ['REJECTED','CANCELLED'].includes(stagingAuthority.approval_status);
   const comparatorDecisionStatus = unavailableComparatorApprovals.length ? 'PAPERCLIP_STATUS_UNAVAILABLE'
     : deniedComparatorApprovals.length ? 'NOT_GRANTED_IN_PAPERCLIP'
       : allComparatorApprovalsApproved ? 'APPROVED_IN_PAPERCLIP'
@@ -378,6 +382,9 @@ function strategyOnboardingPage(data) {
   </ol>`;
   const nextActionTitle = comparatorInvalid ? 'Repair the v0.6.238 TEST comparator contract'
     : comparatorNeedsDecision ? 'Approve the v0.6.238 TEST comparator run'
+    : preflightBlocked && stagingApprovalPending ? 'Review the exact TEST staging approval in Paperclip'
+    : preflightBlocked && stagingApprovalApproved ? 'Continue only through the approved TEST staging gates'
+    : preflightBlocked && stagingApprovalNotGranted ? 'TEST staging authority was not granted'
     : preflightBlocked ? 'Resolve the saved v0.6.240 / v0.5.52 physical mismatch'
     : allComparatorApprovalsApproved ? 'Complete the read-only preflight'
     : pendingHumanApprovals.length ? 'Review the required human approval'
@@ -394,6 +401,7 @@ function strategyOnboardingPage(data) {
       : deniedComparatorApprovals.length
         ? 'One or more comparator decisions were not granted. Review the linked records; no run or release authority exists.'
         : `Approve both the dataset/physical selection and RUN_RELEASE records. ${pendingComparatorApprovals.length} decision${pendingComparatorApprovals.length === 1 ? ' is' : 's are'} pending. Ocean remains fail-closed; this does not start Replay or alter v0.1.1/v234, v240, historical roles, Paper, or Live.`
+    : preflightBlocked && stagingAuthority ? `Paperclip approved the two earlier comparator decisions and the bound coordinator completed the read-only preflight. Replay Two still has strategy ${preflightOutcome.strategy_artifact.saved_version} and Telemetry ${preflightOutcome.telemetry_artifact.saved_version} saved, not selected ${preflightOutcome.strategy_artifact.selected_version} and ${preflightOutcome.telemetry_artifact.selected_version}. ${preflightOutcome.next_task.issue_identifier} produced an immutable ${stagingAuthority.timeframe.display} TEST package; its separate Paperclip staging decision is ${human(stagingAuthority.approval_status)}. Nothing has been staged or started by Ocean.`
     : preflightBlocked ? `Paperclip approved both named decisions and the bound coordinator completed the read-only preflight. Replay Two still has strategy ${preflightOutcome.strategy_artifact.saved_version} and Telemetry ${preflightOutcome.telemetry_artifact.saved_version} saved, not selected ${preflightOutcome.strategy_artifact.selected_version} and ${preflightOutcome.telemetry_artifact.selected_version}. ${preflightOutcome.next_task.issue_identifier} is the Paperclip task for the exact Sim1 TEST staging package and separate scoped staging/write/start approval. Nothing has been staged or started.`
     : allComparatorApprovalsApproved ? 'Both named decisions are approved. Ocean may wake only the scoped coordinator for a read-only physical/data/STTL2 preflight. Replay/runtime writes, run materialization, and Sierra/Replay start remain blocked until exact TEST-only scope is separately requested or derived after that preflight.'
     : pendingHumanApprovals.length ? `${pendingHumanApprovals.length} required Paperclip approval${pendingHumanApprovals.length === 1 ? ' is' : 's are'} awaiting a human decision. Ocean remains fail-closed.`
@@ -403,9 +411,9 @@ function strategyOnboardingPage(data) {
       ? `Telemetry ${paperTelemetryRepair.version} STTL2 run identity code is merged and locally verified. It is not deployed to Paper and is not Paper-qualified. The next action is to obtain a separate Paper manifest and qualification approval for the exact strategy and six lineage inputs, then verify one new simulated Paper trade end to end. The approved coordinator record does not authorize that deployment or qualification.`
       : `Paperclip confirms every approval referenced by the current program action is approved. Continue only through the remaining exact-binding and evidence gates; this does not approve a strategy change, Paper, Live, or promotion.${paperQualificationApprovalRequired ? ' A separate Paper manifest and qualification approval is still required and has not been granted; prospective Paper rows are not eligible evidence until their lineage manifest and run identity are verified.' : ''}`
     : programNextActionText;
-  const nextActionOwner = comparatorInvalid ? 'Ocean' : preflightBlocked ? 'CICD physical binding and Telemetry owners / Paperclip board' : comparator.state === 'AVAILABLE' ? 'Wayne / Paperclip board' : improvementActive ? 'Ocean continuous-improvement coordinator' : pendingAcceptanceGate?.owner || governedAction?.owner || null;
+  const nextActionOwner = comparatorInvalid ? 'Ocean' : preflightBlocked ? 'Wayne / Paperclip board, then the bound CICD coordinator' : comparator.state === 'AVAILABLE' ? 'Wayne / Paperclip board' : improvementActive ? 'Ocean continuous-improvement coordinator' : pendingAcceptanceGate?.owner || governedAction?.owner || null;
   const nextActionControls = preflightBlocked
-    ? `<div class='actions'><a class='button primary' href='${esc(preflightOutcome.next_task.url)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}Open ${esc(preflightOutcome.next_task.issue_identifier)} in Paperclip</a></div>`
+    ? `<div class='actions'>${stagingAuthority ? `<a class='button primary' href='${esc(stagingAuthority.approval_url)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}${stagingApprovalPending ? 'Review' : 'Open'} staging approval in Paperclip</a><a class='button' href='${esc(stagingAuthority.package_url)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}Open sealed package</a>` : ''}<a class='button' href='${esc(preflightOutcome.next_task.url)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}Open ${esc(preflightOutcome.next_task.issue_identifier)}</a></div>`
     : comparator.state === 'AVAILABLE' || comparatorInvalid || improvementActive || pendingAcceptanceGate || governedAction ? '' : `<div class='actions'><a class='button primary' ${paperRuntimeActive ? '' : 'data-replay-monitor'} href='${esc(nextActionHref)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}${nextActionLabel}</a></div>`;
   const nextAction = onboardingComplete
     ? `<div class='strategy-next-action'><div><span>Current action</span><h3>${esc(nextActionTitle)}</h3><p>${esc(nextActionText)}</p>${nextActionOwner ? `<small>Owner: ${esc(nextActionOwner)}</small>` : ''}</div>${nextActionControls}</div>`
@@ -423,6 +431,9 @@ function strategyOnboardingPage(data) {
   const humanApprovalBody = approvalCards(humanApprovals);
   const humanApprovalSection = humanApprovals.length
     ? section('Required human approvals', humanApprovalBody + `<p class='readonly-note'>${icon('shield-check')}Status is read live from Paperclip. Ocean cannot approve, reject, or change an approval from this page.${paperQualificationApprovalRequired ? ' The approved coordinator record is not the separate Paper manifest and qualification approval.' : ''}</p>`, `<span class='muted'>${humanApprovals.length} referenced by the current program</span>`)
+    : '';
+  const stagingApprovalCard = preflightBlocked && stagingAuthority
+    ? `<article class='human-approval-card' data-approval-id='${esc(stagingAuthority.approval_id)}'><div><span>Separate Paperclip staging approval</span><h3>${esc(stagingAuthority.title)}</h3><p>${stagingApprovalPending ? 'Awaiting Wayne’s decision in Paperclip. Ocean has no approval controls and remains fail-closed.' : stagingApprovalApproved ? 'Approved in Paperclip. The requester-bound continuation may resume only after reauthenticating the exact package and deriving no broader filesystem scope than the approval names.' : stagingApprovalNotGranted ? 'Paperclip did not grant this staging authority. No staging or diagnostic start may continue.' : 'Paperclip status is not actionable; no staging authority is inferred.'}</p><small>Package SHA-256 <code>${esc(stagingAuthority.package_sha256)}</code> · ${esc(stagingAuthority.timeframe.display)} / ${esc(String(stagingAuthority.timeframe.bar_seconds))} seconds · byte-identical attachment verified</small></div><div class='human-approval-state'>${badge(stagingAuthority.approval_status)}<a class='button ${stagingApprovalPending ? 'primary' : ''}' href='${esc(stagingAuthority.approval_url)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}${stagingApprovalPending ? 'Review approval in Paperclip' : 'Open approval record'}</a><a class='button' href='${esc(stagingAuthority.package_url)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}Open sealed package</a></div></article>`
     : '';
   const comparatorApprovalSection = comparator.state === 'AVAILABLE'
     ? section('Physical comparator approvals', facts([
@@ -442,6 +453,7 @@ function strategyOnboardingPage(data) {
       ['Replay started', badge(comparator.execution_plan.replay_started ? 'YES' : 'NO')],
     ]) + approvalCards(comparatorApprovals)
       + `<article class='human-approval-card'><div><span>Post-approval gate</span><h3>${preflightBlocked ? 'Read-only preflight complete — blocked' : 'Read-only coordinator preflight'}</h3><p>${preflightBlocked ? `Paperclip heartbeat ${esc(approvalDispatch.heartbeat_run_id)} completed without writes or a Replay start. It found saved ${esc(preflightOutcome.strategy_artifact.saved_version)} / ${esc(preflightOutcome.telemetry_artifact.saved_version)}, not selected ${esc(preflightOutcome.strategy_artifact.selected_version)} / ${esc(preflightOutcome.telemetry_artifact.selected_version)}.` : 'After both exact approvals are approved in Paperclip, Ocean can wake only the bound OCEA-20 coordinator. Its first action is limited to read-only physical, dataset, and STTL2 verification.'}</p><small>${preflightBlocked ? `Brain ${esc(preflightOutcome.brain_record_id)} + ${esc(preflightOutcome.supplemental_brain_record_id)} · ${esc(preflightOutcome.account_alias)} · no staging or start authority` : 'Persistent Website monitor · order-independent · one dispatch per sealed contract/context'}</small></div><div class='human-approval-state'>${badge(approvalDispatch.status)}</div></article>`
+      + stagingApprovalCard
       + facts([
         ['Wake action', badge(approvalDispatch.gate?.action || 'READ_ONLY_PREFLIGHT_ONLY')],
         ['Current external permission', esc(human(approvalDispatch.gate?.current_permission_state || 'READ_ONLY_EXTERNAL_EVIDENCE_NO_REPLAY_RUNTIME_WRITE'))],
@@ -452,15 +464,22 @@ function strategyOnboardingPage(data) {
           ['Selected Telemetry', `${esc(preflightOutcome.telemetry_artifact.selected_version)} · ${hash(preflightOutcome.telemetry_artifact.selected_hash)}`],
           ['Paperclip staging task', `<a class='text-link' href='${esc(preflightOutcome.next_task.url)}' target='_blank' rel='noopener'>${esc(preflightOutcome.next_task.issue_identifier)}</a> · ${badge(preflightOutcome.next_task.status)}`],
           ['Task heartbeat', preflightOutcome.next_task.execution_run_id ? `<code>${esc(preflightOutcome.next_task.execution_run_id)}</code>` : badge('NOT_RUNNING')],
+          ...(stagingAuthority ? [
+            ['Sealed staging package', `<a class='text-link' href='${esc(stagingAuthority.package_url)}' target='_blank' rel='noopener'><code>${esc(stagingAuthority.package_sha256)}</code></a> · ${esc(String(stagingAuthority.package_bytes))} bytes`],
+            ['Execution timeframe', `${esc(stagingAuthority.timeframe.display)} (${esc(String(stagingAuthority.timeframe.bar_seconds))} seconds) · ${esc(human(stagingAuthority.timeframe.one_minute_disposition))}`],
+            ['Mutable draft captured in package', `${hash('sha256:' + stagingAuthority.mutable_reference.captured_sha256)} · ${badge(stagingAuthority.mutable_reference.classification)} · fresh reauthentication required`],
+            ['Scoped continuation', `${badge(stagingAuthority.continuation.state)} · requester ${esc(stagingAuthority.requested_by_agent_id)}`],
+            ['Package exclusions', esc(stagingAuthority.excluded)],
+          ] : []),
         ] : []),
-        ['Replay/runtime write scope', badge(approvalDispatch.safety?.runtime_write_scope_authorized ? 'AUTHORIZED' : 'NOT_AUTHORIZED')],
-        ['Replay start', badge(approvalDispatch.safety?.replay_start_authorized ? 'AUTHORIZED' : 'NOT_AUTHORIZED')],
+        ['Current executed write state', badge(approvalDispatch.safety?.runtime_write_scope_authorized ? 'AUTHORIZED' : 'NOT_AUTHORIZED')],
+        ['Current executed Replay start state', badge(approvalDispatch.safety?.replay_start_authorized ? 'AUTHORIZED' : 'NOT_AUTHORIZED')],
         ['Next gate after preflight', esc(human(approvalDispatch.gate?.post_preflight_gate || 'EXACT_TEST_REPLAY_TWO_RUNTIME_OUTPUT_WRITE_START_SCOPE_REQUIRED'))],
         ['Next action', esc(human(approvalDispatch.gate?.post_preflight_action || 'REQUEST_OR_DERIVE_ONLY_AFTER_READ_ONLY_PREFLIGHT'))],
         ['Paper / Live', badge(approvalDispatch.safety?.paper_authorized || approvalDispatch.safety?.live_authorized ? 'AUTHORIZED' : 'PROHIBITED')],
         ['Codex polling heartbeat', badge('NOT_REQUIRED')],
       ])
-      + `<p class='readonly-note'>${icon('shield-check')}Paperclip is the approval authority. Ocean reads and displays those decisions; it cannot approve or change them. The sealed document records its original creation state, while the decision status above is the current Paperclip state. No execution authority is inferred, and Paper and Live remain untouched.</p>`,
+      + `<p class='readonly-note'>${icon('shield-check')}Paperclip is the approval authority. Ocean reads and displays those decisions; it cannot approve or change them. The sealed document records its original creation state, while each decision status above is the current Paperclip state. The package’s mutable requalification draft hash is informational only and must be reauthenticated; the package digest and attachment are the immutable approval boundary. The prior one-minute chart was an explicitly superseded observation setup; the governed v0.6.238 source/profile require five minutes. Paper and Live remain untouched.</p>`,
     `<span class='muted'>${comparatorApprovals.filter(item => item.status === 'APPROVED').length} approved in Paperclip · ${pendingComparatorApprovals.length} pending</span>`)
     : comparatorInvalid
       ? section('Physical comparator contract', `<p class='form-error'>Ocean rejected the bundled contract: ${esc(human(comparator.reason || 'contract invalid'))}. No approval or run authority is inferred.</p>`, badge('BLOCKED_FAIL_CLOSED'))
