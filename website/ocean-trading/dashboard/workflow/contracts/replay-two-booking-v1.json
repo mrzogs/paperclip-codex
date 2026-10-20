@@ -1,0 +1,279 @@
+{
+  "schema": "ocean.replay-two-booking-contract/v1",
+  "status": "TEST_ONLY_SOURCE_CONTRACT",
+  "resource_key": "sierra-replay-two:primary",
+  "instance_executable": "D:\\Trading\\SierraChart-Replay Two\\SierraChart_64.exe",
+  "operation_scope": [
+    "Stage",
+    "VerifySelection",
+    "Rollback"
+  ],
+  "routes": {
+    "register": "POST /api/workflow/operational/v1/replay-two-bookings",
+    "exact": "GET /api/workflow/operational/v1/replay-two-bookings/{booking_id}",
+    "current": "GET /api/workflow/operational/v1/replay-two-bookings/current?resource_key=sierra-replay-two%3Aprimary",
+    "renew": "POST /api/workflow/operational/v1/replay-two-bookings/renew",
+    "release": "POST /api/workflow/operational/v1/replay-two-bookings/{booking_id}/release",
+    "revoke": "POST /api/workflow/operational/v1/replay-two-bookings/{booking_id}/revoke"
+  },
+  "authorization": {
+    "register_release_scope": "booking.issue",
+    "read_scope": "booking.read",
+    "register_release_actor": "Exact configured OPERATIONAL STRATEGY identity and owner_project binding",
+    "approval_binding": "Exact protected-config identity_id, owner_project, approval_id, approval_snapshot_sha256, package_sha256 and expires_utc match; lease expiry cannot exceed approval expiry",
+    "revoke_actor": "Authenticated Wayne browser identity",
+    "renewal": "BOOKING_RENEWAL_UNAVAILABLE"
+  },
+  "approval_authority": {
+    "live_status_authoritative": false,
+    "acquire_pin": "The protected config binding pins approval identity, snapshot hash, package hash and expiry at acquisition.",
+    "client_gate": "An ACTIVE booking never authorizes a physical mutation by itself. Stage, VerifySelection and Rollback clients must independently re-read the protected live approval immediately before and after each mutation and fail closed on any change or revocation.",
+    "booking_revocation": "Wayne or the supervised Ocean governance path must also revoke the booking when approval is withdrawn."
+  },
+  "fresh_read": {
+    "request_header": "X-Ocean-Booking-Read-Nonce",
+    "response_header": "X-Ocean-Booking-Read-Nonce",
+    "value_format": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    "client_rule": "Generate a new nonce for every exact/current GET and reject a missing or unequal echo.",
+    "server_cache_control": "no-store",
+    "response_signed": false,
+    "server_observation_field": "observed_at_utc",
+    "client_max_request_duration_ms": 5000,
+    "client_max_observation_age_ms": 5000,
+    "client_clock_skew_ms": 1000,
+    "receipt_hash_includes_nonce": false
+  },
+  "current_semantics": {
+    "latest_fence_always_present_after_first_acquisition": true,
+    "active_and_terminal_shape": "The current field contains the latest immutable booking fence and effective_status for ACTIVE, RELEASED, REVOKED or EXPIRED. It is never null after the first acquisition.",
+    "restart_recovery": "A freshly restarted authorized client obtains expected_prior_generation and expected_prior_receipt_hash from current.generation and current.receipt_hash before a successor acquisition.",
+    "no_booking": "The route returns BOOKING_NOT_FOUND before the first acquisition."
+  },
+  "hashing": {
+    "algorithm": "sha256",
+    "format": "^sha256:[0-9a-f]{64}$",
+    "canonicalization": "Recursively sort object keys, preserve array order, UTF-8 JSON.stringify-equivalent encoding, no insignificant whitespace.",
+    "receipt_core_fields": [
+      "schema",
+      "booking_id",
+      "resource_key",
+      "generation",
+      "status",
+      "owner_project",
+      "owner_agent_id",
+      "approval_id",
+      "approval_snapshot_sha256",
+      "package_sha256",
+      "instance_executable",
+      "operation_scope",
+      "acquired_utc",
+      "expires_utc",
+      "prior_receipt_hash"
+    ],
+    "receipt_excluded_fields": [
+      "receipt_hash",
+      "registry_comment_id",
+      "registry_body_sha256"
+    ]
+  },
+  "audit_mirror": {
+    "authoritative": false,
+    "absent_registry_comment_id": null,
+    "absent_registry_body_sha256": null,
+    "receipt_hash_includes_mirror": false
+  },
+  "fixture": {
+    "read_nonce": "test-read-0001",
+    "register_request": {
+      "schema": "oql.replay-two-booking-register-request/v1",
+      "resource_key": "sierra-replay-two:primary",
+      "owner_project": "oql-vwap-wave-pullback",
+      "owner_agent_id": "ocean-booking-oql",
+      "approval_id": "test-approval-0001",
+      "approval_snapshot_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "package_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "instance_executable": "D:\\Trading\\SierraChart-Replay Two\\SierraChart_64.exe",
+      "operation_scope": [
+        "Stage",
+        "VerifySelection",
+        "Rollback"
+      ],
+      "requested_expires_utc": "2026-10-20T16:01:00.000Z",
+      "expected_prior_generation": null,
+      "expected_prior_receipt_hash": null
+    },
+    "receipt": {
+      "schema": "oql.replay-two-booking-receipt/v1",
+      "booking_id": "test-booking-0001",
+      "resource_key": "sierra-replay-two:primary",
+      "generation": 1,
+      "status": "ACTIVE",
+      "owner_project": "oql-vwap-wave-pullback",
+      "owner_agent_id": "ocean-booking-oql",
+      "approval_id": "test-approval-0001",
+      "approval_snapshot_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "package_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "instance_executable": "D:\\Trading\\SierraChart-Replay Two\\SierraChart_64.exe",
+      "operation_scope": [
+        "Stage",
+        "VerifySelection",
+        "Rollback"
+      ],
+      "acquired_utc": "2026-10-20T16:00:00.000Z",
+      "expires_utc": "2026-10-20T16:01:00.000Z",
+      "prior_receipt_hash": null,
+      "receipt_hash": "sha256:0223862bee3575669d5fc57446cd2f08634afc9a2e4da553f0323a536c831b17",
+      "registry_comment_id": null,
+      "registry_body_sha256": null
+    },
+    "register_response": {
+      "schema": "oql.replay-two-booking-register-response/v1",
+      "receipt": {
+        "schema": "oql.replay-two-booking-receipt/v1",
+        "booking_id": "test-booking-0001",
+        "resource_key": "sierra-replay-two:primary",
+        "generation": 1,
+        "status": "ACTIVE",
+        "owner_project": "oql-vwap-wave-pullback",
+        "owner_agent_id": "ocean-booking-oql",
+        "approval_id": "test-approval-0001",
+        "approval_snapshot_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "package_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "instance_executable": "D:\\Trading\\SierraChart-Replay Two\\SierraChart_64.exe",
+        "operation_scope": [
+          "Stage",
+          "VerifySelection",
+          "Rollback"
+        ],
+        "acquired_utc": "2026-10-20T16:00:00.000Z",
+        "expires_utc": "2026-10-20T16:01:00.000Z",
+        "prior_receipt_hash": null,
+        "receipt_hash": "sha256:0223862bee3575669d5fc57446cd2f08634afc9a2e4da553f0323a536c831b17",
+        "registry_comment_id": null,
+        "registry_body_sha256": null
+      },
+      "current": {
+        "resource_key": "sierra-replay-two:primary",
+        "booking_id": "test-booking-0001",
+        "generation": 1,
+        "receipt_hash": "sha256:0223862bee3575669d5fc57446cd2f08634afc9a2e4da553f0323a536c831b17",
+        "effective_status": "ACTIVE",
+        "expires_utc": "2026-10-20T16:01:00.000Z"
+      },
+      "observed_at_utc": "2026-10-20T16:00:00.000Z"
+    },
+    "exact_readback": {
+      "schema": "oql.replay-two-booking-readback/v1",
+      "receipt": {
+        "schema": "oql.replay-two-booking-receipt/v1",
+        "booking_id": "test-booking-0001",
+        "resource_key": "sierra-replay-two:primary",
+        "generation": 1,
+        "status": "ACTIVE",
+        "owner_project": "oql-vwap-wave-pullback",
+        "owner_agent_id": "ocean-booking-oql",
+        "approval_id": "test-approval-0001",
+        "approval_snapshot_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "package_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "instance_executable": "D:\\Trading\\SierraChart-Replay Two\\SierraChart_64.exe",
+        "operation_scope": [
+          "Stage",
+          "VerifySelection",
+          "Rollback"
+        ],
+        "acquired_utc": "2026-10-20T16:00:00.000Z",
+        "expires_utc": "2026-10-20T16:01:00.000Z",
+        "prior_receipt_hash": null,
+        "receipt_hash": "sha256:0223862bee3575669d5fc57446cd2f08634afc9a2e4da553f0323a536c831b17",
+        "registry_comment_id": null,
+        "registry_body_sha256": null
+      },
+      "terminal_event": null,
+      "effective_status": "ACTIVE",
+      "observed_at_utc": "2026-10-20T16:00:01.000Z"
+    },
+    "current_readback": {
+      "schema": "oql.replay-two-booking-current/v1",
+      "resource_key": "sierra-replay-two:primary",
+      "current": {
+        "booking_id": "test-booking-0001",
+        "generation": 1,
+        "receipt_hash": "sha256:0223862bee3575669d5fc57446cd2f08634afc9a2e4da553f0323a536c831b17",
+        "effective_status": "ACTIVE",
+        "expires_utc": "2026-10-20T16:01:00.000Z",
+        "owner_project": "oql-vwap-wave-pullback",
+        "owner_agent_id": "ocean-booking-oql",
+        "approval_id": "test-approval-0001",
+        "package_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "instance_executable": "D:\\Trading\\SierraChart-Replay Two\\SierraChart_64.exe",
+        "operation_scope": [
+          "Stage",
+          "VerifySelection",
+          "Rollback"
+        ]
+      },
+      "observed_at_utc": "2026-10-20T16:00:01.000Z"
+    },
+    "terminal_current_readback": {
+      "schema": "oql.replay-two-booking-current/v1",
+      "resource_key": "sierra-replay-two:primary",
+      "current": {
+        "booking_id": "test-booking-0001",
+        "generation": 1,
+        "receipt_hash": "sha256:0223862bee3575669d5fc57446cd2f08634afc9a2e4da553f0323a536c831b17",
+        "effective_status": "RELEASED",
+        "expires_utc": "2026-10-20T16:01:00.000Z",
+        "owner_project": "oql-vwap-wave-pullback",
+        "owner_agent_id": "ocean-booking-oql",
+        "approval_id": "test-approval-0001",
+        "package_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "instance_executable": "D:\\Trading\\SierraChart-Replay Two\\SierraChart_64.exe",
+        "operation_scope": [
+          "Stage",
+          "VerifySelection",
+          "Rollback"
+        ]
+      },
+      "observed_at_utc": "2026-10-20T16:00:30.000Z"
+    },
+    "terminal_request": {
+      "schema": "oql.replay-two-booking-terminal-request/v1",
+      "generation": 1,
+      "receipt_hash": "sha256:0223862bee3575669d5fc57446cd2f08634afc9a2e4da553f0323a536c831b17",
+      "reason": "Completed guarded operation"
+    },
+    "terminal_event": {
+      "schema": "oql.replay-two-booking-terminal-event/v1",
+      "event_id": "test-booking-event-0001",
+      "booking_id": "test-booking-0001",
+      "resource_key": "sierra-replay-two:primary",
+      "generation": 1,
+      "receipt_hash": "sha256:0223862bee3575669d5fc57446cd2f08634afc9a2e4da553f0323a536c831b17",
+      "kind": "RELEASED",
+      "actor_type": "STRATEGY",
+      "actor_id": "ocean-booking-oql",
+      "reason": "Completed guarded operation",
+      "occurred_at_utc": "2026-10-20T16:00:30.000Z",
+      "event_hash": "sha256:c71e6ac24eaef622dabb8b18cb5566bc282d0bd7c8dc9cc943f9bd7717615da2"
+    },
+    "terminal_response": {
+      "schema": "oql.replay-two-booking-terminal-response/v1",
+      "event": {
+        "schema": "oql.replay-two-booking-terminal-event/v1",
+        "event_id": "test-booking-event-0001",
+        "booking_id": "test-booking-0001",
+        "resource_key": "sierra-replay-two:primary",
+        "generation": 1,
+        "receipt_hash": "sha256:0223862bee3575669d5fc57446cd2f08634afc9a2e4da553f0323a536c831b17",
+        "kind": "RELEASED",
+        "actor_type": "STRATEGY",
+        "actor_id": "ocean-booking-oql",
+        "reason": "Completed guarded operation",
+        "occurred_at_utc": "2026-10-20T16:00:30.000Z",
+        "event_hash": "sha256:c71e6ac24eaef622dabb8b18cb5566bc282d0bd7c8dc9cc943f9bd7717615da2"
+      },
+      "current": null,
+      "observed_at_utc": "2026-10-20T16:00:30.000Z"
+    }
+  }
+}
