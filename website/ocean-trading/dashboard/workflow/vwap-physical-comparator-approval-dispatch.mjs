@@ -104,9 +104,44 @@ function validateStagingAuthorityConfig(config) {
   'APPROVAL_DISPATCH_STAGING_MUTABLE_REFERENCE_INVALID');
   requireValue(staging.continuation?.requester_agent_id === config.paperclip.coordinator_agent_id
     && staging.continuation?.approval_resolution_wakes_requester === true
+    && staging.continuation?.ocean_liveness_repair_enabled === true
+    && Number(staging.continuation?.paperclip_wakeup_grace_ms) >= 0
     && staging.continuation?.next_action === 'REAUTHENTICATE_PACKAGE_AND_DERIVE_ONLY_EXACT_APPROVED_FILESYSTEM_SCOPE'
+    && UUID.test(String(staging.continuation?.existing_run_release_approval_id || ''))
+    && staging.continuation?.existing_run_release_scope === 'RUN_RELEASE'
+    && path.win32.isAbsolute(String(staging.continuation?.run_release_output_root || ''))
+    && staging.continuation?.combine_existing_scopes_after_gates === false
+    && staging.continuation?.existing_run_release_reuse_status === 'BLOCKED_POST_STAGING_CHARTBOOK_HASH_NOT_PREAUTHORIZED'
+    && staging.continuation?.playback_authorized === false
+    && staging.continuation?.next_human_gate === 'CONSOLIDATED_POST_STAGING_RUN_RELEASE_AND_REPLAY_MEASUREMENT_START_AFTER_CONTROLLER_PROOF'
+    && staging.continuation?.staging_success_receipt?.schema_version === 'cicd-vwap-sim1-staging-success-receipt/v1'
+    && path.win32.isAbsolute(String(staging.continuation?.staging_success_receipt?.path || ''))
+    && staging.continuation?.staging_success_receipt?.authority === 'PACKAGE_BOUND_CICD_COORDINATOR_READBACK'
+    && staging.continuation?.staging_success_receipt?.required_status === 'STAGED_DIAGNOSTIC_VERIFIED_AWAITING_POST_STAGING_RUN_AUTHORITY'
+    && staging.continuation?.staging_success_receipt?.accepted_before_playback === true
+    && staging.continuation?.staging_success_receipt?.immutable_hash_required === true
+    && staging.continuation?.execution_route?.mode === 'REQUIRE_APPROVAL_BOUND_NARROW_EXECUTOR'
+    && staging.continuation?.execution_route?.adapter_config_mutation_authorized === false
+    && staging.continuation?.execution_route?.command_policy_enforced === false
+    && UUID.test(String(staging.continuation?.execution_route?.engineering_issue_id || ''))
+    && /^OCEA-[0-9]+$/.test(String(staging.continuation?.execution_route?.engineering_issue_identifier || ''))
+    && typeof staging.continuation?.execution_route?.engineering_issue_title === 'string'
+    && staging.continuation.execution_route.engineering_issue_title.length > 0
+    && staging.continuation?.execution_route?.engineering_issue_owner_agent_id === config.paperclip.coordinator_agent_id
+    && Array.isArray(staging.continuation?.execution_route?.required_source_read_paths)
+    && staging.continuation.execution_route.required_source_read_paths.length === 2
+    && staging.continuation.execution_route.required_source_read_paths.every(value => path.win32.isAbsolute(String(value)))
+    && JSON.stringify(staging.continuation?.execution_route?.diagnostic_commands_only) === JSON.stringify(['STATUS','DIAGNOSTICS','STUDY_INPUT_EXPORT'])
+    && staging.continuation?.execution_route?.measurement_start_allowed === false
     && staging.continuation?.no_ocean_approval_authority === true,
   'APPROVAL_DISPATCH_STAGING_CONTINUATION_INVALID');
+  const runReleaseApproval = config.sealed_authority?.approvals?.find(item => item.decision_scope === 'RUN_RELEASE');
+  requireValue(runReleaseApproval?.approval_id === staging.continuation.existing_run_release_approval_id,
+    'APPROVAL_DISPATCH_STAGING_RUN_RELEASE_SCOPE_INVALID');
+  requireValue(Array.isArray(staging.allowed_future_write_paths) && staging.allowed_future_write_paths.length > 0
+    && new Set(staging.allowed_future_write_paths.map(value => path.win32.normalize(String(value)).toLowerCase())).size === staging.allowed_future_write_paths.length
+    && staging.allowed_future_write_paths.every(value => path.win32.isAbsolute(String(value))),
+  'APPROVAL_DISPATCH_STAGING_WRITE_PATHS_INVALID');
 }
 
 export function loadVwapPhysicalComparatorApprovalDispatchConfig(configPath = DEFAULT_VWAP_APPROVAL_DISPATCH_CONFIG) {
@@ -195,14 +230,19 @@ function validateApproval(config, expected, approval) {
     && payload.contract_hash === sealed.contract_hash && payload.context_hash === sealed.context_hash
     && payload.run_id === sealed.run_id && payload.decision_scope === expected.decision_scope,
   'APPROVAL_DISPATCH_APPROVAL_MISMATCH:' + expected.decision_scope);
+  if (expected.decision_scope === 'RUN_RELEASE') requireValue(
+    samePath(payload.output_root, config.staging_authority.continuation.run_release_output_root),
+    'APPROVAL_DISPATCH_RUN_RELEASE_OUTPUT_ROOT_MISMATCH');
 }
-function validateIssueAndAgent(config, issue, agent) {
+function validateIssueAndAgent(config, issue, agent, stagingApproved) {
   const expected = config.paperclip;
   requireValue(issue?.id === expected.issue_id && issue?.identifier === expected.issue_identifier
     && issue?.companyId === expected.company_id && issue?.projectId === expected.project_id
     && issue?.projectWorkspaceId === expected.workspace_id && issue?.assigneeAgentId === expected.coordinator_agent_id,
   'APPROVAL_DISPATCH_ISSUE_BINDING_INVALID');
   requireValue(!['done','cancelled'].includes(String(issue.status || '').toLowerCase()), 'APPROVAL_DISPATCH_ISSUE_CLOSED');
+  const blockerId = config.preflight_outcome.next_task.issue_id;
+  requireValue((issue.blockedBy || []).some(blocker => blocker?.id === blockerId), 'APPROVAL_DISPATCH_ACTIVE_BLOCKER_LINK_MISSING');
   requireValue(agent?.id === expected.coordinator_agent_id && agent?.companyId === expected.company_id
     && agent?.name === expected.coordinator_name && agent?.adapterType === 'codex_local'
     && samePath(agent?.adapterConfig?.cwd, expected.coordinator_project_root)
@@ -213,12 +253,61 @@ function validateIssueAndAgent(config, issue, agent) {
     && agent?.metadata?.environment === 'TEST_ONLY' && agent?.metadata?.live_real_enabled === false
     && agent?.permissions?.canUseLiveTrading === false && agent?.adapterConfig?.dangerouslyBypassApprovalsAndSandbox === false,
   'APPROVAL_DISPATCH_COORDINATOR_BINDING_INVALID');
-  const args = (agent?.adapterConfig?.extraArgs || []).join('\n').replace(/\\/g, '/').toLowerCase();
-  requireValue(!/=\s*"write"/i.test(args), 'APPROVAL_DISPATCH_COORDINATOR_WRITE_GRANT_PRESENT');
+  const writePaths = coordinatorGrantPaths(agent, 'write');
+  const allowedWrites = new Set(approvedCoordinatorWritePaths(config).map(value => path.win32.normalize(value).toLowerCase()));
+  if (!stagingApproved) requireValue(writePaths.length === 0, 'APPROVAL_DISPATCH_COORDINATOR_WRITE_GRANT_PRESENT');
+  else requireValue(writePaths.every(value => allowedWrites.has(value)), 'APPROVAL_DISPATCH_COORDINATOR_UNAPPROVED_WRITE_GRANT_PRESENT');
+  const readPaths = coordinatorGrantPaths(agent, 'read');
   for (const requiredPath of config.coordinator_gate.required_read_only_paths) {
-    const normalized = requiredPath.replace(/\\/g, '/').toLowerCase();
-    requireValue(args.includes(`"${normalized}" = "read"`), 'APPROVAL_DISPATCH_REQUIRED_READ_GRANT_MISSING');
+    requireValue(readPaths.some(granted => pathCoveredByGrant(requiredPath, granted)), 'APPROVAL_DISPATCH_REQUIRED_READ_GRANT_MISSING');
   }
+}
+function approvedCoordinatorWritePaths(config) {
+  return [...config.staging_authority.allowed_future_write_paths];
+}
+function coordinatorGrantPaths(agent, access) {
+  const args = (agent?.adapterConfig?.extraArgs || []).join('\n').replace(/\\/g, '/');
+  const pattern = new RegExp('"([^"]+)"\\s*=\\s*"' + access + '"', 'gi');
+  return [...args.matchAll(pattern)].map(match => path.win32.normalize(match[1]).toLowerCase());
+}
+function pathCoveredByGrant(required, granted) {
+  const child=path.win32.normalize(String(required)).toLowerCase();
+  const parent=path.win32.normalize(String(granted)).toLowerCase().replace(/[\\/]+$/,'');
+  return child===parent||child.startsWith(parent+path.win32.sep);
+}
+function coordinatorScopeHash(config) {
+  return 'sha256:' + digest(JSON.stringify({
+    reads:config.staging_authority.continuation.execution_route.required_source_read_paths.map(value => path.win32.normalize(value).toLowerCase()).sort(),
+    writes:approvedCoordinatorWritePaths(config).map(value => path.win32.normalize(value).toLowerCase()).sort(),
+    commands:[...config.staging_authority.continuation.execution_route.diagnostic_commands_only].sort(),
+    measurement_start_allowed:false,
+  }));
+}
+function inspectApprovedCoordinatorExecutionScope(config, agent, stagingAuthority) {
+  const route=stagingAuthority.continuation.execution_route;
+  if (stagingAuthority.approval_status !== 'APPROVED') return {...stagingAuthority,execution_route:{...route,
+    state:'AWAITING_PAPERCLIP_STAGING_APPROVAL',coordinator_can_execute:false,mutation_attempted:false}};
+  const required = approvedCoordinatorWritePaths(config);
+  const requiredNormalized = new Set(required.map(value => path.win32.normalize(value).toLowerCase()));
+  const current = coordinatorGrantPaths(agent, 'write');
+  const unexpected = current.filter(value => !requiredNormalized.has(value));
+  requireValue(unexpected.length === 0, 'APPROVAL_DISPATCH_COORDINATOR_UNAPPROVED_WRITE_GRANT_PRESENT:' + unexpected.join('|'));
+  const expectedHash = coordinatorScopeHash(config);
+  const missing = required.filter(value => !current.includes(path.win32.normalize(value).toLowerCase()));
+  const currentReads=coordinatorGrantPaths(agent, 'read');
+  const requiredReads=route.required_source_read_paths;
+  const missingReads=requiredReads.filter(value=>!currentReads.some(granted=>pathCoveredByGrant(value,granted)));
+  const commandPolicyReady = route.command_policy_enforced === true;
+  const state = missingReads.length ? 'BLOCKED_COORDINATOR_SOURCE_READ_SCOPE_MISSING'
+    : missing.length ? 'BLOCKED_COORDINATOR_WRITE_SCOPE_MISSING'
+    : commandPolicyReady ? 'EXACT_APPROVAL_BOUND_EXECUTOR_READY' : 'BLOCKED_DIAGNOSTIC_COMMAND_POLICY_NOT_ENFORCED';
+  return {...stagingAuthority,execution_route:{...route,state,
+    scope_hash:expectedHash,required_write_paths:[...required],missing_write_paths:missing,
+    required_source_read_paths:[...requiredReads],missing_source_read_paths:missingReads,
+    observed_write_paths:current,observed_read_paths:currentReads,
+    coordinator_can_execute:missing.length===0&&missingReads.length===0&&commandPolicyReady,
+    mutation_attempted:false,dangerously_bypass_approvals_and_sandbox:false,
+    blocker:'Paperclip approval does not override filesystem restrictions, and connector-control writes require a trusted diagnostics-only command policy.'}};
 }
 function wakeReason(config) {
   return 'vwap_v238_dual_approval_read_only_preflight_' + digest([config.sealed_authority.contract_hash, config.sealed_authority.context_hash, ...config.sealed_authority.approvals.map(item => item.approval_id).sort()].join('|')).slice(0, 20);
@@ -235,8 +324,22 @@ function validateNextTask(config, task) {
   requireValue(task?.id === expected.issue_id && task?.identifier === expected.issue_identifier
     && task?.companyId === config.paperclip.company_id && task?.projectId === config.paperclip.project_id
     && task?.projectWorkspaceId === config.paperclip.workspace_id && task?.parentId === config.paperclip.issue_id
-    && task?.title === expected.title && task?.assigneeAgentId === config.paperclip.coordinator_agent_id,
+    && task?.title === expected.title && task?.assigneeAgentId === config.paperclip.coordinator_agent_id
+    && (task?.blockedBy || []).some(blocker => blocker?.id === config.staging_authority.continuation.execution_route.engineering_issue_id),
   'APPROVAL_DISPATCH_PREFLIGHT_TASK_BINDING_INVALID');
+}
+function validateExecutorIssue(config, issue) {
+  const expected=config.staging_authority.continuation.execution_route;
+  requireValue(issue?.id===expected.engineering_issue_id
+    &&issue?.identifier===expected.engineering_issue_identifier
+    &&issue?.companyId===config.paperclip.company_id
+    &&issue?.projectId===config.paperclip.project_id
+    &&issue?.projectWorkspaceId===config.paperclip.workspace_id
+    &&issue?.parentId===config.staging_authority.issue_id
+    &&issue?.title===expected.engineering_issue_title
+    &&issue?.assigneeAgentId===expected.engineering_issue_owner_agent_id
+    &&!['done','cancelled'].includes(String(issue?.status||'').toLowerCase()),
+  'APPROVAL_DISPATCH_EXECUTOR_ISSUE_BINDING_INVALID');
 }
 function validateStagingApproval(config, approval, task, packageBytes) {
   const expected = config.staging_authority, payload = approval?.payload || {};
@@ -254,6 +357,9 @@ function validateStagingApproval(config, approval, task, packageBytes) {
   const excluded = String(payload.excluded || '');
   requireValue(['RUN_RELEASE','playback','bridge activation','Paper/Live','real orders','historical role/row edits','threshold selection']
     .every(value => excluded.includes(value)), 'APPROVAL_DISPATCH_STAGING_EXCLUSIONS_INVALID');
+  const approvedWritePaths = (payload.allowed_future_write_paths || []).map(value => path.win32.normalize(String(value)).toLowerCase()).sort();
+  const expectedWritePaths = expected.allowed_future_write_paths.map(value => path.win32.normalize(value).toLowerCase()).sort();
+  requireValue(JSON.stringify(approvedWritePaths) === JSON.stringify(expectedWritePaths), 'APPROVAL_DISPATCH_STAGING_WRITE_PATHS_MISMATCH');
   requireValue(bufferDigest(packageBytes) === expected.package_sha256, 'APPROVAL_DISPATCH_STAGING_PACKAGE_HASH_MISMATCH');
   let sealed;
   try { sealed = JSON.parse(packageBytes.toString('utf8').replace(/^\uFEFF/, '')); }
@@ -275,6 +381,7 @@ function validateStagingApproval(config, approval, task, packageBytes) {
     approval_url:expected.approval_url,
     requested_by_agent_id:approval.requestedByAgentId,
     decided_at_utc:approval.decidedAt || null,
+    updated_at_utc:approval.updatedAt || null,
     title:payload.title || 'Exact Sim1 TEST staging authority',
     approval_scope:expected.approval_scope,
     attachment_id:expected.attachment_id,
@@ -287,10 +394,16 @@ function validateStagingApproval(config, approval, task, packageBytes) {
     risks:Array.isArray(payload.risks) ? payload.risks : [],
     timeframe:{...expected.timeframe},
     mutable_reference:{...expected.mutable_reference},
-    continuation:{...expected.continuation, state:status === 'APPROVED' ? 'PAPERCLIP_REQUESTER_WAKE_ELIGIBLE_REAUTHENTICATION_REQUIRED' : status === 'PENDING' ? 'AWAITING_PAPERCLIP_HUMAN_DECISION' : status === 'REVISION_REQUESTED' ? 'REVISION_REQUIRED_NO_CONTINUATION' : 'NOT_GRANTED_NO_CONTINUATION'},
+    allowed_future_write_paths:[...expected.allowed_future_write_paths],
+    scope_authority:{staging_write_and_single_diagnostic_start_granted:status === 'APPROVED',
+      existing_run_release_approval_granted:true,combined_sequence_eligible:false,
+      existing_run_release_reuse_status:expected.continuation.existing_run_release_reuse_status,
+      post_staging_consolidated_approval_required:true,playback_granted:false,paper_granted:false,live_granted:false,
+      composition_rule:'STAGING_ONLY_THEN_NEW_POST_STAGING_BINDING_AND_MEASUREMENT_START_GATE'},
+    continuation:{...expected.continuation, state:status === 'APPROVED' ? 'AWAITING_PAPERCLIP_REQUESTER_WAKE' : status === 'PENDING' ? 'AWAITING_PAPERCLIP_HUMAN_DECISION' : status === 'REVISION_REQUESTED' ? 'REVISION_REQUIRED_NO_CONTINUATION' : 'NOT_GRANTED_NO_CONTINUATION'},
   };
 }
-function completedPreflightDetails(config, run, statuses, reason, task, stagingAuthority) {
+function completedPreflightDetails(config, run, statuses, reason, task, executorIssue, stagingAuthority) {
   const outcome = config.preflight_outcome;
   if (run?.id !== outcome?.heartbeat_run_id || String(run?.status || '').toLowerCase() !== 'succeeded') return null;
   return {
@@ -302,8 +415,146 @@ function completedPreflightDetails(config, run, statuses, reason, task, stagingA
     heartbeat_started_at_utc:run.startedAt,
     heartbeat_finished_at_utc:run.finishedAt || outcome.completed_at_utc,
     preflight_outcome:{...outcome, next_task:{...outcome.next_task, status:String(task.status || 'unknown').toUpperCase(), execution_run_id:task.executionRunId || null}},
+    workflow_lineage:{blocked_issue:{id:config.paperclip.issue_id,identifier:config.paperclip.issue_identifier},
+      active_blocker:{id:outcome.next_task.issue_id,identifier:outcome.next_task.issue_identifier,status:String(task.status || 'unknown').toUpperCase(),
+        owner_agent_id:config.paperclip.coordinator_agent_id},relationship:'BLOCKED_BY',legacy_path:'SUPERSEDED_NOT_WOKEN',
+      executor_blocker:{id:executorIssue.id,identifier:executorIssue.identifier,status:String(executorIssue.status||'unknown').toUpperCase(),
+        owner_agent_id:executorIssue.assigneeAgentId,relationship:'OCEA_22_BLOCKED_BY_EXECUTOR'},
+      brain_continuity_record_id:'reasoning-20261020145924-1caa3931'},
     staging_authority:stagingAuthority,
   };
+}
+
+function approvalResolutionRuns(config, runs) {
+  return (Array.isArray(runs) ? runs : runs?.items || []).filter(run => run?.agentId === config.paperclip.coordinator_agent_id
+    && run?.contextSnapshot?.approvalId === config.staging_authority.approval_id
+    && run?.contextSnapshot?.issueId === config.staging_authority.issue_id
+    && run?.contextSnapshot?.wakeReason === 'approval_approved');
+}
+function continuationWakeReason(config) {
+  return 'vwap_v238_staging_liveness_repair_' + digest([
+    config.staging_authority.approval_id,
+    config.staging_authority.package_sha256,
+    config.staging_authority.continuation.existing_run_release_approval_id,
+  ].join('|')).slice(0, 20);
+}
+function fallbackContinuationRuns(config, runs, reason) {
+  return (Array.isArray(runs) ? runs : runs?.items || []).filter(run => run?.agentId === config.paperclip.coordinator_agent_id
+    && run?.contextSnapshot?.issueId === config.staging_authority.issue_id
+    && run?.contextSnapshot?.wakeReason === reason);
+}
+function continuationWithRun(stagingAuthority, state, source, run) {
+  return {...stagingAuthority, continuation:{...stagingAuthority.continuation,state,source,
+    heartbeat_run_id:run?.id || null,heartbeat_run_status:run?.status || null,
+    heartbeat_started_at_utc:run?.startedAt || null,heartbeat_finished_at_utc:run?.finishedAt || null}};
+}
+function observedQueuedRun(runs) {
+  return runs.find(run => !STARTED_STATUSES.has(String(run?.status || '').toLowerCase())) || null;
+}
+async function reconcileApprovedContinuation(config, stagingAuthority, initialRuns, resolvedState, fetchImpl, sleepImpl) {
+  if (stagingAuthority.approval_status !== 'APPROVED') return stagingAuthority;
+  const classify = runs => {
+    const paperclip = approvalResolutionRuns(config, runs), fallback = fallbackContinuationRuns(config, runs, continuationWakeReason(config));
+    const paperclipStarted = observedStartedRun(paperclip);
+    const fallbackStarted = observedStartedRun(fallback);
+    if (paperclipStarted) return continuationWithRun(stagingAuthority, 'PAPERCLIP_REQUESTER_WAKE_STARTED', 'PAPERCLIP_APPROVAL_RESOLUTION', paperclipStarted);
+    const paperclipQueued = observedQueuedRun(paperclip);
+    if (paperclipQueued) return continuationWithRun(stagingAuthority, 'PAPERCLIP_REQUESTER_WAKE_QUEUED', 'PAPERCLIP_APPROVAL_RESOLUTION', paperclipQueued);
+    if (fallbackStarted) return continuationWithRun(stagingAuthority, 'OCEAN_LIVENESS_REPAIR_STARTED', 'OCEAN_FAIL_CLOSED_LIVENESS_REPAIR', fallbackStarted);
+    const fallbackQueued = observedQueuedRun(fallback);
+    if (fallbackQueued) return continuationWithRun(stagingAuthority, 'OCEAN_LIVENESS_REPAIR_QUEUED', 'OCEAN_FAIL_CLOSED_LIVENESS_REPAIR', fallbackQueued);
+    return null;
+  };
+  const observed = classify(initialRuns);
+  if (observed) return observed;
+  const decidedAt = Date.parse(stagingAuthority.decided_at_utc || stagingAuthority.updated_at_utc || '');
+  requireValue(Number.isFinite(decidedAt), 'APPROVAL_DISPATCH_STAGING_DECISION_TIME_INVALID');
+  const graceMs = Number(stagingAuthority.continuation.paperclip_wakeup_grace_ms);
+  const remaining = decidedAt + graceMs - Date.now();
+  if (remaining > 0) return {...stagingAuthority, continuation:{...stagingAuthority.continuation,
+    state:'AWAITING_PAPERCLIP_REQUESTER_WAKE',source:'PAPERCLIP_APPROVAL_RESOLUTION',grace_remaining_ms:remaining}};
+  requireValue(stagingAuthority.continuation.ocean_liveness_repair_enabled === true, 'APPROVAL_DISPATCH_CONTINUATION_WAKE_MISSING');
+  fs.mkdirSync(path.dirname(resolvedState), {recursive:true});
+  const lockPath = resolvedState + '.continuation.lock';
+  let lock;
+  try { lock = fs.openSync(lockPath, 'wx'); }
+  catch (error) {
+    if (error?.code === 'EEXIST') return {...stagingAuthority, continuation:{...stagingAuthority.continuation,
+      state:'OCEAN_LIVENESS_REPAIR_LOCKED',source:'OCEAN_FAIL_CLOSED_LIVENESS_REPAIR'}};
+    throw error;
+  }
+  try {
+    const insideRuns = await requestJson(config, '/companies/' + config.paperclip.company_id + '/heartbeat-runs?agentId=' + config.paperclip.coordinator_agent_id + '&limit=1000', {}, fetchImpl);
+    const insideObserved = classify(insideRuns);
+    if (insideObserved) return insideObserved;
+    const reason = continuationWakeReason(config);
+    const wake = await requestJson(config, '/agents/' + config.paperclip.coordinator_agent_id + '/wakeup?companyId=' + config.paperclip.company_id, {
+      method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({
+        source:'automation', triggerDetail:'system', reason, idempotencyKey:reason,
+        payload:{issueId:config.staging_authority.issue_id,approvalId:config.staging_authority.approval_id,
+          approvalStatus:'approved',strategyId:config.strategy_id,namespace:config.namespace,
+          packageAttachmentId:config.staging_authority.attachment_id,packageSha256:config.staging_authority.package_sha256,
+          allowedFutureWritePaths:config.staging_authority.allowed_future_write_paths,
+          existingRunReleaseApprovalId:config.staging_authority.continuation.existing_run_release_approval_id,
+          action:'CONTINUE_APPROVED_STAGING_OR_REPORT_EXECUTOR_BLOCKER_NO_PLAYBACK',
+          stagingWriteScopeAuthorized:stagingAuthority.execution_route?.coordinator_can_execute===true,
+          singleDiagnosticStartAuthorized:stagingAuthority.execution_route?.coordinator_can_execute===true,
+          runReleaseMaterializationAuthorized:false,
+          replayPlaybackAuthorized:false,paperAuthorized:false,liveAuthorized:false,realOrdersAuthorized:false,
+          brainContinuityRecordId:'reasoning-20261020145924-1caa3931',
+          instruction:'Reauthenticate the exact approved attachment, package digest, Sim1 TEST identity, stopped Replay, flat/no-order state, and the six exact allowed staging paths. Paperclip approval does not override filesystem restrictions. If an approval-bound narrow executor with write-time live approval validation and a diagnostics-only command policy is not proven, record that exact blocker and do not stage. Never mutate this agent adapter configuration. A vwap-hook START is a measurement START that calls Sierra replay/order-reset paths; never treat it as the diagnostic start and do not invoke it here. The existing RUN_RELEASE approval pins the pre-staging chartbook hash and cannot be reused after chartbook selection changes without an approved deterministic pre/post transformation or a superseding contract. Require fresh loaded-controller identity and lifecycle proof; the historical v0.2.0 receipt is not current proof, while disk v0.2.3 facts are recorded in Brain reasoning-20261020151153-961eaa4a. Do not advance replay/playback, place orders, mutate historical evidence, touch Paper/Live, or broaden filesystem scope. After a staging receipt and controller proof, prepare one consolidated human gate for the post-staging run contract plus measurement START.'},
+      }),
+    }, fetchImpl);
+    requireValue(UUID.test(String(wake?.id || '')), 'APPROVAL_DISPATCH_CONTINUATION_WAKE_RECEIPT_INVALID');
+    const deadline = Date.now() + Number(config.wake_start_timeout_ms || 30000);
+    let run = wake;
+    while (Date.now() < deadline) {
+      run = await requestJson(config, '/heartbeat-runs/' + wake.id, {}, fetchImpl);
+      if (STARTED_STATUSES.has(String(run?.status || '').toLowerCase()) && run?.startedAt) break;
+      await sleepImpl(Number(config.wake_poll_interval_ms || 500));
+    }
+    requireValue(STARTED_STATUSES.has(String(run?.status || '').toLowerCase()) && Boolean(run?.startedAt), 'APPROVAL_DISPATCH_CONTINUATION_WAKE_NOT_PROVEN_STARTED');
+    requireValue(run?.agentId === config.paperclip.coordinator_agent_id
+      && run?.contextSnapshot?.issueId === config.staging_authority.issue_id
+      && run?.contextSnapshot?.wakeReason === reason, 'APPROVAL_DISPATCH_CONTINUATION_WAKE_READBACK_MISMATCH');
+    return continuationWithRun(stagingAuthority, 'OCEAN_LIVENESS_REPAIR_STARTED', 'OCEAN_FAIL_CLOSED_LIVENESS_REPAIR', run);
+  } finally {
+    try { fs.closeSync(lock); } catch {}
+    try { fs.unlinkSync(lockPath); } catch {}
+  }
+}
+function stagingSuccessReceiptReadback(config) {
+  const expected = config.staging_authority.continuation.staging_success_receipt;
+  const waiting = {schema_version:expected.schema_version,status:'AWAITING_PACKAGE_BOUND_RECEIPT',path:expected.path,
+    authority:expected.authority,accepted_before_playback:true,immutable_hash_required:true};
+  if (!fs.existsSync(expected.path)) return waiting;
+  const bytes = fs.readFileSync(expected.path), receiptHash = 'sha256:' + bufferDigest(bytes);
+  let receipt;
+  try { receipt = JSON.parse(bytes.toString('utf8').replace(/^\uFEFF/, '')); }
+  catch { throw new Error('APPROVAL_DISPATCH_STAGING_SUCCESS_RECEIPT_JSON_INVALID'); }
+  requireValue(receipt?.schema_version === expected.schema_version
+    && receipt?.status === expected.required_status
+    && receipt?.strategy_id === config.strategy_id && receipt?.namespace === config.namespace
+    && receipt?.issue_id === config.staging_authority.issue_id
+    && receipt?.approval_id === config.staging_authority.approval_id
+    && receipt?.package_attachment_id === config.staging_authority.attachment_id
+    && String(receipt?.package_sha256 || '').toLowerCase() === config.staging_authority.package_sha256
+    && receipt?.run_release_approval_id === config.staging_authority.continuation.existing_run_release_approval_id
+    && receipt?.run_id === config.sealed_authority.run_id
+    && receipt?.target?.account === 'Sim1' && receipt?.target?.bar_seconds === 300
+    && samePath(receipt?.target?.chartbook, config.preflight_outcome.chartbook_path)
+    && String(receipt?.selected_artifacts?.strategy_sha256 || '').toLowerCase() === config.preflight_outcome.strategy_artifact.selected_hash
+    && String(receipt?.selected_artifacts?.telemetry_sha256 || '').toLowerCase() === config.preflight_outcome.telemetry_artifact.selected_hash
+    && receipt?.gates?.dry_run_passed === true && receipt?.gates?.stopped_flat_no_orders_verified === true
+    && receipt?.gates?.diagnostic_process_started === true && receipt?.gates?.run_release_materialized === false
+    && receipt?.safety?.playback_started === false && receipt?.safety?.measurement_start_invoked === false
+    && receipt?.safety?.paper_touched === false && receipt?.safety?.live_touched === false
+    && receipt?.safety?.real_orders_authorized === false
+    && Number.isFinite(Date.parse(receipt?.created_at_utc || '')),
+  'APPROVAL_DISPATCH_STAGING_SUCCESS_RECEIPT_MISMATCH');
+  return {schema_version:expected.schema_version,status:'VERIFIED_IMMUTABLE_RECEIPT',path:expected.path,
+    authority:expected.authority,receipt_hash:receiptHash,created_at_utc:receipt.created_at_utc,
+    run_id:receipt.run_id,playback_started:false,measurement_start_invoked:false};
 }
 
 export async function scanVwapPhysicalComparatorApprovalDispatch({config, stateFile, contractPath, fetchImpl = fetch, sleepImpl = sleep} = {}) {
@@ -320,23 +571,29 @@ export async function scanVwapPhysicalComparatorApprovalDispatch({config, stateF
     if (approvals.some(item => WAITING_STATUSES.has(String(item.status || '').toLowerCase()))) return write('WAITING_FOR_BOTH_APPROVALS', {approval_statuses:statuses, dispatched:false});
     requireValue(approvals.every(item => String(item.status || '').toLowerCase() === 'approved'), 'APPROVAL_DISPATCH_APPROVAL_STATUS_INVALID');
 
-    const [issue, agent, runList, nextTask, stagingApproval, stagingPackage] = await Promise.all([
+    const [issue, agent, runList, nextTask, executorIssue, stagingApproval, stagingPackage] = await Promise.all([
       requestJson(config, '/issues/' + config.paperclip.issue_id, {}, fetchImpl),
       requestJson(config, '/agents/' + config.paperclip.coordinator_agent_id, {}, fetchImpl),
       requestJson(config, '/companies/' + config.paperclip.company_id + '/heartbeat-runs?agentId=' + config.paperclip.coordinator_agent_id + '&limit=1000', {}, fetchImpl),
       requestJson(config, '/issues/' + config.preflight_outcome.next_task.issue_id, {}, fetchImpl),
+      requestJson(config, '/issues/' + config.staging_authority.continuation.execution_route.engineering_issue_id, {}, fetchImpl),
       requestJson(config, '/approvals/' + config.staging_authority.approval_id, {}, fetchImpl),
       requestBytes(config, '/attachments/' + config.staging_authority.attachment_id + '/content', {}, fetchImpl),
     ]);
-    validateIssueAndAgent(config, issue, agent);
-    const stagingAuthority = validateStagingApproval(config, stagingApproval, nextTask, stagingPackage);
+    validateExecutorIssue(config, executorIssue);
+    let stagingAuthority = validateStagingApproval(config, stagingApproval, nextTask, stagingPackage);
+    validateIssueAndAgent(config, issue, agent, stagingAuthority.approval_status === 'APPROVED');
+    stagingAuthority = inspectApprovedCoordinatorExecutionScope(config, agent, stagingAuthority);
     const reason = wakeReason(config), prior = matchingRuns(config, runList, reason);
     const priorStarted = observedStartedRun(prior);
     if (priorStarted) {
-      const completed = completedPreflightDetails(config, priorStarted, statuses, reason, nextTask, stagingAuthority);
-      return completed
-        ? write('PREFLIGHT_BLOCKED_PHYSICAL_BINDING', completed)
-        : write('ALREADY_DISPATCHED_READ_ONLY_PREFLIGHT', {approval_statuses:statuses, dispatched:true, wake_reason:reason, heartbeat_run_id:priorStarted.id, heartbeat_run_status:priorStarted.status, heartbeat_started_at_utc:priorStarted.startedAt});
+      const completed = completedPreflightDetails(config, priorStarted, statuses, reason, nextTask, executorIssue, stagingAuthority);
+      if (completed) {
+        completed.staging_authority = await reconcileApprovedContinuation(config, stagingAuthority, runList, resolvedState, fetchImpl, sleepImpl);
+        completed.staging_authority.staging_success_receipt = stagingSuccessReceiptReadback(config);
+        return write('PREFLIGHT_BLOCKED_PHYSICAL_BINDING', completed);
+      }
+      return write('ALREADY_DISPATCHED_READ_ONLY_PREFLIGHT', {approval_statuses:statuses, dispatched:true, wake_reason:reason, heartbeat_run_id:priorStarted.id, heartbeat_run_status:priorStarted.status, heartbeat_started_at_utc:priorStarted.startedAt});
     }
     if (prior.length) return write('ATTENTION_REQUIRED', {reason:'PRIOR_WAKE_NOT_PROVEN_STARTED', approval_statuses:statuses, dispatched:false, wake_reason:reason, heartbeat_run_id:prior[0].id, heartbeat_run_status:prior[0].status});
     requireValue(String(issue.status || '').toLowerCase() === 'blocked', 'APPROVAL_DISPATCH_ISSUE_NOT_BLOCKED_BEFORE_WAKE');
@@ -350,10 +607,13 @@ export async function scanVwapPhysicalComparatorApprovalDispatch({config, stateF
       const insideList = await requestJson(config, '/companies/' + config.paperclip.company_id + '/heartbeat-runs?agentId=' + config.paperclip.coordinator_agent_id + '&limit=1000', {}, fetchImpl);
       const insidePrior = matchingRuns(config, insideList, reason), insideStarted = observedStartedRun(insidePrior);
       if (insideStarted) {
-        const completed = completedPreflightDetails(config, insideStarted, statuses, reason, nextTask, stagingAuthority);
-        return completed
-          ? write('PREFLIGHT_BLOCKED_PHYSICAL_BINDING', completed)
-          : write('ALREADY_DISPATCHED_READ_ONLY_PREFLIGHT', {approval_statuses:statuses, dispatched:true, wake_reason:reason, heartbeat_run_id:insideStarted.id, heartbeat_run_status:insideStarted.status, heartbeat_started_at_utc:insideStarted.startedAt});
+        const completed = completedPreflightDetails(config, insideStarted, statuses, reason, nextTask, executorIssue, stagingAuthority);
+        if (completed) {
+          completed.staging_authority = await reconcileApprovedContinuation(config, stagingAuthority, insideList, resolvedState, fetchImpl, sleepImpl);
+          completed.staging_authority.staging_success_receipt = stagingSuccessReceiptReadback(config);
+          return write('PREFLIGHT_BLOCKED_PHYSICAL_BINDING', completed);
+        }
+        return write('ALREADY_DISPATCHED_READ_ONLY_PREFLIGHT', {approval_statuses:statuses, dispatched:true, wake_reason:reason, heartbeat_run_id:insideStarted.id, heartbeat_run_status:insideStarted.status, heartbeat_started_at_utc:insideStarted.startedAt});
       }
       if (insidePrior.length) return write('ATTENTION_REQUIRED', {reason:'PRIOR_WAKE_NOT_PROVEN_STARTED', approval_statuses:statuses, dispatched:false, wake_reason:reason, heartbeat_run_id:insidePrior[0].id, heartbeat_run_status:insidePrior[0].status});
       const wake = await requestJson(config, '/agents/' + config.paperclip.coordinator_agent_id + '/wakeup?companyId=' + config.paperclip.company_id, {

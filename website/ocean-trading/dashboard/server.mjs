@@ -121,7 +121,8 @@ function initializeWorkflowBackend() {
   } catch (error) {
     workflowStartupFailed = true;
     workflowEnrollmentRequired = error.code === "WAYNE_LOCAL_ENROLLMENT_REQUIRED";
-    console.warn(`Ocean workflow backend startup unavailable: ${error.code || error.name || "UNKNOWN_ERROR"}`);
+    const detail=error.message&&error.message!==error.code?` · ${String(error.message).slice(0,320)}`:'';
+    console.warn(`Ocean workflow backend startup unavailable: ${error.code || error.name || "UNKNOWN_ERROR"}${detail}`);
     if (error.code === "PROTECTED_OPERATOR_STATE_UNAVAILABLE") scheduleWorkflowStartupRetry();
   }
 }
@@ -3494,6 +3495,11 @@ const server = http.createServer((req, res) => {
     return;
   }
   const requestUrl = new URL(req.url, `http://${req.headers.host || "127.0.0.1"}`);
+  if (requestUrl.pathname === "/api/health/live" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+    res.end(JSON.stringify({ ok:true, pid:process.pid, uptime_seconds:Math.floor(process.uptime()), workflow_loaded:Boolean(workflowBackend) }));
+    return;
+  }
   if (requestUrl.pathname === "/quant-terminal") {
     res.writeHead(308, { Location: `/quant-terminal/${requestUrl.search}`, "Cache-Control": "no-store" });
     res.end();

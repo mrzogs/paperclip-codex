@@ -96,7 +96,10 @@ Assert-Test ((ConvertTo-UtcDateTimeOffset $zTimestamp).ToString('o') -eq '2026-1
 Assert-Test ((ConvertTo-UtcDateTimeOffset $offsetTimestamp).ToString('o') -eq '2026-10-09T18:00:00.0000000+00:00') 'OFFSET_TIMESTAMP_CHANGED_IN_UTC_CONVERSION'
 
 $source = Get-Content -LiteralPath $sourcePath -Raw
-Assert-Test ($source.Contains("[Uri]'http://127.0.0.1:3102/api/workflow/readiness'")) 'PROBE_DOES_NOT_REQUIRE_WORKFLOW_READINESS'
+Assert-Test ($source.Contains("`$ReadinessProbeUri = [Uri]'http://127.0.0.1:3102/api/workflow/readiness'")) 'STARTUP_PROBE_DOES_NOT_REQUIRE_WORKFLOW_READINESS'
+Assert-Test ($source.Contains("`$LivenessProbeUri = [Uri]'http://127.0.0.1:3102/api/health/live'")) 'STEADY_STATE_PROBE_IS_NOT_ISOLATED_FROM_WORKFLOW_SQLITE'
+Assert-Test ($source.Contains('Test-OceanWebsiteLiveness $ReadinessProbeUri $ProbeTimeoutSeconds')) 'STARTUP_DOES_NOT_USE_SEMANTIC_READINESS'
+Assert-Test ($source.Contains('Test-OceanWebsiteLiveness $LivenessProbeUri $ProbeTimeoutSeconds')) 'RECOVERY_DOES_NOT_USE_CHEAP_LIVENESS'
 Assert-Test ($source.Contains("Origin', 'http://127.0.0.1:3102'")) 'READINESS_PROBE_HAS_NO_ALLOWED_LOOPBACK_ORIGIN'
 Assert-Test (-not $source.Contains('/api/workflow/status')) 'SUPERVISOR_PROBES_THE_SLOW_WORKFLOW_STATUS_ROUTE'
 Assert-Test ($source.Contains('-WindowStyle Hidden')) 'WEBSITE_CHILD_IS_NOT_STARTED_HIDDEN'
@@ -104,6 +107,7 @@ Assert-Test ($source.Contains("Local\OceanTradingWebsiteSupervisor-v1")) 'WEBSIT
 Assert-Test ($source.Contains('Stop-Process -Id $Process.Id -Force')) 'RECOVERY_IS_NOT_SCOPED_TO_THE_EXACT_CHILD_PID'
 Assert-Test (-not ($source -match 'manage-ocean-services\.ps1.+Restart')) 'LIVENESS_RECOVERY_RESTARTS_THE_SERVICE_STACK'
 Assert-Test ($source.Contains("Get-ScheduledTask -TaskPath '\OceanTrading\' -TaskName 'OceanTrading-Website'")) 'DISABLED_WEBSITE_TASK_DOES_NOT_SUPPRESS_RESTART'
+Assert-Test ($source.Contains('[int]$StartupTimeoutSeconds = 150')) 'WEBSITE_STARTUP_TIMEOUT_DOES_NOT_COVER_PROTECTED_READBACK'
 $delayMarker = 'Start-Sleep -Seconds $RestartDelaySeconds'
 $delayIndex = $source.IndexOf($delayMarker)
 $postDelay = if ($delayIndex -ge 0) { $source.Substring($delayIndex + $delayMarker.Length) } else { '' }

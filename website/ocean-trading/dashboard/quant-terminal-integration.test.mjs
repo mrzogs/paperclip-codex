@@ -21,6 +21,12 @@ test('Ocean hosts Quant routes and saved state on its own listener across restar
   });
   try {
     let base = await listen();
+    const livenessResponse = await fetch(`${base}/api/health/live`);
+    assert.equal(livenessResponse.status, 200);
+    const liveness = await livenessResponse.json();
+    assert.equal(liveness.ok, true);
+    assert.equal(liveness.pid, process.pid);
+    assert.equal(liveness.workflow_loaded, false);
     const home = await fetch(base);
     assert.match(await home.text(), /href="\/quant-terminal\/"/);
     const redirect = await fetch(`${base}/quant-terminal`, { redirect: 'manual' });
