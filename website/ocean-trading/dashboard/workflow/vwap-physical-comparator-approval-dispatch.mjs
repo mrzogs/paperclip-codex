@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readVwapPhysicalComparatorContract, DEFAULT_VWAP_PHYSICAL_COMPARATOR_CONTRACT } from './vwap-physical-comparator-contract.mjs';
+import { projectVwapContinuity, currentVwapContinuity } from './vwap-continuity-projection.mjs';
 
 export const APPROVAL_DISPATCH_SCHEMA = 'ocean-vwap-physical-comparator-approval-dispatch/v1';
 export const APPROVAL_DISPATCH_STATE_SCHEMA = 'ocean-vwap-physical-comparator-approval-dispatch-state/v1';
@@ -186,7 +187,7 @@ export function readVwapPhysicalComparatorApprovalDispatchState(statePath = DEFA
     || (state.status === 'PREFLIGHT_BLOCKED_PHYSICAL_BINDING' && state.staging_authority?.authoritative !== true)) return {schema_version:APPROVAL_DISPATCH_STATE_SCHEMA, strategy_id:strategyId, enabled:true, status:'ATTENTION_REQUIRED', reason:'APPROVAL_DISPATCH_STATE_INVALID', checked_at_utc:nowUtc(),
       gate:{action:'READ_ONLY_PREFLIGHT_ONLY', current_permission_state:'READ_ONLY_EXTERNAL_EVIDENCE_NO_REPLAY_RUNTIME_WRITE', post_preflight_gate:'EXACT_TEST_REPLAY_TWO_RUNTIME_OUTPUT_WRITE_START_SCOPE_REQUIRED', post_preflight_action:'REQUEST_OR_DERIVE_ONLY_AFTER_READ_ONLY_PREFLIGHT'},
       safety:{execution_authority:false,runtime_write_scope_authorized:false,replay_start_authorized:false,paper_authorized:false,live_authorized:false,automatic_approval_enabled:false}};
-  return state;
+  return {...state,continuity:currentVwapContinuity(state.continuity)};
 }
 
 async function requestJson(config, relative, options = {}, fetchImpl = fetch) {
@@ -317,7 +318,8 @@ function matchingRuns(config, runs, reason) {
     && run?.contextSnapshot?.issueId === config.paperclip.issue_id && run?.contextSnapshot?.wakeReason === reason);
 }
 function observedStartedRun(runs) {
-  return runs.find(run => STARTED_STATUSES.has(String(run.status || '').toLowerCase()) && Boolean(run.startedAt)) || null;
+  return runs.find(run => UUID.test(String(run?.id || '')) && STARTED_STATUSES.has(String(run?.status || '').toLowerCase())
+    && Number.isFinite(Date.parse(run?.startedAt || ''))) || null;
 }
 function validateNextTask(config, task) {
   const expected = config.preflight_outcome.next_task;
@@ -449,7 +451,7 @@ function continuationWithRun(stagingAuthority, state, source, run) {
     heartbeat_started_at_utc:run?.startedAt || null,heartbeat_finished_at_utc:run?.finishedAt || null}};
 }
 function observedQueuedRun(runs) {
-  return runs.find(run => !STARTED_STATUSES.has(String(run?.status || '').toLowerCase())) || null;
+  return runs.find(run => String(run?.status || '').toLowerCase() === 'queued') || null;
 }
 async function reconcileApprovedContinuation(config, stagingAuthority, initialRuns, resolvedState, fetchImpl, sleepImpl) {
   if (stagingAuthority.approval_status !== 'APPROVED') return stagingAuthority;
@@ -463,6 +465,7 @@ async function reconcileApprovedContinuation(config, stagingAuthority, initialRu
     if (fallbackStarted) return continuationWithRun(stagingAuthority, 'OCEAN_LIVENESS_REPAIR_STARTED', 'OCEAN_FAIL_CLOSED_LIVENESS_REPAIR', fallbackStarted);
     const fallbackQueued = observedQueuedRun(fallback);
     if (fallbackQueued) return continuationWithRun(stagingAuthority, 'OCEAN_LIVENESS_REPAIR_QUEUED', 'OCEAN_FAIL_CLOSED_LIVENESS_REPAIR', fallbackQueued);
+    requireValue(paperclip.length === 0 && fallback.length === 0, 'APPROVAL_DISPATCH_CONTINUATION_PRIOR_START_NOT_PROVEN');
     return null;
   };
   const observed = classify(initialRuns);
@@ -510,11 +513,11 @@ async function reconcileApprovedContinuation(config, stagingAuthority, initialRu
     let run = wake;
     while (Date.now() < deadline) {
       run = await requestJson(config, '/heartbeat-runs/' + wake.id, {}, fetchImpl);
-      if (STARTED_STATUSES.has(String(run?.status || '').toLowerCase()) && run?.startedAt) break;
+      if (observedStartedRun([run])) break;
       await sleepImpl(Number(config.wake_poll_interval_ms || 500));
     }
-    requireValue(STARTED_STATUSES.has(String(run?.status || '').toLowerCase()) && Boolean(run?.startedAt), 'APPROVAL_DISPATCH_CONTINUATION_WAKE_NOT_PROVEN_STARTED');
-    requireValue(run?.agentId === config.paperclip.coordinator_agent_id
+    requireValue(observedStartedRun([run]), 'APPROVAL_DISPATCH_CONTINUATION_WAKE_NOT_PROVEN_STARTED');
+    requireValue(run?.id === wake.id && run?.agentId === config.paperclip.coordinator_agent_id
       && run?.contextSnapshot?.issueId === config.staging_authority.issue_id
       && run?.contextSnapshot?.wakeReason === reason, 'APPROVAL_DISPATCH_CONTINUATION_WAKE_READBACK_MISMATCH');
     return continuationWithRun(stagingAuthority, 'OCEAN_LIVENESS_REPAIR_STARTED', 'OCEAN_FAIL_CLOSED_LIVENESS_REPAIR', run);
@@ -552,9 +555,20 @@ function stagingSuccessReceiptReadback(config) {
     && receipt?.safety?.real_orders_authorized === false
     && Number.isFinite(Date.parse(receipt?.created_at_utc || '')),
   'APPROVAL_DISPATCH_STAGING_SUCCESS_RECEIPT_MISMATCH');
-  return {schema_version:expected.schema_version,status:'VERIFIED_IMMUTABLE_RECEIPT',path:expected.path,
+  return {schema_version:expected.schema_version,status:'CONTENT_MATCHED_AUTHORITY_UNVERIFIED',path:expected.path,
     authority:expected.authority,receipt_hash:receiptHash,created_at_utc:receipt.created_at_utc,
-    run_id:receipt.run_id,playback_started:false,measurement_start_invoked:false};
+    run_id:receipt.run_id,playback_started:false,measurement_start_invoked:false,
+    runtime_execution_authorized:false,
+    blocker:'Independent receipt custody and current exclusive booking authority have not been verified.'};
+}
+
+async function continuityReadback(config,executorIssue,stagingAuthority,fetchImpl) {
+  try { return await projectVwapContinuity({config,executorIssue,stagingAuthority,
+    getJson:relative=>requestJson(config,relative,{},fetchImpl)}); }
+  catch(error) { return {schema_version:'ocean-vwap-continuity-projection/v1',source:'PAPERCLIP_UNAVAILABLE',
+    observed_at_utc:null,freshness:{state:'UNAVAILABLE',max_age_ms:90000},
+    reason:String(error?.message||'CONTINUITY_READBACK_FAILED').split(':')[0],next_automatic_job:null,
+    authority:{runtime_execution_authorized:false}}; }
 }
 
 export async function scanVwapPhysicalComparatorApprovalDispatch({config, stateFile, contractPath, fetchImpl = fetch, sleepImpl = sleep} = {}) {
@@ -591,6 +605,7 @@ export async function scanVwapPhysicalComparatorApprovalDispatch({config, stateF
       if (completed) {
         completed.staging_authority = await reconcileApprovedContinuation(config, stagingAuthority, runList, resolvedState, fetchImpl, sleepImpl);
         completed.staging_authority.staging_success_receipt = stagingSuccessReceiptReadback(config);
+        completed.continuity = await continuityReadback(config,executorIssue,completed.staging_authority,fetchImpl);
         return write('PREFLIGHT_BLOCKED_PHYSICAL_BINDING', completed);
       }
       return write('ALREADY_DISPATCHED_READ_ONLY_PREFLIGHT', {approval_statuses:statuses, dispatched:true, wake_reason:reason, heartbeat_run_id:priorStarted.id, heartbeat_run_status:priorStarted.status, heartbeat_started_at_utc:priorStarted.startedAt});
@@ -611,6 +626,7 @@ export async function scanVwapPhysicalComparatorApprovalDispatch({config, stateF
         if (completed) {
           completed.staging_authority = await reconcileApprovedContinuation(config, stagingAuthority, insideList, resolvedState, fetchImpl, sleepImpl);
           completed.staging_authority.staging_success_receipt = stagingSuccessReceiptReadback(config);
+          completed.continuity = await continuityReadback(config,executorIssue,completed.staging_authority,fetchImpl);
           return write('PREFLIGHT_BLOCKED_PHYSICAL_BINDING', completed);
         }
         return write('ALREADY_DISPATCHED_READ_ONLY_PREFLIGHT', {approval_statuses:statuses, dispatched:true, wake_reason:reason, heartbeat_run_id:insideStarted.id, heartbeat_run_status:insideStarted.status, heartbeat_started_at_utc:insideStarted.startedAt});
@@ -634,11 +650,12 @@ export async function scanVwapPhysicalComparatorApprovalDispatch({config, stateF
       let run = wake;
       while (Date.now() < deadline) {
         run = await requestJson(config, '/heartbeat-runs/' + wake.id, {}, fetchImpl);
-        if (STARTED_STATUSES.has(String(run?.status || '').toLowerCase()) && run?.startedAt) break;
+        if (observedStartedRun([run])) break;
         await sleepImpl(Number(config.wake_poll_interval_ms || 500));
       }
-      requireValue(STARTED_STATUSES.has(String(run?.status || '').toLowerCase()) && Boolean(run?.startedAt), 'APPROVAL_DISPATCH_WAKE_NOT_PROVEN_STARTED');
-      requireValue(run?.contextSnapshot?.issueId === config.paperclip.issue_id && run?.contextSnapshot?.wakeReason === reason, 'APPROVAL_DISPATCH_WAKE_READBACK_MISMATCH');
+      requireValue(observedStartedRun([run]), 'APPROVAL_DISPATCH_WAKE_NOT_PROVEN_STARTED');
+      requireValue(run?.id === wake.id && run?.agentId === config.paperclip.coordinator_agent_id
+        && run?.contextSnapshot?.issueId === config.paperclip.issue_id && run?.contextSnapshot?.wakeReason === reason, 'APPROVAL_DISPATCH_WAKE_READBACK_MISMATCH');
       return write('DISPATCHED_READ_ONLY_PREFLIGHT', {approval_statuses:statuses, dispatched:true, wake_reason:reason, heartbeat_run_id:run.id, heartbeat_run_status:run.status, heartbeat_started_at_utc:run.startedAt});
     } finally {
       try { fs.closeSync(lock); } catch {}

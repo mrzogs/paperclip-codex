@@ -390,8 +390,10 @@ export class RunManager {
     const progress=this.db.prepare('SELECT payload_json FROM ow_run_progress WHERE run_id=? ORDER BY id DESC LIMIT 1').get(run.id);
     const evidence=this.db.prepare('SELECT canonical_id,market_id,payload_json FROM ow_evidence_revisions WHERE run_id=?').all(run.id);
     const complete=this.db.prepare('SELECT payload_json FROM ow_coverage_receipts WHERE run_id=? ORDER BY id DESC LIMIT 1').get(run.id);
-    const missingPins=this.db.prepare("SELECT id FROM ow_trade_pins WHERE run_id=? AND state='CLOSED'").all(run.id).filter(pin=>!evidence.some(e=>parse(e).trade_id===pin.id)).length;
-    const unresolved=missingPins+evidence.filter(r=>!r.canonical_id || parse(r).conflicting_fields.length>0).length;
+    const parsedEvidence=evidence.map(row=>({canonical_id:row.canonical_id,value:parse(row)}));
+    const recordedTradeIds=new Set(parsedEvidence.map(row=>row.value.trade_id));
+    const missingPins=this.db.prepare("SELECT id FROM ow_trade_pins WHERE run_id=? AND state='CLOSED'").all(run.id).filter(pin=>!recordedTradeIds.has(pin.id)).length;
+    const unresolved=missingPins+parsedEvidence.filter(row=>!row.canonical_id || row.value.conflicting_fields.length>0).length;
     const completion=complete?parse(complete):null;
     const current=!!completion && completion.processing_event_count===evidence.length && unresolved===0 && (!progress || parse(progress).observed_at_utc<=completion.completed_at_utc);
     return {progress:progress?parse(progress):null,open_pins:this.db.prepare("SELECT COUNT(*) AS n FROM ow_trade_pins WHERE run_id=? AND state='OPEN'").get(run.id).n,unique_canonical_count:new Set(evidence.map(r=>r.canonical_id).filter(Boolean)).size,unique_market_count:new Set(evidence.map(r=>r.market_id).filter(Boolean)).size,processing_count:evidence.length,unresolved_records:unresolved,completion,completion_current:current};

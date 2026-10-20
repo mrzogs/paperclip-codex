@@ -266,6 +266,22 @@ test('queued receipt alone is not accepted as dispatch success', async () => {
   assert.equal(f.posts(), 1);
 });
 
+test('worker readback cannot substitute another run or a malformed start timestamp', async () => {
+  for (const patch of [{id:'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'},{startedAt:'not-a-date'}]) {
+    const f=fixture();
+    const fetchImpl=async(url,options)=>{
+      const value=await f.fetchImpl(url,options);
+      if(new URL(url).pathname==='/api/heartbeat-runs/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')
+        return response({...JSON.parse(await value.text()),...patch});
+      return value;
+    };
+    const result=await scanVwapPhysicalComparatorApprovalDispatch({config:f.config,stateFile:f.config.state_path,fetchImpl,sleepImpl:async()=>{}});
+    assert.equal(result.status,'ATTENTION_REQUIRED');
+    assert.match(result.reason,/WAKE_(READBACK_MISMATCH|NOT_PROVEN_STARTED)/);
+    assert.equal(result.dispatched,false);
+  }
+});
+
 test('changed OCEA-20 binding prevents wake', async () => {
   const f = fixture({issuePatch:{status:'todo'}});
   const result = await scanVwapPhysicalComparatorApprovalDispatch({config:f.config, stateFile:f.config.state_path, fetchImpl:f.fetchImpl});
