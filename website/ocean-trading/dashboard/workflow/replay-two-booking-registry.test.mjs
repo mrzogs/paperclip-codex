@@ -200,6 +200,12 @@ test("protected atomic Replay Two registry preserves fencing, immutable receipts
     assert.equal(result.value.schema, "oql.replay-two-booking-current/v1");
     assert.equal(result.value.current.receipt_hash, first.receipt_hash);
 
+    const configuredApprovals = app.backend().replayTwoBookings.config.approval_bindings;
+    app.backend().replayTwoBookings.config.approval_bindings = [];
+    result = await app.request(`replay-two-bookings/${first.booking_id}`, { role: "TELEMETRY" });
+    assert.equal(result.value.effective_status, "ACTIVE", "booking state is not a substitute for the separate live approval gate");
+    app.backend().replayTwoBookings.config.approval_bindings = configuredApprovals;
+
     result = await app.request("replay-two-bookings", { method: "POST", body: app.acquire() });
     assert.equal(result.status, 409);
     assert.equal(result.value.error.code, "BOOKING_RESOURCE_BUSY");
@@ -316,6 +322,8 @@ test("published contract fixtures retain the exact canonical receipt and termina
   assert.deepEqual(contract.fixture.terminal_response.event, terminalEvent);
   assert.equal(contract.fresh_read.request_header, "X-Ocean-Booking-Read-Nonce");
   assert.equal(contract.fresh_read.response_header, "X-Ocean-Booking-Read-Nonce");
+  assert.equal(contract.approval_authority.live_status_authoritative, false);
+  assert.match(contract.approval_authority.client_gate, /before and after each mutation/);
   assert.equal(receipt.registry_comment_id, null);
   assert.equal(receipt.registry_body_sha256, null);
 });

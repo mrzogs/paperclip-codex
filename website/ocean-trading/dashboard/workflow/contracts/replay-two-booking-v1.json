@@ -24,6 +24,12 @@
     "revoke_actor": "Authenticated Wayne browser identity",
     "renewal": "BOOKING_RENEWAL_UNAVAILABLE"
   },
+  "approval_authority": {
+    "live_status_authoritative": false,
+    "acquire_pin": "The protected config binding pins approval identity, snapshot hash, package hash and expiry at acquisition.",
+    "client_gate": "An ACTIVE booking never authorizes a physical mutation by itself. Stage, VerifySelection and Rollback clients must independently re-read the protected live approval immediately before and after each mutation and fail closed on any change or revocation.",
+    "booking_revocation": "Wayne or the supervised Ocean governance path must also revoke the booking when approval is withdrawn."
+  },
   "fresh_read": {
     "request_header": "X-Ocean-Booking-Read-Nonce",
     "response_header": "X-Ocean-Booking-Read-Nonce",

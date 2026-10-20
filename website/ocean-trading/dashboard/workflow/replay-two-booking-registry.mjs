@@ -202,6 +202,8 @@ export class ReplayTwoBookingRegistry {
     hash(input.package_sha256, "BOOKING_PACKAGE_HASH_REQUIRED");
     requireThat(sameScope(input.operation_scope), 422, "BOOKING_OPERATION_SCOPE_CONFLICT");
     const now = this.now();
+    // This pins the approved artifact identity for booking acquisition. Physical
+    // clients still revalidate live approval before and after every mutation.
     const approvalBinding = this.config.approval_bindings.find((entry) => entry.identity_id === actor.id
       && entry.owner_project === input.owner_project
       && entry.approval_id === input.approval_id
