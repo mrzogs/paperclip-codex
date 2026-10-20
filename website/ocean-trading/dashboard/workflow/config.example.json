@@ -14,16 +14,5 @@
   "brain_submission":"OFF",
   "live_real":"DISABLED",
   "dispatch_worker":"OFF",
-  "replay_two_booking_registry": {
-    "enabled": false,
-    "test_only": true,
-    "resource_key": "sierra-replay-two:primary",
-    "instance_executable": "D:\\Trading\\SierraChart-Replay Two\\SierraChart_64.exe",
-    "min_ttl_ms": 10000,
-    "max_ttl_ms": 900000,
-    "issuers": [],
-    "approval_bindings": [],
-    "reader_identity_ids": []
-  },
   "lease_ms":30000
 }

@@ -28,7 +28,7 @@ export class WorkflowStore {
         const tables = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all().map(row => row.name);
         requireThat(tables.length > 0 && tables.every(name => name.startsWith("ow_")), 503, "EXISTING_NON_WORKFLOW_DATABASE_REJECTED");
         requireThat(["ow_schema_migrations", "ow_auth_state", "ow_auth_audit", "ow_identities"].every(name => tables.includes(name)), 503, "EXISTING_WORKFLOW_SCHEMA_REQUIRED");
-        requireThat(this.db.prepare("SELECT MAX(version) AS version FROM ow_schema_migrations").get().version === 14, 503, "READONLY_WORKFLOW_MIGRATION_REQUIRED");
+        requireThat(this.db.prepare("SELECT MAX(version) AS version FROM ow_schema_migrations").get().version === 13, 503, "READONLY_WORKFLOW_MIGRATION_REQUIRED");
       } catch (error) { this.db.close(); throw error; }
       return;
     }
@@ -54,7 +54,7 @@ export class WorkflowStore {
         });
       }
       const version = this.db.prepare("SELECT MAX(version) AS version FROM ow_schema_migrations").get().version;
-      requireThat([1,2,3,4,5,6,7,8,9,10,11,12,13,14].includes(version), 503, "WORKFLOW_MIGRATION_VERSION_CONFLICT");
+      requireThat([1,2,3,4,5,6,7,8,9,10,11,12,13].includes(version), 503, "WORKFLOW_MIGRATION_VERSION_CONFLICT");
       if (version === 1) this.transaction(() => {
         this.db.exec(fs.readFileSync(new URL("./migrations/002-up.sql", import.meta.url), "utf8"));
         for (const table of RUN_IMMUTABLE) for (const action of ["UPDATE","DELETE"]) this.db.exec(`CREATE TRIGGER ${table}_no_${action.toLowerCase()} BEFORE ${action} ON ${table} BEGIN SELECT RAISE(ABORT,'immutable run record'); END;`);
@@ -74,7 +74,6 @@ export class WorkflowStore {
       if (version < 11) this.transaction(() => this.db.exec(fs.readFileSync(new URL("./migrations/011-up.sql", import.meta.url), "utf8")));
       if (version < 12) this.transaction(() => this.db.exec(fs.readFileSync(new URL("./migrations/012-up.sql", import.meta.url), "utf8")));
       if (version < 13) this.transaction(() => this.db.exec(fs.readFileSync(new URL("./migrations/013-up.sql", import.meta.url), "utf8")));
-      if (version < 14) this.transaction(() => this.db.exec(fs.readFileSync(new URL("./migrations/014-up.sql", import.meta.url), "utf8")));
     } catch (error) { this.db.close(); throw error; }
   }
   transaction(work) {
@@ -113,8 +112,6 @@ export class WorkflowStore {
     const count = this.db.prepare("SELECT (SELECT COUNT(*) FROM ow_cases)+(SELECT COUNT(*) FROM ow_runs)+(SELECT COUNT(*) FROM ow_setup_receipts) AS n").get().n;
     requireThat(count === 0, 409, "POPULATED_WORKFLOW_REQUIRES_BACKUP_AND_OPERATOR_ROLLBACK");
     this.transaction(() => {
-      requireThat(this.db.prepare('SELECT (SELECT COUNT(*) FROM ow_replay_two_bookings)+(SELECT COUNT(*) FROM ow_replay_two_booking_events) AS n').get().n===0,409,'REPLAY_TWO_BOOKING_HISTORY_REQUIRES_BACKUP_ROLLBACK');
-      this.db.exec('DROP TRIGGER ow_replay_two_booking_events_no_delete; DROP TRIGGER ow_replay_two_booking_events_no_update; DROP TRIGGER ow_replay_two_bookings_no_delete; DROP TRIGGER ow_replay_two_bookings_no_update; DROP TABLE ow_replay_two_booking_events; DROP INDEX ow_replay_two_bookings_current; DROP TABLE ow_replay_two_bookings; DELETE FROM ow_schema_migrations WHERE version=14;');
       requireThat(this.db.prepare('SELECT COUNT(*) AS n FROM ow_candidate_evaluation_jobs').get().n===0,409,'CANDIDATE_EVALUATION_HISTORY_REQUIRES_BACKUP_ROLLBACK');
       this.db.exec('DROP TRIGGER ow_candidate_evaluation_jobs_readback_immutable; DROP TRIGGER ow_candidate_evaluation_jobs_response_immutable; DROP TRIGGER ow_candidate_evaluation_jobs_request_immutable; DROP TRIGGER ow_candidate_evaluation_jobs_input_immutable; DROP TRIGGER ow_candidate_evaluation_jobs_identity_immutable; DROP INDEX ow_candidate_evaluation_jobs_due; DROP TABLE ow_candidate_evaluation_jobs; DELETE FROM ow_schema_migrations WHERE version=13;');
       this.db.exec('DROP INDEX ow_run_progress_run_latest; DROP INDEX ow_coverage_receipts_run_latest; DROP INDEX ow_events_entity_action_latest; DELETE FROM ow_schema_migrations WHERE version=12;');
