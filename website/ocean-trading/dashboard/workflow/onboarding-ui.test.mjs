@@ -214,8 +214,10 @@ test('complete onboarding is actionable in the browser without touching producti
     await expect(page.locator('#notice')).toContainText('Open Replay Monitor to view Ocean data');
     await expect(page.getByRole('heading',{ name:'Onboarding complete', exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'CI/CD continuous run', exact:true })).toBeVisible();
-    await expect(page.getByRole('heading',{ name:'Review the exact TEST staging approval in Paperclip', exact:true })).toBeVisible();
-    await expect(page.getByText(/Paperclip—not Ocean—is the approval authority\. The two comparator decisions are approved and the read-only preflight completed/)).toBeVisible();
+    await expect(page.getByRole('heading',{ name:'Resolve blocked Replay execution work before staging', exact:true })).toBeVisible();
+    await expect(page.getByText(/approving it alone cannot install the host or start Replay/)).toBeVisible();
+    await expect(page.getByRole('link',{ name:'Open blocked work OCEA-30', exact:true })).toHaveAttribute('href','http://127.0.0.1:3100/OCEA/issues/OCEA-30');
+    await expect(page.getByText(/OCEA-30 is blocked: Restore execution: review supervised host candidate/)).toBeVisible();
     await expect(page.getByRole('heading',{ name:'Read-only preflight complete — blocked', exact:true })).toBeVisible();
     await expect(page.getByText('Preflight blocked physical binding',{ exact:true })).toBeVisible();
     await expect(page.getByText('Read only preflight only',{ exact:true })).toBeVisible();
@@ -239,8 +241,8 @@ test('complete onboarding is actionable in the browser without touching producti
     sources['priority-completion-program.json'].status = 'CICD_GATES_PROVEN_READY_FOR_GOVERNED_CANDIDATE_DECISION';
     fs.writeFileSync(path.join(sourceRoot,'priority-completion-program.json'),JSON.stringify(sources['priority-completion-program.json']));
     await page.locator('#refresh').click();
-    await expect(page.getByRole('heading',{ name:'Review the exact TEST staging approval in Paperclip', exact:true })).toBeVisible();
-    await expect(page.getByText('Owner: Wayne / Paperclip board',{ exact:true })).toBeVisible();
+    await expect(page.getByRole('heading',{ name:'Resolve blocked Replay execution work before staging', exact:true })).toBeVisible();
+    await expect(page.getByText('Owner: Mara Vale - Quant Lab Coordinator',{ exact:true })).toBeVisible();
     await expect(page.getByText('Autonomous improvement implementation',{ exact:true })).toBeVisible();
     await expect(page.getByRole('columnheader',{ name:'Exact next action', exact:true })).toBeVisible();
     await expect(page.getByRole('button',{ name:'Prepare Replay history run', exact:true })).toHaveCount(0);
