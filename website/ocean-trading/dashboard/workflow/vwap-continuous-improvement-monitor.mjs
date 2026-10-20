@@ -74,7 +74,9 @@ function normalize(row,source,config) {
   const critical=(config.critical_quality_flags||[]).filter(value=>observedFlags.has(String(value).toLowerCase()));
   const missing=REQUIRED_CAUSAL_FIELDS.filter(field=>row[field]===null||row[field]===undefined||row[field]==='');
   const environment=String(row.environment||source.environment||'').toUpperCase(),entry=utc(row.entry_datetime);
-  const identityVerified=row.strategy_id===config.strategy_id&&String(row.trade_account||'')===String(source.account||'')&&environment===String(source.environment||'').toUpperCase()&&Number(row.is_simulated)===1&&contractState.verified;
+  const account=String(row.trade_account||'');
+  const foreignAccount=account!==''&&account!==String(source.account||'');
+  const identityVerified=row.strategy_id===config.strategy_id&&account===String(source.account||'')&&environment===String(source.environment||'').toUpperCase()&&Number(row.is_simulated)===1&&contractState.verified;
   const telemetryComplete=String(row.context_status||'').toLowerCase()==='complete'&&!critical.length&&!missing.length&&LEARNING_ROLES.has(role);
   return {trade_id:source.id+':'+row.trade_id,source_id:source.id,source_trade_id:String(row.trade_id),run_id:row.run_id||null,
     strategy_id:row.strategy_id||null,strategy_version:row.strategy_version||null,environment,dataset_role:role,
@@ -82,7 +84,7 @@ function normalize(row,source,config) {
     setup_id:row.setup_id||null,session_name:row.session_name||null,side:row.side||row.direction||null,
     regime_label:row.regime_label||null,volatility_label:row.volatility_label||null,vwap_reclaim_state:row.vwap_reclaim_state||null,
     net_pnl:Number(row.net_profit_loss??row.profit_loss??0),mfe:row.mfe_points??row.max_favourable_excursion??null,mae:row.mae_points??row.max_adverse_excursion??null,
-    telemetry_complete:telemetryComplete,identity_verified:identityVerified,run_contract_state:contractState.state,
+    telemetry_complete:telemetryComplete,identity_verified:identityVerified,foreign_account:foreignAccount,run_contract_state:contractState.state,
     quality_flags:[...observedFlags].sort(),
     quality_blockers:[...critical,...missing.map(field=>field+'_missing'),...(contractState.verified?[]:['run_contract_'+contractState.state.toLowerCase()])].sort(),entry_time_utc:entry,exit_time_utc:utc(row.exit_datetime),updated_utc:row.updated_utc||null};
 }
@@ -323,7 +325,7 @@ export async function scanVwapContinuousImprovement({config,stateFile,reason='pe
   const previous=readJson(stateFile,{})||{},checkedAt=nowUtc();
   const publication=runContractPublication(config);
   const signatures=config.sources.flatMap(source=>sqliteSignatures(source.database_path));
-  const signature=digest({normalization_version:'frozen-replay-role-map/v1',signatures,
+  const signature=digest({normalization_version:'frozen-replay-role-map-account-scope/v2',signatures,
     sources:config.sources.map(source=>({id:source.id,environment:source.environment,account:source.account,
       run_assignments:source.run_assignments||null,require_explicit_dataset_role:source.require_explicit_dataset_role===true,
       run_contracts:source.run_contracts||null,default_dataset_role:source.default_dataset_role||null})),critical_quality_flags:config.critical_quality_flags||[]});
@@ -338,7 +340,10 @@ export async function scanVwapContinuousImprovement({config,stateFile,reason='pe
       writeJson(stateFile,{...readJson(stateFile,{}),current_source_id:source.id});
       sources.push({source,rows:await readSource(source,config)});
     }
-    const rows=sources.flatMap(item=>item.rows);
+    // A shared telemetry database may hold trades from other simulated accounts.
+    // Keep their presence visible, but never count or dispatch them as this source.
+    const foreignAccountRows=sources.flatMap(item=>item.rows.filter(row=>row.foreign_account));
+    const rows=sources.flatMap(item=>item.rows.filter(row=>!row.foreign_account));
     const eligible=row=>row.telemetry_complete&&row.identity_verified&&LEARNING_ROLES.has(row.dataset_role);
     const ids=new Set(rows.map(row=>row.trade_id)),prior=new Set(previous.observed_trade_ids||[]),newIds=[...ids].filter(id=>!prior.has(id)).sort();
     const eligibleRows=rows.filter(eligible).sort((left,right)=>left.trade_id.localeCompare(right.trade_id));
@@ -388,14 +393,16 @@ export async function scanVwapContinuousImprovement({config,stateFile,reason='pe
       initialized_at_utc:previous.initialized_at_utc||checkedAt,last_checked_at_utc:checkedAt,last_database_interrogation_at_utc:checkedAt,last_check_reason:reason,
       skipped_unchanged:false,database_query_count:Number(previous.database_query_count||0)+1,database_signature:signature,
       sources:sources.map(item=>({id:item.source.id,environment:item.source.environment,account:item.source.account,database_path:item.source.database_path,
-        observed_trade_count:item.rows.length,eligible_trade_count:item.rows.filter(eligible).length,
-        role_issue_count:item.rows.filter(isRunRoleIssue).length,
-        latest_trade_id:item.rows.at(-1)?.trade_id||null})),
-      observed_trade_count:rows.length,eligible_trade_count:eligibleRows.length,new_trade_count:baseline?0:newIds.length,last_observed_new_trade_ids:baseline?[]:newIds,
+        observed_trade_count:item.rows.filter(row=>!row.foreign_account).length,eligible_trade_count:item.rows.filter(eligible).length,
+        foreign_account_trade_count:item.rows.filter(row=>row.foreign_account).length,
+        role_issue_count:item.rows.filter(row=>!row.foreign_account&&isRunRoleIssue(row)).length,
+        latest_trade_id:item.rows.filter(row=>!row.foreign_account).at(-1)?.trade_id||null})),
+      observed_trade_count:rows.length,foreign_account_trade_count:foreignAccountRows.length,eligible_trade_count:eligibleRows.length,new_trade_count:baseline?0:newIds.length,last_observed_new_trade_ids:baseline?[]:newIds,
       newly_eligible_trade_count:baseline?0:newlyEligibleIds.length,last_newly_eligible_trade_ids:baseline?[]:newlyEligibleIds,
       observed_trade_ids:[...ids].sort(),eligible_trade_ids:eligibleIds,eligible_evidence_fingerprint:eligibleFingerprint,
       run_contract_publication:publication,
       detector,disposition:detector.disposition,next_action:nextAction,
+      account_scope_anomaly_action:foreignAccountRows.length?'FOREIGN_ACCOUNT_ROWS_EXCLUDED: verify the telemetry producer and account binding; do not import these rows into this account evidence.':null,
       role_issue_count:roleIssueCount,paper_provenance_issue_count:paperProvenanceIssueCount,baseline_applied:baseline,
       current_phase:null,current_source_id:null,
       last_trigger_receipt:receipt||previous.last_trigger_receipt||null,last_triggered_analysis_hash:lastHash,
