@@ -115,4 +115,3 @@ process.stdout.write(`${JSON.stringify({
   instance_executable: REPLAY_TWO_EXECUTABLE,
   approval_expires_utc: approvalExpiresAt,
 })}\n`);
-
