@@ -9,6 +9,7 @@ import { issueOceanIdentity, issueTestBrowserSecret } from './auth.mjs';
 import { WorkflowBackend } from './backend.mjs';
 
 const TEST_STRATEGY_ID = 'e2e-disposable-test-strategy';
+const TEST_APPROVAL_ID = 'd6bb0adb-2704-4e44-8aa8-011ee2b9baee';
 
 const sources = {
   'strategy-registry.json': { strategy_id:TEST_STRATEGY_ID, strategy_name:'E2E Disposable Test Strategy', profile_id:'profile-1', profile_version:'v0.1.1', profile_hash:'sha256:profile', baseline_version:'v0.1.0', production_version:null, activation_status:'PENDING_ONBOARDING', activation_decision_id:null },
@@ -24,7 +25,7 @@ const sources = {
   ] },
   'replay-two-alert-remediation.json': { strategy_id:TEST_STRATEGY_ID, verified_through:'2026-09-29T07:14:21Z', diagnosis:{ dll_rebuild_required:false }, fix:{ alerts_enabled:false }, validation:{ automated_order_placement:false, telemetry_logging:false } },
   'priority-completion-program.json': { schema_version:'cicd-vwap-priority-completion-program/v1', strategy_id:TEST_STRATEGY_ID, program_id:'test-priority-program', status:'IN_PROGRESS_POST_DISCOVERY_REVIEW', priority:'CRITICAL', authorization:{ live_real:'PROHIBITED' }, current_runtime_contracts:{ replay:'MNQH26_FUT_CME', paper:'MNQZ26_FUT_CME' }, next_governed_action:{ title:'Review discovery and decide whether to freeze a candidate', owner:'Wayne with Ocean Trading', action:'Either freeze one new isolated candidate for backward regression or record NO_CHANGE.', automatic_action:'NONE_UNTIL_CANDIDATE_FREEZE', reason:'Non-discovery data remains sealed until candidate freeze.' }, current_acceptance_assessment:{ assessed_at:'2026-10-02T22:39:20Z', promotion_disposition:'NO_AUTOMATIC_PROMOTION', pending:[{ gate:'FROZEN_DATASET_LADDER_FULLY_QUALIFIED', title:'Acquire MNQZ25 history for backward regression', blocker:'The required segment is absent.', owner:'Coordinator', resolution_action:'Acquire the exact MNQZ25 SCID segment before backward regression.' }] }, workstreams:[{ id:'W5', name:'Paper simulation operation', owner:'Coordinator', status:'ACTIVE_SIM1_V234_V0532_VERIFIED_FLAT_CONNECTED', next_action:'Continue non-promotional Paper observation on Sim1.', exit:'Paper safety verified.' }] },
-  'autonomous-continuous-improvement-program.json': { schema_version:'cicd-vwap-autonomous-continuous-improvement-program/v1', strategy_id:TEST_STRATEGY_ID, program_id:'test-autonomous-program', status:'ACTIVE_IMPLEMENTATION', priority:'CRITICAL', authorization:{ live_real:'PROHIBITED', real_order_routing:'PROHIBITED' }, fixed_boundaries:{ live_real_enabled:false, automatic_approval_enabled:false, production_version:null }, pipeline:[{ id:'P01', name:'Evidence ingestion and identity binding', status:'PROVEN', acceptance:'Every source is attributable.' },{ id:'P02', name:'Causal telemetry enrichment', status:'IMPLEMENTING', acceptance:'Causal fields are complete.' }], acceptance_gates:{ total:2, complete:1, implementing:1, pending:0 }, controller:{ canonical_version:'v0.2.0-cicd-vwap', deployment_receipt:'onboarding/controller-v020-replay-two-deployment-receipt.json' }, known_blockers:[{ id:'B01', status:'WORKAROUND_IN_PROGRESS', blocker:'Local-only controller CI integration is pending.', resolution:'Run the repository validation suite locally.' }], next_action:'Complete telemetry, strategy, Ocean, and Brain integration, then execute the non-live proof.' },
+  'autonomous-continuous-improvement-program.json': { schema_version:'cicd-vwap-autonomous-continuous-improvement-program/v1', strategy_id:TEST_STRATEGY_ID, program_id:'test-autonomous-program', status:'ACTIVE_IMPLEMENTATION', priority:'CRITICAL', authorization:{ live_real:'PROHIBITED', real_order_routing:'PROHIBITED' }, fixed_boundaries:{ live_real_enabled:false, automatic_approval_enabled:false, production_version:null }, pipeline:[{ id:'P01', name:'Evidence ingestion and identity binding', status:'PROVEN', acceptance:'Every source is attributable.' },{ id:'P02', name:'Causal telemetry enrichment', status:'IMPLEMENTING', acceptance:'Causal fields are complete.' }], acceptance_gates:{ total:2, complete:1, implementing:1, pending:0 }, controller:{ canonical_version:'v0.2.0-cicd-vwap', deployment_receipt:'onboarding/controller-v020-replay-two-deployment-receipt.json' }, known_blockers:[{ id:'B01', status:'WORKAROUND_IN_PROGRESS', blocker:'Local-only controller CI integration is pending.', resolution:'Run the repository validation suite locally.' }], required_human_approvals:[{ approval_id:TEST_APPROVAL_ID, title:'Approve the dedicated coordinator', purpose:'Coordinator hiring gate' }], next_action:`Continue after approval ${TEST_APPROVAL_ID} and exact route verification.` },
 };
 
 function writeSources(root) {
@@ -47,17 +48,23 @@ test('complete onboarding is actionable in the browser without touching producti
   let backend;
   const server = http.createServer((request, response) => {
     const url = new URL(request.url, `http://${request.headers.host}`);
+    if (url.pathname === `/api/approvals/${TEST_APPROVAL_ID}`) {
+      response.setHeader('Content-Type','application/json');
+      response.end(JSON.stringify({ id:TEST_APPROVAL_ID, type:'hire_agent', status:'approved', payload:{ name:'CICD VWAP Recovery Coordinator' }, createdAt:'2026-10-19T15:46:53.575Z', decidedAt:'2026-10-20T09:51:07.457Z' }));
+      return;
+    }
     if (url.pathname.startsWith('/api/workflow/')) { void backend.handle(request, response, url); return; }
     if (url.pathname === '/replay-monitor.html') { response.setHeader('Content-Type','text/html'); response.end('<!doctype html><main><h1>Replay Monitor</h1></main>'); return; }
     if (url.pathname === '/assets/ocean-trading-icon.png') { response.setHeader('Content-Type','image/png'); response.end(fs.readFileSync(path.join(publicRoot, '../assets/ocean-trading-icon.png'))); return; }
     const file = url.pathname.startsWith('/workflow/') ? url.pathname.slice('/workflow/'.length) : 'index.html';
-    if (!['index.html','ui.js','ui.css','icons.js','run-wizard.js','onboarding-help.js'].includes(file)) { response.writeHead(404).end(); return; }
+    if (!['index.html','ui.js','ui.css','icons.js','reprocess-identity.js','run-wizard.js','onboarding-help.js'].includes(file)) { response.writeHead(404).end(); return; }
     response.setHeader('Cache-Control','no-store');
     response.setHeader('Content-Type', file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html');
     response.end(fs.readFileSync(path.join(publicRoot, file)));
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
+  environment.PAPERCLIP_API = `${base}/api`;
   const strategyIds = [TEST_STRATEGY_ID]; const instanceIds = ['test-replay-two'];
   const config = {
     db_file:path.join(root,'workflow.sqlite'), test_only:true, contract_release:'2.1.0', allowed_origins:[base], lease_ms:30000,
@@ -78,7 +85,7 @@ test('complete onboarding is actionable in the browser without touching producti
   const browserErrors = []; page.on('pageerror', error => browserErrors.push(error.message));
   try {
     await page.goto(`${base}/improvement/strategies/${TEST_STRATEGY_ID}`);
-    assert.match(await page.locator('script[type="module"]').getAttribute('src'),/event-driven-vwap-monitor-20261005-1/,'the deployed page must request the current workflow module version');
+    assert.match(await page.locator('script[type="module"]').getAttribute('src'),/paperclip-approval-status-20261020-1/,'the deployed page must request the current workflow module version');
     await page.getByRole('button',{ name:'Sign in', exact:true }).click();
     await page.getByRole('link',{ name:'Help', exact:true }).click();
     await expect(page.getByRole('heading',{ name:'Onboarding help', exact:true })).toBeVisible();
@@ -92,6 +99,10 @@ test('complete onboarding is actionable in the browser without touching producti
     await page.setViewportSize({ width:1440, height:950 });
     await page.getByRole('link',{ name:'Back to strategies', exact:true }).click();
     await page.getByRole('link',{ name:'E2E Disposable Test Strategy', exact:true }).click();
+    await expect(page.getByRole('heading',{ name:'Required human approvals', exact:true })).toBeVisible();
+    await expect(page.getByRole('heading',{ name:'CICD VWAP Recovery Coordinator', exact:true })).toBeVisible();
+    await expect(page.getByText('Approved',{ exact:true }).last()).toBeVisible();
+    await expect(page.getByRole('link',{ name:'Open approval record', exact:true })).toHaveAttribute('href',`${base}/approvals/${TEST_APPROVAL_ID}`);
     await expect(page.getByRole('heading',{ name:'Event-driven evidence monitor', exact:true })).toBeVisible();
     await expect(page.getByText('Codex polling',{ exact:true })).toBeVisible();
     await expect(page.getByText('Not required',{ exact:true })).toBeVisible();
@@ -128,8 +139,9 @@ test('complete onboarding is actionable in the browser without touching producti
     await expect(page.locator('#notice')).toContainText('Open Replay Monitor to view Ocean data');
     await expect(page.getByRole('heading',{ name:'Onboarding complete', exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'CI/CD continuous run', exact:true })).toBeVisible();
-    await expect(page.getByRole('heading',{ name:'Complete the autonomous improvement loop', exact:true })).toBeVisible();
-    await expect(page.getByText('Complete telemetry, strategy, Ocean, and Brain integration, then execute the non-live proof.',{ exact:true }).first()).toBeVisible();
+    await expect(page.getByRole('heading',{ name:'Human approval recorded', exact:true })).toBeVisible();
+    await expect(page.getByText(/does not approve a strategy change, Paper, Live, or promotion/)).toBeVisible();
+    await expect(page.getByText(`Continue after approval ${TEST_APPROVAL_ID} and exact route verification.`,{ exact:true }).first()).toBeVisible();
     await expect(page.getByText('Autonomous improvement implementation',{ exact:true })).toBeVisible();
     await expect(page.getByText('MNQZ26_FUT_CME',{ exact:true })).toBeVisible();
     await expect(page.getByText('The non-live strategy is onboarded. Ocean is implementing and proving the continuous learning loop; candidate promotion still requires human approval and Live remains disabled.',{ exact:true })).toBeVisible();
@@ -140,7 +152,7 @@ test('complete onboarding is actionable in the browser without touching producti
     sources['priority-completion-program.json'].status = 'CICD_GATES_PROVEN_READY_FOR_GOVERNED_CANDIDATE_DECISION';
     fs.writeFileSync(path.join(sourceRoot,'priority-completion-program.json'),JSON.stringify(sources['priority-completion-program.json']));
     await page.locator('#refresh').click();
-    await expect(page.getByRole('heading',{ name:'Complete the autonomous improvement loop', exact:true })).toBeVisible();
+    await expect(page.getByRole('heading',{ name:'Human approval recorded', exact:true })).toBeVisible();
     await expect(page.getByText('Owner: Ocean continuous-improvement coordinator',{ exact:true })).toBeVisible();
     await expect(page.getByText('Autonomous improvement implementation',{ exact:true })).toBeVisible();
     await expect(page.getByRole('columnheader',{ name:'Exact next action', exact:true })).toBeVisible();

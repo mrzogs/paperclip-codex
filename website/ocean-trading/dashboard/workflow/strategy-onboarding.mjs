@@ -47,6 +47,30 @@ const DECISIONS = [
 
 const fileDigest = value => `sha256:${crypto.createHash('sha256').update(value).digest('hex')}`;
 const booleanState = value => value === true ? 'ON' : 'OFF';
+const APPROVAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function requiredHumanApprovals(value) {
+  const explicit = value.required_human_approvals;
+  requireThat(explicit === undefined || Array.isArray(explicit), 422, 'AUTONOMOUS_PROGRAM_APPROVAL_REFERENCES_INVALID');
+  const references = (explicit || []).map(item => {
+    requireThat(item && typeof item === 'object' && APPROVAL_UUID.test(String(item.approval_id || '')), 422, 'AUTONOMOUS_PROGRAM_APPROVAL_REFERENCE_INVALID');
+    return {
+      approval_id:String(item.approval_id),
+      purpose:String(item.purpose || item.title || 'Required human approval'),
+      title:item.title ? String(item.title) : null,
+      source:'program',
+    };
+  });
+  const keyed = new Map(references.map(item => [item.approval_id.toLowerCase(), item]));
+  const text = String(value.next_action || '');
+  const pattern = /\bapproval\s+([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\b/ig;
+  for (const match of text.matchAll(pattern)) {
+    if (!keyed.has(match[1].toLowerCase())) keyed.set(match[1].toLowerCase(), {
+      approval_id:match[1], purpose:'Approval required by the current program action', title:null, source:'next_action',
+    });
+  }
+  return [...keyed.values()];
+}
 
 export function readOnboardingStrategyId(root = DEFAULT_ONBOARDING_ROOT) {
   try {
@@ -186,6 +210,7 @@ export function readAutonomousImprovementProgram(root = DEFAULT_ONBOARDING_ROOT,
       state:'AVAILABLE', program_id:value.program_id, status:String(value.status || 'UNKNOWN'), priority:value.priority || null,
       pipeline, acceptance_gates:value.acceptance_gates || null, controller:value.controller || null,
       blockers, owners:value.owners || {}, brain_evidence:value.brain_evidence || null,
+      required_human_approvals:requiredHumanApprovals(value),
       next_action:String(value.next_action || 'Review the continuous-improvement program.'),
       path:programPath, sha256:fileDigest(content), observed_at_utc:fs.statSync(programPath).mtime.toISOString(),
       live_real:'DISABLED', automatic_approval:'DISABLED', production_version:null,

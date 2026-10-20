@@ -33,6 +33,7 @@ import {
   registerStrategyOnboarding,
 } from './strategy-onboarding.mjs';
 import { OnboardingBrainSync, retryOnboardingBrain } from './onboarding-brain-sync.mjs';
+import { enrichStrategyApprovalStatuses } from './paperclip-approval-status.mjs';
 
 export const TABLE = JSON.parse(fs.readFileSync(new URL("./workflow-transition-table.json", import.meta.url), "utf8"));
 const candidateRouteImplementationHash=digest(fs.readFileSync(new URL('./backend.mjs',import.meta.url)));
@@ -1064,7 +1065,16 @@ export class WorkflowBackend {
       if (request.method === "GET") {
         if (route === "run-manager/options") response.end(JSON.stringify(this.runs.options(actor)));
         else if (/^run-manager\/context\/[A-Za-z0-9_.:-]+$/.test(route)) response.end(JSON.stringify(this.runs.read(actor,route.split('/')[2])));
-        else if (route.startsWith("view/")) response.end(JSON.stringify(readWorkflowView(this, actor, route)));
+        else if (route.startsWith("view/")) {
+          const view=readWorkflowView(this,actor,route);
+          const result=/^view\/strategies\/[A-Za-z0-9_.:-]+$/.test(route)
+            ? await enrichStrategyApprovalStatuses(view,{
+              apiBase:this.environment.PAPERCLIP_API || 'http://127.0.0.1:3100/api',
+              timeoutMs:this.environment.OCEAN_PAPERCLIP_APPROVAL_TIMEOUT_MS || 2000,
+            })
+            : view;
+          response.end(JSON.stringify(result));
+        }
         else if (route === "status") response.end(JSON.stringify({ api_version: API_VERSION, contract_release: RELEASE, namespace: "TEST", brain_submission: "OFF", live_real: "DISABLED", dispatch_worker: "OFF", auth: "REQUIRED", schema_version: 13, identity: { id: actor.id, role: actor.role, scopes: actor.scopes, strategy_ids: actor.strategyIds, instance_ids: actor.instanceIds }, ...this.auth.readiness(), test_communication:this.testCommunication.readiness(actor), onboarding_brain_sync:this.onboardingBrain.status(), operational_learning:this.operationalLearning.status(), candidate_evaluator:{version:CANDIDATE_EVALUATOR_VERSION,state:this.operationalCandidateEvaluator.running?'RUNNING':'READY'}, maintenance:this.maintenanceHealth || {state:'NOT_INSTALLED_ISOLATED'} }));
         else if (route === 'setup-receipts') {
           requireThat(actor.role === 'HUMAN',403,'WAYNE_BROWSER_ONLY');
