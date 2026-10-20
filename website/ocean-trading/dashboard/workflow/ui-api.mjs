@@ -8,6 +8,19 @@ import { readOnboardingBrainOutbox } from './onboarding-brain-sync.mjs';
 export const UI_API_VERSION = 'ocean-workflow-ui/v1';
 const PAGE_SIZE = 50;
 const parse = (row, field = 'payload_json') => JSON.parse(row[field]);
+// A strategy overview is navigation, not an evidence/authority evaluation.
+// Full readCase traverses immutable research artifacts, which can be very large.
+// Keep those checks on the case-detail and action paths, not every auto-refresh.
+export function strategyCaseSummaries(db, strategyId, name) {
+  return db.prepare(`SELECT id,strategy_id,instance_id,run_id,stage,work_status,
+    revision,owner_id FROM ow_cases WHERE strategy_id=? ORDER BY rowid DESC LIMIT 200`)
+    .all(strategyId).map(row => ({
+      case_id:row.id,strategy_id:row.strategy_id,execution_instance_id:row.instance_id,
+      run_id:row.run_id,stage:row.stage,work_status:row.work_status,revision:row.revision,
+      owner_id:row.owner_id,strategy_name:name,validation_state:'NOT_EVALUATED_IN_LIST',
+      next_action:'Open case details to verify current evidence and next action.',
+    }));
+}
 const pageOf = (db, table, offset, order = 'rowid DESC') => ({
   rows: db.prepare(`SELECT * FROM ${table} ORDER BY ${order} LIMIT ? OFFSET ?`).all(PAGE_SIZE, offset),
   total: db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n,
@@ -72,7 +85,7 @@ export function readWorkflowView(backend, actor, route) {
   const strategyRow = (value) => {
     const registry = parse(value);
     const profile = parse(backend.one('ow_profiles', value.profile_id));
-    return { strategy_id: value.id, strategy_name: registry.strategy_name, registry_revision: value.revision, activation_status: registry.activation_status, activation_decision_id: registry.activation_decision_id, baseline_version: registry.baseline_version, baseline_hash: value.baseline_hash, production_version: registry.production_version, profile: { profile_id: profile.profile_id, profile_version: profile.profile_version, profile_hash: profile.profile_hash, strategy_code_hash: profile.strategy_code_hash, strategy_config_hash: profile.strategy_config_hash }, cases: db.prepare('SELECT id FROM ow_cases WHERE strategy_id=? ORDER BY rowid DESC LIMIT 200').all(value.id).map(row => caseRow(backend.one('ow_cases', row.id))), cases_total: db.prepare('SELECT COUNT(*) AS n FROM ow_cases WHERE strategy_id=?').get(value.id).n };
+    return { strategy_id: value.id, strategy_name: registry.strategy_name, registry_revision: value.revision, activation_status: registry.activation_status, activation_decision_id: registry.activation_decision_id, baseline_version: registry.baseline_version, baseline_hash: value.baseline_hash, production_version: registry.production_version, profile: { profile_id: profile.profile_id, profile_version: profile.profile_version, profile_hash: profile.profile_hash, strategy_code_hash: profile.strategy_code_hash, strategy_config_hash: profile.strategy_config_hash }, cases: strategyCaseSummaries(db,value.id,registry.strategy_name), cases_total: db.prepare('SELECT COUNT(*) AS n FROM ow_cases WHERE strategy_id=?').get(value.id).n };
   };
   const onboarding = () => {
     const strategyId = readOnboardingStrategyId(backend.config.strategy_onboarding_root);

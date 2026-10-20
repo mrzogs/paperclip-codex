@@ -65,3 +65,25 @@ issue-scoped model configuration and real review readback remain owner work.
 Staging approval `9f8cd5c6-948a-4818-9fad-5bd56d00cb23` remains pending.
 No standing TEST policy, physical staging, measurement start, Paper/Live
 deployment, or learning eligibility is inferred.
+
+## r3 deployed follow-up: historical case hydration
+
+Release `ocean-3635828-20261020-vwap-continuity-r3` fixed the displayed approval
+source and exposed fresh Sim1 trades, but sustained testing still found liveness
+timeouts. Do not report r3 as a complete responsiveness fix. A second deployed
+45-second CPU profile during real browser refresh measured 16,548 ms in SQLite
+`get` below continuation `forCase`/`backend.one`, and 12,804 ms below research
+`statusForCase`. The strategy overview eagerly called full `readCase` for up to
+200 cases, repeatedly loading and validating historical research artifacts.
+
+The follow-up makes that strategy navigation list a bounded metadata-only
+projection. Every row explicitly says to open case details for current evidence
+and next action; it supplies no verified research or authority claims. Full case
+detail and all protected action validation paths remain unchanged. Two real
+in-memory SQLite/source-contract regression tests cover bounds, strategy isolation,
+no artifact access, non-mutating behavior and retention of full detail checks.
+
+Paperclip OCEA-30 was independently read back as `done`; its reviewer run
+`54b4b5c7-3d17-4c79-a539-45a1b123fb51` succeeded at 16:49:44.539Z following an
+issue-only supported command/model/workspace override. This is an offline review
+completion, not host-integration, staging, Replay, Paper or Live authority.
