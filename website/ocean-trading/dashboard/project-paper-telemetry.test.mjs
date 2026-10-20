@@ -70,7 +70,18 @@ test("reports an active isolated Paper telemetry database", () => {
   assert.equal(status.account, "Sim1");
   assert.equal(status.symbol, "MNQZ26_FUT_CME");
   assert.equal(status.loggerVersion, "v0.5.26");
-  assert.deepEqual(status.counts, { accountSnapshots: 1, orders: 0, fills: 0, trades: 2, openTrades: 1, legacyOpenTrades: 0, unattributedOpenTrades: 0 });
+  assert.deepEqual(status.counts, {
+    accountSnapshots: 1,
+    orders: 0,
+    fills: 0,
+    trades: 2,
+    authoritativeTrades: 2,
+    excludedTrades: 0,
+    foreignAccountTrades: 0,
+    openTrades: 1,
+    legacyOpenTrades: 0,
+    unattributedOpenTrades: 0,
+  });
   assert.equal(status.closedTrades.length, 1);
   assert.equal(status.closedTrades[0].tradeId, "cicd-vwap-paper-sqlite-1");
   assert.equal(status.closedTrades[0].realizedPnlDollars, 1.72);
@@ -79,6 +90,53 @@ test("reports an active isolated Paper telemetry database", () => {
   assert.equal(status.openPositions[0].strategyId, "cicd-vwap-pull-back-strategy");
   assert.equal(status.closedNetProfitLossDollars, 1.72);
   assert.match(status.isolation, /separate observed CICD VWAP Paper feed/i);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("keeps a historical foreign-account trade visible as excluded audit evidence", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ocean-paper-telemetry-foreign-history-"));
+  const file = path.join(dir, "paper.sqlite");
+  const db = new DatabaseSync(file);
+  db.exec(`
+    CREATE TABLE sierra_instance (instance_name TEXT, instance_role TEXT);
+    CREATE TABLE logger_health (health_id INTEGER PRIMARY KEY, message TEXT);
+    CREATE TABLE account_snapshot (
+      account_snapshot_id INTEGER PRIMARY KEY, instance_name TEXT, instance_role TEXT,
+      trade_account TEXT, account_type_guess TEXT, is_simulated INTEGER,
+      snapshot_utc TEXT, created_utc TEXT
+    );
+    CREATE TABLE instrument_snapshot (
+      instrument_snapshot_id INTEGER PRIMARY KEY, instance_name TEXT,
+      trade_account TEXT, symbol TEXT, created_utc TEXT
+    );
+    CREATE TABLE orders (id INTEGER);
+    CREATE TABLE fills (id INTEGER);
+    CREATE TABLE trades (
+      trade_id INTEGER, trade_account TEXT, is_simulated INTEGER, status TEXT,
+      strategy_id TEXT, strategy_name TEXT, strategy_version TEXT,
+      net_profit_loss REAL, created_utc TEXT, updated_utc TEXT
+    );
+    INSERT INTO sierra_instance VALUES ('PaperTrading_CICD_VWAP_Pullback', 'paper');
+    INSERT INTO logger_health VALUES (1, 'logger_started version=v0.5.33');
+    INSERT INTO account_snapshot VALUES (1, 'PaperTrading_CICD_VWAP_Pullback', 'paper', 'Sim1', 'simulation', 1, '2026-10-20 18:45:00', '2026-10-20 18:45:00');
+    INSERT INTO instrument_snapshot VALUES (1, 'PaperTrading_CICD_VWAP_Pullback', 'Sim1', 'MNQZ26_FUT_CME', '2026-10-20 18:45:00');
+    INSERT INTO trades VALUES (49, 'Sim1', 1, 'closed', 'cicd-vwap-pull-back-strategy', 'VWAP Pullback', 'v0.6.238', -58.64, '2026-10-20 18:40:00', '2026-10-20 18:44:10');
+    INSERT INTO trades VALUES (3, 'Sim4', 1, 'closed', 'cicd-vwap-pull-back-strategy', 'VWAP Pullback', 'v0.6.233', -145.14, '2026-10-02 13:44:56', '2026-10-02 20:31:07');
+  `);
+  db.close();
+
+  const status = readProjectPaperTelemetry(file, { nowMs: Date.parse("2026-10-20T18:45:30Z") });
+  assert.equal(status.status, "active");
+  assert.equal(status.healthy, true);
+  assert.equal(status.counts.trades, 2);
+  assert.equal(status.counts.authoritativeTrades, 1);
+  assert.equal(status.counts.excludedTrades, 1);
+  assert.equal(status.counts.foreignAccountTrades, 1);
+  assert.deepEqual(status.foreignAccounts, [{ account: "Sim4", count: 1 }]);
+  assert.equal(status.closedTrades.length, 1);
+  assert.equal(status.closedTrades[0].account, "Sim1");
+  assert.equal(status.closedNetProfitLossDollars, -58.64);
+  assert.match(status.warning, /Sim4 \(1\).*excluded from Sim1 trades and P&L/i);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
