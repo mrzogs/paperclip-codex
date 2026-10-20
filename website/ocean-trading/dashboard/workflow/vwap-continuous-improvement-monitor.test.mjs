@@ -146,7 +146,8 @@ test('actionable evidence reaches issue and wakeup HTTP endpoints',async()=>{
   const state=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true});await new Promise(resolve=>server.close(resolve));
   assert.equal(state.last_trigger_receipt.triggered,true);
   assert.deepEqual(requests.map(item=>item.method+' '+item.url),['GET /api/agents/agent','GET /api/projects/'+PROJECT_ID,
-    'GET /api/projects/'+PROJECT_ID+'/workspaces','GET /api/companies/company/issues?limit=100','POST /api/companies/company/issues','POST /api/agents/agent/wakeup?companyId=company']);
+    'GET /api/projects/'+PROJECT_ID+'/workspaces','GET '+requests[3].url,'POST /api/companies/company/issues','POST /api/agents/agent/wakeup?companyId=company']);
+  assert.match(requests[3].url,/^\/api\/companies\/company\/issues\?limit=5&q=vwap-ci-/);
   assert.equal(requests[4].body.status,'todo');assert.equal(requests[5].body.idempotencyKey.startsWith('vwap-ci-'),true);
   assert.equal(requests[4].body.projectId,PROJECT_ID);assert.equal(requests[4].body.projectWorkspaceId,WORKSPACE_ID);
   assert.match(requests[4].body.description,/Exact strategy ID: cicd-vwap-pull-back-strategy/);
@@ -171,7 +172,7 @@ test('wrong coordinator workspace creates only a blocked containment issue',asyn
     assert.equal(receipt.routing_state,'BLOCKED_EXACT_PROJECT_ROUTE_REQUIRED');
     assert.equal(requests[2].body.status,'blocked');assert.match(requests[2].body.description,/Keep this issue blocked/);
     assert.equal(requests[2].body.projectId,null);assert.equal(requests[2].body.projectWorkspaceId,null);
-    assert.deepEqual(requests.map(item=>item.method+' '+item.url),['GET /api/agents/agent','GET /api/companies/company/issues?limit=100','POST /api/companies/company/issues']);
+    assert.deepEqual(requests.map(item=>item.method+' '+item.url),['GET /api/agents/agent','GET /api/companies/company/issues?limit=5&q=routing-blocked','POST /api/companies/company/issues']);
     assert.equal(receipt.wakeup_id,null);
   } finally { await new Promise(resolve=>server.close(resolve)); }
 });
@@ -278,6 +279,28 @@ test('transport test reaches the normal issue and wakeup path without authorizin
   const receipt=await dispatchVwapImprovementEvent(f.config,{kind:'TRANSPORT_TEST',event_id:'vwap-ci-e2e-fixture',strategy_id:f.config.strategy_id,analysis_hash:'sha256:test',transport_test:true,new_trade_ids:[],investigation_queue:[],next_action:'none'});await new Promise(resolve=>server.close(resolve));
   assert.equal(receipt.triggered,true);assert.match(requests[4].body.description,/No strategy, Sierra, approval, promotion, Paper, or Live action is authorized/);assert.equal(requests[5].body.triggerDetail,'system');assert.equal(requests[5].body.reason,'vwap_continuous_improvement_transport_test');
 });
+test('scoped event lookup reuses only an exact existing issue',async()=>{
+  const f=fixture(),requests=[],eventId='vwap-ci-existing-event';
+  const title='[VWAP CI]['+f.config.strategy_id+'] TRANSPORT_TEST '+eventId;
+  const server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{
+    requests.push({url:req.url,method:req.method});res.setHeader('content-type','application/json');
+    const resource=exactRoutingResource(req.url,f.config);
+    if(resource!==undefined)res.end(JSON.stringify(resource));
+    else if(req.method==='GET'&&req.url.includes('/issues?'))res.end(JSON.stringify([
+      {id:'wrong-issue',title:'another strategy '+eventId},
+      {id:'existing-issue',identifier:'OCEA-EXISTING',title}]));
+    else if(req.method==='POST'&&req.url.includes('/wakeup'))res.end(JSON.stringify({id:'existing-wakeup'}));
+    else res.end(JSON.stringify({id:'unexpected-issue-creation'}));
+  });});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));f.config.trigger.api_base_url='http://127.0.0.1:'+server.address().port+'/api';
+  try{
+    const receipt=await dispatchVwapImprovementEvent(f.config,{kind:'TRANSPORT_TEST',event_id:eventId,
+      strategy_id:f.config.strategy_id,analysis_hash:'sha256:test',transport_test:true});
+    assert.equal(receipt.issue_id,'existing-issue');assert.equal(receipt.wakeup_id,'existing-wakeup');
+    assert.equal(requests.some(item=>item.method==='POST'&&item.url.endsWith('/issues')),false);
+    assert.equal(requests[3].url,'/api/companies/company/issues?limit=5&q='+eventId);
+  } finally {await new Promise(resolve=>server.close(resolve));}
+});
 test('evidence blocker reaches recovery issue and wakeup without strategy authority',async()=>{
   const f=fixture(),requests=[],server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{requests.push({url:req.url,method:req.method,body:body?JSON.parse(body):null});res.setHeader('content-type','application/json');const resource=exactRoutingResource(req.url,f.config);if(resource!==undefined)res.end(JSON.stringify(resource));else if(req.method==='GET')res.end('[]');else if(req.url.includes('/issues'))res.end(JSON.stringify({id:'issue-blocked',identifier:'OCEA-BLOCKED'}));else res.end(JSON.stringify({id:'wake-blocked'}));});});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));f.config.trigger.api_base_url='http://127.0.0.1:'+server.address().port+'/api';
@@ -289,7 +312,8 @@ test('evidence blocker reaches recovery issue and wakeup without strategy author
     assert.equal(state.last_trigger_receipt.triggered,true);
     assert.equal(state.last_trigger_receipt.issue_identifier,'OCEA-BLOCKED');
     assert.deepEqual(requests.map(item=>item.method+' '+item.url),['GET /api/agents/agent','GET /api/projects/'+PROJECT_ID,
-      'GET /api/projects/'+PROJECT_ID+'/workspaces','GET /api/companies/company/issues?limit=100','POST /api/companies/company/issues','POST /api/agents/agent/wakeup?companyId=company']);
+      'GET /api/projects/'+PROJECT_ID+'/workspaces','GET '+requests[3].url,'POST /api/companies/company/issues','POST /api/agents/agent/wakeup?companyId=company']);
+    assert.match(requests[3].url,/^\/api\/companies\/company\/issues\?limit=5&q=vwap-ci-/);
     assert.match(requests[4].body.description,/do not relabel historical validation\/holdout trades/);
     assert.match(requests[4].body.description,/no automatic approval/);
   } finally { await new Promise(resolve=>server.close(resolve)); }

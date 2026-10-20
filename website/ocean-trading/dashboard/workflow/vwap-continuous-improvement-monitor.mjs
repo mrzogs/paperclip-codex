@@ -192,7 +192,9 @@ export async function dispatchVwapImprovementEvent(config,event) {
     && samePath(workspace?.cwd,routing.required_project_root);
   const routingState=routeReady?'EXACT_PROJECT_READY':'BLOCKED_EXACT_PROJECT_ROUTE_REQUIRED';
   const title='[VWAP CI]['+event.strategy_id+'] '+event.kind+' '+event.event_id;
-  const listed=await requestJson(base+'/companies/'+trigger.company_id+'/issues?limit=100',{},timeout);
+  // The company-wide issue list can exceed the dispatch deadline. Search by this
+  // immutable event ID, then still require the exact title before reusing an issue.
+  const listed=await requestJson(base+'/companies/'+trigger.company_id+'/issues?limit=5&q='+encodeURIComponent(event.event_id),{},timeout);
   let issue=(Array.isArray(listed)?listed:listed?.items||[]).find(item=>item.title===title);
   const degraded=event.kind==='MONITOR_DEGRADED',evidenceBlocked=event.kind==='EVIDENCE_BLOCKED',transportTest=event.transport_test===true;
   if(!issue)issue=await requestJson(base+'/companies/'+trigger.company_id+'/issues',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
