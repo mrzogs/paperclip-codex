@@ -35,6 +35,11 @@ Assert-Test ($manager.Contains("Join-Path `$Root 'scripts\run-ocean-monitor-supe
   'MONITOR_RESTART_CANNOT_FIND_PRIOR_SUPERVISORS'
 Assert-Test ($manager.Contains('function Get-MonitorOwnedProcessTree')) 'MONITOR_RESTART_DOES_NOT_CLEAN_CHILD_PROCESSES'
 Assert-Test ($manager.Contains('Stopped Ocean monitor generation PID')) 'MONITOR_RESTART_STILL_STOPS_ONLY_CURRENT_MONITOR'
+Assert-Test ($manager.Contains('function Stop-WebsiteSupervisorProcesses')) 'WEBSITE_RESTART_CANNOT_RETIRE_STALE_SUPERVISORS'
+Assert-Test ($manager.Contains("Join-Path `$Root 'scripts\run-ocean-website-supervised.ps1'")) `
+  'WEBSITE_SUPERVISOR_MATCH_IS_NOT_BOUND_TO_TRACKED_SCRIPT'
+Assert-Test ($manager.Contains('Stop-WebsiteSupervisorProcesses')) 'WEBSITE_RESTART_DOES_NOT_INVOKE_SUPERVISOR_RETIREMENT'
+Assert-Test ($manager.Contains('Stopped stale Ocean website supervisor child PID')) 'WEBSITE_RESTART_DOES_NOT_CLEAN_SUPERVISOR_CHILDREN'
 Assert-Test ($manager.Contains('function Stop-WebsiteOwnedMonitorProcesses')) 'WEBSITE_RESTART_CANNOT_RETIRE_ITS_DETACHED_MONITOR'
 Assert-Test ($manager.Contains('Stop-WebsiteOwnedMonitorProcesses -WebsiteProcessIds $websiteProcessIds')) `
   'WEBSITE_RESTART_DOES_NOT_RETIRE_ITS_DETACHED_MONITOR'
