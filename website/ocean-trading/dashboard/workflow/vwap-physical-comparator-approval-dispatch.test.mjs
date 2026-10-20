@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -15,16 +16,41 @@ const CONTRACT = new URL('../config/cicd-vwap-v238-physical-comparator.json', im
 function response(body, status = 200) {
   return {ok:status >= 200 && status < 300, status, text:async () => JSON.stringify(body)};
 }
-function fixture({statuses = ['approved','approved'], issuePatch = {}, agentPatch = {}, queuedOnly = false, configPatch = {}} = {}) {
+function byteResponse(body, status = 200) {
+  const bytes = Buffer.from(body);
+  return {ok:status >= 200 && status < 300, status, arrayBuffer:async () => bytes};
+}
+function fixture({statuses = ['approved','approved'], stagingStatus = 'pending', issuePatch = {}, agentPatch = {}, queuedOnly = false, configPatch = {}} = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ocean-vwap-approval-dispatch-'));
   const config = JSON.parse(JSON.stringify(loadVwapPhysicalComparatorApprovalDispatchConfig(BASE_CONFIG)));
   Object.assign(config, {state_path:path.join(root, 'state.json'), contract_path:CONTRACT.pathname.replace(/^\/(.:)/, '$1'), wake_start_timeout_ms:20, wake_poll_interval_ms:1}, configPatch);
+  const stagingPackage = Buffer.from(JSON.stringify({
+    schema_version:config.staging_authority.package_schema_version,
+    status:'PREPARED_NOT_AUTHORIZED_NOT_EXECUTED', issue:config.staging_authority.issue_identifier,
+    target:{account:'Sim1',bar_seconds:300},
+    approval_request:{decision:config.staging_authority.approval_scope,approval_granted:false},
+  }));
+  config.staging_authority.package_sha256 = crypto.createHash('sha256').update(stagingPackage).digest('hex');
   const approvals = new Map(config.sealed_authority.approvals.map((item, index) => [item.approval_id, {
     id:item.approval_id, companyId:config.paperclip.company_id, type:'request_board_approval', status:statuses[index],
     payload:{strategy_id:config.strategy_id, namespace:config.namespace, contract_id:config.sealed_authority.contract_id,
       contract_hash:config.sealed_authority.contract_hash, context_hash:config.sealed_authority.context_hash,
       run_id:config.sealed_authority.run_id, decision_scope:item.decision_scope},
   }]));
+  approvals.set(config.staging_authority.approval_id, {
+    id:config.staging_authority.approval_id, companyId:config.paperclip.company_id, type:'request_board_approval',
+    requestedByAgentId:config.paperclip.coordinator_agent_id, status:stagingStatus, payload:{
+      title:'CICD Sim1 TEST only: exact v238 / v0.5.53 staging and one gated diagnostic start',
+      attachmentId:config.staging_authority.attachment_id, package_sha256:config.staging_authority.package_sha256,
+      scope:config.staging_authority.approval_scope,
+      target:{account:'Sim1',bar_seconds:300,chartbook:config.preflight_outcome.chartbook_path},
+      selected_artifacts:[config.preflight_outcome.strategy_artifact,config.preflight_outcome.telemetry_artifact]
+        .map(item => ({sha256:item.selected_hash.replace(/^sha256:/, '')})),
+      database_rule:'No database edit authority.',
+      excluded:'RUN_RELEASE materialization, playback, bridge activation, Paper/Live, real orders, historical role/row edits, threshold selection',
+      risks:['Fresh stopped/flat/no-order proof remains unverified.'],
+    },
+  });
   const issue = {id:config.paperclip.issue_id, identifier:config.paperclip.issue_identifier, companyId:config.paperclip.company_id,
     projectId:config.paperclip.project_id, projectWorkspaceId:config.paperclip.workspace_id,
     assigneeAgentId:config.paperclip.coordinator_agent_id, status:'blocked', ...issuePatch};
@@ -44,6 +70,7 @@ function fixture({statuses = ['approved','approved'], issuePatch = {}, agentPatc
   const fetchImpl = async (url, options = {}) => {
     const route = new URL(url).pathname + new URL(url).search;
     if (route.includes('/approvals/')) return response(approvals.get(route.split('/').at(-1)));
+    if (route === '/api/attachments/' + config.staging_authority.attachment_id + '/content') return byteResponse(stagingPackage);
     if (route === '/api/issues/' + config.paperclip.issue_id) return response(issue);
     if (route === '/api/issues/' + config.preflight_outcome.next_task.issue_id) return response(nextTask);
     if (route === '/api/agents/' + config.paperclip.coordinator_agent_id) return response(agent);
@@ -62,7 +89,7 @@ function fixture({statuses = ['approved','approved'], issuePatch = {}, agentPatc
     }
     return response({error:'not found', route}, 404);
   };
-  return {root, config, approvals, issue, nextTask, agent, runs, fetchImpl, posts:() => posts};
+  return {root, config, approvals, issue, nextTask, agent, runs, stagingPackage, fetchImpl, posts:() => posts};
 }
 
 test('one pending approval remains fail-closed and never wakes', async () => {
@@ -124,8 +151,43 @@ test('completed exact preflight projects the physical mismatch and Paperclip tas
   assert.equal(result.status, 'PREFLIGHT_BLOCKED_PHYSICAL_BINDING');
   assert.equal(result.preflight_outcome.account_alias, 'Sim1');
   assert.equal(result.preflight_outcome.next_task.issue_identifier, 'OCEA-22');
+  assert.equal(result.staging_authority.approval_status, 'PENDING');
+  assert.equal(result.staging_authority.package_recovery, 'BYTE_IDENTICAL_SHA256_VERIFIED');
+  assert.equal(result.staging_authority.timeframe.bar_seconds, 300);
+  assert.equal(result.staging_authority.mutable_reference.classification, 'INFORMATIONAL_SNAPSHOT_NOT_PHYSICAL_PREFLIGHT_PIN');
+  assert.equal(result.staging_authority.continuation.state, 'AWAITING_PAPERCLIP_HUMAN_DECISION');
   assert.equal(result.safety.runtime_write_scope_authorized, false);
   assert.equal(result.safety.replay_start_authorized, false);
+  assert.equal(f.posts(), 0);
+});
+
+test('approved staging authority exposes the exact requester-wake continuation without authorizing execution', async () => {
+  const f = fixture({stagingStatus:'approved'});
+  f.runs.push({
+    id:f.config.preflight_outcome.heartbeat_run_id, agentId:f.config.paperclip.coordinator_agent_id,
+    status:'succeeded', startedAt:'2026-10-20T13:30:21.351Z', finishedAt:'2026-10-20T13:32:41.930Z',
+    contextSnapshot:{issueId:f.config.paperclip.issue_id, wakeReason:'vwap_v238_dual_approval_read_only_preflight_e9a1f3be3c90bb88bc2e'},
+  });
+  const result = await scanVwapPhysicalComparatorApprovalDispatch({config:f.config, stateFile:f.config.state_path, fetchImpl:f.fetchImpl});
+  assert.equal(result.status, 'PREFLIGHT_BLOCKED_PHYSICAL_BINDING');
+  assert.equal(result.staging_authority.approval_status, 'APPROVED');
+  assert.equal(result.staging_authority.continuation.state, 'PAPERCLIP_REQUESTER_WAKE_ELIGIBLE_REAUTHENTICATION_REQUIRED');
+  assert.equal(result.safety.runtime_write_scope_authorized, false);
+  assert.equal(result.safety.replay_start_authorized, false);
+  assert.equal(f.posts(), 0);
+});
+
+test('changed staging package bytes fail closed', async () => {
+  const f = fixture();
+  f.stagingPackage[0] = 0x20;
+  f.runs.push({
+    id:f.config.preflight_outcome.heartbeat_run_id, agentId:f.config.paperclip.coordinator_agent_id,
+    status:'succeeded', startedAt:'2026-10-20T13:30:21.351Z', finishedAt:'2026-10-20T13:32:41.930Z',
+    contextSnapshot:{issueId:f.config.paperclip.issue_id, wakeReason:'vwap_v238_dual_approval_read_only_preflight_e9a1f3be3c90bb88bc2e'},
+  });
+  const result = await scanVwapPhysicalComparatorApprovalDispatch({config:f.config, stateFile:f.config.state_path, fetchImpl:f.fetchImpl});
+  assert.equal(result.status, 'ATTENTION_REQUIRED');
+  assert.match(result.reason, /STAGING_PACKAGE_HASH_MISMATCH/);
   assert.equal(f.posts(), 0);
 });
 
@@ -160,6 +222,7 @@ test('HTTP integration reads a queued wake back as running before recording disp
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, `http://${request.headers.host}`);
     response.setHeader('content-type', 'application/json');
+    if (url.pathname === '/api/attachments/' + f.config.staging_authority.attachment_id + '/content') return response.end(f.stagingPackage);
     if (url.pathname.startsWith('/api/approvals/')) return response.end(JSON.stringify(f.approvals.get(url.pathname.split('/').at(-1))));
     if (url.pathname === '/api/issues/' + f.config.paperclip.issue_id) return response.end(JSON.stringify(f.issue));
     if (url.pathname === '/api/issues/' + f.config.preflight_outcome.next_task.issue_id) return response.end(JSON.stringify(f.nextTask));

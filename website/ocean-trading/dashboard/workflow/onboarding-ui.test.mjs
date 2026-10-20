@@ -14,6 +14,8 @@ const TEST_STRATEGY_ID = 'cicd-vwap-pull-back-strategy';
 const TEST_APPROVAL_ID = 'd6bb0adb-2704-4e44-8aa8-011ee2b9baee';
 const TEST_COMPARATOR_APPROVAL_ID = '11111111-1111-4111-8111-111111111111';
 const TEST_RELEASE_APPROVAL_ID = '22222222-2222-4222-8222-222222222222';
+const TEST_STAGING_APPROVAL_ID = '55555555-5555-4555-8555-555555555555';
+const TEST_STAGING_ATTACHMENT_ID = '66666666-6666-4666-8666-666666666666';
 
 const sources = {
   'strategy-registry.json': { strategy_id:TEST_STRATEGY_ID, strategy_name:'E2E Disposable Test Strategy', profile_id:'profile-1', profile_version:'v0.1.1', profile_hash:'sha256:profile', baseline_version:'v0.1.0', production_version:null, activation_status:'PENDING_ONBOARDING', activation_decision_id:null },
@@ -63,6 +65,15 @@ test('complete onboarding is actionable in the browser without touching producti
       strategy_artifact:{ saved_version:'v0.6.240', saved_hash:'sha256:'+'9'.repeat(64), selected_version:'v0.6.238', selected_hash:'sha256:'+'6'.repeat(64) },
       telemetry_artifact:{ saved_version:'v0.5.52', saved_hash:'sha256:'+'c'.repeat(64), selected_version:'v0.5.53', selected_hash:'sha256:'+'5'.repeat(64) },
       next_task:{ issue_id:'33333333-3333-4333-8333-333333333333', issue_identifier:'OCEA-22', title:'Prepare exact Sim1 TEST staging package', status:'IN_PROGRESS', execution_run_id:'44444444-4444-4444-8444-444444444444', url:'http://127.0.0.1:3100/OCEA/issues/OCEA-22' } },
+    staging_authority:{ authoritative:true, approval_id:TEST_STAGING_APPROVAL_ID, approval_status:'PENDING', action_required:true,
+      approval_url:`http://127.0.0.1:3100/OCEA/approvals/${TEST_STAGING_APPROVAL_ID}`, requested_by_agent_id:'75618a1a-a7ba-44bd-b391-48d58617433c', decided_at_utc:null,
+      title:'CICD Sim1 TEST only: exact v238 / v0.5.53 staging and one gated diagnostic start', approval_scope:'TEST_STAGING_WRITE_SINGLE_DIAGNOSTIC_START_ONLY',
+      attachment_id:TEST_STAGING_ATTACHMENT_ID, package_url:`http://127.0.0.1:3100/api/attachments/${TEST_STAGING_ATTACHMENT_ID}/content`,
+      package_sha256:'8'.repeat(64), package_bytes:32265, package_recovery:'BYTE_IDENTICAL_SHA256_VERIFIED', database_rule:'No database edit authority.',
+      excluded:'RUN_RELEASE materialization, playback, bridge activation, Paper/Live, real orders, historical role/row edits, threshold selection', risks:['Fresh proof remains required.'],
+      timeframe:{bar_seconds:300,display:'5 minutes',authority:'v0.6.238 source and current governed CICD profile',one_minute_disposition:'SUPERSEDED_UNQUALIFIED_OBSERVATION_SETUP'},
+      mutable_reference:{path:'C:\\Users\\wayne\\OneDrive\\Documents\\Brady - Optimization\\onboarding\\replay-discovery-requalification-20261020.json',captured_sha256:'2'.repeat(64),classification:'INFORMATIONAL_SNAPSHOT_NOT_PHYSICAL_PREFLIGHT_PIN',fresh_reauthentication_required:true},
+      continuation:{requester_agent_id:'75618a1a-a7ba-44bd-b391-48d58617433c',approval_resolution_wakes_requester:true,next_action:'REAUTHENTICATE_PACKAGE_AND_DERIVE_ONLY_EXACT_APPROVED_FILESYSTEM_SCOPE',no_ocean_approval_authority:true,state:'AWAITING_PAPERCLIP_HUMAN_DECISION'} },
     gate:{ action:'READ_ONLY_PREFLIGHT_ONLY', current_permission_state:'READ_ONLY_EXTERNAL_EVIDENCE_NO_REPLAY_RUNTIME_WRITE',
       post_preflight_gate:'EXACT_TEST_REPLAY_TWO_RUNTIME_OUTPUT_WRITE_START_SCOPE_REQUIRED', post_preflight_action:'REQUEST_OR_DERIVE_ONLY_AFTER_READ_ONLY_PREFLIGHT' },
     safety:{ execution_authority:false, runtime_write_scope_authorized:false, replay_start_authorized:false,
@@ -121,7 +132,7 @@ test('complete onboarding is actionable in the browser without touching producti
   const browserErrors = []; page.on('pageerror', error => browserErrors.push(error.message));
   try {
     await page.goto(`${base}/improvement/strategies/${TEST_STRATEGY_ID}`);
-    assert.match(await page.locator('script[type="module"]').getAttribute('src'),/v238-paperclip-preflight-blocker-20261020-1/,'the deployed page must request the current workflow module version');
+    assert.match(await page.locator('script[type="module"]').getAttribute('src'),/v238-paperclip-staging-approval-20261020-1/,'the deployed page must request the current workflow module version');
     await page.getByRole('button',{ name:'Sign in', exact:true }).click();
     await page.getByRole('link',{ name:'Help', exact:true }).click();
     await expect(page.getByRole('heading',{ name:'Onboarding help', exact:true })).toBeVisible();
@@ -148,6 +159,11 @@ test('complete onboarding is actionable in the browser without touching producti
     await expect(page.getByText('Pending human approval',{ exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'Read-only preflight complete — blocked', exact:true })).toBeVisible();
     await expect(page.getByRole('link',{ name:'OCEA-22', exact:true })).toHaveAttribute('href','http://127.0.0.1:3100/OCEA/issues/OCEA-22');
+    await expect(page.getByRole('heading',{ name:'CICD Sim1 TEST only: exact v238 / v0.5.53 staging and one gated diagnostic start', exact:true })).toBeVisible();
+    await expect(page.locator(`[data-approval-id="${TEST_STAGING_APPROVAL_ID}"]`).getByRole('link',{ name:'Review approval in Paperclip', exact:true })).toHaveAttribute('href',`http://127.0.0.1:3100/OCEA/approvals/${TEST_STAGING_APPROVAL_ID}`);
+    await expect(page.getByRole('link',{ name:'Open sealed package', exact:true }).first()).toHaveAttribute('href',`http://127.0.0.1:3100/api/attachments/${TEST_STAGING_ATTACHMENT_ID}/content`);
+    await expect(page.getByText('5 minutes (300 seconds) · Superseded unqualified observation setup',{ exact:true })).toBeVisible();
+    await expect(page.getByText(/mutable requalification draft hash is informational only/)).toBeVisible();
     await expect(page.getByText('v0.1.1 / v0.6.234-absolute-risk-gate-candidate',{ exact:true })).toBeVisible();
     await expect(page.getByText('Distinct unselected unchanged',{ exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'Event-driven evidence monitor', exact:true })).toBeVisible();
@@ -186,8 +202,8 @@ test('complete onboarding is actionable in the browser without touching producti
     await expect(page.locator('#notice')).toContainText('Open Replay Monitor to view Ocean data');
     await expect(page.getByRole('heading',{ name:'Onboarding complete', exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'CI/CD continuous run', exact:true })).toBeVisible();
-    await expect(page.getByRole('heading',{ name:'Resolve the saved v0.6.240 / v0.5.52 physical mismatch', exact:true })).toBeVisible();
-    await expect(page.getByText(/Paperclip approved both named decisions and the bound coordinator completed the read-only preflight/)).toBeVisible();
+    await expect(page.getByRole('heading',{ name:'Review the exact TEST staging approval in Paperclip', exact:true })).toBeVisible();
+    await expect(page.getByText(/Paperclip approved the two earlier comparator decisions and the bound coordinator completed the read-only preflight/)).toBeVisible();
     await expect(page.getByRole('heading',{ name:'Read-only preflight complete — blocked', exact:true })).toBeVisible();
     await expect(page.getByText('Preflight blocked physical binding',{ exact:true })).toBeVisible();
     await expect(page.getByText('Read only preflight only',{ exact:true })).toBeVisible();
@@ -211,8 +227,8 @@ test('complete onboarding is actionable in the browser without touching producti
     sources['priority-completion-program.json'].status = 'CICD_GATES_PROVEN_READY_FOR_GOVERNED_CANDIDATE_DECISION';
     fs.writeFileSync(path.join(sourceRoot,'priority-completion-program.json'),JSON.stringify(sources['priority-completion-program.json']));
     await page.locator('#refresh').click();
-    await expect(page.getByRole('heading',{ name:'Resolve the saved v0.6.240 / v0.5.52 physical mismatch', exact:true })).toBeVisible();
-    await expect(page.getByText('Owner: CICD physical binding and Telemetry owners / Paperclip board',{ exact:true })).toBeVisible();
+    await expect(page.getByRole('heading',{ name:'Review the exact TEST staging approval in Paperclip', exact:true })).toBeVisible();
+    await expect(page.getByText('Owner: Wayne / Paperclip board, then the bound CICD coordinator',{ exact:true })).toBeVisible();
     await expect(page.getByText('Autonomous improvement implementation',{ exact:true })).toBeVisible();
     await expect(page.getByRole('columnheader',{ name:'Exact next action', exact:true })).toBeVisible();
     await expect(page.getByRole('button',{ name:'Prepare Replay history run', exact:true })).toHaveCount(0);

@@ -80,6 +80,35 @@
     },
     "next_action": "Prepare exact artifact custody, backup, binding, stale-command reconciliation, rollback, and stop-on-failure package in Paperclip; then request a separate scoped human approval for TEST-only staging/write and one bounded Replay Two start."
   },
+  "staging_authority": {
+    "issue_id": "f75069f9-ef1c-4add-9015-6dc8808897c8",
+    "issue_identifier": "OCEA-22",
+    "approval_id": "9f8cd5c6-948a-4818-9fad-5bd56d00cb23",
+    "attachment_id": "3ac2754b-5f6e-43a1-b957-af72ba2b83ca",
+    "package_schema_version": "cicd-vwap-sim1-staging-authority-package/v1",
+    "package_sha256": "86e8a15348490b0ce921cb906e51cfd479f3a5409d46cfe1a2168fa17689cc62",
+    "approval_scope": "TEST_STAGING_WRITE_SINGLE_DIAGNOSTIC_START_ONLY",
+    "approval_url": "http://127.0.0.1:3100/OCEA/approvals/9f8cd5c6-948a-4818-9fad-5bd56d00cb23",
+    "package_url": "http://127.0.0.1:3100/api/attachments/3ac2754b-5f6e-43a1-b957-af72ba2b83ca/content",
+    "timeframe": {
+      "bar_seconds": 300,
+      "display": "5 minutes",
+      "authority": "v0.6.238 source and current governed CICD profile",
+      "one_minute_disposition": "SUPERSEDED_UNQUALIFIED_OBSERVATION_SETUP"
+    },
+    "mutable_reference": {
+      "path": "C:\\Users\\wayne\\OneDrive\\Documents\\Brady - Optimization\\onboarding\\replay-discovery-requalification-20261020.json",
+      "captured_sha256": "2acadc9fb9bf0189bca7b08959d2d94279400624f75437a167be69caa9ce5c83",
+      "classification": "INFORMATIONAL_SNAPSHOT_NOT_PHYSICAL_PREFLIGHT_PIN",
+      "fresh_reauthentication_required": true
+    },
+    "continuation": {
+      "requester_agent_id": "75618a1a-a7ba-44bd-b391-48d58617433c",
+      "approval_resolution_wakes_requester": true,
+      "next_action": "REAUTHENTICATE_PACKAGE_AND_DERIVE_ONLY_EXACT_APPROVED_FILESYSTEM_SCOPE",
+      "no_ocean_approval_authority": true
+    }
+  },
   "safety": {
     "execution_authority": false,
     "runtime_write_scope_authorized": false,
