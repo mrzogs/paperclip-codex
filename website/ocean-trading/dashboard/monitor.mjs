@@ -12,6 +12,10 @@ import {
   loadVwapContinuousImprovementConfig,
   scanVwapContinuousImprovement,
 } from "./workflow/vwap-continuous-improvement-monitor.mjs";
+import {
+  loadVwapPhysicalComparatorApprovalDispatchConfig,
+  scanVwapPhysicalComparatorApprovalDispatch,
+} from "./workflow/vwap-physical-comparator-approval-dispatch.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, "data");
@@ -25,6 +29,7 @@ const VWAP_PAPER_SIM1_EMAIL_CONFIG_FILE = path.join(__dirname, "config", "vwap-p
 const VWAP_PAPER_SIM1_EMAIL_STATE_FILE = path.join(DATA_DIR, "vwap-paper-sim1-email-state.json");
 const VWAP_IMPROVEMENT_CONFIG_FILE = path.join(__dirname, "config", "vwap-continuous-improvement-monitor.json");
 const VWAP_IMPROVEMENT_STATE_FILE = path.join(DATA_DIR, "vwap-continuous-improvement-monitor-state.json");
+const VWAP_APPROVAL_DISPATCH_CONFIG_FILE = path.join(__dirname, "config", "cicd-vwap-v238-approval-dispatch.json");
 const DASHBOARD_DATA_FILE = path.join(__dirname, "dashboard-data.json");
 const BUILD_SCRIPT = path.join(__dirname, "build-manifest.mjs");
 const DTC_SNAPSHOT_SCRIPT = path.join(__dirname, "dtc-snapshot.mjs");
@@ -50,6 +55,7 @@ let scanCount = 0;
 let importCount = 0;
 let stopping = false;
 let scanInFlight = false;
+let approvalDispatchScanInFlight = false;
 
 function readJson(filePath, fallback = null) {
   try {
@@ -793,6 +799,35 @@ async function monitorVwapContinuousImprovement(reason) {
   }
 }
 
+async function monitorVwapPhysicalComparatorApprovalDispatch(reason) {
+  if (stopping || approvalDispatchScanInFlight) return { status:"SCAN_ALREADY_IN_PROGRESS" };
+  approvalDispatchScanInFlight = true;
+  try {
+    const config = loadVwapPhysicalComparatorApprovalDispatchConfig(VWAP_APPROVAL_DISPATCH_CONFIG_FILE);
+    const result = await scanVwapPhysicalComparatorApprovalDispatch({config, stateFile:config.state_path});
+    writeState({
+      vwapApprovalDispatchStateFile: config.state_path,
+      vwapApprovalDispatchStatus: result.status || "UNKNOWN",
+      vwapApprovalDispatchCheckedAtUtc: result.checked_at_utc || null,
+      vwapApprovalDispatchHeartbeatRunId: result.heartbeat_run_id || null,
+      vwapApprovalDispatchCodexPollingRequired: false,
+    });
+    return result;
+  } catch (error) {
+    writeState({
+      vwapApprovalDispatchStatus: "ATTENTION_REQUIRED",
+      vwapApprovalDispatchError: String(error?.message || error),
+      vwapApprovalDispatchCodexPollingRequired: false,
+    }, createMonitorEvent("error", "vwap-approval-dispatch-error", "VWAP dual-approval dispatch scan failed closed", {
+      reason,
+      error: String(error?.message || error),
+    }));
+    return {status:"ATTENTION_REQUIRED", error:String(error?.message || error)};
+  } finally {
+    approvalDispatchScanInFlight = false;
+  }
+}
+
 function isTradeLog(name) {
   return /^TradeActivityLog_\d{4}-\d{2}-\d{2}_UTC\..+\.data$/i.test(name);
 }
@@ -1022,6 +1057,7 @@ export {
   notifyNewClosedTrades,
   notifyVwapPaperSim1Events,
   monitorVwapContinuousImprovement,
+  monitorVwapPhysicalComparatorApprovalDispatch,
   queueClosedTradeEmailViaConnector,
   vwapProjectPaperSqliteFiles,
 };
@@ -1049,9 +1085,14 @@ writeState({
   error: null,
 }, createMonitorEvent("info", "startup", "Monitor worker starting", { scanIntervalMs: INTERVAL_MS }));
 scan();
+void monitorVwapPhysicalComparatorApprovalDispatch("startup");
 setInterval(() => {
   void scan();
 }, INTERVAL_MS);
+const approvalDispatchConfig = loadVwapPhysicalComparatorApprovalDispatchConfig(VWAP_APPROVAL_DISPATCH_CONFIG_FILE);
+setInterval(() => {
+  void monitorVwapPhysicalComparatorApprovalDispatch("periodic_scan");
+}, Number(approvalDispatchConfig.poll_interval_ms));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

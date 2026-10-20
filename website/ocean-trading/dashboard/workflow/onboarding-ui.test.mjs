@@ -53,6 +53,15 @@ test('complete onboarding is actionable in the browser without touching producti
     eligible_trade_count:0, new_trade_count:0, sources:[{ id:'replay-two', environment:'REPLAY', account:'Sim1',
       database_path:'D:\\Trading\\CICD\\runtime\\cicd-vwap-pull-back-strategy\\ReplayTwo-v013\\test.sqlite', observed_trade_count:239, eligible_trade_count:0 }],
   }));
+  const approvalDispatchState = path.join(root, 'vwap-approval-dispatch-state.json');
+  fs.writeFileSync(approvalDispatchState, JSON.stringify({
+    schema_version:'ocean-vwap-physical-comparator-approval-dispatch-state/v1', strategy_id:TEST_STRATEGY_ID,
+    enabled:true, status:'WAITING_FOR_BOTH_APPROVALS', checked_at_utc:'2026-10-20T13:00:00Z',
+    gate:{ action:'READ_ONLY_PREFLIGHT_ONLY', current_permission_state:'READ_ONLY_EXTERNAL_EVIDENCE_NO_REPLAY_RUNTIME_WRITE',
+      post_preflight_gate:'EXACT_TEST_REPLAY_TWO_RUNTIME_OUTPUT_WRITE_START_SCOPE_REQUIRED', post_preflight_action:'REQUEST_OR_DERIVE_ONLY_AFTER_READ_ONLY_PREFLIGHT' },
+    safety:{ execution_authority:false, runtime_write_scope_authorized:false, replay_start_authorized:false,
+      paper_authorized:false, live_authorized:false, automatic_approval_enabled:false },
+  }));
   const publicRoot = path.resolve('public/workflow');
   const environment = {};
   let backend;
@@ -89,7 +98,7 @@ test('complete onboarding is actionable in the browser without touching producti
   const config = {
     db_file:path.join(root,'workflow.sqlite'), test_only:true, contract_release:'2.1.0', allowed_origins:[base], lease_ms:30000,
     python_executable:'python', strategy_onboarding_root:sourceRoot, strategy_improvement_monitor_state:improvementMonitorState,
-    strategy_physical_comparator_contract:physicalComparatorPath, onboarding_brain_sync:{ enabled:false },
+    strategy_physical_comparator_contract:physicalComparatorPath, strategy_approval_dispatch_state:approvalDispatchState, onboarding_brain_sync:{ enabled:false },
     strategy_onboarding_runtime_probe:() => ({
       monitor:{ state:'AVAILABLE', url:'/replay-monitor.html' },
       sierra:{ state:'OPEN_EXACT_CHARTBOOK_VERIFIED', executable:'D:\\Trading\\SierraChart-Replay Two\\SierraChart_64.exe', chartbook_path:'D:\\Trading\\SierraChart-Replay Two\\Data\\CICD - VWAP Pull Back Strategy.Cht', chart_id:'1', process_id:123, window_title:'CICD - VWAP Pull Back Strategy' },
@@ -106,7 +115,7 @@ test('complete onboarding is actionable in the browser without touching producti
   const browserErrors = []; page.on('pageerror', error => browserErrors.push(error.message));
   try {
     await page.goto(`${base}/improvement/strategies/${TEST_STRATEGY_ID}`);
-    assert.match(await page.locator('script[type="module"]').getAttribute('src'),/v238-comparator-approvals-20261020-1/,'the deployed page must request the current workflow module version');
+    assert.match(await page.locator('script[type="module"]').getAttribute('src'),/v238-dual-approval-dispatch-20261020-1/,'the deployed page must request the current workflow module version');
     await page.getByRole('button',{ name:'Sign in', exact:true }).click();
     await page.getByRole('link',{ name:'Help', exact:true }).click();
     await expect(page.getByRole('heading',{ name:'Onboarding help', exact:true })).toBeVisible();
@@ -135,7 +144,7 @@ test('complete onboarding is actionable in the browser without touching producti
     await expect(page.getByText('Distinct unselected unchanged',{ exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'Event-driven evidence monitor', exact:true })).toBeVisible();
     await expect(page.getByText('Codex polling',{ exact:true })).toBeVisible();
-    await expect(page.getByText('Not required',{ exact:true })).toBeVisible();
+    await expect(page.getByText('Not required',{ exact:true }).first()).toBeVisible();
     await expect(page.getByText('245',{ exact:true })).toBeVisible();
     await expect(page.getByText(/ReplayTwo-v013\\test.sqlite/)).toBeVisible();
     await expect(page.getByRole('link',{ name:'Open Replay setup confirmed', exact:true })).toBeVisible();
@@ -171,6 +180,11 @@ test('complete onboarding is actionable in the browser without touching producti
     await expect(page.getByRole('heading',{ name:'CI/CD continuous run', exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'Approve the v0.6.238 TEST comparator run', exact:true })).toBeVisible();
     await expect(page.getByText(/Ocean remains fail-closed; this does not start Replay or alter v0\.1\.1\/v234, v240, historical roles, Paper, or Live\./)).toBeVisible();
+    await expect(page.getByRole('heading',{ name:'Read-only coordinator preflight', exact:true })).toBeVisible();
+    await expect(page.getByText('Waiting for both approvals',{ exact:true })).toBeVisible();
+    await expect(page.getByText('Read only preflight only',{ exact:true })).toBeVisible();
+    await expect(page.getByText('Not authorized',{ exact:true }).first()).toBeVisible();
+    await expect(page.getByText('Prohibited',{ exact:true }).last()).toBeVisible();
     await expect(page.getByText(/The approved coordinator record is not the separate Paper manifest and qualification approval/)).toBeVisible();
     await expect(page.getByRole('heading',{ name:'Separate Paper qualification gate', exact:true })).toBeVisible();
     await expect(page.getByText('Code merged not deployed',{ exact:true })).toBeVisible();

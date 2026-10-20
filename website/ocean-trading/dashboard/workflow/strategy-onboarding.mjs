@@ -7,6 +7,7 @@ import { exactKeys, id, objectHash, requireThat } from './common.mjs';
 import { enqueueOnboardingBrain } from './onboarding-brain-sync.mjs';
 import { readVwapContinuousImprovementState } from './vwap-continuous-improvement-monitor.mjs';
 import { DEFAULT_VWAP_PHYSICAL_COMPARATOR_CONTRACT, readVwapPhysicalComparatorContract } from './vwap-physical-comparator-contract.mjs';
+import { DEFAULT_VWAP_APPROVAL_DISPATCH_STATE, readVwapPhysicalComparatorApprovalDispatchState } from './vwap-physical-comparator-approval-dispatch.mjs';
 
 export const ONBOARDING_STRATEGY_ID = 'cicd-vwap-pull-back-strategy';
 export const DEFAULT_ONBOARDING_ROOT = process.env.OCEAN_STRATEGY_ONBOARDING_ROOT
@@ -442,7 +443,7 @@ export function probeReplayTwoRuntime({ executable, chartbook_path: chartbookPat
   return structuredClone(value);
 }
 
-export function loadStrategyOnboarding({ root = DEFAULT_ONBOARDING_ROOT, events = [], brainOutbox = [], registration = null, activationEvents = [], runtimeProbe = probeReplayTwoRuntime, campaignStatePath = DEFAULT_REPLAY_CAMPAIGN_STATE, improvementMonitorStatePath = DEFAULT_VWAP_IMPROVEMENT_MONITOR_STATE, physicalComparatorPath = DEFAULT_VWAP_PHYSICAL_COMPARATOR_CONTRACT } = {}) {
+export function loadStrategyOnboarding({ root = DEFAULT_ONBOARDING_ROOT, events = [], brainOutbox = [], registration = null, activationEvents = [], runtimeProbe = probeReplayTwoRuntime, campaignStatePath = DEFAULT_REPLAY_CAMPAIGN_STATE, improvementMonitorStatePath = DEFAULT_VWAP_IMPROVEMENT_MONITOR_STATE, physicalComparatorPath = DEFAULT_VWAP_PHYSICAL_COMPARATOR_CONTRACT, approvalDispatchStatePath = DEFAULT_VWAP_APPROVAL_DISPATCH_STATE } = {}) {
   const strategyId = readOnboardingStrategyId(root);
   const sources = SOURCES.map(([key, filename]) => readSource(root, key, filename, strategyId));
   const records = Object.fromEntries(sources.map(source => [source.key, source.value]));
@@ -528,6 +529,8 @@ export function loadStrategyOnboarding({ root = DEFAULT_ONBOARDING_ROOT, events 
   const autonomousImprovement = readAutonomousImprovementProgram(root, strategyId);
   const eventMonitor = readVwapContinuousImprovementState(improvementMonitorStatePath);
   const physicalComparator = readVwapPhysicalComparatorContract(physicalComparatorPath, strategyId);
+  const approvalDispatch = readVwapPhysicalComparatorApprovalDispatchState(approvalDispatchStatePath, strategyId);
+  physicalComparator.approval_dispatch = approvalDispatch;
 
   return {
     strategy_id: strategyId, strategy_name: registry?.strategy_name || profile?.strategy_name || setup?.strategy_name || 'Strategy onboarding',
