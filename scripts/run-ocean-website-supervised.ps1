@@ -122,8 +122,39 @@ function Get-NextLivenessState([int]$FailureCount, [bool]$Healthy, [int]$Thresho
   }
 }
 
+function Test-PrivateDirectoryAcl([string]$Path) {
+  if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return $false }
+  try {
+    $acl = if ($PSVersionTable.PSEdition -eq 'Core') {
+      [IO.FileSystemAclExtensions]::GetAccessControl([IO.DirectoryInfo]::new($Path))
+    } else {
+      [IO.Directory]::GetAccessControl($Path)
+    }
+    if (-not $acl.AreAccessRulesProtected) { return $false }
+    $rules = @($acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]))
+    $expected = @([Security.Principal.WindowsIdentity]::GetCurrent().User.Value, 'S-1-5-18')
+    if ($rules.Count -ne $expected.Count) { return $false }
+    foreach ($principal in $expected) {
+      $matches = @($rules | Where-Object {
+        $_.IdentityReference.Value -ceq $principal -and
+        $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+        $_.FileSystemRights -eq [Security.AccessControl.FileSystemRights]::FullControl -and
+        $_.InheritanceFlags -eq ([Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit) -and
+        $_.PropagationFlags -eq [Security.AccessControl.PropagationFlags]::None
+      })
+      if ($matches.Count -ne 1) { return $false }
+    }
+    return $true
+  } catch {
+    return $false
+  }
+}
+
 function Set-PrivateDirectoryAcl([string]$Path) {
-  New-Item -ItemType Directory -Force -Path $Path | Out-Null
+  if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+    New-Item -ItemType Directory -Force -Path $Path | Out-Null
+  }
+  if (Test-PrivateDirectoryAcl $Path) { return }
   $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
   $acl = New-Object Security.AccessControl.DirectorySecurity
   $acl.SetAccessRuleProtection($true, $false)
@@ -136,6 +167,35 @@ function Set-PrivateDirectoryAcl([string]$Path) {
   } else {
     [IO.Directory]::SetAccessControl($Path, $acl)
   }
+}
+
+function Stop-ExactWebsiteProcessTree([Diagnostics.Process]$Process) {
+  $snapshot = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+  $owned = [Collections.Generic.HashSet[int]]::new()
+  [void]$owned.Add([int]$Process.Id)
+  do {
+    $added = $false
+    foreach ($candidate in $snapshot) {
+      if ($owned.Contains([int]$candidate.ParentProcessId) -and $owned.Add([int]$candidate.ProcessId)) {
+        $added = $true
+      }
+    }
+  } while ($added)
+  $descendants = @($snapshot | Where-Object {
+    [int]$_.ProcessId -ne [int]$Process.Id -and $owned.Contains([int]$_.ProcessId)
+  })
+  foreach ($descendant in $descendants) {
+    Stop-Process -Id ([int]$descendant.ProcessId) -Force -ErrorAction SilentlyContinue
+    Write-SupervisorLog "Stopped exact Ocean website descendant PID $($descendant.ProcessId) from website PID $($Process.Id)."
+  }
+  Stop-Process -Id $Process.Id -Force -ErrorAction Stop
+  $deadline = (Get-Date).AddSeconds(5)
+  do {
+    $remaining = @($owned | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+    if (-not $remaining.Count) { return }
+    Start-Sleep -Milliseconds 100
+  } while ((Get-Date) -lt $deadline)
+  throw "Exact Ocean website process tree did not exit after forced cleanup: $($remaining -join ',')."
 }
 
 function Get-WebsiteState {
@@ -446,8 +506,7 @@ function Stop-OwnedWebsiteProcess([Diagnostics.Process]$Process, [int]$GracefulT
   $Process.Refresh()
   if (-not $Process.HasExited) {
     Write-SupervisorLog "Graceful stop timed out; forcing exact unresponsive Ocean website PID $($Process.Id)."
-    Stop-Process -Id $Process.Id -Force -ErrorAction Stop
-    if (-not $Process.WaitForExit(5000)) { throw 'Exact Ocean website child did not exit after forced liveness recovery.' }
+    Stop-ExactWebsiteProcessTree $Process
   }
   $recoveryStillOwned = Complete-OwnedStopRequest ([int]$request.pid) ([string]$request.nonce) ([string]$request.request_id)
   if (-not $recoveryStillOwned) {
@@ -461,8 +520,7 @@ function Stop-UnreadyStartedChild([Diagnostics.Process]$Process) {
   $Process.Refresh()
   if ($Process.HasExited) { return }
   Write-SupervisorLog "Stopping exact newly started Ocean website PID $($Process.Id) after readiness failure."
-  Stop-Process -Id $Process.Id -Force -ErrorAction Stop
-  if (-not $Process.WaitForExit(5000)) { throw 'Unready Ocean website child did not exit after forced cleanup.' }
+  Stop-ExactWebsiteProcessTree $Process
 }
 
 function Initialize-WebsiteEnvironment {

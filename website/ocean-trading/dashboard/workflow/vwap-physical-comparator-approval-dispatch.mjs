@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readVwapPhysicalComparatorContract, DEFAULT_VWAP_PHYSICAL_COMPARATOR_CONTRACT } from './vwap-physical-comparator-contract.mjs';
 import { projectVwapContinuity, currentVwapContinuity } from './vwap-continuity-projection.mjs';
+import { reconcileVwapEngineeringContinuity } from './vwap-engineering-continuity.mjs';
 
 export const APPROVAL_DISPATCH_SCHEMA = 'ocean-vwap-physical-comparator-approval-dispatch/v1';
 export const APPROVAL_DISPATCH_STATE_SCHEMA = 'ocean-vwap-physical-comparator-approval-dispatch-state/v1';
@@ -339,7 +340,7 @@ function validateExecutorIssue(config, issue) {
     &&issue?.projectWorkspaceId===config.paperclip.workspace_id
     &&issue?.parentId===config.staging_authority.issue_id
     &&issue?.title===expected.engineering_issue_title
-    &&issue?.assigneeAgentId===expected.engineering_issue_owner_agent_id
+    &&UUID.test(String(issue?.assigneeAgentId||''))
     &&!['done','cancelled'].includes(String(issue?.status||'').toLowerCase()),
   'APPROVAL_DISPATCH_EXECUTOR_ISSUE_BINDING_INVALID');
 }
@@ -562,19 +563,25 @@ function stagingSuccessReceiptReadback(config) {
     blocker:'Independent receipt custody and current exclusive booking authority have not been verified.'};
 }
 
-async function continuityReadback(config,executorIssue,stagingAuthority,fetchImpl) {
+async function continuityReadback(config,executorIssue,stagingAuthority,fetchImpl,previous = null) {
   try { return await projectVwapContinuity({config,executorIssue,stagingAuthority,
     getJson:relative=>requestJson(config,relative,{},fetchImpl)}); }
-  catch(error) { return {schema_version:'ocean-vwap-continuity-projection/v1',source:'PAPERCLIP_UNAVAILABLE',
-    observed_at_utc:null,freshness:{state:'UNAVAILABLE',max_age_ms:90000},
+  catch(error) { const lastKnown = currentVwapContinuity(previous);
+    return {schema_version:'ocean-vwap-continuity-projection/v1',source:'PAPERCLIP_UNAVAILABLE',
+    observed_at_utc:lastKnown?.observed_at_utc || null,freshness:{state:'UNAVAILABLE',max_age_ms:90000},
     reason:String(error?.message||'CONTINUITY_READBACK_FAILED').split(':')[0],next_automatic_job:null,
+    other_ready_jobs:[],last_known_next_automatic_job:previous?.next_automatic_job || previous?.last_known_next_automatic_job || null,
+    issue_chain:lastKnown?.issue_chain || [],human_decision:{...(lastKnown?.human_decision || {}),source:'STALE_READBACK',required:false},
     authority:{runtime_execution_authorized:false}}; }
 }
 
 export async function scanVwapPhysicalComparatorApprovalDispatch({config, stateFile, contractPath, fetchImpl = fetch, sleepImpl = sleep} = {}) {
   const resolvedState = stateFile || config?.state_path || DEFAULT_VWAP_APPROVAL_DISPATCH_STATE;
   if (!config?.enabled) return {enabled:false, status:'DISABLED'};
-  const write = (status, details = {}) => { const state = publicState(config, status, details); writeJson(resolvedState, state); return state; };
+  const previousState = readJson(resolvedState, null);
+  const write = (status, details = {}) => { const enriched = details.approval_statuses && !details.approval_statuses_source
+    ? {...details,approval_statuses_source:'PAPERCLIP_LIVE'} : details;
+    const state = publicState(config, status, enriched); writeJson(resolvedState, state); return state; };
   try {
     const contract = readVwapPhysicalComparatorContract(contractPath || config.contract_path || DEFAULT_VWAP_PHYSICAL_COMPARATOR_CONTRACT, config.strategy_id);
     validateContract(config, contract);
@@ -605,7 +612,12 @@ export async function scanVwapPhysicalComparatorApprovalDispatch({config, stateF
       if (completed) {
         completed.staging_authority = await reconcileApprovedContinuation(config, stagingAuthority, runList, resolvedState, fetchImpl, sleepImpl);
         completed.staging_authority.staging_success_receipt = stagingSuccessReceiptReadback(config);
-        completed.continuity = await continuityReadback(config,executorIssue,completed.staging_authority,fetchImpl);
+        completed.continuity = await continuityReadback(config,executorIssue,completed.staging_authority,fetchImpl,previousState?.continuity);
+        completed.engineering_continuity = await reconcileVwapEngineeringContinuity({config,executorIssue,
+          stagingAuthority:completed.staging_authority,continuity:completed.continuity,
+          previous:previousState?.engineering_continuity,
+          getJson:relative=>requestJson(config,relative,{},fetchImpl),
+          postJson:(relative,body)=>requestJson(config,relative,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)},fetchImpl)});
         return write('PREFLIGHT_BLOCKED_PHYSICAL_BINDING', completed);
       }
       return write('ALREADY_DISPATCHED_READ_ONLY_PREFLIGHT', {approval_statuses:statuses, dispatched:true, wake_reason:reason, heartbeat_run_id:priorStarted.id, heartbeat_run_status:priorStarted.status, heartbeat_started_at_utc:priorStarted.startedAt});
@@ -626,7 +638,12 @@ export async function scanVwapPhysicalComparatorApprovalDispatch({config, stateF
         if (completed) {
           completed.staging_authority = await reconcileApprovedContinuation(config, stagingAuthority, insideList, resolvedState, fetchImpl, sleepImpl);
           completed.staging_authority.staging_success_receipt = stagingSuccessReceiptReadback(config);
-          completed.continuity = await continuityReadback(config,executorIssue,completed.staging_authority,fetchImpl);
+          completed.continuity = await continuityReadback(config,executorIssue,completed.staging_authority,fetchImpl,previousState?.continuity);
+          completed.engineering_continuity = await reconcileVwapEngineeringContinuity({config,executorIssue,
+            stagingAuthority:completed.staging_authority,continuity:completed.continuity,
+            previous:previousState?.engineering_continuity,
+            getJson:relative=>requestJson(config,relative,{},fetchImpl),
+            postJson:(relative,body)=>requestJson(config,relative,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)},fetchImpl)});
           return write('PREFLIGHT_BLOCKED_PHYSICAL_BINDING', completed);
         }
         return write('ALREADY_DISPATCHED_READ_ONLY_PREFLIGHT', {approval_statuses:statuses, dispatched:true, wake_reason:reason, heartbeat_run_id:insideStarted.id, heartbeat_run_status:insideStarted.status, heartbeat_started_at_utc:insideStarted.startedAt});
@@ -662,6 +679,16 @@ export async function scanVwapPhysicalComparatorApprovalDispatch({config, stateF
       try { fs.unlinkSync(lockPath); } catch {}
     }
   } catch (error) {
-    return write('ATTENTION_REQUIRED', {reason:String(error?.message || error), dispatched:false});
+    const priorContinuity = previousState?.continuity || null;
+    const staleContinuity = priorContinuity ? {...priorContinuity,source:'PAPERCLIP_UNAVAILABLE',
+      freshness:{state:'STALE',max_age_ms:90000},next_automatic_job:null,other_ready_jobs:[],
+      last_known_next_automatic_job:priorContinuity.next_automatic_job || priorContinuity.last_known_next_automatic_job || null,
+      human_decision:{...(priorContinuity.human_decision || {}),source:'STALE_READBACK',required:false}} : null;
+    return write('ATTENTION_REQUIRED', {reason:String(error?.message || error), dispatched:false,
+      approval_statuses:previousState?.approval_statuses || null,approval_statuses_source:'STALE_READBACK',
+      last_verified_at_utc:previousState?.checked_at_utc || null,last_verified_status:previousState?.status || null,
+      preflight_outcome:previousState?.preflight_outcome || null,staging_authority:previousState?.staging_authority || null,
+      workflow_lineage:previousState?.workflow_lineage || null,continuity:staleContinuity,
+      engineering_continuity:previousState?.engineering_continuity || null});
   }
 }

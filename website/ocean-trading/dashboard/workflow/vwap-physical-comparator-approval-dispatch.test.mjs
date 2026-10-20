@@ -93,8 +93,9 @@ function fixture({statuses = ['approved','approved'], stagingStatus = 'pending',
     if (route.startsWith('/api/agents/') && route.includes('/wakeup')) {
       posts += 1;
       const body = JSON.parse(options.body);
-      const continuation = body.payload.approvalId === config.staging_authority.approval_id;
-      const run = {id:continuation?'dddddddd-dddd-4ddd-8ddd-dddddddddddd':'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', agentId:config.paperclip.coordinator_agent_id,
+      const engineering = body.payload.action === 'CONTINUE_EXACT_ENGINEERING_ISSUE_OR_OPEN_TYPED_RECOVERY';
+      const continuation = !engineering && body.payload.approvalId === config.staging_authority.approval_id;
+      const run = {id:engineering?'99999999-9999-4999-8999-999999999999':continuation?'dddddddd-dddd-4ddd-8ddd-dddddddddddd':'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', agentId:config.paperclip.coordinator_agent_id,
         status:'queued', startedAt:null, contextSnapshot:{issueId:body.payload.issueId,wakeReason:body.reason}};
       runs.push(run);
       return response(run);
@@ -107,6 +108,10 @@ function fixture({statuses = ['approved','approved'], stagingStatus = 'pending',
       const run = runs.find(item => item.id === 'dddddddd-dddd-4ddd-8ddd-dddddddddddd');
       if (!queuedOnly) Object.assign(run, {status:'running', startedAt:'2026-10-20T14:00:00.000Z'});
       return response(run);
+    }
+    if (route.startsWith('/api/heartbeat-runs/')) {
+      const run = runs.find(item => item.id === route.split('/').at(-1));
+      return run ? response(run) : response({error:'not found',route},404);
     }
     return response({error:'not found', route}, 404);
   };
@@ -179,7 +184,9 @@ test('completed exact preflight projects the physical mismatch and Paperclip tas
   assert.equal(result.staging_authority.continuation.state, 'AWAITING_PAPERCLIP_HUMAN_DECISION');
   assert.equal(result.safety.runtime_write_scope_authorized, false);
   assert.equal(result.safety.replay_start_authorized, false);
-  assert.equal(f.posts(), 0);
+  assert.equal(result.engineering_continuity.state, 'WAKE_QUEUED');
+  assert.equal(result.engineering_continuity.approval_status, 'PENDING');
+  assert.equal(f.posts(), 1);
 });
 
 test('approved staging authority observes the Paperclip requester wake without authorizing playback', async () => {
@@ -203,7 +210,9 @@ test('approved staging authority observes the Paperclip requester wake without a
   assert.equal(result.staging_authority.scope_authority.playback_granted, false);
   assert.equal(result.safety.runtime_write_scope_authorized, false);
   assert.equal(result.safety.replay_start_authorized, false);
-  assert.equal(f.posts(), 0);
+  assert.equal(result.engineering_continuity.state, 'WAKE_QUEUED');
+  assert.equal(result.engineering_continuity.wake_run_id, '99999999-9999-4999-8999-999999999999');
+  assert.equal(f.posts(), 1);
 });
 
 test('approved staging authority repairs a missing requester wake once and proves it started', async () => {
@@ -223,10 +232,13 @@ test('approved staging authority repairs a missing requester wake once and prove
   assert.equal(f.requests.some(item=>item.method==='PATCH'&&item.route.includes('/agents/')),false);
   assert.equal(first.staging_authority.staging_success_receipt.status,'AWAITING_PACKAGE_BOUND_RECEIPT');
   assert.equal(first.workflow_lineage.relationship,'BLOCKED_BY');
-  assert.equal(f.posts(),1);
+  assert.equal(first.engineering_continuity.state,'WAKE_QUEUED');
+  assert.equal(f.posts(),2);
   const second = await scanVwapPhysicalComparatorApprovalDispatch({config:f.config,stateFile:f.config.state_path,fetchImpl:f.fetchImpl});
   assert.equal(second.staging_authority.continuation.heartbeat_run_id,first.staging_authority.continuation.heartbeat_run_id);
-  assert.equal(f.posts(),1);
+  assert.equal(second.engineering_continuity.state,'WAKE_QUEUED');
+  assert.equal(second.engineering_continuity.wake_run_id,first.engineering_continuity.wake_run_id);
+  assert.equal(f.posts(),2);
 });
 
 test('a queued Paperclip requester wake suppresses the Ocean fallback', async () => {
@@ -241,7 +253,29 @@ test('a queued Paperclip requester wake suppresses the Ocean fallback', async ()
   const result = await scanVwapPhysicalComparatorApprovalDispatch({config:f.config,stateFile:f.config.state_path,fetchImpl:f.fetchImpl});
   assert.equal(result.status,'PREFLIGHT_BLOCKED_PHYSICAL_BINDING',result.reason);
   assert.equal(result.staging_authority.continuation.state,'PAPERCLIP_REQUESTER_WAKE_QUEUED');
-  assert.equal(f.posts(),0);
+  assert.equal(result.engineering_continuity.state,'WAKE_QUEUED');
+  assert.equal(f.posts(),1);
+});
+
+test('a transient Paperclip failure preserves only stale last-verified decisions and work evidence', async () => {
+  const f = fixture({stagingStatus:'approved'});
+  f.runs.push({id:f.config.preflight_outcome.heartbeat_run_id,agentId:f.config.paperclip.coordinator_agent_id,
+    status:'succeeded',startedAt:'2026-10-20T13:30:21.351Z',finishedAt:'2026-10-20T13:32:41.930Z',
+    contextSnapshot:{issueId:f.config.paperclip.issue_id,wakeReason:'vwap_v238_dual_approval_read_only_preflight_e9a1f3be3c90bb88bc2e'}});
+  f.runs.push({id:'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',agentId:f.config.paperclip.coordinator_agent_id,
+    status:'running',startedAt:'2026-10-20T23:59:59.000Z',contextSnapshot:{approvalId:f.config.staging_authority.approval_id,
+      issueId:f.config.staging_authority.issue_id,wakeReason:'approval_approved'}});
+  const verified = await scanVwapPhysicalComparatorApprovalDispatch({config:f.config,stateFile:f.config.state_path,fetchImpl:f.fetchImpl});
+  assert.equal(verified.approval_statuses_source,'PAPERCLIP_LIVE');
+  const stale = await scanVwapPhysicalComparatorApprovalDispatch({config:f.config,stateFile:f.config.state_path,
+    fetchImpl:async()=>{ throw new Error('PAPERCLIP_TIMEOUT'); }});
+  assert.equal(stale.status,'ATTENTION_REQUIRED');
+  assert.equal(stale.approval_statuses_source,'STALE_READBACK');
+  assert.deepEqual(stale.approval_statuses,verified.approval_statuses);
+  assert.equal(stale.last_verified_status,'PREFLIGHT_BLOCKED_PHYSICAL_BINDING');
+  assert.equal(stale.preflight_outcome.status,'BLOCKED_PHYSICAL_BINDING_MISMATCH');
+  assert.equal(stale.continuity.freshness.state,'STALE');
+  assert.equal(stale.safety.replay_start_authorized,false);
 });
 
 test('changed staging package bytes fail closed', async () => {

@@ -59,6 +59,7 @@ test('complete onboarding is actionable in the browser without touching producti
   fs.writeFileSync(approvalDispatchState, JSON.stringify({
     schema_version:'ocean-vwap-physical-comparator-approval-dispatch-state/v1', strategy_id:TEST_STRATEGY_ID,
     enabled:true, status:'PREFLIGHT_BLOCKED_PHYSICAL_BINDING', checked_at_utc:'2026-10-20T13:33:06Z',
+    approval_statuses:{DATASET_PHYSICAL_SELECTION:'APPROVED',RUN_RELEASE:'APPROVED'},approval_statuses_source:'PAPERCLIP_LIVE',
     continuity:{schema_version:'ocean-vwap-continuity-projection/v1',source:'PAPERCLIP_LIVE',observed_at_utc:new Date().toISOString(),freshness:{state:'CURRENT'},
       next_automatic_job:{identifier:'OCEA-30',title:'Restore execution: review supervised host candidate',status:'BLOCKED',
         owner_name:'Mara Vale - Quant Lab Coordinator',url:'http://127.0.0.1:3100/OCEA/issues/OCEA-30',worker:{state:'NOT_OBSERVED'},
@@ -160,8 +161,8 @@ test('complete onboarding is actionable in the browser without touching producti
     await expect(page.getByRole('heading',{ name:'Physical comparator approvals', exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'Approve v0.6.238 TEST dataset and physical comparator selection', exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'Approve create-new v0.6.238 Sep-2025 Z25 TEST RUN_RELEASE', exact:true })).toBeVisible();
-    await expect(page.locator(`[data-approval-id="${TEST_COMPARATOR_APPROVAL_ID}"]`).getByRole('link',{ name:'Open approval record', exact:true })).toHaveAttribute('href',`${base}/approvals/${TEST_COMPARATOR_APPROVAL_ID}`);
-    await expect(page.locator(`[data-approval-id="${TEST_RELEASE_APPROVAL_ID}"]`).getByRole('link',{ name:'Open approval record', exact:true })).toHaveAttribute('href',`${base}/approvals/${TEST_RELEASE_APPROVAL_ID}`);
+    await expect(page.locator(`[data-approval-id="${TEST_COMPARATOR_APPROVAL_ID}"]`).getByRole('link',{ name:'Open approval record', exact:true })).toHaveAttribute('href',`http://127.0.0.1:3100/OCEA/approvals/${TEST_COMPARATOR_APPROVAL_ID}`);
+    await expect(page.locator(`[data-approval-id="${TEST_RELEASE_APPROVAL_ID}"]`).getByRole('link',{ name:'Open approval record', exact:true })).toHaveAttribute('href',`http://127.0.0.1:3100/OCEA/approvals/${TEST_RELEASE_APPROVAL_ID}`);
     await expect(page.getByText('Approved in Paperclip',{ exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{name:'Current automatic work',exact:true})).toBeVisible();
     await expect(page.getByRole('heading',{name:'Restore execution: review supervised host candidate',exact:true})).toBeVisible();
@@ -215,6 +216,8 @@ test('complete onboarding is actionable in the browser without touching producti
     await expect(page.getByRole('heading',{ name:'Onboarding complete', exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'CI/CD continuous run', exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'Resolve blocked Replay execution work before staging', exact:true })).toBeVisible();
+    await expect(page.getByText('2 approved in Paperclip · 0 pending',{ exact:true })).toBeVisible();
+    await expect(page.getByText('Approved in Paperclip',{ exact:true }).first()).toBeVisible();
     await expect(page.getByText(/approving it alone cannot install the host or start Replay/)).toBeVisible();
     await expect(page.getByRole('link',{ name:'Open blocked work OCEA-30', exact:true })).toHaveAttribute('href','http://127.0.0.1:3100/OCEA/issues/OCEA-30');
     await expect(page.getByText(/OCEA-30 is blocked: Restore execution: review supervised host candidate/)).toBeVisible();

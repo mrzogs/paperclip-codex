@@ -264,16 +264,25 @@ function strategyOnboardingPage(data) {
   const unavailableHumanApprovals = humanApprovals.filter(item => !item.authoritative);
   const deniedHumanApprovals = humanApprovals.filter(item => ['REJECTED','CANCELLED'].includes(item.status));
   const allHumanApprovalsApproved = humanApprovals.length > 0 && humanApprovals.every(item => item.authoritative && item.status === 'APPROVED');
-  const comparatorApprovals = Array.isArray(comparator.required_human_approvals) ? comparator.required_human_approvals : [];
+  const comparatorStatusesCurrent = approvalDispatch.approval_statuses_source === 'PAPERCLIP_LIVE';
+  const comparatorApprovals = Array.isArray(comparator.required_human_approvals) ? comparator.required_human_approvals.map(item => ({
+    ...item,
+    status:String(approvalDispatch.approval_statuses?.[item.decision_scope] || 'UNAVAILABLE').toUpperCase(),
+    authoritative:comparatorStatusesCurrent,
+    action_required:comparatorStatusesCurrent && ['PENDING','REVISION_REQUESTED'].includes(String(approvalDispatch.approval_statuses?.[item.decision_scope] || '').toUpperCase()),
+    url:`http://127.0.0.1:3100/OCEA/approvals/${encodeURIComponent(item.approval_id)}`,
+  })) : [];
   const pendingComparatorApprovals = comparatorApprovals.filter(item => ['PENDING','REVISION_REQUESTED'].includes(item.status));
   const unavailableComparatorApprovals = comparatorApprovals.filter(item => !item.authoritative);
   const deniedComparatorApprovals = comparatorApprovals.filter(item => ['REJECTED','CANCELLED'].includes(item.status));
   const allComparatorApprovalsApproved = comparator.state === 'AVAILABLE' && comparatorApprovals.length === 2
     && comparatorApprovals.every(item => item.authoritative && item.status === 'APPROVED');
-  const comparatorNeedsDecision = comparator.state === 'AVAILABLE' && !allComparatorApprovalsApproved;
+  const comparatorStatusUnavailable = comparator.state === 'AVAILABLE' && unavailableComparatorApprovals.length > 0;
+  const comparatorNeedsDecision = comparator.state === 'AVAILABLE' && !comparatorStatusUnavailable && !allComparatorApprovalsApproved;
   const comparatorInvalid = comparator.state === 'ATTENTION_REQUIRED';
   const preflightOutcome = approvalDispatch.preflight_outcome || null;
-  const preflightBlocked = approvalDispatch.status === 'PREFLIGHT_BLOCKED_PHYSICAL_BINDING'
+  const preflightBlocked = (approvalDispatch.status === 'PREFLIGHT_BLOCKED_PHYSICAL_BINDING'
+    || approvalDispatch.last_verified_status === 'PREFLIGHT_BLOCKED_PHYSICAL_BINDING')
     && preflightOutcome?.status === 'BLOCKED_PHYSICAL_BINDING_MISMATCH';
   const stagingAuthority = approvalDispatch.staging_authority || null;
   const stagingApprovalPending = stagingAuthority?.approval_status === 'PENDING' || stagingAuthority?.approval_status === 'REVISION_REQUESTED';
@@ -288,6 +297,7 @@ function strategyOnboardingPage(data) {
   const continuity = approvalDispatch.continuity || null;
   const continuityCurrent = continuity?.freshness?.state === 'CURRENT';
   const automaticJob = continuityCurrent ? continuity.next_automatic_job : null;
+  const lastKnownAutomaticJob = continuity?.last_known_next_automatic_job || null;
   const blockedHostIssue = continuityCurrent && Array.isArray(continuity.issue_chain)
     ? continuity.issue_chain.find(item => item.identifier === 'OCEA-28' && item.status === 'BLOCKED') : null;
   const blockedExecutionJob = blockedHostIssue
@@ -397,6 +407,7 @@ function strategyOnboardingPage(data) {
     <li class='${liveRuns.length ? 'current' : 'waiting'}'><span class='journey-marker'>4</span><div class='journey-copy'><div><h3>4. Live trading</h3>${badge(liveState)}</div><p>Live is a separate, explicit human decision after Replay and Paper evidence has been reviewed. Ocean never promotes a strategy automatically.</p></div></li>
   </ol>`;
   const nextActionTitle = comparatorInvalid ? 'Repair the v0.6.238 TEST comparator contract'
+    : comparatorStatusUnavailable ? 'Verify the current Paperclip comparator decisions'
     : comparatorNeedsDecision ? 'Approve the v0.6.238 TEST comparator run'
     : preflightBlocked && blockedExecutionJob ? 'Resolve blocked Replay execution work before staging'
     : preflightBlocked && stagingApprovalPending ? 'Review the exact TEST staging approval in Paperclip'
@@ -416,6 +427,7 @@ function strategyOnboardingPage(data) {
   const nextActionLabel = paperRuntimeActive ? 'Open Paper Dashboard' : 'Open Replay Monitor';
   const programNextActionText = improvementActive ? improvement.next_action : pendingAcceptanceGate?.resolution_action || governedAction?.action || paperWorkstream?.next_action || campaign.next_action;
   const nextActionText = comparatorInvalid ? `Ocean rejected the comparator contract (${human(comparator.reason || 'contract invalid')}). No run or release authority exists.`
+    : comparatorStatusUnavailable ? 'Ocean cannot currently prove the two comparator decisions from Paperclip. The last recorded values are displayed only as stale evidence; no new approval or runtime authority is inferred.'
     : comparatorNeedsDecision ? unavailableComparatorApprovals.length
       ? 'Ocean cannot verify one or more comparator approvals. No authority is inferred. Verify both linked approval records before any run materialization.'
       : deniedComparatorApprovals.length
@@ -444,7 +456,7 @@ function strategyOnboardingPage(data) {
       ? (automaticJob ? `<h3>${esc(automaticJob.title)}</h3><p><a href='${esc(automaticJob.url)}' target='_blank' rel='noopener'>${esc(automaticJob.identifier)}</a> · ${esc(automaticJob.owner_name)} · ${badge(automaticJob.status)} · ${badge(automaticJob.worker.state)}</p>${automaticJob.recovery_required ? `<p>${esc(automaticJob.recovery_action)}</p>` : ''}` : '<p>No runnable engineering task is currently proven. The coordinator must reconcile the issue chain.</p>')
         + `<p>Candidate detection: ${Number(eventMonitor.eligible_trade_count || 0) === 0 ? 'waiting for eligible trades' : 'monitoring eligible evidence'} (${esc(String(eventMonitor.eligible_trade_count || 0))} eligible / ${esc(String(eventMonitor.observed_trade_count || 0))} observed).</p>`
         + `<details><summary>Authority and handoff requirements</summary><p>Instance admission and host readiness: ${esc(human(continuity.authority.instance_admission))}. Current exclusive booking: ${esc(human(continuity.authority.current_exclusive_booking))}. ${esc(continuity.authority.booking_requirement)}</p><p>Per-run manifest: ${esc(human(continuity.authority.per_run_manifest))}. ${esc(continuity.authority.future_gate)} Standing TEST policy: ${esc(human(continuity.authority.test_standing_policy))}; repeat-run authority is not inferred from the current decisions.</p><p>Paper and Live promotion each require a separate human decision.</p>${table(['Issue','Current status'],continuity.issue_chain.map(item=>[esc(item.identifier)+' — '+esc(item.title),badge(item.status)]))}</details><small>Paperclip readback: ${esc(date(continuity.observed_at_utc))}. Ocean refreshes this automatically.</small>`
-      : '<p>Paperclip continuity evidence is stale. Ocean is refreshing the current owner and work state; no worker start or authority is inferred.</p>', badge(continuityCurrent ? 'PAPERCLIP_LIVE' : 'STALE'))
+      : `<p>Paperclip continuity evidence is stale. Ocean is refreshing the current owner and work state; no worker start or authority is inferred.${lastKnownAutomaticJob ? ` Last known work was ${esc(lastKnownAutomaticJob.identifier)} — ${esc(lastKnownAutomaticJob.title)}.` : ''}</p>`, badge(continuityCurrent ? 'PAPERCLIP_LIVE' : 'STALE'))
     : '';
   const approvalCards = approvals => approvals.map(item => {
     const linkLabel = item.action_required ? 'Review approval in Paperclip' : 'Open approval record';

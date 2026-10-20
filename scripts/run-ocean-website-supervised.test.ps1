@@ -105,6 +105,10 @@ Assert-Test (-not $source.Contains('/api/workflow/status')) 'SUPERVISOR_PROBES_T
 Assert-Test ($source.Contains('-WindowStyle Hidden')) 'WEBSITE_CHILD_IS_NOT_STARTED_HIDDEN'
 Assert-Test ($source.Contains("Local\OceanTradingWebsiteSupervisor-v1")) 'WEBSITE_SUPERVISOR_HAS_NO_PERSISTENT_SINGLETON'
 Assert-Test ($source.Contains('Stop-Process -Id $Process.Id -Force')) 'RECOVERY_IS_NOT_SCOPED_TO_THE_EXACT_CHILD_PID'
+Assert-Test ($source.Contains('function Test-PrivateDirectoryAcl')) 'PRIVATE_ACL_RECONCILIATION_IS_NOT_IDEMPOTENT'
+Assert-Test ($source.Contains('if (Test-PrivateDirectoryAcl $Path) { return }')) 'CORRECT_PRIVATE_ACL_IS_STILL_REWRITTEN'
+Assert-Test ($source.Contains('function Stop-ExactWebsiteProcessTree')) 'FORCED_RECOVERY_DOES_NOT_RETIRE_DESCENDANTS'
+Assert-Test ($source.Contains('Stopped exact Ocean website descendant PID')) 'FORCED_RECOVERY_HAS_NO_DESCENDANT_EVIDENCE'
 Assert-Test (-not ($source -match 'manage-ocean-services\.ps1.+Restart')) 'LIVENESS_RECOVERY_RESTARTS_THE_SERVICE_STACK'
 Assert-Test ($source.Contains("Get-ScheduledTask -TaskPath '\OceanTrading\' -TaskName 'OceanTrading-Website'")) 'DISABLED_WEBSITE_TASK_DOES_NOT_SUPPRESS_RESTART'
 Assert-Test ($source.Contains('[int]$StartupTimeoutSeconds = 150')) 'WEBSITE_STARTUP_TIMEOUT_DOES_NOT_COVER_PROTECTED_READBACK'
@@ -114,6 +118,16 @@ $postDelay = if ($delayIndex -ge 0) { $source.Substring($delayIndex + $delayMark
 $postDelayGateIndex = $postDelay.IndexOf('Test-WebsiteRestartAllowed')
 $postDelayLaunchIndex = $postDelay.IndexOf('$process = Start-WebsiteChild')
 Assert-Test ($delayIndex -ge 0 -and $postDelayGateIndex -ge 0 -and $postDelayLaunchIndex -gt $postDelayGateIndex) 'RECOVERY_DELAY_HAS_AN_UNCHECKED_OPERATOR_STOP_RACE'
+
+$aclRoot = Join-Path ([IO.Path]::GetTempPath()) ('ocean-private-acl-' + [Guid]::NewGuid().ToString('N'))
+try {
+  Set-PrivateDirectoryAcl $aclRoot
+  Assert-Test (Test-PrivateDirectoryAcl $aclRoot) 'PRIVATE_ACL_DID_NOT_REACH_THE_EXACT_REQUIRED_STATE'
+  Set-PrivateDirectoryAcl $aclRoot
+  Assert-Test (Test-PrivateDirectoryAcl $aclRoot) 'PRIVATE_ACL_IDEMPOTENT_RECHECK_FAILED'
+} finally {
+  Remove-Item -LiteralPath $aclRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 $singletonHolder = $null
 $singletonScript = Join-Path ([IO.Path]::GetTempPath()) ('ocean-supervisor-singleton-' + [Guid]::NewGuid().ToString('N') + '.ps1')
