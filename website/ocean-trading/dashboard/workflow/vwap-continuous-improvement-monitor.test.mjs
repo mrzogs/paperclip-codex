@@ -66,6 +66,14 @@ test('checked-in monitor config pins the approved isolated coordinator route',()
   assert.equal(config.safety.automatic_approval_enabled,false);
   assert.equal(config.safety.live_real_enabled,false);
   assert.equal(config.safety.real_order_routing,'PROHIBITED');
+  const source=config.sources.find(item=>item.id==='replay-two-v013');
+  const runId='cicd-vwap-v238-discovery-20250913-20251001-z25-20261020-r1';
+  assert.equal(source.run_assignments[runId],'DISCOVERY');
+  assert.equal(source.run_contracts[runId].run_release_approval_id,'f3b264eb-f081-4b51-b105-6a09c2b42860');
+  assert.equal(source.run_contracts[runId].registered_before_rows,true);
+  assert.equal(source.run_contracts[runId].materialization_authorized,false);
+  assert.equal(source.run_contracts[runId].materialization_attestation,null);
+  assert.equal(source.run_contracts[runId].playback_authorized,false);
 });
 test('first scan baselines rows and incomplete telemetry fails closed',async()=>{
   const f=fixture();insertRows(f.dbFile,1,60,{quality:'vol_state_missing'});let calls=0;
@@ -89,6 +97,48 @@ test('new discovery evidence triggers once and unchanged scans stay local',async
   assert.equal(third.new_trade_count,0);assert.equal(calls,1);
   const fourth=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:false,dispatch:async()=>{calls++;}});
   assert.equal(fourth.skipped_unchanged,true);assert.equal(calls,1);
+});
+test('existing trade IDs trigger once when a frozen run assignment makes them newly eligible',async()=>{
+  const f=fixture();delete f.config.sources[0].run_assignments;insertRows(f.dbFile,1,60,{role:null,runId:'prospective-run'});let calls=0,event=null;
+  await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async()=>({triggered:false})});
+  f.config.sources[0].run_assignments={'prospective-run':'DISCOVERY'};
+  const second=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:false,dispatch:async(_config,value)=>{calls++;event=value;return {triggered:true,dispatch_committed:true};}});
+  assert.equal(second.new_trade_count,0);assert.equal(second.newly_eligible_trade_count,60);assert.equal(second.disposition,'INVESTIGATE');
+  assert.equal(calls,1);assert.equal(event.trigger_reason,'EXISTING_TRADES_BECAME_ELIGIBLE');assert.equal(event.newly_eligible_trade_ids.length,60);
+  const third=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:false,dispatch:async()=>{calls++;return {triggered:true,dispatch_committed:true};}});
+  assert.equal(third.skipped_unchanged,true);assert.equal(calls,1);
+});
+test('a prospective run publication cannot make pre-materialization or forged rows eligible',async()=>{
+  const f=fixture(),runId='prospective-governed-run',hash='sha256:'+'a'.repeat(64);
+  f.config.sources[0].run_assignments={[runId]:'DISCOVERY'};
+  f.config.sources[0].run_contracts={[runId]:{dataset_role:'DISCOVERY',contract_id:'prospective-contract',
+    contract_hash:hash,document_hash:'sha256:'+'b'.repeat(64),context_hash:'sha256:'+'c'.repeat(64),
+    run_release_approval_id:'33333333-3333-4333-8333-333333333333',run_release_scope:'RUN_RELEASE',
+    materialization_authorized:false,materialization_blocker:'POST_STAGING_CHARTBOOK_HASH_NOT_BOUND_BY_EXISTING_RUN_RELEASE',
+    materialization_attestation:null,playback_authorized:false,registered_before_rows:true}};
+  insertRows(f.dbFile,1,60,{role:'DISCOVERY',runId});let calls=0;
+  const state=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async()=>{calls++;return {triggered:true,dispatch_committed:true};}});
+  assert.equal(state.eligible_trade_count,0);
+  assert.equal(state.role_issue_count,60);
+  assert.equal(state.detector.sufficiency.discovery_trade_count,0);
+  assert.equal(calls,0);
+  assert.equal(state.run_contract_publication.contracts[0].materialization_authorized,false);
+});
+test('an uncommitted route-blocked dispatch retries after route repair without new database rows',async()=>{
+  const f=fixture();insertRows(f.dbFile,1,50);await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async()=>({triggered:false})});insertRows(f.dbFile,51,10);
+  let calls=0;
+  const blocked=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async()=>{calls++;return {triggered:false,dispatch_committed:false,reason:'EXACT_PROJECT_ROUTE_NOT_READY',issue_id:'same-issue'};}});
+  assert.equal(blocked.pending_dispatch.receipt.issue_id,'same-issue');assert.equal(blocked.last_triggered_analysis_hash,null);
+  const recovered=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:false,dispatch:async()=>{calls++;return {triggered:true,dispatch_committed:true,issue_id:'same-issue',wakeup_id:'wake'};}});
+  assert.equal(recovered.skipped_unchanged,false);assert.equal(recovered.pending_dispatch,null);assert.equal(recovered.last_triggered_analysis_hash,recovered.detector.analysis_hash);assert.equal(calls,2);
+});
+test('a failure after issue creation preserves the pending event and retries the same event',async()=>{
+  const f=fixture();insertRows(f.dbFile,1,50);await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async()=>({triggered:false})});insertRows(f.dbFile,51,10);
+  let calls=0,firstEvent=null,secondEvent=null;
+  const failed=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async(_config,event)=>{calls++;firstEvent=event;throw new Error('WAKE_FAILED_AFTER_ISSUE_CREATE');}});
+  assert.equal(failed.status,'DEGRADED');assert.equal(failed.pending_dispatch.event.event_id,firstEvent.event_id);
+  const recovered=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:false,dispatch:async(_config,event)=>{calls++;secondEvent=event;return {triggered:true,dispatch_committed:true,issue_id:'same-issue'};}});
+  assert.equal(recovered.status,'HEALTHY');assert.equal(recovered.pending_dispatch,null);assert.equal(secondEvent.event_id,firstEvent.event_id);assert.equal(calls,2);
 });
 test('validation rows never select thresholds or wake an agent',async()=>{
   const f=fixture();insertRows(f.dbFile,1,60,{role:'VALIDATION'});let calls=0;
@@ -141,7 +191,7 @@ test('new unassigned Paper trades raise one provenance recovery, not a strategy 
 });
 test('actionable evidence reaches issue and wakeup HTTP endpoints',async()=>{
   const f=fixture();insertRows(f.dbFile,1,50);await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async()=>({triggered:false})});insertRows(f.dbFile,51,10);
-  const requests=[],server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{requests.push({url:req.url,method:req.method,body:body?JSON.parse(body):null});res.setHeader('content-type','application/json');const resource=exactRoutingResource(req.url,f.config);if(resource!==undefined)res.end(JSON.stringify(resource));else if(req.method==='GET')res.end('[]');else if(req.url.includes('/issues'))res.end(JSON.stringify({id:'issue-1',identifier:'OCEA-TEST'}));else res.end(JSON.stringify({id:'wake-1'}));});});
+  const requests=[],server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{const parsed=body?JSON.parse(body):null;requests.push({url:req.url,method:req.method,body:parsed});res.setHeader('content-type','application/json');const resource=exactRoutingResource(req.url,f.config);if(resource!==undefined)res.end(JSON.stringify(resource));else if(req.method==='GET')res.end('[]');else if(req.url.includes('/issues'))res.end(JSON.stringify({id:'issue-1',identifier:'OCEA-TEST'}));else res.end(JSON.stringify({id:'wake-1',agentId:'agent',status:'running',startedAt:'2026-10-20T13:00:00Z',contextSnapshot:{issueId:parsed.payload.issueId,wakeReason:parsed.reason}}));});});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));f.config.trigger.api_base_url='http://127.0.0.1:'+server.address().port+'/api';
   const state=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true});await new Promise(resolve=>server.close(resolve));
   assert.equal(state.last_trigger_receipt.triggered,true);
@@ -156,6 +206,23 @@ test('actionable evidence reaches issue and wakeup HTTP endpoints',async()=>{
   assert.deepEqual({strategyId:requests[5].body.payload.strategyId,brainProject:requests[5].body.payload.brainProject,
     brainDomain:requests[5].body.payload.brainDomain,isolationScope:requests[5].body.payload.isolationScope},{
     strategyId:'cicd-vwap-pull-back-strategy',brainProject:'cicd-vwap-pull-back-strategy',brainDomain:'trading-strategy',isolationScope:'EXACT_STRATEGY_ONLY'});
+});
+test('a queued wake receipt is not committed until the heartbeat proves it started',async()=>{
+  const f=fixture();f.config.trigger.wake_start_timeout_ms=5;f.config.trigger.wake_poll_interval_ms=1;
+  const server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{
+    const parsed=body?JSON.parse(body):null;res.setHeader('content-type','application/json');const resource=exactRoutingResource(req.url,f.config);
+    if(resource!==undefined)res.end(JSON.stringify(resource));
+    else if(req.method==='GET'&&req.url.includes('/issues?'))res.end('[]');
+    else if(req.method==='POST'&&req.url.includes('/issues'))res.end(JSON.stringify({id:'issue-queued',identifier:'OCEA-QUEUED'}));
+    else if(req.method==='POST'&&req.url.includes('/wakeup'))res.end(JSON.stringify({id:'wake-queued',agentId:'agent',status:'queued',startedAt:null,contextSnapshot:{issueId:parsed.payload.issueId,wakeReason:parsed.reason}}));
+    else if(req.method==='GET'&&req.url==='/api/heartbeat-runs/wake-queued')res.end(JSON.stringify({id:'wake-queued',agentId:'agent',status:'queued',startedAt:null,contextSnapshot:{issueId:'issue-queued',wakeReason:'vwap_continuous_improvement_evidence_deadbeefdeadbeef'}}));
+    else res.writeHead(404).end(JSON.stringify({error:'not found'}));
+  });});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));f.config.trigger.api_base_url='http://127.0.0.1:'+server.address().port+'/api';
+  try{
+    await assert.rejects(()=>dispatchVwapImprovementEvent(f.config,{kind:'INVESTIGATE',event_id:'queued-event',strategy_id:f.config.strategy_id,
+      analysis_hash:'sha256:test',new_trade_ids:[],newly_eligible_trade_ids:[],investigation_queue:[],next_action:'none'}),/WAKE_NOT_PROVEN_STARTED/);
+  } finally {await new Promise(resolve=>server.close(resolve));}
 });
 test('dispatch fails closed before HTTP when the event strategy identity differs',async()=>{
   const f=fixture();
@@ -274,10 +341,10 @@ test('source interrogation yields the event loop while an auxiliary read is pend
   assert.equal(timerObserved,true);assert.equal(state.status,'HEALTHY');assert.equal(state.sources[0].observed_trade_count,0);
 });
 test('transport test reaches the normal issue and wakeup path without authorizing strategy action',async()=>{
-  const f=fixture(),requests=[],server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{requests.push({url:req.url,method:req.method,body:body?JSON.parse(body):null});res.setHeader('content-type','application/json');const resource=exactRoutingResource(req.url,f.config);if(resource!==undefined)res.end(JSON.stringify(resource));else if(req.method==='GET')res.end('[]');else if(req.url.includes('/issues'))res.end(JSON.stringify({id:'issue-test',identifier:'OCEA-E2E'}));else res.end(JSON.stringify({id:'wake-test'}));});});
+  const f=fixture(),requests=[],server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{const parsed=body?JSON.parse(body):null;requests.push({url:req.url,method:req.method,body:parsed});res.setHeader('content-type','application/json');const resource=exactRoutingResource(req.url,f.config);if(resource!==undefined)res.end(JSON.stringify(resource));else if(req.method==='GET')res.end('[]');else if(req.url.includes('/issues'))res.end(JSON.stringify({id:'issue-test',identifier:'OCEA-E2E'}));else res.end(JSON.stringify({id:'wake-test',agentId:'agent',status:'running',startedAt:'2026-10-20T13:00:00Z',contextSnapshot:{issueId:parsed.payload.issueId,wakeReason:parsed.reason}}));});});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));f.config.trigger.api_base_url='http://127.0.0.1:'+server.address().port+'/api';
   const receipt=await dispatchVwapImprovementEvent(f.config,{kind:'TRANSPORT_TEST',event_id:'vwap-ci-e2e-fixture',strategy_id:f.config.strategy_id,analysis_hash:'sha256:test',transport_test:true,new_trade_ids:[],investigation_queue:[],next_action:'none'});await new Promise(resolve=>server.close(resolve));
-  assert.equal(receipt.triggered,true);assert.match(requests[4].body.description,/No strategy, Sierra, approval, promotion, Paper, or Live action is authorized/);assert.equal(requests[5].body.triggerDetail,'system');assert.equal(requests[5].body.reason,'vwap_continuous_improvement_transport_test');
+  assert.equal(receipt.triggered,true);assert.equal(receipt.downstream_investigation_complete,false);assert.match(requests[4].body.description,/No strategy, Sierra, approval, promotion, Paper, or Live action is authorized/);assert.equal(requests[5].body.triggerDetail,'system');assert.match(requests[5].body.reason,/^vwap_continuous_improvement_transport_test_[0-9a-f]{16}$/);
 });
 test('scoped event lookup reuses only an exact existing issue',async()=>{
   const f=fixture(),requests=[],eventId='vwap-ci-existing-event';
@@ -289,7 +356,7 @@ test('scoped event lookup reuses only an exact existing issue',async()=>{
     else if(req.method==='GET'&&req.url.includes('/issues?'))res.end(JSON.stringify([
       {id:'wrong-issue',title:'another strategy '+eventId},
       {id:'existing-issue',identifier:'OCEA-EXISTING',title}]));
-    else if(req.method==='POST'&&req.url.includes('/wakeup'))res.end(JSON.stringify({id:'existing-wakeup'}));
+    else if(req.method==='POST'&&req.url.includes('/wakeup')){const parsed=body?JSON.parse(body):null;res.end(JSON.stringify({id:'existing-wakeup',agentId:'agent',status:'running',startedAt:'2026-10-20T13:00:00Z',contextSnapshot:{issueId:parsed.payload.issueId,wakeReason:parsed.reason}}));}
     else res.end(JSON.stringify({id:'unexpected-issue-creation'}));
   });});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));f.config.trigger.api_base_url='http://127.0.0.1:'+server.address().port+'/api';
@@ -301,8 +368,32 @@ test('scoped event lookup reuses only an exact existing issue',async()=>{
     assert.equal(requests[3].url,'/api/companies/company/issues?limit=5&q='+eventId);
   } finally {await new Promise(resolve=>server.close(resolve));}
 });
+test('a route-created blocked event issue is rebound and reopened before the exact wake',async()=>{
+  const f=fixture(),requests=[],eventId='vwap-ci-route-repair',title='[VWAP CI]['+f.config.strategy_id+'] TRANSPORT_TEST '+eventId;
+  const server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{
+    const parsed=body?JSON.parse(body):null;requests.push({url:req.url,method:req.method,body:parsed});res.setHeader('content-type','application/json');
+    const resource=exactRoutingResource(req.url,f.config);
+    if(resource!==undefined)res.end(JSON.stringify(resource));
+    else if(req.method==='GET'&&req.url.includes('/issues?'))res.end(JSON.stringify([{id:'route-blocked-issue',identifier:'OCEA-ROUTE',title,
+      status:'blocked',assigneeAgentId:'agent',projectId:null,projectWorkspaceId:null}]));
+    else if(req.method==='PATCH'&&req.url==='/api/issues/route-blocked-issue')res.end(JSON.stringify({id:'route-blocked-issue',identifier:'OCEA-ROUTE',title,
+      status:'todo',assigneeAgentId:'agent',projectId:PROJECT_ID,projectWorkspaceId:WORKSPACE_ID}));
+    else if(req.method==='POST'&&req.url.includes('/wakeup'))res.end(JSON.stringify({id:'route-repair-wake',agentId:'agent',status:'running',
+      startedAt:'2026-10-20T13:00:00Z',contextSnapshot:{issueId:parsed.payload.issueId,wakeReason:parsed.reason}}));
+    else res.writeHead(404).end(JSON.stringify({error:'not found'}));
+  });});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));f.config.trigger.api_base_url='http://127.0.0.1:'+server.address().port+'/api';
+  try{
+    const receipt=await dispatchVwapImprovementEvent(f.config,{kind:'TRANSPORT_TEST',event_id:eventId,strategy_id:f.config.strategy_id,
+      analysis_hash:'sha256:test',transport_test:true});
+    assert.equal(receipt.triggered,true);assert.equal(receipt.issue_created,false);assert.equal(receipt.delivery_proven,true);
+    const patchRequest=requests.find(item=>item.method==='PATCH');
+    assert.deepEqual(patchRequest.body,{status:'todo',assigneeAgentId:'agent',projectId:PROJECT_ID,projectWorkspaceId:WORKSPACE_ID});
+    assert.ok(requests.findIndex(item=>item.method==='PATCH')<requests.findIndex(item=>item.url.includes('/wakeup')));
+  } finally {await new Promise(resolve=>server.close(resolve));}
+});
 test('evidence blocker reaches recovery issue and wakeup without strategy authority',async()=>{
-  const f=fixture(),requests=[],server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{requests.push({url:req.url,method:req.method,body:body?JSON.parse(body):null});res.setHeader('content-type','application/json');const resource=exactRoutingResource(req.url,f.config);if(resource!==undefined)res.end(JSON.stringify(resource));else if(req.method==='GET')res.end('[]');else if(req.url.includes('/issues'))res.end(JSON.stringify({id:'issue-blocked',identifier:'OCEA-BLOCKED'}));else res.end(JSON.stringify({id:'wake-blocked'}));});});
+  const f=fixture(),requests=[],server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{const parsed=body?JSON.parse(body):null;requests.push({url:req.url,method:req.method,body:parsed});res.setHeader('content-type','application/json');const resource=exactRoutingResource(req.url,f.config);if(resource!==undefined)res.end(JSON.stringify(resource));else if(req.method==='GET')res.end('[]');else if(req.url.includes('/issues'))res.end(JSON.stringify({id:'issue-blocked',identifier:'OCEA-BLOCKED'}));else res.end(JSON.stringify({id:'wake-blocked',agentId:'agent',status:'running',startedAt:'2026-10-20T13:00:00Z',contextSnapshot:{issueId:parsed.payload.issueId,wakeReason:parsed.reason}}));});});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));f.config.trigger.api_base_url='http://127.0.0.1:'+server.address().port+'/api';
   try {
     insertRows(f.dbFile,1,50,{role:'DISCOVERY',runId:'unregistered-holdout'});

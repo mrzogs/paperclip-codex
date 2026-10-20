@@ -105,9 +105,49 @@
     "continuation": {
       "requester_agent_id": "75618a1a-a7ba-44bd-b391-48d58617433c",
       "approval_resolution_wakes_requester": true,
+      "ocean_liveness_repair_enabled": true,
+      "paperclip_wakeup_grace_ms": 15000,
       "next_action": "REAUTHENTICATE_PACKAGE_AND_DERIVE_ONLY_EXACT_APPROVED_FILESYSTEM_SCOPE",
+      "existing_run_release_approval_id": "f3b264eb-f081-4b51-b105-6a09c2b42860",
+      "existing_run_release_scope": "RUN_RELEASE",
+      "run_release_output_root": "D:\\Trading\\CICD\\recovery-outputs\\CICD-VWAP-V238-SEP2025-Z25-DISCOVERY-20261020-R1",
+      "combine_existing_scopes_after_gates": false,
+      "existing_run_release_reuse_status": "BLOCKED_POST_STAGING_CHARTBOOK_HASH_NOT_PREAUTHORIZED",
+      "playback_authorized": false,
+      "next_human_gate": "CONSOLIDATED_POST_STAGING_RUN_RELEASE_AND_REPLAY_MEASUREMENT_START_AFTER_CONTROLLER_PROOF",
+      "staging_success_receipt": {
+        "schema_version": "cicd-vwap-sim1-staging-success-receipt/v1",
+        "path": "C:\\Users\\wayne\\OneDrive\\Documents\\Brady - Optimization\\reports\\ocea22-sim1-approved-binding-r1.json",
+        "authority": "PACKAGE_BOUND_CICD_COORDINATOR_READBACK",
+        "required_status": "STAGED_DIAGNOSTIC_VERIFIED_AWAITING_POST_STAGING_RUN_AUTHORITY",
+        "accepted_before_playback": true,
+        "immutable_hash_required": true
+      },
+      "execution_route": {
+        "mode": "REQUIRE_APPROVAL_BOUND_NARROW_EXECUTOR",
+        "adapter_config_mutation_authorized": false,
+        "command_policy_enforced": false,
+        "engineering_issue_id": "d62935ff-7862-4f68-aa90-84eecbe54899",
+        "engineering_issue_identifier": "OCEA-24",
+        "engineering_issue_title": "Build approval-bound host staging executor for OCEA-22",
+        "engineering_issue_owner_agent_id": "75618a1a-a7ba-44bd-b391-48d58617433c",
+        "required_source_read_paths": [
+          "D:\\Trading\\CICD\\recovery-outputs\\VWAP-V238-RELEASE-INDEPENDENT-20261008T175011Z\\a\\CICD_VWAPPullback_v238_64.dll",
+          "D:\\Trading\\CICD\\worktrees\\telemetry-s30-2\\build\\releases\\v0.5.53\\SierraTradeTelemetryLogger_v0.5.53_64.dll"
+        ],
+        "diagnostic_commands_only": ["STATUS", "DIAGNOSTICS", "STUDY_INPUT_EXPORT"],
+        "measurement_start_allowed": false
+      },
       "no_ocean_approval_authority": true
-    }
+    },
+    "allowed_future_write_paths": [
+      "D:\\Trading\\SierraChart-Replay Two\\Data\\CICD_VWAPPullback_v238_64.dll",
+      "D:\\Trading\\SierraChart-Replay Two\\Data\\SierraTradeTelemetryLogger_v0.5.53_64.dll",
+      "D:\\Trading\\SierraChart-Replay Two\\Data\\CICD - VWAP Pull Back Strategy.Cht",
+      "C:\\Users\\wayne\\OneDrive\\Documents\\Brady - Optimization\\reports\\ocea22-sim1-approved-binding-r1.json",
+      "C:\\Users\\wayne\\OneDrive\\Documents\\Brady - Optimization\\reports\\ocea22-sim1-approved-backup-r1",
+      "D:\\Trading\\SierraChart-Replay Two\\connector-control\\oql-vwap-replay-isolated"
+    ]
   },
   "safety": {
     "execution_authority": false,

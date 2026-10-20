@@ -400,10 +400,10 @@ function Wait-ComponentHealthy([string]$Name) {
       if (-not $ok) { throw 'Paperclip/Postgres did not become healthy.' }
     }
     'Website' {
-      # The supervised child has a 90-second protected-workflow startup gate.
+      # The supervised child has a 150-second protected-workflow startup gate.
       # Keep the outer service command longer so it cannot report failure while
       # the accepted supervisor generation is still within its own contract.
-      $deadline = (Get-Date).AddSeconds(120)
+      $deadline = (Get-Date).AddSeconds(210)
       do {
         $ok = Test-OceanWorkflowReady
         if (-not $ok) { Start-Sleep -Seconds 1 }

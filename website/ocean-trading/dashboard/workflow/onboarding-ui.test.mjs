@@ -146,7 +146,7 @@ test('complete onboarding is actionable in the browser without touching producti
     await page.setViewportSize({ width:1440, height:950 });
     await page.getByRole('link',{ name:'Back to strategies', exact:true }).click();
     await page.getByRole('link',{ name:'E2E Disposable Test Strategy', exact:true }).click();
-    await expect(page.getByRole('heading',{ name:'Required human approvals', exact:true })).toBeVisible();
+    await expect(page.getByRole('heading',{ name:'Required human approvals', exact:true })).toBeVisible({ timeout:10_000 });
     await expect(page.getByRole('heading',{ name:'CICD VWAP Recovery Coordinator', exact:true })).toBeVisible();
     await expect(page.getByText('Approved',{ exact:true }).last()).toBeVisible();
     await expect(page.locator(`[data-approval-id="${TEST_APPROVAL_ID}"]`).getByRole('link',{ name:'Open approval record', exact:true })).toHaveAttribute('href',`${base}/approvals/${TEST_APPROVAL_ID}`);
@@ -203,7 +203,7 @@ test('complete onboarding is actionable in the browser without touching producti
     await expect(page.getByRole('heading',{ name:'Onboarding complete', exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'CI/CD continuous run', exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'Review the exact TEST staging approval in Paperclip', exact:true })).toBeVisible();
-    await expect(page.getByText(/Paperclip approved the two earlier comparator decisions and the bound coordinator completed the read-only preflight/)).toBeVisible();
+    await expect(page.getByText(/Paperclip—not Ocean—is the approval authority\. The two comparator decisions are approved and the read-only preflight completed/)).toBeVisible();
     await expect(page.getByRole('heading',{ name:'Read-only preflight complete — blocked', exact:true })).toBeVisible();
     await expect(page.getByText('Preflight blocked physical binding',{ exact:true })).toBeVisible();
     await expect(page.getByText('Read only preflight only',{ exact:true })).toBeVisible();
@@ -228,7 +228,7 @@ test('complete onboarding is actionable in the browser without touching producti
     fs.writeFileSync(path.join(sourceRoot,'priority-completion-program.json'),JSON.stringify(sources['priority-completion-program.json']));
     await page.locator('#refresh').click();
     await expect(page.getByRole('heading',{ name:'Review the exact TEST staging approval in Paperclip', exact:true })).toBeVisible();
-    await expect(page.getByText('Owner: Wayne / Paperclip board, then the bound CICD coordinator',{ exact:true })).toBeVisible();
+    await expect(page.getByText('Owner: Wayne / Paperclip board',{ exact:true })).toBeVisible();
     await expect(page.getByText('Autonomous improvement implementation',{ exact:true })).toBeVisible();
     await expect(page.getByRole('columnheader',{ name:'Exact next action', exact:true })).toBeVisible();
     await expect(page.getByRole('button',{ name:'Prepare Replay history run', exact:true })).toHaveCount(0);

@@ -13,6 +13,7 @@ test('protected operator startup and maintenance allow the measured large-state 
   const backend=fs.readFileSync(path.join(here,'backend.mjs'),'utf8');
   const maintenance=fs.readFileSync(path.join(here,'maintenance.mjs'),'utf8');
   const wrapper=fs.readFileSync(path.resolve(here,'../../../../scripts/ocean-workflow-operator.ps1'),'utf8');
+  const supervisor=fs.readFileSync(path.resolve(here,'../../../../scripts/run-ocean-website-supervised.ps1'),'utf8');
   assert.match(backend,/timeout:\s*protectedOperatorTimeoutMs/);
   assert.match(maintenance,/\['Commit','Maintenance'\]\.includes\(action\) \? protectedOperatorCommitTimeoutMs : protectedOperatorTimeoutMs/);
   assert.match(maintenance,/setTimeout\([^\n]+timeoutMs\)/);
@@ -21,5 +22,8 @@ test('protected operator startup and maintenance allow the measured large-state 
   assert.match(wrapper,/OCEAN_WORKFLOW_COMMIT_TIMEOUT_SECONDS/);
   assert.match(wrapper,/WaitForExit\(\$timeoutMilliseconds\)/);
   assert.match(wrapper,/Kill\(\$true\)/);
+  assert.match(wrapper,/if \(\$ReadOnlyAction\) \{ \$lock = \[IO\.File\]::Open\(\(Join-Path \$Root 'operator\.lock'\),'Open','Read','None'\) \}/);
+  assert.match(wrapper,/\$status = Invoke-Core @\{mode='verify-readonly';state=\$state\}/);
+  assert.match(supervisor,/\[int\]\$StartupTimeoutSeconds = 150/);
   assert.ok(wrapper.indexOf('StandardOutput.ReadToEndAsync()') < wrapper.indexOf('StandardInput.WriteAsync($json)'));
 });

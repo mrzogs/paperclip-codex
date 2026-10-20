@@ -3,7 +3,7 @@ param(
   [ValidateRange(10,60)][int]$ProbeIntervalSeconds = 15,
   [ValidateRange(2,10)][int]$ProbeTimeoutSeconds = 4,
   [ValidateRange(3,10)][int]$FailureThreshold = 4,
-  [ValidateRange(30,180)][int]$StartupTimeoutSeconds = 90,
+  [ValidateRange(30,180)][int]$StartupTimeoutSeconds = 150,
   [ValidateRange(5,35)][int]$GracefulStopTimeoutSeconds = 15,
   [ValidateRange(1,60)][int]$RestartDelaySeconds = 5
 )
@@ -31,7 +31,8 @@ $StopFile = Join-Path $Runtime 'website-stop.json'
 $StopAckFile = Join-Path $Runtime 'website-stop-ack.json'
 $Node = 'C:\Program Files\nodejs\node.exe'
 $LogDir = Join-Path $Dashboard 'logs'
-$ProbeUri = [Uri]'http://127.0.0.1:3102/api/workflow/readiness'
+$ReadinessProbeUri = [Uri]'http://127.0.0.1:3102/api/workflow/readiness'
+$LivenessProbeUri = [Uri]'http://127.0.0.1:3102/api/health/live'
 $script:SupervisorLog = $null
 $script:SupervisorMutexName = 'Local\OceanTradingWebsiteSupervisor-v1'
 
@@ -291,7 +292,7 @@ function Wait-WebsiteReady([Diagnostics.Process]$Process, [int]$TimeoutSeconds) 
   do {
     $Process.Refresh()
     if ($Process.HasExited) { return $false }
-    if (Test-OceanWebsiteLiveness $ProbeUri $ProbeTimeoutSeconds) { return $true }
+    if (Test-OceanWebsiteLiveness $ReadinessProbeUri $ProbeTimeoutSeconds) { return $true }
     Start-Sleep -Seconds 1
   } while ((Get-Date) -lt $deadline)
   return $false
@@ -537,7 +538,7 @@ function Invoke-OceanWebsiteSupervisor {
     }
 
     $previousFailureCount = $failureCount
-    $healthy = Test-OceanWebsiteLiveness $ProbeUri $ProbeTimeoutSeconds
+    $healthy = Test-OceanWebsiteLiveness $LivenessProbeUri $ProbeTimeoutSeconds
     $state = Get-NextLivenessState $failureCount $healthy $FailureThreshold
     $failureCount = $state.FailureCount
     if ($healthy -and $previousFailureCount -gt 0) {

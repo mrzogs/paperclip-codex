@@ -139,7 +139,7 @@ function Publish-Handoffs($State) {
   }
 }
 $lock = $null
-if ($ReadOnlyAction -or $StartupRuntimeAction) {
+if ($ReadOnlyAction) {
   Assert-ReadOnlyFile $StatePath
   Assert-ReadOnlyFile (Join-Path $Root 'operator.lock')
 }
@@ -180,16 +180,22 @@ try {
   } elseif ($Action -in @('Status','Runtime','Bootstrap-Runtime','Transfer','Probe','Read-Facts')) {
     if (Test-Path -LiteralPath $PendingPath) { throw 'Interrupted credential update. Run -Action Resume first.' }
     $state = Decode-State $StatePath
-    if ($ReadOnlyAction -or $StartupRuntimeAction) {
+    if ($ReadOnlyAction) {
       $expectedDb = Join-Path $Root 'workflow.sqlite'
       if ($state.config.db_file -cne $expectedDb) { throw 'Protected workflow database root conflict.' }
       Assert-ReadOnlyFile $expectedDb
       foreach ($suffix in @('-wal','-shm')) {
         if (Test-Path -LiteralPath "$expectedDb$suffix") { Assert-ReadOnlyFile "$expectedDb$suffix" }
       }
-      $mode = if ($ReadOnlyAction) { 'verify-readonly' } else { 'verify' }
-      $status = Invoke-Core @{mode=$mode;state=$state}
-    } else { $status = Invoke-Core @{mode='verify';state=$state} }
+      $status = Invoke-Core @{mode='verify-readonly';state=$state}
+    } else {
+      if ($StartupRuntimeAction) {
+        $expectedDb = Join-Path $Root 'workflow.sqlite'
+        if ($state.config.db_file -cne $expectedDb) { throw 'Protected workflow database root conflict.' }
+        if (-not (Test-Path -LiteralPath $expectedDb -PathType Leaf)) { throw 'Protected workflow database is missing.' }
+      }
+      $status = Invoke-Core @{mode='verify';state=$state}
+    }
     if ($Action -eq 'Read-Facts') {
       $factsMode = if ($ReadOnlyAction) { 'facts-readonly' } else { 'facts-read' }
       Invoke-Core @{mode=$factsMode;state=$state;identity_id=$IdentityId} | ConvertTo-Json -Depth 50
