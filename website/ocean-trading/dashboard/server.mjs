@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import { applyReplayClearsToSession, clearReplayAccount } from "./replay-session-scope.mjs";
 import { configuredProcessTimeoutMs } from "./process-timeouts.mjs";
+import {websiteTiming,timedSync} from './request-timing.mjs';
 import { shouldWebsiteScheduleManifestRebuild } from "./manifest-refresh-policy.mjs";
 import { workflowFromEnvironment } from "./workflow/backend.mjs";
 import { installWebsiteControl } from "./workflow/process-control.mjs";
@@ -260,13 +261,13 @@ function readLatestManifestSnapshot() {
   const signature = `${fileMtimeMs(SQLITE_FILE)}:${fileMtimeMs(path.join(ROOT_DIR, "dashboard", "dashboard-data.json"))}`;
   if (cachedManifestPayload && cachedManifestSignature === signature) return cachedManifestPayload;
   try {
-    const payload = execFileSync(PYTHON_EXE, [SQLITE_QUERY_SCRIPT, SQLITE_FILE, "latest-manifest"], {
+    const payload = timedSync('manifest.sqlite.child',()=>execFileSync(PYTHON_EXE, [SQLITE_QUERY_SCRIPT, SQLITE_FILE, "latest-manifest"], {
       cwd: __dirname,
       encoding: "utf8",
       windowsHide: true,
       timeout: 5000,
       maxBuffer: 32 * 1024 * 1024,
-    });
+    }));
     cachedManifestPayload = payload;
     cachedManifestSignature = signature;
     return payload;
@@ -385,6 +386,9 @@ function startManifestFreshnessPoll() {
 }
 
 function buildManifest(options = {}) {
+  return timedSync('manifest.build',()=>buildManifestObserved(options));
+}
+function buildManifestObserved(options = {}) {
   const manifestPath = path.join(ROOT_DIR, "dashboard", "dashboard-data.json");
   const needsRebuild = !options.skipRebuildCheck && (options.forceRebuild || shouldRebuildManifest(manifestPath));
   if (needsRebuild) {
@@ -3488,7 +3492,8 @@ async function createBacktestIssue(input) {
   return payload;
 }
 
-const server = http.createServer((req, res) => {
+websiteTiming.start();
+const server = http.createServer((req, res) => websiteTiming.request(req,res,()=>{
   if (!req.url) {
     res.statusCode = 404;
     res.end("not found");
@@ -3971,9 +3976,10 @@ const server = http.createServer((req, res) => {
 
   res.statusCode = 404;
   res.end("not found");
-});
+}));
 
 server.on("close", () => {
+  websiteTiming.stop();
   if (manifestFreshnessTimer) clearInterval(manifestFreshnessTimer);
   manifestFreshnessTimer = null;
   if (workflowRetryTimer) clearTimeout(workflowRetryTimer);

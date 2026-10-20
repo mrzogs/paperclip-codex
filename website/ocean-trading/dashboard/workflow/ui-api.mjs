@@ -4,6 +4,7 @@ import { OperationalPreparation } from './operational-preparation.mjs';
 import { MAX_SERVICE_IDENTITIES } from './provider-lifecycle.mjs';
 import { loadStrategyOnboarding, onboardingStrategyRow, readOnboardingActivationEvents, readOnboardingRegistration, readOnboardingStrategyId, readStrategyOnboardingEvents } from './strategy-onboarding.mjs';
 import { readOnboardingBrainOutbox } from './onboarding-brain-sync.mjs';
+import {timedSync,routeFamily} from '../request-timing.mjs';
 
 export const UI_API_VERSION = 'ocean-workflow-ui/v1';
 const PAGE_SIZE = 50;
@@ -52,6 +53,9 @@ export function operationalView(backend) {
 
 // These human-only projections omit credential metadata and private source paths.
 export function readWorkflowView(backend, actor, route) {
+  return timedSync(`workflow.${routeFamily(`/api/workflow/${route}`)}`,()=>readWorkflowViewObserved(backend,actor,route));
+}
+function readWorkflowViewObserved(backend, actor, route) {
   requireThat(actor.role === 'HUMAN', 403, 'WAYNE_BROWSER_ONLY');
   const db = backend.db;
   const parts = route.split('/');
@@ -66,7 +70,7 @@ export function readWorkflowView(backend, actor, route) {
   const runRow = (value, options = {}) => ({
     ...backend.readRun(actor, value.id, options),
     strategy_name: strategyName(value.strategy_id),
-    learning: backend.operationalLearning?.statusForRun(value.id) || null,
+    learning: timedSync('workflow.run-learning',()=>backend.operationalLearning?.statusForRun(value.id) || null),
   });
   const artifactRow = (value) => ({ artifact_id: value.id, case_id: value.case_id, kind: value.kind, producer_id: value.producer_id, recipient_id: value.recipient_id, candidate_hash: value.candidate_hash, dependency_ids: JSON.parse(value.dependencies_json), manifest: JSON.parse(value.manifest_json) });
   const approvalRow = (value) => {
