@@ -5,8 +5,8 @@ export const API_VERSION = "ocean-workflow/v1";
 export const MAX_BODY_BYTES = 256 * 1024;
 export const ROLES = Object.freeze({
   BRAIN: ["read", "artifact.write", "case.transition", "approval.request", "delivery", "event.write"],
-  TELEMETRY: ["read", "event.write", "health.write"],
-  STRATEGY: ["read", "artifact.write", "case.transition", "delivery", "event.write"],
+  TELEMETRY: ["read", "event.write", "health.write", "booking.read"],
+  STRATEGY: ["read", "artifact.write", "case.transition", "delivery", "event.write", "booking.read", "booking.issue"],
 });
 
 export class WorkflowError extends Error {

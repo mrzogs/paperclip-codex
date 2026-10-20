@@ -49,7 +49,7 @@ test('v11 upgrade adds bounded run-read indexes and is idempotent', () => {
   try {
     createVersion11Database(filename);
     let store = new WorkflowStore(filename);
-    assert.equal(store.db.prepare('SELECT MAX(version) version FROM ow_schema_migrations').get().version, 13);
+    assert.equal(store.db.prepare('SELECT MAX(version) version FROM ow_schema_migrations').get().version, 14);
     assert.match(planDetail(store.db, 'SELECT payload_json FROM ow_run_progress WHERE run_id=? ORDER BY id DESC LIMIT 1'), /ow_run_progress_run_latest/);
     assert.match(planDetail(store.db, 'SELECT payload_json FROM ow_coverage_receipts WHERE run_id=? ORDER BY id DESC LIMIT 1'), /ow_coverage_receipts_run_latest/);
     assert.match(planDetail(store.db, "SELECT payload_json FROM ow_events WHERE entity_id=? AND action='run-manager.end' ORDER BY id DESC LIMIT 1"), /ow_events_entity_action_latest/);
@@ -61,6 +61,7 @@ test('v11 upgrade adds bounded run-read indexes and is idempotent', () => {
     store = new WorkflowStore(filename);
     assert.equal(store.db.prepare('SELECT COUNT(*) count FROM ow_schema_migrations WHERE version=12').get().count, 1);
     assert.equal(store.db.prepare('SELECT COUNT(*) count FROM ow_schema_migrations WHERE version=13').get().count, 1);
+    assert.equal(store.db.prepare('SELECT COUNT(*) count FROM ow_schema_migrations WHERE version=14').get().count, 1);
     store.close();
   } finally {
     // node:sqlite can retain the empty directory handle until process exit on Windows.

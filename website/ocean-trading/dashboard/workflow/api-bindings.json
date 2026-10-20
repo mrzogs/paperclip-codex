@@ -32,6 +32,29 @@
     "setup_receipt_registration_due": "S29",
     "setup_is_approval": false
   },
+  "replay_two_booking_registry": {
+    "status": "SOURCE_IMPLEMENTED_TEST_ONLY_CONFIG_DISABLED_BY_DEFAULT",
+    "base_path": "/api/workflow/operational/v1/replay-two-bookings",
+    "resource_key": "sierra-replay-two:primary",
+    "instance_executable": "D:\\Trading\\SierraChart-Replay Two\\SierraChart_64.exe",
+    "operation_scope": [
+      "Stage",
+      "VerifySelection",
+      "Rollback"
+    ],
+    "acquire_scope": "booking.issue plus exact configured issuer identity and owner project",
+    "approval_binding": "Acquire requires an exact protected-config match for issuer, owner project, approval ID, approval snapshot hash, package hash and approval expiry; the lease cannot outlive that binding",
+    "read_scope": "booking.read plus exact configured reader or issuer identity",
+    "fresh_read": "Each exact/current GET requires X-Ocean-Booking-Read-Nonce and echoes it; clients reject a nonce mismatch and revalidate around every mutation",
+    "renewal": "BOOKING_RENEWAL_UNAVAILABLE in v1; no in-place expiry, hash or generation mutation",
+    "terminal": "Owner release; Wayne browser revoke; server-derived expiry",
+    "comment_authority": false,
+    "absent_comment_encoding": {
+      "registry_comment_id": null,
+      "registry_body_sha256": null
+    },
+    "runtime_side_effects": false
+  },
   "auth": {
     "provider": "OCEAN_TRADING",
     "service_transport": "Authorization bearer; server-issued environment-injected values only",
@@ -47,14 +70,17 @@
       "TELEMETRY": [
         "read",
         "event.write",
-        "health.write"
+        "health.write",
+        "booking.read"
       ],
       "STRATEGY": [
         "read",
         "artifact.write",
         "case.transition",
         "delivery",
-        "event.write"
+        "event.write",
+        "booking.read",
+        "booking.issue"
       ]
     },
     "exact_strategy_and_instance_allowlists": true,
