@@ -121,6 +121,14 @@ test('projects explicit and legacy current-action Paperclip approval references 
       board_approval_status:'APPROVED_READ_BACK',
       prospective_paper_provenance_diagnosis:{
         required_remedy:'APPROVE_GENUINE_PAPER_RUN_AND_DATASET_MANIFEST;_BIND_SIX_SOURCE_INPUTS;_FIX_PROSPECTIVE_TELEMETRY_RUN_ID_PROPAGATION',
+        telemetry_run_id_repair:{
+          status:'CODE_MERGED_NOT_DEPLOYED', version:'v0.5.53',
+          pull_request:'https://github.com/mrzogs/sierra-trade-telemetry-logger/pull/21',
+          merge_commit:'2bdcb5c2646d261d18f3b6cbd27083ff7dcea714',
+          dll_sha256:'5B30CC3971184DAFD8A4E8A002FE63D588ADD9F416600BCD12292675242D110C',
+          verification:'71 passed, 1 skipped; native attribution harness PASS.',
+          deployed_to_paper:false, paper_qualified:false,
+        },
       },
     };
     fs.writeFileSync(programPath, JSON.stringify(value));
@@ -131,10 +139,24 @@ test('projects explicit and legacy current-action Paperclip approval references 
     assert.deepEqual(overlay.paper_qualification_gate, {
       status:'APPROVAL_REQUIRED',
       title:'Paper manifest and qualification approval',
-      detail:'Approve a genuine Paper run and dataset manifest, bind the six producer lineage inputs, and verify prospective run identity before Paper rows can become eligible evidence.',
+      detail:'v0.5.53 contains the merged STTL2 Paper run identity repair, but the DLL is not deployed to Paper and is not Paper-qualified. Approve an exact Paper run and dataset manifest, bind the six producer lineage inputs, then verify a new simulated trade before Paper rows can become eligible evidence.',
       approval_id:null,
       source:'latest_verified_overlay_20261020',
+      telemetry_repair:{
+        status:'CODE_MERGED_NOT_DEPLOYED', version:'v0.5.53',
+        pull_request:'https://github.com/mrzogs/sierra-trade-telemetry-logger/pull/21',
+        merge_commit:'2bdcb5c2646d261d18f3b6cbd27083ff7dcea714',
+        dll_sha256:'5B30CC3971184DAFD8A4E8A002FE63D588ADD9F416600BCD12292675242D110C',
+        verification:'71 passed, 1 skipped; native attribution harness PASS.',
+        deployed_to_paper:false, paper_qualified:false,
+      },
     });
+
+    value.latest_verified_overlay_20261020.prospective_paper_provenance_diagnosis.telemetry_run_id_repair.deployed_to_paper = true;
+    fs.writeFileSync(programPath, JSON.stringify(value));
+    const unsafeRepair = readAutonomousImprovementProgram(root);
+    assert.equal(unsafeRepair.state, 'ATTENTION_REQUIRED');
+    assert.match(unsafeRepair.reason, /PAPER_TELEMETRY_REPAIR_BOUNDARY_INVALID/);
   } finally { fs.rmSync(root, { recursive:true, force:true }); }
 });
 

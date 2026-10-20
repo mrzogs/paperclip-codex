@@ -48,6 +48,9 @@ const DECISIONS = [
 const fileDigest = value => `sha256:${crypto.createHash('sha256').update(value).digest('hex')}`;
 const booleanState = value => value === true ? 'ON' : 'OFF';
 const APPROVAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const COMMIT_SHA = /^[0-9a-f]{40}$/i;
+const SHA256 = /^[0-9a-f]{64}$/i;
+const TELEMETRY_PR_URL = /^https:\/\/github\.com\/mrzogs\/sierra-trade-telemetry-logger\/pull\/\d+$/i;
 
 function latestVerifiedOverlay(value) {
   return Object.entries(value || {})
@@ -92,12 +95,36 @@ function paperQualificationGate(value) {
   const diagnosis = overlayEntry?.[1]?.prospective_paper_provenance_diagnosis;
   const requiredRemedy = String(diagnosis?.required_remedy || '');
   if (!/APPROVE_GENUINE_PAPER_RUN_AND_DATASET_MANIFEST/i.test(requiredRemedy)) return null;
+  const repair = diagnosis?.telemetry_run_id_repair;
+  let telemetryRepair = null;
+  if (repair !== undefined) {
+    requireThat(repair && typeof repair === 'object' && !Array.isArray(repair), 422, 'PAPER_TELEMETRY_REPAIR_INVALID');
+    requireThat(repair.status === 'CODE_MERGED_NOT_DEPLOYED', 422, 'PAPER_TELEMETRY_REPAIR_STATUS_INVALID');
+    requireThat(/^v\d+\.\d+\.\d+$/.test(String(repair.version || '')), 422, 'PAPER_TELEMETRY_REPAIR_VERSION_INVALID');
+    requireThat(TELEMETRY_PR_URL.test(String(repair.pull_request || '')), 422, 'PAPER_TELEMETRY_REPAIR_PR_INVALID');
+    requireThat(COMMIT_SHA.test(String(repair.merge_commit || '')), 422, 'PAPER_TELEMETRY_REPAIR_COMMIT_INVALID');
+    requireThat(SHA256.test(String(repair.dll_sha256 || '')), 422, 'PAPER_TELEMETRY_REPAIR_HASH_INVALID');
+    requireThat(repair.deployed_to_paper === false && repair.paper_qualified === false, 422, 'PAPER_TELEMETRY_REPAIR_BOUNDARY_INVALID');
+    telemetryRepair = {
+      status:'CODE_MERGED_NOT_DEPLOYED',
+      version:String(repair.version),
+      pull_request:String(repair.pull_request),
+      merge_commit:String(repair.merge_commit),
+      dll_sha256:String(repair.dll_sha256).toUpperCase(),
+      verification:String(repair.verification || 'Verification recorded in the telemetry repository.'),
+      deployed_to_paper:false,
+      paper_qualified:false,
+    };
+  }
   return {
     status:'APPROVAL_REQUIRED',
     title:'Paper manifest and qualification approval',
-    detail:'Approve a genuine Paper run and dataset manifest, bind the six producer lineage inputs, and verify prospective run identity before Paper rows can become eligible evidence.',
+    detail:telemetryRepair
+      ? `${telemetryRepair.version} contains the merged STTL2 Paper run identity repair, but the DLL is not deployed to Paper and is not Paper-qualified. Approve an exact Paper run and dataset manifest, bind the six producer lineage inputs, then verify a new simulated trade before Paper rows can become eligible evidence.`
+      : 'Approve a genuine Paper run and dataset manifest, bind the six producer lineage inputs, and verify prospective run identity before Paper rows can become eligible evidence.',
     approval_id:null,
     source:overlayEntry[0],
+    telemetry_repair:telemetryRepair,
   };
 }
 
