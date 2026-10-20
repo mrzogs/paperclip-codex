@@ -113,6 +113,28 @@ test('projects explicit and legacy current-action Paperclip approval references 
     assert.equal(legacy.required_human_approvals.length, 1);
     assert.equal(legacy.required_human_approvals[0].approval_id, approvalId);
     assert.equal(legacy.required_human_approvals.some(item => item.approval_id === agentId), false);
+
+    value.next_action = 'Await coordinator acknowledgement. Separate explicit human approval is required for Paper promotion.';
+    value.latest_verified_overlay_20261020 = {
+      supersedes_historical_active_run_and_next_action_snapshot:true,
+      board_approval_id:approvalId,
+      board_approval_status:'APPROVED_READ_BACK',
+      prospective_paper_provenance_diagnosis:{
+        required_remedy:'APPROVE_GENUINE_PAPER_RUN_AND_DATASET_MANIFEST;_BIND_SIX_SOURCE_INPUTS;_FIX_PROSPECTIVE_TELEMETRY_RUN_ID_PROPAGATION',
+      },
+    };
+    fs.writeFileSync(programPath, JSON.stringify(value));
+    const overlay = readAutonomousImprovementProgram(root);
+    assert.equal(overlay.required_human_approvals.length, 1);
+    assert.equal(overlay.required_human_approvals[0].approval_id, approvalId);
+    assert.equal(overlay.required_human_approvals[0].source, 'latest_verified_overlay_20261020');
+    assert.deepEqual(overlay.paper_qualification_gate, {
+      status:'APPROVAL_REQUIRED',
+      title:'Paper manifest and qualification approval',
+      detail:'Approve a genuine Paper run and dataset manifest, bind the six producer lineage inputs, and verify prospective run identity before Paper rows can become eligible evidence.',
+      approval_id:null,
+      source:'latest_verified_overlay_20261020',
+    });
   } finally { fs.rmSync(root, { recursive:true, force:true }); }
 });
 

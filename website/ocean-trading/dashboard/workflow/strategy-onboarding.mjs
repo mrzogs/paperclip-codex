@@ -49,6 +49,13 @@ const fileDigest = value => `sha256:${crypto.createHash('sha256').update(value).
 const booleanState = value => value === true ? 'ON' : 'OFF';
 const APPROVAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+function latestVerifiedOverlay(value) {
+  return Object.entries(value || {})
+    .filter(([key, overlay]) => /^latest_verified_overlay_\d{8}[a-z]*$/i.test(key) && overlay && typeof overlay === 'object' && !Array.isArray(overlay))
+    .sort(([left], [right]) => left.localeCompare(right))
+    .at(-1) || null;
+}
+
 function requiredHumanApprovals(value) {
   const explicit = value.required_human_approvals;
   requireThat(explicit === undefined || Array.isArray(explicit), 422, 'AUTONOMOUS_PROGRAM_APPROVAL_REFERENCES_INVALID');
@@ -62,6 +69,14 @@ function requiredHumanApprovals(value) {
     };
   });
   const keyed = new Map(references.map(item => [item.approval_id.toLowerCase(), item]));
+  const overlayEntry = latestVerifiedOverlay(value);
+  const overlayApprovalId = String(overlayEntry?.[1]?.board_approval_id || '');
+  if (APPROVAL_UUID.test(overlayApprovalId) && !keyed.has(overlayApprovalId.toLowerCase())) keyed.set(overlayApprovalId.toLowerCase(), {
+    approval_id:overlayApprovalId,
+    purpose:'Dedicated CICD VWAP recovery coordinator governance gate',
+    title:null,
+    source:overlayEntry[0],
+  });
   const text = String(value.next_action || '');
   const pattern = /\bapproval\s+([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\b/ig;
   for (const match of text.matchAll(pattern)) {
@@ -70,6 +85,20 @@ function requiredHumanApprovals(value) {
     });
   }
   return [...keyed.values()];
+}
+
+function paperQualificationGate(value) {
+  const overlayEntry = latestVerifiedOverlay(value);
+  const diagnosis = overlayEntry?.[1]?.prospective_paper_provenance_diagnosis;
+  const requiredRemedy = String(diagnosis?.required_remedy || '');
+  if (!/APPROVE_GENUINE_PAPER_RUN_AND_DATASET_MANIFEST/i.test(requiredRemedy)) return null;
+  return {
+    status:'APPROVAL_REQUIRED',
+    title:'Paper manifest and qualification approval',
+    detail:'Approve a genuine Paper run and dataset manifest, bind the six producer lineage inputs, and verify prospective run identity before Paper rows can become eligible evidence.',
+    approval_id:null,
+    source:overlayEntry[0],
+  };
 }
 
 export function readOnboardingStrategyId(root = DEFAULT_ONBOARDING_ROOT) {
@@ -211,6 +240,7 @@ export function readAutonomousImprovementProgram(root = DEFAULT_ONBOARDING_ROOT,
       pipeline, acceptance_gates:value.acceptance_gates || null, controller:value.controller || null,
       blockers, owners:value.owners || {}, brain_evidence:value.brain_evidence || null,
       required_human_approvals:requiredHumanApprovals(value),
+      paper_qualification_gate:paperQualificationGate(value),
       next_action:String(value.next_action || 'Review the continuous-improvement program.'),
       path:programPath, sha256:fileDigest(content), observed_at_utc:fs.statSync(programPath).mtime.toISOString(),
       live_real:'DISABLED', automatic_approval:'DISABLED', production_version:null,
