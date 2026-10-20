@@ -256,6 +256,7 @@ function strategyOnboardingPage(data) {
   const program = delivery.priority_program || { state:'NOT_CONFIGURED', status:'UNKNOWN', workstreams:[] };
   const improvement = delivery.autonomous_improvement || { state:'NOT_CONFIGURED', status:'UNKNOWN', pipeline:[], blockers:[], next_action:null };
   const comparator = delivery.physical_comparator || { state:'NOT_CONFIGURED', status:'UNKNOWN', required_human_approvals:[] };
+  const approvalDispatch = comparator.approval_dispatch || { status:'NOT_OBSERVED', gate:{ action:'READ_ONLY_PREFLIGHT_ONLY', current_permission_state:'READ_ONLY_EXTERNAL_EVIDENCE_NO_REPLAY_RUNTIME_WRITE', post_preflight_gate:'EXACT_TEST_REPLAY_TWO_RUNTIME_OUTPUT_WRITE_START_SCOPE_REQUIRED', post_preflight_action:'REQUEST_OR_DERIVE_ONLY_AFTER_READ_ONLY_PREFLIGHT' }, safety:{ runtime_write_scope_authorized:false, replay_start_authorized:false, paper_authorized:false, live_authorized:false } };
   const eventMonitor = delivery.event_monitor || { status:'NOT_STARTED', disposition:'UNKNOWN', sources:[], observed_trade_count:0, eligible_trade_count:0, new_trade_count:0 };
   const improvementActive = improvement.state === 'AVAILABLE';
   const humanApprovals = Array.isArray(improvement.required_human_approvals) ? improvement.required_human_approvals : [];
@@ -365,7 +366,7 @@ function strategyOnboardingPage(data) {
   </ol>`;
   const nextActionTitle = comparatorInvalid ? 'Repair the v0.6.238 TEST comparator contract'
     : comparatorNeedsDecision ? 'Approve the v0.6.238 TEST comparator run'
-    : allComparatorApprovalsApproved ? 'Verify and materialize the approved TEST run'
+    : allComparatorApprovalsApproved ? 'Complete the read-only preflight'
     : pendingHumanApprovals.length ? 'Review the required human approval'
     : unavailableHumanApprovals.length ? 'Verify the required human approval'
     : deniedHumanApprovals.length ? 'Resolve the required human approval'
@@ -380,7 +381,7 @@ function strategyOnboardingPage(data) {
       : deniedComparatorApprovals.length
         ? 'One or more comparator decisions were not granted. Review the linked records; no run or release authority exists.'
         : `Approve both the dataset/physical selection and RUN_RELEASE records. ${pendingComparatorApprovals.length} decision${pendingComparatorApprovals.length === 1 ? ' is' : 's are'} pending. Ocean remains fail-closed; this does not start Replay or alter v0.1.1/v234, v240, historical roles, Paper, or Live.`
-    : allComparatorApprovalsApproved ? 'Both named decisions are approved. The next separate action is a fresh exact preflight and create-new run materialization; Replay must remain stopped until separately authorized.'
+    : allComparatorApprovalsApproved ? 'Both named decisions are approved. Ocean may wake only the scoped coordinator for a read-only physical/data/STTL2 preflight. Replay/runtime writes, run materialization, and Sierra/Replay start remain blocked until exact TEST-only scope is separately requested or derived after that preflight.'
     : pendingHumanApprovals.length ? `${pendingHumanApprovals.length} required Paperclip approval${pendingHumanApprovals.length === 1 ? ' is' : 's are'} awaiting a human decision. Ocean remains fail-closed.`
     : unavailableHumanApprovals.length ? 'Ocean could not verify the current Paperclip approval status. No approval is inferred and protected actions remain blocked.'
     : deniedHumanApprovals.length ? 'A required Paperclip approval was not granted. Review the linked decision before changing the program.'
@@ -423,6 +424,17 @@ function strategyOnboardingPage(data) {
       ['RUN_RELEASE materialized', badge(comparator.execution_plan.release_record_inserted ? 'YES' : 'NO')],
       ['Replay started', badge(comparator.execution_plan.replay_started ? 'YES' : 'NO')],
     ]) + approvalCards(comparatorApprovals)
+      + `<article class='human-approval-card'><div><span>Post-approval gate</span><h3>Read-only coordinator preflight</h3><p>After both exact approvals are approved, Ocean can wake only the bound OCEA-20 coordinator. Its first action is limited to read-only physical, dataset, and STTL2 verification.</p><small>Persistent Website monitor · order-independent · one dispatch per sealed contract/context</small></div><div class='human-approval-state'>${badge(approvalDispatch.status)}</div></article>`
+      + facts([
+        ['Wake action', badge(approvalDispatch.gate?.action || 'READ_ONLY_PREFLIGHT_ONLY')],
+        ['Current external permission', esc(human(approvalDispatch.gate?.current_permission_state || 'READ_ONLY_EXTERNAL_EVIDENCE_NO_REPLAY_RUNTIME_WRITE'))],
+        ['Replay/runtime write scope', badge(approvalDispatch.safety?.runtime_write_scope_authorized ? 'AUTHORIZED' : 'NOT_AUTHORIZED')],
+        ['Replay start', badge(approvalDispatch.safety?.replay_start_authorized ? 'AUTHORIZED' : 'NOT_AUTHORIZED')],
+        ['Next gate after preflight', esc(human(approvalDispatch.gate?.post_preflight_gate || 'EXACT_TEST_REPLAY_TWO_RUNTIME_OUTPUT_WRITE_START_SCOPE_REQUIRED'))],
+        ['Next action', esc(human(approvalDispatch.gate?.post_preflight_action || 'REQUEST_OR_DERIVE_ONLY_AFTER_READ_ONLY_PREFLIGHT'))],
+        ['Paper / Live', badge(approvalDispatch.safety?.paper_authorized || approvalDispatch.safety?.live_authorized ? 'AUTHORIZED' : 'PROHIBITED')],
+        ['Codex polling heartbeat', badge('NOT_REQUIRED')],
+      ])
       + `<p class='readonly-note'>${icon('shield-check')}These are two separate human decisions. The contract grants no execution authority, keeps v0.6.240 distinct and unselected, preserves the DISCOVERY role, and leaves Paper and Live untouched.</p>`,
     `<span class='muted'>${pendingComparatorApprovals.length} pending · exact TEST authority only</span>`)
     : comparatorInvalid
