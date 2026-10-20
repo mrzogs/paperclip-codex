@@ -9,21 +9,30 @@ import {timedSync,routeFamily} from '../request-timing.mjs';
 export const UI_API_VERSION = 'ocean-workflow-ui/v1';
 const PAGE_SIZE = 50;
 const parse = (row, field = 'payload_json') => JSON.parse(row[field]);
+const CASE_NAV_FIELDS='id,strategy_id,instance_id,run_id,stage,work_status,revision,owner_id';
+const RUN_NAV_FIELDS='id,strategy_id,instance_id,state,revision,context_json';
+export function caseNavigationSummary(row,name){
+  return {case_id:row.id,strategy_id:row.strategy_id,execution_instance_id:row.instance_id,
+    run_id:row.run_id,stage:row.stage,work_status:row.work_status,revision:row.revision,
+    owner_id:row.owner_id,strategy_name:name,navigation_only:true,
+    validation_state:'NOT_EVALUATED_IN_LIST',qualification_state:'NOT_EVALUATED_IN_LIST',
+    protected_actions_allowed:false,next_action:'Open case details to verify current evidence and next action.'};
+}
+export function runNavigationSummary(row,name){
+  return {context:JSON.parse(row.context_json),state:row.state,revision:row.revision,
+    strategy_name:name,events:[],manager:null,learning:null,navigation_only:true,
+    qualification_state:'NOT_EVALUATED_IN_LIST',protected_actions_allowed:false,
+    observation_basis:'RECORDED_CONTEXT_NOT_CURRENT_EXECUTION',reservation_is_actual_sierra_start:false};
+}
 // A strategy overview is navigation, not an evidence/authority evaluation.
 // Full readCase traverses immutable research artifacts, which can be very large.
 // Keep those checks on the case-detail and action paths, not every auto-refresh.
 export function strategyCaseSummaries(db, strategyId, name) {
-  return db.prepare(`SELECT id,strategy_id,instance_id,run_id,stage,work_status,
-    revision,owner_id FROM ow_cases WHERE strategy_id=? ORDER BY rowid DESC LIMIT 200`)
-    .all(strategyId).map(row => ({
-      case_id:row.id,strategy_id:row.strategy_id,execution_instance_id:row.instance_id,
-      run_id:row.run_id,stage:row.stage,work_status:row.work_status,revision:row.revision,
-      owner_id:row.owner_id,strategy_name:name,validation_state:'NOT_EVALUATED_IN_LIST',
-      next_action:'Open case details to verify current evidence and next action.',
-    }));
+  return db.prepare(`SELECT ${CASE_NAV_FIELDS} FROM ow_cases WHERE strategy_id=? ORDER BY rowid DESC LIMIT 200`)
+    .all(strategyId).map(row=>caseNavigationSummary(row,name));
 }
-const pageOf = (db, table, offset, order = 'rowid DESC') => ({
-  rows: db.prepare(`SELECT * FROM ${table} ORDER BY ${order} LIMIT ? OFFSET ?`).all(PAGE_SIZE, offset),
+const pageOf = (db, table, offset, order = 'rowid DESC',fields='*') => ({
+  rows: db.prepare(`SELECT ${fields} FROM ${table} ORDER BY ${order} LIMIT ? OFFSET ?`).all(PAGE_SIZE, offset),
   total: db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n,
   offset, page_size: PAGE_SIZE,
 });
@@ -67,6 +76,8 @@ function readWorkflowViewObserved(backend, actor, route) {
   const strategyName = (value) => parse(backend.one('ow_strategies', value)).strategy_name;
   const operationalReleases = () => new OperationalPreparation(backend).list(actor).items;
   const caseRow = (value) => ({ ...timedSync('workflow.case-read',()=>backend.readCase(actor, value.id)), strategy_name: strategyName(value.strategy_id), priority: value.stage === 'ROLLBACK_REVIEW' ? 'URGENT_REVIEW' : null });
+  const caseNavigationRow=value=>caseNavigationSummary(value,strategyName(value.strategy_id));
+  const runNavigationRow=value=>runNavigationSummary(value,strategyName(value.strategy_id));
   const runRow = (value, options = {}) => ({
     ...timedSync('workflow.run-read',()=>backend.readRun(actor, value.id, options)),
     strategy_name: strategyName(value.strategy_id),
@@ -119,13 +130,13 @@ function readWorkflowViewObserved(backend, actor, route) {
       pending_sync: db.prepare("SELECT COUNT(*) AS n FROM ow_outbox WHERE state<>'ACKNOWLEDGED'").get().n,
     };
     const health = db.prepare('SELECT payload_json FROM ow_health ORDER BY rowid DESC LIMIT 50').all().map(row => { const data = parse(row); return { ...data, stale: Date.now() - Date.parse(data.observed_at_utc) > 120000 }; });
-    return { ...stamp, counts, pending: pending.slice(0, 10), operational_releases:releaseRequests.slice(0,10), cases: db.prepare("SELECT * FROM ow_cases WHERE stage<>'CLOSED' ORDER BY CASE WHEN work_status IN ('BLOCKED','FAILED') THEN 0 ELSE 1 END, rowid DESC LIMIT 10").all().map(caseRow), health, history: db.prepare('SELECT payload_json FROM ow_events ORDER BY id DESC LIMIT 12').all().map(row => parse(row)), operations:operationalView(backend), ...backend.auth.readiness(), provider_binding: 'PENDING_FUTURE_CONSUMERS', dispatch_worker: 'OFF', brain_submission: 'OFF', live_real: 'DISABLED' };
+    return { ...stamp, counts, pending: pending.slice(0, 10), operational_releases:releaseRequests.slice(0,10), cases: db.prepare(`SELECT ${CASE_NAV_FIELDS} FROM ow_cases WHERE stage<>'CLOSED' ORDER BY CASE WHEN work_status IN ('BLOCKED','FAILED') THEN 0 ELSE 1 END, rowid DESC LIMIT 10`).all().map(caseNavigationRow), health, history: db.prepare('SELECT payload_json FROM ow_events ORDER BY id DESC LIMIT 12').all().map(row => parse(row)), operations:operationalView(backend), ...backend.auth.readiness(), provider_binding: 'PENDING_FUTURE_CONSUMERS', dispatch_worker: 'OFF', brain_submission: 'OFF', live_real: 'DISABLED' };
   }
   const tables = { strategies: 'ow_strategies', cases: 'ow_cases', runs: 'ow_runs', approvals: 'ow_approval_requests', history: 'ow_events' };
   if (tables[collection] && (!key || key === 'page')) {
     requireThat(!key || /^\d+$/.test(parts[3] || ''), 400, 'INVALID_VIEW_PAGE');
-    const page = pageOf(db, tables[collection], offset, collection === 'history' ? 'id DESC' : 'rowid DESC');
-    const formatter = { strategies: strategyRow, cases: caseRow, runs: runRow, approvals: approvalRow, history: row => ({ event_id: row.id, ...parse(row) }) }[collection];
+    const page = pageOf(db, tables[collection], offset, collection === 'history' ? 'id DESC' : 'rowid DESC',collection==='cases'?CASE_NAV_FIELDS:collection==='runs'?RUN_NAV_FIELDS:'*');
+    const formatter = { strategies: strategyRow, cases: caseNavigationRow, runs: runNavigationRow, approvals: approvalRow, history: row => ({ event_id: row.id, ...parse(row) }) }[collection];
     const setup = collection === 'history' ? orderedSetup(db.prepare('SELECT payload_json FROM ow_setup_receipts').all()).map(row => {
       const receipt=parse(row);return {task_id:receipt.registered_task_id || receipt.task_id,status:receipt.status,project:receipt.project || receipt.owner,operator_id:receipt.operator_id || 'Historical operator',classification:'HISTORICAL_SETUP_NOT_APPROVAL'};
     }) : undefined;
@@ -146,8 +157,8 @@ function readWorkflowViewObserved(backend, actor, route) {
     const projected = key === onboardingProjection.strategy_id ? onboardingProjection : null;
     requireThat(stored || projected, 404, 'ENTITY_NOT_FOUND');
     const strategy = stored ? mergeOnboarding(projected, strategyRow(stored)) : onboardingStrategyRow(projected);
-    const runs = db.prepare('SELECT * FROM ow_runs WHERE strategy_id=? ORDER BY rowid DESC LIMIT 200').all(key)
-      .map(value => runRow(value, { allowTerminalHistoricalBindingProjection: true }));
+    const runs = db.prepare(`SELECT ${RUN_NAV_FIELDS} FROM ow_runs WHERE strategy_id=? ORDER BY rowid DESC LIMIT 200`).all(key)
+      .map(runNavigationRow);
     const instances = db.prepare('SELECT payload_json FROM ow_instances WHERE strategy_id=?').all(key).map(row => parse(row));
     return { ...stamp, ...strategy, runs, runs_total: db.prepare('SELECT COUNT(*) AS n FROM ow_runs WHERE strategy_id=?').get(key).n, instances: instances.length ? instances : projected?.instance?.execution_instance_id ? [projected.instance] : [] };
   }

@@ -139,7 +139,7 @@ test('complete onboarding is actionable in the browser without touching producti
   const browserErrors = []; page.on('pageerror', error => browserErrors.push(error.message));
   try {
     await page.goto(`${base}/improvement/strategies/${TEST_STRATEGY_ID}`);
-    assert.match(await page.locator('script[type="module"]').getAttribute('src'),/v238-continuity-current-action-20261020-2/,'the deployed page must request the current workflow module version');
+    assert.match(await page.locator('script[type="module"]').getAttribute('src'),/v238-bounded-navigation-20261020-r5/,'the deployed page must request the current workflow module version');
     await page.getByRole('button',{ name:'Sign in', exact:true }).click();
     await page.getByRole('link',{ name:'Help', exact:true }).click();
     await expect(page.getByRole('heading',{ name:'Onboarding help', exact:true })).toBeVisible();

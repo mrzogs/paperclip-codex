@@ -115,13 +115,13 @@ function onboardingHelpPage() {
     + `</div></div>`;
 }
 function caseTable(items) {
-  return table(['Case / strategy', 'Stage', 'Owner', 'Work status', 'Next action'], items.map(row => [link('cases', row.case_id) + `<div class='subline'>${esc(row.strategy_name)}</div>`, esc(human(row.stage)), esc(row.owner_id), badge(row.work_status), esc(row.next_action || row.waiting_on || 'Stage prerequisites')]));
+  return table(['Case / strategy', 'Stage', 'Owner', 'Work status', 'Next action'], items.map(row => [link('cases', row.case_id) + `<div class='subline'>${esc(row.strategy_name)}</div>${row.navigation_only?'<div class="subline">Recorded summary · current checks in case details</div>':''}`, esc(human(row.stage)), esc(row.owner_id), badge(row.work_status), esc(row.next_action || row.waiting_on || 'Stage prerequisites')]));
 }
 function runTable(items) {
   return table(['Run / strategy', 'State', 'Instance', 'Declared / observed', 'Purpose'], items.map(row => {
-    const context = row.context; const observed = row.events.find(event => event.payload?.observed_handshake)?.payload.observed_handshake.source_state || context.observed_source_state;
+    const context = row.context; const observed = (row.events||[]).find(event => event.payload?.observed_handshake)?.payload.observed_handshake.source_state || context.observed_source_state || {environment:'UNKNOWN'};
     const historical = row.manager?.historical_projection;
-    return [link('runs', context.run_id) + `<div class='subline'>${esc(row.strategy_name)}</div>`, badge(row.state) + (historical ? `<div class='subline'>Historical · read only</div>` : ''), esc(context.execution_instance_id), `${esc(context.expected_environment)} / ${esc(observed.environment)}`, esc(human(context.evidence_purpose))];
+    return [link('runs', context.run_id) + `<div class='subline'>${esc(row.strategy_name)}</div>`, badge(row.state) + (row.navigation_only?'<div class="subline">Recorded context · current checks in run details</div>':historical ? `<div class='subline'>Historical · read only</div>` : ''), esc(context.execution_instance_id), `${esc(context.expected_environment)} / ${esc(observed.environment)}`, esc(human(context.evidence_purpose))];
   }));
 }
 function approvalTable(items) {
