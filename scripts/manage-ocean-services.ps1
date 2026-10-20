@@ -286,6 +286,31 @@ function Get-MonitorOwnedProcessTree {
   return @($Snapshot | Where-Object { $owned.Contains([int]$_.ProcessId) })
 }
 
+function Get-WebsiteSupervisorCommandPattern {
+  return [regex]::Escape((Join-Path $Root 'scripts\run-ocean-website-supervised.ps1'))
+}
+
+function Stop-WebsiteSupervisorProcesses {
+  $snapshot = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+  $supervisorPattern = Get-WebsiteSupervisorCommandPattern
+  $roots = @($snapshot | Where-Object {
+    $_.Name -in @('powershell.exe','pwsh.exe') -and
+    ($_.CommandLine -as [string]) -match $supervisorPattern
+  })
+  if (-not $roots.Count) { return }
+  $rootIds = [Collections.Generic.HashSet[int]]::new()
+  foreach ($proc in $roots) { [void]$rootIds.Add([int]$proc.ProcessId) }
+  $tree = @(Get-MonitorOwnedProcessTree -Snapshot $snapshot -Roots $roots)
+  foreach ($proc in @($tree | Where-Object { -not $rootIds.Contains([int]$_.ProcessId) })) {
+    Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+    Write-Output "Stopped stale Ocean website supervisor child PID $($proc.ProcessId)."
+  }
+  foreach ($proc in $roots) {
+    Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+    Write-Output "Stopped stale Ocean website supervisor PID $($proc.ProcessId)."
+  }
+}
+
 function Stop-MonitorProcesses {
   $snapshot = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
   $releaseMonitorPattern = Get-ReleaseMonitorCommandPattern
@@ -375,7 +400,10 @@ function Stop-ComponentProcesses([string]$Name) {
       $pgPort = Get-PostgresPort
       if ($pgPort) { Stop-PortProcess $pgPort 'postgres\.exe' 'embedded Postgres' }
     }
-    'Website' { Stop-WebsiteGracefully }
+    'Website' {
+      Stop-WebsiteGracefully
+      Stop-WebsiteSupervisorProcesses
+    }
     'Monitor' {
       Stop-MonitorProcesses
       Write-MonitorStoppedState
