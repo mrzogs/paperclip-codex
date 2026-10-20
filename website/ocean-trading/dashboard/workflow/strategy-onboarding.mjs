@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { exactKeys, id, objectHash, requireThat } from './common.mjs';
 import { enqueueOnboardingBrain } from './onboarding-brain-sync.mjs';
 import { readVwapContinuousImprovementState } from './vwap-continuous-improvement-monitor.mjs';
+import { DEFAULT_VWAP_PHYSICAL_COMPARATOR_CONTRACT, readVwapPhysicalComparatorContract } from './vwap-physical-comparator-contract.mjs';
 
 export const ONBOARDING_STRATEGY_ID = 'cicd-vwap-pull-back-strategy';
 export const DEFAULT_ONBOARDING_ROOT = process.env.OCEAN_STRATEGY_ONBOARDING_ROOT
@@ -441,7 +442,7 @@ export function probeReplayTwoRuntime({ executable, chartbook_path: chartbookPat
   return structuredClone(value);
 }
 
-export function loadStrategyOnboarding({ root = DEFAULT_ONBOARDING_ROOT, events = [], brainOutbox = [], registration = null, activationEvents = [], runtimeProbe = probeReplayTwoRuntime, campaignStatePath = DEFAULT_REPLAY_CAMPAIGN_STATE, improvementMonitorStatePath = DEFAULT_VWAP_IMPROVEMENT_MONITOR_STATE } = {}) {
+export function loadStrategyOnboarding({ root = DEFAULT_ONBOARDING_ROOT, events = [], brainOutbox = [], registration = null, activationEvents = [], runtimeProbe = probeReplayTwoRuntime, campaignStatePath = DEFAULT_REPLAY_CAMPAIGN_STATE, improvementMonitorStatePath = DEFAULT_VWAP_IMPROVEMENT_MONITOR_STATE, physicalComparatorPath = DEFAULT_VWAP_PHYSICAL_COMPARATOR_CONTRACT } = {}) {
   const strategyId = readOnboardingStrategyId(root);
   const sources = SOURCES.map(([key, filename]) => readSource(root, key, filename, strategyId));
   const records = Object.fromEntries(sources.map(source => [source.key, source.value]));
@@ -526,6 +527,7 @@ export function loadStrategyOnboarding({ root = DEFAULT_ONBOARDING_ROOT, events 
   const priorityProgram = readPriorityProgram(root, strategyId);
   const autonomousImprovement = readAutonomousImprovementProgram(root, strategyId);
   const eventMonitor = readVwapContinuousImprovementState(improvementMonitorStatePath);
+  const physicalComparator = readVwapPhysicalComparatorContract(physicalComparatorPath, strategyId);
 
   return {
     strategy_id: strategyId, strategy_name: registry?.strategy_name || profile?.strategy_name || setup?.strategy_name || 'Strategy onboarding',
@@ -545,7 +547,7 @@ export function loadStrategyOnboarding({ root = DEFAULT_ONBOARDING_ROOT, events 
     registration: { state: registration ? (registrationComplete ? 'REGISTERED' : 'BRAIN_SYNC_PENDING') : questionnaireBrainComplete ? 'READY' : 'NOT_READY', can_register: questionnaireBrainComplete && !registration, receipt: registration ? { id: registration.id, package_hash: registration.package_hash, created_at_utc: registration.created_at_utc, brain_sync: registrationBrain } : null },
     activation: { state: latestActive ? latestActive.state : 'INACTIVE', environments: activationEnvironments, actual_source_started: replayRuntime.chart_replay.started === true, automated_ordering: false, live_real: false },
     replay_runtime: replayRuntime,
-    continuous_delivery: { priority_program: priorityProgram, autonomous_improvement: autonomousImprovement, replay_campaign: replayCampaign, event_monitor: eventMonitor },
+    continuous_delivery: { priority_program: priorityProgram, autonomous_improvement: autonomousImprovement, physical_comparator: physicalComparator, replay_campaign: replayCampaign, event_monitor: eventMonitor },
     source: { status: sourceStatus, label: 'Ocean strategy and Sierra source records', fingerprint, last_verified_at_utc: setup?.last_verified_at || remediation?.verified_through || null, files: sources.map(({ filename, state, reason, sha256, modified_at_utc }) => ({ filename, state, reason, sha256, modified_at_utc })) },
     read_only: false, source_read_only: true, workflow_writable: true,
     safety: { affects_trading_controls: false, execution_authority: false, registration_automatic: false, activation_does_not_start_source: true },

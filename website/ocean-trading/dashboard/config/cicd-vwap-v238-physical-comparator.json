@@ -1,0 +1,224 @@
+{
+  "schema_version": "ocean-vwap-physical-comparator-run/v1",
+  "contract_id": "cicd-vwap-v238-sep2025-z25-discovery-20261020-r1",
+  "strategy_id": "cicd-vwap-pull-back-strategy",
+  "created_at_utc": "2026-10-20T12:02:06Z",
+  "status": "PENDING_HUMAN_APPROVAL",
+  "namespace": "TEST",
+  "logical_baseline": {
+    "logical_version": "v0.1.1",
+    "approved_physical_baseline_version": "v0.6.234-absolute-risk-gate-candidate",
+    "strategy_code_hash": "sha256:8b26b689b013f1473304a1fdde4bcf265ddbfd4cf05e58e11a97e9f777ed7909",
+    "approved_baseline_dll_hash": "sha256:7cc09f2fcdf8043e2c4b4d61273ee76b4893fa618e38631fb9049c38cbfb6375",
+    "profile_id": "cicd-vwap-pull-back-strategy.profile-v0.1.0-source-bound",
+    "profile_version": "v0.1.3",
+    "profile_hash": "sha256:e7c09205fdc05916d51e6ac541d6fefc5efe318c31b8385f9e72ed51ba609f82",
+    "strategy_config_hash": "sha256:21968c73dbff8646ff15bfffafaa0d85e4e8db5b8273f5b0a88eec001942af4d",
+    "baseline_evidence_path": "C:\\Users\\wayne\\OneDrive\\Documents\\Brady - Optimization\\onboarding\\baseline-promotion-v0.1.1-20261002-r2.json"
+  },
+  "physical_comparator": {
+    "version": "v0.6.238",
+    "raw_version": "v0.6.238-managed-entry-boundary-candidate",
+    "candidate_id": "v0.6.238-managed-entry-boundary",
+    "profile_id": "nasdaq_v0608_us_trendup_weak_distance_qty1_replay_status_preserve_risk1100_qty5_candidate",
+    "selection_state": "PENDING_HUMAN_APPROVAL",
+    "source_path": "D:\\Trading\\CICD\\recovery-worktrees\\vwap-v234-candidate-contract\\research\\vwap-wave-pullback-balanced\\sierra\\VWAPWavePullbackBalanced.cpp",
+    "source_hash": "sha256:0dd0bb987dbc6e0a3b319ae9653d8118668e74bb470c24e2b9c0d954377fba9d",
+    "dll_path": "D:\\Trading\\CICD\\recovery-outputs\\VWAP-V238-RELEASE-INDEPENDENT-20261008T175011Z\\a\\CICD_VWAPPullback_v238_64.dll",
+    "dll_hash": "sha256:6c871ad65aaa7e5891d8aa5133c3c18bc5c5a4fb72911c77181f01deaeaf9435",
+    "build_receipt_path": "D:\\Trading\\CICD\\recovery-outputs\\VWAP-V238-RELEASE-INDEPENDENT-20261008T175011Z\\build-receipt.json",
+    "build_receipt_hash": "sha256:ad4efd7a12cf712eccc0a018fdafb2caa9711c3b45f6e4073deac3a94d5d3fb4",
+    "repository_base_commit": "a4f902f17009d3f401656650cc434942be0f2b83",
+    "repository_head_commit": "ae2ea1c08da32d56c534cbe92ba9fb2d638a12e9",
+    "compiler_artifacts": {
+      "cl_hash": "sha256:7a154e5136cc538b42e6944997fc5e3bb49112894e41dd88a70940aaff9aa831",
+      "link_hash": "sha256:359b5861060b8b8899a1ef87385a37b32d8ecb8a81d092866907e7249ab962be",
+      "sierrachart_header_hash": "sha256:4f72050650a4d94c90fa2ea28d21acc3e43268300c03ab7334cfb46eec3a923d",
+      "causal_header_hash": "sha256:ba2251d2a08e8650e19868055d06b0321ea0f78abe8c17b035d11958847f3e84"
+    },
+    "provenance_report_path": "D:\\ExternalRepos\\ocean-quant-lab\\.codex\\diagnostics\\cicd-vwap-v238-provenance-20261020\\REPORT.md",
+    "provenance_report_hash": "sha256:e0e648da4433e1d37351927aba4046ea6cb97f857861a004c32b920c60a853cf",
+    "mapping_handoff_path": "D:\\Trading\\CICD\\recovery-outputs\\OQL-V238-PHYSICAL-MAPPING-20261008\\HANDOFF.md",
+    "mapping_handoff_hash": "sha256:1eed2b2fe7593794f133b5f0850136aa2adca705d878cfe86e85ad0bc67e7039"
+  },
+  "preserved_candidate_v240": {
+    "version": "v0.6.240",
+    "raw_version": "v0.6.240-test-boundary-drain-short-exclusion-candidate",
+    "candidate_id": "v0.6.239-short-exclusion+v0.6.240-test-boundary-drain",
+    "state": "DISTINCT_UNSELECTED_UNCHANGED",
+    "selected": false,
+    "active_bridge_changed": false,
+    "dll_path": "D:\\Trading\\SierraChart-Replay Two\\Data\\CICD_VWAPPullback_v228_64.dll",
+    "dll_hash": "sha256:9a6189a438cb49c8a16b71cebc05372cab5f6f6002f2daa8ea780c33b9aef05f",
+    "source_hash": "sha256:dae8630910c8f22b61597cd19bf65229a268a36ab263f24cf902233e8424cd7d",
+    "build_receipt_hash": "sha256:1083a3c49bd4517edff5b798e5c0b9621807b2808adee03c52e6843f46408796",
+    "evidence_path": "C:\\Users\\wayne\\OneDrive\\Documents\\Brady - Optimization\\onboarding\\v0.6.240-physical-identity-correction-20261015.json",
+    "evidence_hash": "sha256:2ffbb4f6e92132cfcb782ca72958c2ecf01d9942da1dfbe5ef326923c30e4d3b"
+  },
+  "dataset_selection": {
+    "manifest_id": "cicd-vwap-frozen-ladder-qualified-20261002",
+    "revision": 3,
+    "manifest_hash": "sha256:5b90b3f16c44fd220c63d445fab092f4b15ee067526cb3189a805a93bc015a01",
+    "partition_index": 1,
+    "symbol": "MNQZ25_FUT_CME",
+    "role": "DISCOVERY",
+    "start_utc": "2025-09-12T23:00:00Z",
+    "end_utc": "2025-09-30T23:00:00Z",
+    "start_chart_time": "2025-09-13 00:00:00",
+    "end_chart_time_exclusive": "2025-10-01 00:00:00",
+    "chart_timezone": "Europe/London",
+    "source_scid_path": "D:\\Trading\\SierraChart-Replay Two\\Data\\MNQZ25_FUT_CME.scid",
+    "source_scid_hash": "sha256:4ace82ecd1e614a620014f1720dec2a84a51ef58bb256e2b9e79133bed2f4c39",
+    "source_scid_bytes": 3970023136,
+    "source_scid_last_write_utc": "2026-10-02T23:10:59Z",
+    "prior_exposure": "EXPOSED",
+    "use_classification": "REUSED_DEVELOPMENT_DATA",
+    "validation_independence": false,
+    "selection_action": "REPROCESS_EXISTING_HISTORY",
+    "role_mutation_allowed": false
+  },
+  "run_context": {
+    "schema_version": "2.1.0",
+    "run_id": "cicd-vwap-v238-discovery-20250913-20251001-z25-20261020-r1",
+    "revision": 1,
+    "context_hash": "sha256:d6282a2e3fbbaf4dcdd698a4e3ff2302a161de20d34adabed362800bac5616d7",
+    "strategy_id": "cicd-vwap-pull-back-strategy",
+    "strategy_version": "v0.1.1",
+    "strategy_code_hash": "sha256:8b26b689b013f1473304a1fdde4bcf265ddbfd4cf05e58e11a97e9f777ed7909",
+    "strategy_config_hash": "sha256:21968c73dbff8646ff15bfffafaa0d85e4e8db5b8273f5b0a88eec001942af4d",
+    "strategy_profile_id": "cicd-vwap-pull-back-strategy.profile-v0.1.0-source-bound",
+    "strategy_profile_version": "v0.1.3",
+    "execution_instance_id": "cicd-vwap-pull-back-strategy:replay-two:chart1",
+    "source_installation_id": "sierra-replay-two-494ca0a67d569d84",
+    "expected_environment": "REPLAY",
+    "observed_source_state": {
+      "observed_at_utc": "2026-10-20T12:02:06Z",
+      "environment": "UNKNOWN",
+      "simulation": null,
+      "replay": null,
+      "account_alias": null,
+      "source_schema_version": null,
+      "quality": "UNKNOWN"
+    },
+    "evidence_purpose": "HISTORICAL_BUILD",
+    "dataset_manifest_id": "cicd-vwap-frozen-ladder-qualified-20261002",
+    "dataset_manifest_revision": 3,
+    "dataset_manifest_hash": "sha256:5b90b3f16c44fd220c63d445fab092f4b15ee067526cb3189a805a93bc015a01",
+    "dataset_partition": "DISCOVERY",
+    "experiment_id": null,
+    "candidate_id": null,
+    "case_id": null,
+    "historical_build_mode": "REPROCESS_EXISTING_HISTORY",
+    "learner_permission": "HISTORICAL_DISCOVERY",
+    "permission_reason": "Draft historical discovery context; materialization requires both named human approvals and a fresh exact preflight."
+  },
+  "execution_plan": {
+    "creation_mode": "CREATE_NEW",
+    "state": "SELECTED_NOT_MATERIALIZED",
+    "run_record_inserted": false,
+    "release_record_inserted": false,
+    "replay_started": false,
+    "run_id": "cicd-vwap-v238-discovery-20250913-20251001-z25-20261020-r1",
+    "context_hash": "sha256:d6282a2e3fbbaf4dcdd698a4e3ff2302a161de20d34adabed362800bac5616d7",
+    "output_root": "D:\\Trading\\CICD\\recovery-outputs\\CICD-VWAP-V238-SEP2025-Z25-DISCOVERY-20261020-R1",
+    "target_executable": "D:\\Trading\\SierraChart-Replay Two\\SierraChart_64.exe",
+    "target_instance_id": "cicd-vwap-pull-back-strategy:replay-two:chart1",
+    "account_alias": "Sim1",
+    "simulation_required": true,
+    "chartbook_path": "D:\\Trading\\SierraChart-Replay Two\\Data\\CICD - VWAP Pull Back Strategy.Cht",
+    "selected_chartbook_hash": "sha256:6edc7f49f577ca739b73a06c660cf2680b52ae3cc1c636334232431c8564e935",
+    "superseded_chartbook_binding_hash": "sha256:b3c288dec46d0e5f582a4d56d6d8b71338946f26b6dd080fb1ce6c71e19d7445",
+    "chart_number": 1,
+    "profile_index": 6,
+    "maximum_risk_currency": 1100,
+    "order_quantity": 5,
+    "replay_load_start_chart_time": "2025-08-29 21:55:00",
+    "trade_start_chart_time": "2025-09-13 00:00:00",
+    "end_chart_time_exclusive": "2025-10-01 00:00:00",
+    "managed_time_basis": "controller",
+    "measured_start": "vwap-hook",
+    "replay_api": "legacy",
+    "replay_speed": 1920,
+    "audit_mode": 2,
+    "timeout_seconds": 21600,
+    "session_observation_mode": "sierra_trading_day_v1",
+    "preflight_requirements": [
+      "EXACT_PROCESS_PATH",
+      "EXACT_CHARTBOOK_AND_HASH_RECONCILIATION",
+      "SIMULATION_MODE",
+      "ACCOUNT_SIM1",
+      "DISCONNECTED",
+      "FLAT",
+      "REPLAY_STOPPED",
+      "V238_DLL_HASH",
+      "V053_LOGGER_HASH_AND_FRESH_HEALTH",
+      "BOTH_APPROVALS_APPROVED"
+    ]
+  },
+  "telemetry_lineage": {
+    "sttl2_inputs": {
+      "113": "cicd-vwap-v238-discovery-20250913-20251001-z25-20261020-r1",
+      "114": "sha256:8b26b689b013f1473304a1fdde4bcf265ddbfd4cf05e58e11a97e9f777ed7909",
+      "115": "sha256:21968c73dbff8646ff15bfffafaa0d85e4e8db5b8273f5b0a88eec001942af4d",
+      "116": "sha256:d6282a2e3fbbaf4dcdd698a4e3ff2302a161de20d34adabed362800bac5616d7",
+      "117": "cicd-vwap-frozen-ladder-qualified-20261002:3",
+      "118": "DISCOVERY"
+    },
+    "managed_strategy_version": "v0.6.238",
+    "managed_candidate_id": "v0.6.238-managed-entry-boundary",
+    "raw_text_tag_required": {
+      "strategy_v": "v0.6.238-managed-entry-boundary-candidate",
+      "candidate": "v0.6.238-managed-entry-boundary",
+      "profile": "nasdaq_v0608_us_trendup_weak_distance_qty1_replay_status_preserve_risk1100_qty5_candidate"
+    },
+    "logger_successor": {
+      "state": "SELECTED_NOT_DEPLOYED",
+      "version": "v0.5.53",
+      "dll_hash": "sha256:5b30cc3971184dafd8a4e8a002fe63d588add9f416600bcd12292675242d110c",
+      "loaded": false,
+      "paper_qualified": false
+    }
+  },
+  "replaced_authority": {
+    "reusable": false,
+    "old_run_ids": [
+      "cicd-vwap-discovery-20250913-20251001-z25-v011-r1",
+      "reprocess-cicd-vwap-discovery-20250913-20251001-z25-v011-r1-f92fa7f6-6c63-4481-88d1-d36979572086"
+    ],
+    "old_context_hashes": [
+      "sha256:af134de82cfdce083b3791ef697c688844215a806b3d987df17ab47dc7a8e847",
+      "sha256:ded61cf38c6bf4621d34853a39ca3c1eaa9b415ece1eb0978f69873fb1b3ec73"
+    ],
+    "old_output_roots": [
+      "D:\\Trading\\CICD\\recovery-outputs\\CICD-VWAP-LEARNING-LOOP-COMPLETION-20261009T084618Z\\september-z25-v238-native546-f92fa7f6-startack4"
+    ],
+    "old_frozen_job_hash": "sha256:74b2bbe4523d7ed318a9bbfcac9771a3d05c5f893ff9a081e41628ebc14e88f9"
+  },
+  "required_human_approvals": [
+    {
+      "approval_id": "d2710454-1cc5-4058-b219-1bfae717042a",
+      "decision_scope": "DATASET_PHYSICAL_SELECTION",
+      "title": "Approve v0.6.238 TEST dataset and physical comparator selection",
+      "purpose": "Approve only the exact reused DISCOVERY partition and v0.6.238 physical comparator binding.",
+      "source": "physical_comparator_contract"
+    },
+    {
+      "approval_id": "f3b264eb-f081-4b51-b105-6a09c2b42860",
+      "decision_scope": "RUN_RELEASE",
+      "title": "Approve create-new v0.6.238 Sep-2025 Z25 TEST RUN_RELEASE",
+      "purpose": "Approve only materialization of the exact new run/context after fresh preflight; this does not start Replay.",
+      "source": "physical_comparator_contract"
+    }
+  ],
+  "safety": {
+    "execution_authority": false,
+    "replay_start_authorized": false,
+    "paper_deployment_authorized": false,
+    "live_deployment_authorized": false,
+    "historical_role_change_authorized": false,
+    "active_bridge_change_authorized": false,
+    "automatic_approval_enabled": false
+  },
+  "contract_hash": "sha256:26520c8bcd372ebef56d62a95d51bf477d4cefb61ca65d13f10d06f2edfd8014",
+  "document_hash": "sha256:33233134255ba77ef893f3b61ab32c9608fb4529d71cbafb4eea00bb7c532a0c"
+}

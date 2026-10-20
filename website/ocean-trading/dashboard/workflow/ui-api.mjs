@@ -84,6 +84,7 @@ export function readWorkflowView(backend, actor, route) {
       activationEvents: readOnboardingActivationEvents(db, strategyId),
       runtimeProbe: backend.config.strategy_onboarding_runtime_probe,
       improvementMonitorStatePath: backend.config.strategy_improvement_monitor_state,
+      physicalComparatorPath: backend.config.strategy_physical_comparator_contract,
     });
   };
   const mergeOnboarding = (row, value) => row && value.strategy_id === row.strategy_id ? { ...value, onboarding: row } : value;
