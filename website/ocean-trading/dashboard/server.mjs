@@ -8,6 +8,7 @@ import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import { applyReplayClearsToSession, clearReplayAccount } from "./replay-session-scope.mjs";
 import { configuredProcessTimeoutMs } from "./process-timeouts.mjs";
 import {websiteTiming,timedSync} from './request-timing.mjs';
+import {manifestStatePath} from './manifest-state-path.mjs';
 import { shouldWebsiteScheduleManifestRebuild } from "./manifest-refresh-policy.mjs";
 import { workflowFromEnvironment } from "./workflow/backend.mjs";
 import { installWebsiteControl } from "./workflow/process-control.mjs";
@@ -19,6 +20,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PUBLIC_DIR = path.join(__dirname, "public");
 const ROOT_DIR = path.dirname(__dirname);
+const MANIFEST_FILE = manifestStatePath(__dirname);
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 const SQLITE_FILE = process.env.OCEAN_WEBSITE_DB || "D:\\OceanTradingData\\website\\ocean-trading-website.sqlite";
 const SQLITE_QUERY_SCRIPT = path.join(__dirname, "query-sqlite.py");
@@ -258,7 +260,7 @@ function shouldRebuildManifest(manifestPath) {
 
 function readLatestManifestSnapshot() {
   if (!fs.existsSync(SQLITE_FILE) || !fs.existsSync(SQLITE_QUERY_SCRIPT)) return null;
-  const signature = `${fileMtimeMs(SQLITE_FILE)}:${fileMtimeMs(path.join(ROOT_DIR, "dashboard", "dashboard-data.json"))}`;
+  const signature = `${fileMtimeMs(SQLITE_FILE)}:${fileMtimeMs(MANIFEST_FILE)}`;
   if (cachedManifestPayload && cachedManifestSignature === signature) return cachedManifestPayload;
   try {
     const payload = timedSync('manifest.sqlite.child',()=>execFileSync(PYTHON_EXE, [SQLITE_QUERY_SCRIPT, SQLITE_FILE, "latest-manifest"], {
@@ -364,7 +366,7 @@ function scheduleManifestRebuild() {
 
 function startManifestFreshnessPoll() {
   if (manifestFreshnessTimer) return;
-  const manifestPath = path.join(ROOT_DIR, "dashboard", "dashboard-data.json");
+  const manifestPath = MANIFEST_FILE;
   const pollMs = Math.max(1000, Number(process.env.OCEAN_MANIFEST_FRESHNESS_POLL_MS) || 5000);
   const poll = () => {
     try {
@@ -389,7 +391,7 @@ function buildManifest(options = {}) {
   return timedSync('manifest.build',()=>buildManifestObserved(options));
 }
 function buildManifestObserved(options = {}) {
-  const manifestPath = path.join(ROOT_DIR, "dashboard", "dashboard-data.json");
+  const manifestPath = MANIFEST_FILE;
   const needsRebuild = !options.skipRebuildCheck && (options.forceRebuild || shouldRebuildManifest(manifestPath));
   if (needsRebuild) {
     // Dashboard reads must remain available while telemetry is publishing. The
@@ -484,7 +486,7 @@ function dashboardCalendarFreshnessInfo(mode = "paper") {
     }))
     .filter((trade) => trade.exitAtUtc)
     .sort((a, b) => String(b.exitAtUtc).localeCompare(String(a.exitAtUtc)))[0] || null;
-  const dashboardDataFile = path.join(ROOT_DIR, "dashboard", "dashboard-data.json");
+  const dashboardDataFile = MANIFEST_FILE;
   const dashboardStat = fs.existsSync(dashboardDataFile) ? fs.statSync(dashboardDataFile) : null;
   const sourceFiles = Array.isArray(tradingMode.sourceFiles) ? tradingMode.sourceFiles : [];
   const latestSourceMtimeMs = sourceFiles.reduce((latest, filePath) => Math.max(latest, fileMtimeMs(filePath)), 0);
