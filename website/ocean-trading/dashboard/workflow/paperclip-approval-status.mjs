@@ -43,6 +43,7 @@ export async function readPaperclipApprovalStatus(reference, options = {}) {
       approval_id:approvalId,
       purpose:String(reference.purpose || 'Required human approval'),
       source:String(reference.source || 'program'),
+      decision_scope:reference.decision_scope ? String(reference.decision_scope) : null,
       title:titleOf(payload.payload, payload.type),
       type:String(payload.type || 'request_board_approval').toUpperCase(),
       status,
@@ -58,6 +59,7 @@ export async function readPaperclipApprovalStatus(reference, options = {}) {
       approval_id:approvalId,
       purpose:String(reference.purpose || 'Required human approval'),
       source:String(reference.source || 'program'),
+      decision_scope:reference.decision_scope ? String(reference.decision_scope) : null,
       title:String(reference.title || reference.purpose || 'Required human approval'),
       type:'UNKNOWN', status:'UNAVAILABLE', authoritative:false, action_required:false,
       decided_at_utc:null, requested_at_utc:null, url:browserUrl(apiBase, approvalId),
@@ -71,16 +73,22 @@ export async function readPaperclipApprovalStatus(reference, options = {}) {
 
 export async function enrichStrategyApprovalStatuses(view, options = {}) {
   const improvement = view?.onboarding?.continuous_delivery?.autonomous_improvement;
-  const references = Array.isArray(improvement?.required_human_approvals) ? improvement.required_human_approvals : [];
-  if (!references.length) return view;
-  const statuses = await Promise.all(references.map(reference => readPaperclipApprovalStatus(reference, options)));
+  const comparator = view?.onboarding?.continuous_delivery?.physical_comparator;
+  const improvementReferences = Array.isArray(improvement?.required_human_approvals) ? improvement.required_human_approvals : [];
+  const comparatorReferences = comparator?.state === 'AVAILABLE' && Array.isArray(comparator?.required_human_approvals) ? comparator.required_human_approvals : [];
+  if (!improvementReferences.length && !comparatorReferences.length) return view;
+  const [improvementStatuses, comparatorStatuses] = await Promise.all([
+    Promise.all(improvementReferences.map(reference => readPaperclipApprovalStatus(reference, options))),
+    Promise.all(comparatorReferences.map(reference => readPaperclipApprovalStatus(reference, options))),
+  ]);
   return {
     ...view,
     onboarding:{
       ...view.onboarding,
       continuous_delivery:{
         ...view.onboarding.continuous_delivery,
-        autonomous_improvement:{ ...improvement, required_human_approvals:statuses },
+        autonomous_improvement:{ ...improvement, required_human_approvals:improvementStatuses },
+        physical_comparator:{ ...comparator, required_human_approvals:comparatorStatuses },
       },
     },
   };

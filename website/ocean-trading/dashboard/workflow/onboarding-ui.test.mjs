@@ -7,9 +7,13 @@ import test from 'node:test';
 import { chromium, expect } from '@playwright/test';
 import { issueOceanIdentity, issueTestBrowserSecret } from './auth.mjs';
 import { WorkflowBackend } from './backend.mjs';
+import { sealedHash } from './common.mjs';
+import { DEFAULT_VWAP_PHYSICAL_COMPARATOR_CONTRACT } from './vwap-physical-comparator-contract.mjs';
 
-const TEST_STRATEGY_ID = 'e2e-disposable-test-strategy';
+const TEST_STRATEGY_ID = 'cicd-vwap-pull-back-strategy';
 const TEST_APPROVAL_ID = 'd6bb0adb-2704-4e44-8aa8-011ee2b9baee';
+const TEST_COMPARATOR_APPROVAL_ID = '11111111-1111-4111-8111-111111111111';
+const TEST_RELEASE_APPROVAL_ID = '22222222-2222-4222-8222-222222222222';
 
 const sources = {
   'strategy-registry.json': { strategy_id:TEST_STRATEGY_ID, strategy_name:'E2E Disposable Test Strategy', profile_id:'profile-1', profile_version:'v0.1.1', profile_hash:'sha256:profile', baseline_version:'v0.1.0', production_version:null, activation_status:'PENDING_ONBOARDING', activation_decision_id:null },
@@ -35,6 +39,12 @@ function writeSources(root) {
 test('complete onboarding is actionable in the browser without touching production data', { timeout:120_000 }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ocean-onboarding-ui-'));
   const sourceRoot = path.join(root, 'sources'); fs.mkdirSync(sourceRoot); writeSources(sourceRoot);
+  const physicalComparatorPath = path.join(root, 'physical-comparator.json');
+  const physicalComparator = JSON.parse(fs.readFileSync(DEFAULT_VWAP_PHYSICAL_COMPARATOR_CONTRACT, 'utf8'));
+  physicalComparator.required_human_approvals[0].approval_id = TEST_COMPARATOR_APPROVAL_ID;
+  physicalComparator.required_human_approvals[1].approval_id = TEST_RELEASE_APPROVAL_ID;
+  physicalComparator.document_hash = sealedHash(physicalComparator, 'document_hash');
+  fs.writeFileSync(physicalComparatorPath, JSON.stringify(physicalComparator));
   const improvementMonitorState = path.join(root, 'vwap-improvement-monitor-state.json');
   fs.writeFileSync(improvementMonitorState, JSON.stringify({
     schema_version:'ocean-vwap-continuous-improvement-monitor-state/v1', strategy_id:TEST_STRATEGY_ID,
@@ -53,6 +63,16 @@ test('complete onboarding is actionable in the browser without touching producti
       response.end(JSON.stringify({ id:TEST_APPROVAL_ID, type:'hire_agent', status:'approved', payload:{ name:'CICD VWAP Recovery Coordinator' }, createdAt:'2026-10-19T15:46:53.575Z', decidedAt:'2026-10-20T09:51:07.457Z' }));
       return;
     }
+    if ([TEST_COMPARATOR_APPROVAL_ID,TEST_RELEASE_APPROVAL_ID].some(id => url.pathname === `/api/approvals/${id}`)) {
+      const approvalId = url.pathname.split('/').at(-1);
+      response.setHeader('Content-Type','application/json');
+      response.end(JSON.stringify({ id:approvalId, type:'request_board_approval', status:'pending', payload:{
+        title:approvalId === TEST_COMPARATOR_APPROVAL_ID
+          ? 'Approve v0.6.238 TEST dataset and physical comparator selection'
+          : 'Approve create-new v0.6.238 Sep-2025 Z25 TEST RUN_RELEASE',
+      }, createdAt:'2026-10-20T12:00:00Z', decidedAt:null }));
+      return;
+    }
     if (url.pathname.startsWith('/api/workflow/')) { void backend.handle(request, response, url); return; }
     if (url.pathname === '/replay-monitor.html') { response.setHeader('Content-Type','text/html'); response.end('<!doctype html><main><h1>Replay Monitor</h1></main>'); return; }
     if (url.pathname === '/assets/ocean-trading-icon.png') { response.setHeader('Content-Type','image/png'); response.end(fs.readFileSync(path.join(publicRoot, '../assets/ocean-trading-icon.png'))); return; }
@@ -68,7 +88,8 @@ test('complete onboarding is actionable in the browser without touching producti
   const strategyIds = [TEST_STRATEGY_ID]; const instanceIds = ['test-replay-two'];
   const config = {
     db_file:path.join(root,'workflow.sqlite'), test_only:true, contract_release:'2.1.0', allowed_origins:[base], lease_ms:30000,
-    python_executable:'python', strategy_onboarding_root:sourceRoot, strategy_improvement_monitor_state:improvementMonitorState, onboarding_brain_sync:{ enabled:false },
+    python_executable:'python', strategy_onboarding_root:sourceRoot, strategy_improvement_monitor_state:improvementMonitorState,
+    strategy_physical_comparator_contract:physicalComparatorPath, onboarding_brain_sync:{ enabled:false },
     strategy_onboarding_runtime_probe:() => ({
       monitor:{ state:'AVAILABLE', url:'/replay-monitor.html' },
       sierra:{ state:'OPEN_EXACT_CHARTBOOK_VERIFIED', executable:'D:\\Trading\\SierraChart-Replay Two\\SierraChart_64.exe', chartbook_path:'D:\\Trading\\SierraChart-Replay Two\\Data\\CICD - VWAP Pull Back Strategy.Cht', chart_id:'1', process_id:123, window_title:'CICD - VWAP Pull Back Strategy' },
@@ -85,7 +106,7 @@ test('complete onboarding is actionable in the browser without touching producti
   const browserErrors = []; page.on('pageerror', error => browserErrors.push(error.message));
   try {
     await page.goto(`${base}/improvement/strategies/${TEST_STRATEGY_ID}`);
-    assert.match(await page.locator('script[type="module"]').getAttribute('src'),/paper-telemetry-v0553-status-20261020-3/,'the deployed page must request the current workflow module version');
+    assert.match(await page.locator('script[type="module"]').getAttribute('src'),/v238-comparator-approvals-20261020-1/,'the deployed page must request the current workflow module version');
     await page.getByRole('button',{ name:'Sign in', exact:true }).click();
     await page.getByRole('link',{ name:'Help', exact:true }).click();
     await expect(page.getByRole('heading',{ name:'Onboarding help', exact:true })).toBeVisible();
@@ -103,6 +124,15 @@ test('complete onboarding is actionable in the browser without touching producti
     await expect(page.getByRole('heading',{ name:'CICD VWAP Recovery Coordinator', exact:true })).toBeVisible();
     await expect(page.getByText('Approved',{ exact:true }).last()).toBeVisible();
     await expect(page.getByRole('link',{ name:'Open approval record', exact:true })).toHaveAttribute('href',`${base}/approvals/${TEST_APPROVAL_ID}`);
+    await expect(page.getByRole('heading',{ name:'Physical comparator approvals', exact:true })).toBeVisible();
+    await expect(page.getByRole('heading',{ name:'Approve v0.6.238 TEST dataset and physical comparator selection', exact:true })).toBeVisible();
+    await expect(page.getByRole('heading',{ name:'Approve create-new v0.6.238 Sep-2025 Z25 TEST RUN_RELEASE', exact:true })).toBeVisible();
+    const comparatorApprovalLinks = page.getByRole('link',{ name:'Review approval in Paperclip', exact:true });
+    await expect(comparatorApprovalLinks).toHaveCount(2);
+    await expect(comparatorApprovalLinks.nth(0)).toHaveAttribute('href',`${base}/approvals/${TEST_COMPARATOR_APPROVAL_ID}`);
+    await expect(comparatorApprovalLinks.nth(1)).toHaveAttribute('href',`${base}/approvals/${TEST_RELEASE_APPROVAL_ID}`);
+    await expect(page.getByText('v0.1.1 / v0.6.234-absolute-risk-gate-candidate',{ exact:true })).toBeVisible();
+    await expect(page.getByText('Distinct unselected unchanged',{ exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'Event-driven evidence monitor', exact:true })).toBeVisible();
     await expect(page.getByText('Codex polling',{ exact:true })).toBeVisible();
     await expect(page.getByText('Not required',{ exact:true })).toBeVisible();
@@ -139,10 +169,8 @@ test('complete onboarding is actionable in the browser without touching producti
     await expect(page.locator('#notice')).toContainText('Open Replay Monitor to view Ocean data');
     await expect(page.getByRole('heading',{ name:'Onboarding complete', exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'CI/CD continuous run', exact:true })).toBeVisible();
-    await expect(page.getByRole('heading',{ name:'Human approval recorded', exact:true })).toBeVisible();
-    await expect(page.getByText(/Telemetry v0\.5\.53 STTL2 run identity code is merged and locally verified/)).toBeVisible();
-    await expect(page.getByText(/It is not deployed to Paper and is not Paper-qualified/)).toBeVisible();
-    await expect(page.getByText(/The approved coordinator record does not authorize that deployment or qualification/)).toBeVisible();
+    await expect(page.getByRole('heading',{ name:'Approve the v0.6.238 TEST comparator run', exact:true })).toBeVisible();
+    await expect(page.getByText(/Ocean remains fail-closed; this does not start Replay or alter v0\.1\.1\/v234, v240, historical roles, Paper, or Live\./)).toBeVisible();
     await expect(page.getByText(/The approved coordinator record is not the separate Paper manifest and qualification approval/)).toBeVisible();
     await expect(page.getByRole('heading',{ name:'Separate Paper qualification gate', exact:true })).toBeVisible();
     await expect(page.getByText('Code merged not deployed',{ exact:true })).toBeVisible();
@@ -161,8 +189,8 @@ test('complete onboarding is actionable in the browser without touching producti
     sources['priority-completion-program.json'].status = 'CICD_GATES_PROVEN_READY_FOR_GOVERNED_CANDIDATE_DECISION';
     fs.writeFileSync(path.join(sourceRoot,'priority-completion-program.json'),JSON.stringify(sources['priority-completion-program.json']));
     await page.locator('#refresh').click();
-    await expect(page.getByRole('heading',{ name:'Human approval recorded', exact:true })).toBeVisible();
-    await expect(page.getByText('Owner: Ocean continuous-improvement coordinator',{ exact:true })).toBeVisible();
+    await expect(page.getByRole('heading',{ name:'Approve the v0.6.238 TEST comparator run', exact:true })).toBeVisible();
+    await expect(page.getByText('Owner: Wayne / Ocean board',{ exact:true })).toBeVisible();
     await expect(page.getByText('Autonomous improvement implementation',{ exact:true })).toBeVisible();
     await expect(page.getByRole('columnheader',{ name:'Exact next action', exact:true })).toBeVisible();
     await expect(page.getByRole('button',{ name:'Prepare Replay history run', exact:true })).toHaveCount(0);
