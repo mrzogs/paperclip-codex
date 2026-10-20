@@ -765,13 +765,18 @@ async function notifyVwapPaperSim1Events(reason) {
   }
 }
 
-async function monitorVwapContinuousImprovement(reason) {
+function vwapImprovementScanOptions(scanOrdinal) {
+  return { force: Number(scanOrdinal) === 1 };
+}
+
+async function monitorVwapContinuousImprovement(reason, { force = false } = {}) {
   try {
     const config = loadVwapContinuousImprovementConfig(VWAP_IMPROVEMENT_CONFIG_FILE);
     const result = await scanVwapContinuousImprovement({
       config,
       stateFile: VWAP_IMPROVEMENT_STATE_FILE,
       reason,
+      force,
     });
     writeState({
       vwapImprovementMonitorStateFile: VWAP_IMPROVEMENT_STATE_FILE,
@@ -1019,7 +1024,10 @@ async function scan() {
       lastScanAtUtc: new Date().toISOString(),
       error: null,
     });
-    await monitorVwapContinuousImprovement(changed ? "file_change_scan_before_rebuild" : "periodic_scan");
+    await monitorVwapContinuousImprovement(
+      changed ? "file_change_scan_before_rebuild" : "periodic_scan",
+      vwapImprovementScanOptions(scanCount),
+    );
     if (changed) {
       await rebuild(scanCount === 1 ? "startup_reconcile" : "file_change");
       lastSignature = signature;
@@ -1059,6 +1067,7 @@ export {
   monitorVwapContinuousImprovement,
   monitorVwapPhysicalComparatorApprovalDispatch,
   queueClosedTradeEmailViaConnector,
+  vwapImprovementScanOptions,
   vwapProjectPaperSqliteFiles,
 };
 
