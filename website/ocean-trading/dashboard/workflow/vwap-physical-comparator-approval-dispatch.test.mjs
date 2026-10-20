@@ -109,6 +109,10 @@ function fixture({statuses = ['approved','approved'], stagingStatus = 'pending',
       if (!queuedOnly) Object.assign(run, {status:'running', startedAt:'2026-10-20T14:00:00.000Z'});
       return response(run);
     }
+    if (route.startsWith('/api/heartbeat-runs/')) {
+      const run = runs.find(item => item.id === route.split('/').at(-1));
+      return run ? response(run) : response({error:'not found',route},404);
+    }
     return response({error:'not found', route}, 404);
   };
   return {root, config, approvals, issue, nextTask, executorIssue, agent, runs, stagingPackage, fetchImpl, posts:() => posts,requests};
@@ -232,7 +236,7 @@ test('approved staging authority repairs a missing requester wake once and prove
   assert.equal(f.posts(),2);
   const second = await scanVwapPhysicalComparatorApprovalDispatch({config:f.config,stateFile:f.config.state_path,fetchImpl:f.fetchImpl});
   assert.equal(second.staging_authority.continuation.heartbeat_run_id,first.staging_authority.continuation.heartbeat_run_id);
-  assert.equal(second.engineering_continuity.state,'WAKE_ALREADY_RECORDED');
+  assert.equal(second.engineering_continuity.state,'WAKE_QUEUED');
   assert.equal(second.engineering_continuity.wake_run_id,first.engineering_continuity.wake_run_id);
   assert.equal(f.posts(),2);
 });

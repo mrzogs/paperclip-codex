@@ -76,3 +76,47 @@ test('active work, scheduled retry, recovery and unresolved blockers suppress du
     assert.equal(plan.state,expected);assert.equal(plan.wake_required,false);
   }
 });
+
+test('a terminal owner wake gets one bounded retry and then requires typed recovery',async()=>{
+  const f=fixture();
+  const first=await reconcileVwapEngineeringContinuity(f);
+  const failed={id:first.wake_run_id,agentId:f.executorIssue.assigneeAgentId,status:'failed',
+    contextSnapshot:{issueId:f.executorIssue.id,wakeReason:first.wake_reason}};
+  f.getJson=async route=>route.startsWith('/heartbeat-runs/') ? failed
+    : {id:f.executorIssue.assigneeAgentId,companyId:f.config.paperclip.company_id,name:'Mara'};
+  const scheduled=await reconcileVwapEngineeringContinuity({...f,previous:first,now:()=>Date.parse('2026-10-20T21:00:00Z')});
+  assert.equal(scheduled.state,'RETRY_SCHEDULED');
+  assert.equal(scheduled.wake_attempt,1);
+  const beforeRetryPosts=f.requests.filter(item=>item.method==='POST').length;
+  let retryPosts=0;
+  f.postJson=async(route,body)=>{retryPosts+=1;return {id:id(401),agentId:f.executorIssue.assigneeAgentId,status:'queued',createdAt:'2026-10-20T21:01:01Z',
+    contextSnapshot:{issueId:body.payload.issueId,wakeReason:body.reason}};};
+  const retried=await reconcileVwapEngineeringContinuity({...f,previous:{...scheduled,next_retry_at_utc:'2026-10-20T21:01:00Z'},
+    now:()=>Date.parse('2026-10-20T21:01:01Z')});
+  assert.equal(retried.state,'WAKE_QUEUED');
+  assert.equal(retried.wake_attempt,2);
+  assert.notEqual(retried.wake_reason,first.wake_reason);
+  assert.equal(retryPosts,1);
+  assert.equal(f.requests.filter(item=>item.method==='POST').length,beforeRetryPosts);
+  const failedRetry={id:retried.wake_run_id,agentId:f.executorIssue.assigneeAgentId,status:'failed',
+    contextSnapshot:{issueId:f.executorIssue.id,wakeReason:retried.wake_reason}};
+  f.getJson=async route=>route.startsWith('/heartbeat-runs/') ? failedRetry
+    : {id:f.executorIssue.assigneeAgentId,companyId:f.config.paperclip.company_id,name:'Mara'};
+  const recovery=await reconcileVwapEngineeringContinuity({...f,previous:retried,now:()=>Date.parse('2026-10-20T21:02:00Z')});
+  assert.equal(recovery.state,'RECOVERY_ACTION_REQUIRED');
+  assert.equal(recovery.recovery_owner_agent_id,f.executorIssue.assigneeAgentId);
+  assert.equal(recovery.wake_attempt,2);
+});
+
+test('a stale queued wake becomes an owned recovery action without a duplicate live wake',async()=>{
+  const f=fixture();
+  const first=await reconcileVwapEngineeringContinuity({...f,now:()=>Date.parse('2026-10-20T20:00:00Z')});
+  const queued={id:first.wake_run_id,agentId:f.executorIssue.assigneeAgentId,status:'queued',createdAt:'2026-10-20T20:00:00Z',
+    contextSnapshot:{issueId:f.executorIssue.id,wakeReason:first.wake_reason}};
+  f.getJson=async route=>route.startsWith('/heartbeat-runs/') ? queued
+    : {id:f.executorIssue.assigneeAgentId,companyId:f.config.paperclip.company_id,name:'Mara'};
+  const stale=await reconcileVwapEngineeringContinuity({...f,previous:first,now:()=>Date.parse('2026-10-20T20:03:00Z')});
+  assert.equal(stale.state,'STALE_WAKE_RECOVERY_REQUIRED');
+  assert.equal(stale.recovery_owner_agent_id,f.executorIssue.assigneeAgentId);
+  assert.equal(f.requests.filter(item=>item.method==='POST').length,1);
+});
