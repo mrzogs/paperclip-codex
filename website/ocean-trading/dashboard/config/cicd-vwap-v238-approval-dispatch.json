@@ -49,6 +49,37 @@
     "post_preflight_gate": "EXACT_TEST_REPLAY_TWO_RUNTIME_OUTPUT_WRITE_START_SCOPE_REQUIRED",
     "post_preflight_action": "REQUEST_OR_DERIVE_ONLY_AFTER_READ_ONLY_PREFLIGHT"
   },
+  "preflight_outcome": {
+    "status": "BLOCKED_PHYSICAL_BINDING_MISMATCH",
+    "heartbeat_run_id": "6971a2a5-2a42-4801-b8cc-6c98ccd1df71",
+    "completed_at_utc": "2026-10-20T13:32:41.930Z",
+    "brain_record_id": "reasoning-20261020133145-7184475e",
+    "supplemental_brain_record_id": "reasoning-20261020133945-6dfa3012",
+    "account_alias": "Sim1",
+    "chartbook_path": "D:\\Trading\\SierraChart-Replay Two\\Data\\CICD - VWAP Pull Back Strategy.Cht",
+    "strategy_artifact": {
+      "saved_version": "v0.6.240",
+      "saved_hash": "sha256:9a6189a438cb49c8a16b71cebc05372cab5f6f6002f2daa8ea780c33b9aef05f",
+      "selected_version": "v0.6.238",
+      "selected_hash": "sha256:6c871ad65aaa7e5891d8aa5133c3c18bc5c5a4fb72911c77181f01deaeaf9435",
+      "selected_source_path": "D:\\Trading\\CICD\\recovery-outputs\\VWAP-V238-RELEASE-INDEPENDENT-20261008T175011Z\\a\\CICD_VWAPPullback_v238_64.dll"
+    },
+    "telemetry_artifact": {
+      "saved_version": "v0.5.52",
+      "saved_hash": "sha256:c683c8bebe06e4d9be8c43439ad985268ec569ab8a56c280809b1f22c5bcf30f",
+      "selected_version": "v0.5.53",
+      "selected_hash": "sha256:5b30cc3971184dafd8a4e8a002fe63d588add9f416600bcd12292675242d110c",
+      "selected_source_path": "D:\\Trading\\CICD\\worktrees\\telemetry-s30-2\\build\\releases\\v0.5.53\\SierraTradeTelemetryLogger_v0.5.53_64.dll"
+    },
+    "next_task": {
+      "issue_id": "f75069f9-ef1c-4add-9015-6dc8808897c8",
+      "issue_identifier": "OCEA-22",
+      "title": "Prepare exact Sim1 TEST staging package for v0.6.238 and Telemetry v0.5.53",
+      "status_source": "PAPERCLIP_LIVE",
+      "url": "http://127.0.0.1:3100/OCEA/issues/OCEA-22"
+    },
+    "next_action": "Prepare exact artifact custody, backup, binding, stale-command reconciliation, rollback, and stop-on-failure package in Paperclip; then request a separate scoped human approval for TEST-only staging/write and one bounded Replay Two start."
+  },
   "safety": {
     "execution_authority": false,
     "runtime_write_scope_authorized": false,

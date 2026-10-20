@@ -57,6 +57,30 @@ function publicState(config, status, details = {}) {
   };
 }
 
+function validatePreflightOutcome(config) {
+  const outcome = config.preflight_outcome || {};
+  requireValue(outcome.status === 'BLOCKED_PHYSICAL_BINDING_MISMATCH'
+    && UUID.test(String(outcome.heartbeat_run_id || ''))
+    && Number.isFinite(Date.parse(outcome.completed_at_utc))
+    && /^reasoning-[0-9]{14}-[0-9a-f]{8}$/.test(String(outcome.brain_record_id || ''))
+    && /^reasoning-[0-9]{14}-[0-9a-f]{8}$/.test(String(outcome.supplemental_brain_record_id || ''))
+    && outcome.account_alias === 'Sim1'
+    && samePath(outcome.chartbook_path, 'D:\\Trading\\SierraChart-Replay Two\\Data\\CICD - VWAP Pull Back Strategy.Cht'),
+  'APPROVAL_DISPATCH_PREFLIGHT_OUTCOME_INVALID');
+  for (const artifact of [outcome.strategy_artifact, outcome.telemetry_artifact]) {
+    requireValue(artifact && SHA256.test(String(artifact.saved_hash || '').toLowerCase())
+      && SHA256.test(String(artifact.selected_hash || '').toLowerCase())
+      && artifact.saved_hash.toLowerCase() !== artifact.selected_hash.toLowerCase()
+      && path.win32.isAbsolute(String(artifact.selected_source_path || '')),
+    'APPROVAL_DISPATCH_PREFLIGHT_ARTIFACT_INVALID');
+  }
+  requireValue(UUID.test(String(outcome.next_task?.issue_id || ''))
+    && /^OCEA-[0-9]+$/.test(String(outcome.next_task?.issue_identifier || ''))
+    && outcome.next_task?.status_source === 'PAPERCLIP_LIVE'
+    && /^http:\/\/127\.0\.0\.1:3100\/OCEA\/issues\/OCEA-[0-9]+$/.test(String(outcome.next_task?.url || '')),
+  'APPROVAL_DISPATCH_PREFLIGHT_TASK_INVALID');
+}
+
 export function loadVwapPhysicalComparatorApprovalDispatchConfig(configPath = DEFAULT_VWAP_APPROVAL_DISPATCH_CONFIG) {
   const config = readJson(configPath);
   requireValue(config?.schema_version === APPROVAL_DISPATCH_SCHEMA, 'APPROVAL_DISPATCH_CONFIG_INVALID');
@@ -79,6 +103,7 @@ export function loadVwapPhysicalComparatorApprovalDispatchConfig(configPath = DE
     && Array.isArray(gate.required_read_only_paths) && gate.required_read_only_paths.length >= 4, 'APPROVAL_DISPATCH_GATE_INVALID');
   const safety = config.safety || {};
   requireValue(Object.values(safety).every(value => value === false), 'APPROVAL_DISPATCH_SAFETY_INVALID');
+  validatePreflightOutcome(config);
   return {...config, config_path:configPath};
 }
 
@@ -164,6 +189,29 @@ function matchingRuns(config, runs, reason) {
 function observedStartedRun(runs) {
   return runs.find(run => STARTED_STATUSES.has(String(run.status || '').toLowerCase()) && Boolean(run.startedAt)) || null;
 }
+function validateNextTask(config, task) {
+  const expected = config.preflight_outcome.next_task;
+  requireValue(task?.id === expected.issue_id && task?.identifier === expected.issue_identifier
+    && task?.companyId === config.paperclip.company_id && task?.projectId === config.paperclip.project_id
+    && task?.projectWorkspaceId === config.paperclip.workspace_id && task?.parentId === config.paperclip.issue_id
+    && task?.title === expected.title && task?.assigneeAgentId === config.paperclip.coordinator_agent_id,
+  'APPROVAL_DISPATCH_PREFLIGHT_TASK_BINDING_INVALID');
+}
+function completedPreflightDetails(config, run, statuses, reason, task) {
+  const outcome = config.preflight_outcome;
+  if (run?.id !== outcome?.heartbeat_run_id || String(run?.status || '').toLowerCase() !== 'succeeded') return null;
+  validateNextTask(config, task);
+  return {
+    approval_statuses:statuses,
+    dispatched:true,
+    wake_reason:reason,
+    heartbeat_run_id:run.id,
+    heartbeat_run_status:run.status,
+    heartbeat_started_at_utc:run.startedAt,
+    heartbeat_finished_at_utc:run.finishedAt || outcome.completed_at_utc,
+    preflight_outcome:{...outcome, next_task:{...outcome.next_task, status:String(task.status || 'unknown').toUpperCase(), execution_run_id:task.executionRunId || null}},
+  };
+}
 
 export async function scanVwapPhysicalComparatorApprovalDispatch({config, stateFile, contractPath, fetchImpl = fetch, sleepImpl = sleep} = {}) {
   const resolvedState = stateFile || config?.state_path || DEFAULT_VWAP_APPROVAL_DISPATCH_STATE;
@@ -179,15 +227,21 @@ export async function scanVwapPhysicalComparatorApprovalDispatch({config, stateF
     if (approvals.some(item => WAITING_STATUSES.has(String(item.status || '').toLowerCase()))) return write('WAITING_FOR_BOTH_APPROVALS', {approval_statuses:statuses, dispatched:false});
     requireValue(approvals.every(item => String(item.status || '').toLowerCase() === 'approved'), 'APPROVAL_DISPATCH_APPROVAL_STATUS_INVALID');
 
-    const [issue, agent, runList] = await Promise.all([
+    const [issue, agent, runList, nextTask] = await Promise.all([
       requestJson(config, '/issues/' + config.paperclip.issue_id, {}, fetchImpl),
       requestJson(config, '/agents/' + config.paperclip.coordinator_agent_id, {}, fetchImpl),
       requestJson(config, '/companies/' + config.paperclip.company_id + '/heartbeat-runs?agentId=' + config.paperclip.coordinator_agent_id + '&limit=1000', {}, fetchImpl),
+      requestJson(config, '/issues/' + config.preflight_outcome.next_task.issue_id, {}, fetchImpl),
     ]);
     validateIssueAndAgent(config, issue, agent);
     const reason = wakeReason(config), prior = matchingRuns(config, runList, reason);
     const priorStarted = observedStartedRun(prior);
-    if (priorStarted) return write('ALREADY_DISPATCHED_READ_ONLY_PREFLIGHT', {approval_statuses:statuses, dispatched:true, wake_reason:reason, heartbeat_run_id:priorStarted.id, heartbeat_run_status:priorStarted.status, heartbeat_started_at_utc:priorStarted.startedAt});
+    if (priorStarted) {
+      const completed = completedPreflightDetails(config, priorStarted, statuses, reason, nextTask);
+      return completed
+        ? write('PREFLIGHT_BLOCKED_PHYSICAL_BINDING', completed)
+        : write('ALREADY_DISPATCHED_READ_ONLY_PREFLIGHT', {approval_statuses:statuses, dispatched:true, wake_reason:reason, heartbeat_run_id:priorStarted.id, heartbeat_run_status:priorStarted.status, heartbeat_started_at_utc:priorStarted.startedAt});
+    }
     if (prior.length) return write('ATTENTION_REQUIRED', {reason:'PRIOR_WAKE_NOT_PROVEN_STARTED', approval_statuses:statuses, dispatched:false, wake_reason:reason, heartbeat_run_id:prior[0].id, heartbeat_run_status:prior[0].status});
     requireValue(String(issue.status || '').toLowerCase() === 'blocked', 'APPROVAL_DISPATCH_ISSUE_NOT_BLOCKED_BEFORE_WAKE');
 
@@ -199,7 +253,12 @@ export async function scanVwapPhysicalComparatorApprovalDispatch({config, stateF
     try {
       const insideList = await requestJson(config, '/companies/' + config.paperclip.company_id + '/heartbeat-runs?agentId=' + config.paperclip.coordinator_agent_id + '&limit=1000', {}, fetchImpl);
       const insidePrior = matchingRuns(config, insideList, reason), insideStarted = observedStartedRun(insidePrior);
-      if (insideStarted) return write('ALREADY_DISPATCHED_READ_ONLY_PREFLIGHT', {approval_statuses:statuses, dispatched:true, wake_reason:reason, heartbeat_run_id:insideStarted.id, heartbeat_run_status:insideStarted.status, heartbeat_started_at_utc:insideStarted.startedAt});
+      if (insideStarted) {
+        const completed = completedPreflightDetails(config, insideStarted, statuses, reason, nextTask);
+        return completed
+          ? write('PREFLIGHT_BLOCKED_PHYSICAL_BINDING', completed)
+          : write('ALREADY_DISPATCHED_READ_ONLY_PREFLIGHT', {approval_statuses:statuses, dispatched:true, wake_reason:reason, heartbeat_run_id:insideStarted.id, heartbeat_run_status:insideStarted.status, heartbeat_started_at_utc:insideStarted.startedAt});
+      }
       if (insidePrior.length) return write('ATTENTION_REQUIRED', {reason:'PRIOR_WAKE_NOT_PROVEN_STARTED', approval_statuses:statuses, dispatched:false, wake_reason:reason, heartbeat_run_id:insidePrior[0].id, heartbeat_run_status:insidePrior[0].status});
       const wake = await requestJson(config, '/agents/' + config.paperclip.coordinator_agent_id + '/wakeup?companyId=' + config.paperclip.company_id, {
         method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({
