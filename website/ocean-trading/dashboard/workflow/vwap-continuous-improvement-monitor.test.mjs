@@ -80,6 +80,36 @@ test('first scan baselines rows and incomplete telemetry fails closed',async()=>
   const state=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async()=>{calls++;}});
   assert.equal(state.baseline_applied,true);assert.equal(state.disposition,'INSUFFICIENT_EVIDENCE');assert.equal(state.sources[0].observed_trade_count,60);assert.equal(state.sources[0].eligible_trade_count,0);assert.equal(calls,0);
 });
+test('Paper Sim1 monitoring excludes closed Sim4 rows from counts and detector evidence',async()=>{
+  const f=fixture();f.config.sources=[{id:'fixture-paper',environment:'PAPER',account:'Sim1',database_path:f.dbFile,require_explicit_dataset_role:true}];
+  insertRows(f.dbFile,1,1,{environment:'paper',role:'PAPER'});
+  insertRows(f.dbFile,2,1,{environment:'paper',role:'PAPER'});
+  const db=new DatabaseSync(f.dbFile);
+  db.prepare("UPDATE ocean_trade_causal_v1 SET trade_account='Sim4' WHERE trade_id=2").run();
+  db.close();
+  let calls=0;
+  const first=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async()=>{calls++;return {triggered:true};}});
+  assert.equal(first.status,'HEALTHY');
+  assert.equal(first.observed_trade_count,1);
+  assert.equal(first.sources[0].observed_trade_count,1);
+  assert.equal(first.foreign_account_trade_count,1);
+  assert.equal(first.sources[0].foreign_account_trade_count,1);
+  assert.equal(first.eligible_trade_count,1);
+  assert.equal(first.detector.sufficiency.eligible_paper_trade_count,1);
+  assert.equal(first.paper_provenance_issue_count,0);
+  assert.deepEqual(first.observed_trade_ids,['fixture-paper:1']);
+  assert.match(first.account_scope_anomaly_action,/FOREIGN_ACCOUNT_ROWS_EXCLUDED/);
+  assert.equal(calls,0);
+  insertRows(f.dbFile,3,1,{environment:'paper',role:'PAPER'});
+  const nextDb=new DatabaseSync(f.dbFile);
+  nextDb.prepare("UPDATE ocean_trade_causal_v1 SET trade_account='Sim4' WHERE trade_id=3").run();
+  nextDb.close();
+  const second=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async()=>{calls++;return {triggered:true};}});
+  assert.equal(second.new_trade_count,0);
+  assert.equal(second.observed_trade_count,1);
+  assert.equal(second.foreign_account_trade_count,2);
+  assert.equal(calls,0);
+});
 test('raw and managed identity conflict fails closed even if context status claims complete',async()=>{
   const f=fixture();insertRows(f.dbFile,1,60,{role:'DISCOVERY',quality:'raw_managed_context_conflict|strategy_version_mismatch'});
   const state=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async()=>({triggered:false})});
