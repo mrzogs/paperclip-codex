@@ -35,6 +35,10 @@ and never delete or rename the prior live target. Do not archive that previous
 release while the monitor still owns it. Code/configuration files are never
 replaced from an older release.
 
+The file manifest fallback follows the resolved mutable-data publisher too.
+Windows file symlinks may require administrator privileges; none are required
+or created here. Ordinary/non-aliased deployments retain their existing path.
+
 This diagnostic grants no approval, booking, staging, Replay, Paper, Live or
 order authority. Databases, physical binding and Quant Terminal state remain
 unchanged. Once a blocking call is measured, replace only that path with a
