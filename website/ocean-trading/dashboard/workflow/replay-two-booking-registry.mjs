@@ -21,6 +21,16 @@ const APPROVAL_BINDING_KEYS = [
   "identity_id", "owner_project", "approval_id", "approval_snapshot_sha256",
   "package_sha256", "expires_utc",
 ];
+const RECEIPT_KEYS = [
+  "schema", "booking_id", "resource_key", "generation", "status", "owner_project",
+  "owner_agent_id", "approval_id", "approval_snapshot_sha256", "package_sha256",
+  "instance_executable", "operation_scope", "acquired_utc", "expires_utc",
+  "prior_receipt_hash", "receipt_hash", "registry_comment_id", "registry_body_sha256",
+];
+const EVENT_KEYS = [
+  "schema", "event_id", "booking_id", "resource_key", "generation", "receipt_hash",
+  "kind", "actor_type", "actor_id", "reason", "occurred_at_utc", "event_hash",
+];
 
 function isUtcMillis(value) {
   if (typeof value !== "string" || !UTC_MILLIS.test(value)) return false;
@@ -129,13 +139,91 @@ export class ReplayTwoBookingRegistry {
     return id(value);
   }
 
+  receiptFromRow(row) {
+    if (!row) return null;
+    let receipt;
+    try { receipt = JSON.parse(row.payload_json); }
+    catch { requireThat(false, 503, "BOOKING_RECEIPT_INTEGRITY_REQUIRED"); }
+    const keys = receipt && typeof receipt === "object" && !Array.isArray(receipt) ? Object.keys(receipt) : [];
+    const valid = keys.length === RECEIPT_KEYS.length
+      && RECEIPT_KEYS.every((key) => Object.hasOwn(receipt, key))
+      && receipt.schema === REPLAY_TWO_RECEIPT_SCHEMA
+      && typeof receipt.booking_id === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(receipt.booking_id)
+      && receipt.resource_key === this.config.resource_key
+      && Number.isSafeInteger(receipt.generation) && receipt.generation >= 1 && receipt.generation <= MAX_GENERATION
+      && receipt.status === "ACTIVE"
+      && typeof receipt.owner_project === "string" && /^[a-z0-9]+(?:[-_][a-z0-9]+)*$/.test(receipt.owner_project)
+      && typeof receipt.owner_agent_id === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(receipt.owner_agent_id)
+      && typeof receipt.approval_id === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(receipt.approval_id)
+      && HASH.test(receipt.approval_snapshot_sha256)
+      && HASH.test(receipt.package_sha256)
+      && receipt.instance_executable === this.config.instance_executable
+      && sameScope(receipt.operation_scope)
+      && isUtcMillis(receipt.acquired_utc)
+      && isUtcMillis(receipt.expires_utc)
+      && Date.parse(receipt.acquired_utc) < Date.parse(receipt.expires_utc)
+      && (receipt.prior_receipt_hash === null || HASH.test(receipt.prior_receipt_hash))
+      && ((receipt.generation === 1) === (receipt.prior_receipt_hash === null))
+      && HASH.test(receipt.receipt_hash)
+      && ((receipt.registry_comment_id === null && receipt.registry_body_sha256 === null)
+        || (typeof receipt.registry_comment_id === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(receipt.registry_comment_id) && HASH.test(receipt.registry_body_sha256)))
+      && receipt.receipt_hash === objectHash(receiptCore(receipt))
+      && row.booking_id === receipt.booking_id
+      && row.resource_key === receipt.resource_key
+      && row.generation === receipt.generation
+      && row.receipt_hash === receipt.receipt_hash
+      && row.owner_project === receipt.owner_project
+      && row.owner_agent_id === receipt.owner_agent_id
+      && row.expires_ms === Date.parse(receipt.expires_utc);
+    requireThat(valid, 503, "BOOKING_RECEIPT_INTEGRITY_REQUIRED");
+    return receipt;
+  }
+
+  eventFromRow(row) {
+    if (!row) return null;
+    let event;
+    try { event = JSON.parse(row.payload_json); }
+    catch { requireThat(false, 503, "BOOKING_EVENT_INTEGRITY_REQUIRED"); }
+    const keys = event && typeof event === "object" && !Array.isArray(event) ? Object.keys(event) : [];
+    const valid = keys.length === EVENT_KEYS.length
+      && EVENT_KEYS.every((key) => Object.hasOwn(event, key))
+      && event.schema === "oql.replay-two-booking-terminal-event/v1"
+      && typeof event.event_id === "string"
+      && typeof event.booking_id === "string"
+      && event.resource_key === this.config.resource_key
+      && Number.isSafeInteger(event.generation) && event.generation >= 1 && event.generation <= MAX_GENERATION
+      && HASH.test(event.receipt_hash)
+      && ["RELEASED", "REVOKED", "EXPIRED"].includes(event.kind)
+      && ["STRATEGY", "HUMAN", "OCEAN_SYSTEM"].includes(event.actor_type)
+      && typeof event.actor_id === "string"
+      && typeof event.reason === "string" && event.reason.length >= 1 && event.reason.length <= 1024
+      && isUtcMillis(event.occurred_at_utc)
+      && HASH.test(event.event_hash)
+      && event.event_hash === objectHash(eventCore(event))
+      && row.event_id === event.event_id
+      && row.booking_id === event.booking_id
+      && row.resource_key === event.resource_key
+      && row.generation === event.generation
+      && row.status === event.kind
+      && row.event_hash === event.event_hash;
+    requireThat(valid, 503, "BOOKING_EVENT_INTEGRITY_REQUIRED");
+    const receipt = this.receiptFromRow(this.db.prepare("SELECT * FROM ow_replay_two_bookings WHERE booking_id=?").get(event.booking_id));
+    const actorValid = receipt && ((event.kind === "RELEASED" && event.actor_type === "STRATEGY" && event.actor_id === receipt.owner_agent_id)
+      || (event.kind === "REVOKED" && event.actor_type === "HUMAN" && event.actor_id === "wayne-ocean-ui")
+      || (event.kind === "EXPIRED" && event.actor_type === "OCEAN_SYSTEM" && event.actor_id === "ocean-booking-registry"));
+    requireThat(receipt && event.resource_key === receipt.resource_key && event.generation === receipt.generation
+      && event.receipt_hash === receipt.receipt_hash && actorValid, 503, "BOOKING_EVENT_INTEGRITY_REQUIRED");
+    return event;
+  }
+
   latest(resourceKey) {
-    return this.db.prepare("SELECT payload_json FROM ow_replay_two_bookings WHERE resource_key=? ORDER BY generation DESC LIMIT 1").get(resourceKey);
+    const row = this.db.prepare("SELECT * FROM ow_replay_two_bookings WHERE resource_key=? ORDER BY generation DESC LIMIT 1").get(resourceKey);
+    return this.receiptFromRow(row);
   }
 
   terminal(bookingId) {
-    const row = this.db.prepare("SELECT payload_json FROM ow_replay_two_booking_events WHERE booking_id=? ORDER BY rowid DESC LIMIT 1").get(bookingId);
-    return row ? JSON.parse(row.payload_json) : null;
+    const row = this.db.prepare("SELECT * FROM ow_replay_two_booking_events WHERE booking_id=? ORDER BY rowid DESC LIMIT 1").get(bookingId);
+    return this.eventFromRow(row);
   }
 
   exactReadback(receipt) {
@@ -152,12 +240,11 @@ export class ReplayTwoBookingRegistry {
 
   currentState(receipt) {
     const terminalEvent = this.terminal(receipt.booking_id);
-    if (terminalEvent || this.now() >= Date.parse(receipt.expires_utc)) return null;
     return {
       booking_id: receipt.booking_id,
       generation: receipt.generation,
       receipt_hash: receipt.receipt_hash,
-      effective_status: "ACTIVE",
+      effective_status: effectiveStatus(terminalEvent, this.now() >= Date.parse(receipt.expires_utc)),
       expires_utc: receipt.expires_utc,
       owner_project: receipt.owner_project,
       owner_agent_id: receipt.owner_agent_id,
@@ -222,8 +309,7 @@ export class ReplayTwoBookingRegistry {
     } else requireThat(input.expected_prior_generation === null && input.expected_prior_receipt_hash === null, 422, "BOOKING_PRIOR_CAS_PAIR_REQUIRED");
 
     return this.backend.store.transaction(() => {
-      const latestRow = this.latest(input.resource_key);
-      const latest = latestRow ? JSON.parse(latestRow.payload_json) : null;
+      const latest = this.latest(input.resource_key);
       if (latest) this.expireIfNeeded(latest);
       const active = latest && !this.terminal(latest.booking_id) && this.now() < Date.parse(latest.expires_utc);
       requireThat(!active, 409, "BOOKING_RESOURCE_BUSY");
@@ -260,9 +346,9 @@ export class ReplayTwoBookingRegistry {
 
   exact(actor, bookingId) {
     this.available();
-    const row = this.db.prepare("SELECT payload_json FROM ow_replay_two_bookings WHERE booking_id=?").get(id(bookingId));
+    const row = this.db.prepare("SELECT * FROM ow_replay_two_bookings WHERE booking_id=?").get(id(bookingId));
     requireThat(row, 404, "BOOKING_NOT_FOUND");
-    const receipt = JSON.parse(row.payload_json);
+    const receipt = this.receiptFromRow(row);
     this.authorizeRead(actor, receipt);
     return this.exactReadback(receipt);
   }
@@ -270,9 +356,8 @@ export class ReplayTwoBookingRegistry {
   current(actor, resourceKey) {
     this.available();
     requireThat(resourceKey === this.config.resource_key, 404, "BOOKING_RESOURCE_NOT_FOUND");
-    const row = this.latest(resourceKey);
-    requireThat(row, 404, "BOOKING_NOT_FOUND");
-    const receipt = JSON.parse(row.payload_json);
+    const receipt = this.latest(resourceKey);
+    requireThat(receipt, 404, "BOOKING_NOT_FOUND");
     this.authorizeRead(actor, receipt);
     return {
       schema: "oql.replay-two-booking-current/v1",
@@ -317,22 +402,30 @@ export class ReplayTwoBookingRegistry {
     requireThat(Number.isSafeInteger(input.generation) && input.generation >= 1 && input.generation <= MAX_GENERATION, 422, "BOOKING_GENERATION_REQUIRED");
     hash(input.receipt_hash, "BOOKING_RECEIPT_HASH_REQUIRED");
     requireThat(typeof input.reason === "string" && input.reason.trim().length >= 1 && input.reason.length <= 1024, 422, "BOOKING_TERMINAL_REASON_REQUIRED");
-    const row = this.db.prepare("SELECT payload_json FROM ow_replay_two_bookings WHERE generation=? AND receipt_hash=?").get(input.generation, input.receipt_hash);
+    const row = this.db.prepare("SELECT * FROM ow_replay_two_bookings WHERE generation=? AND receipt_hash=?").get(input.generation, input.receipt_hash);
     requireThat(row, 404, "BOOKING_NOT_FOUND");
-    const receipt = JSON.parse(row.payload_json);
+    const receipt = this.receiptFromRow(row);
     requireThat(id(bookingId) === receipt.booking_id, 409, "BOOKING_PIN_CONFLICT");
     if (kind === "RELEASED") {
       const binding = this.issuer(actor);
       requireThat(binding.owner_project === receipt.owner_project && actor.id === receipt.owner_agent_id, 403, "BOOKING_OWNER_CONFLICT");
     } else requireThat(kind === "REVOKED" && actor.role === "HUMAN" && actor.id === "wayne-ocean-ui", 403, "BOOKING_REVOKER_REQUIRED");
-    return this.backend.store.transaction(() => {
-      const existing = this.terminal(receipt.booking_id);
+    const outcome = this.backend.store.transaction(() => {
+      let existing = this.terminal(receipt.booking_id);
+      if (!existing && this.now() >= Date.parse(receipt.expires_utc)) {
+        existing = this.insertTerminal(receipt, "EXPIRED", "Server-observed lease expiry", "ocean-booking-registry");
+        return { conflict: "BOOKING_EXPIRED", event: existing };
+      }
       if (existing) {
-        requireThat(existing.kind === kind && existing.reason === input.reason && existing.actor_id === actor.id, 409, "BOOKING_ALREADY_TERMINAL");
-        return { schema: "oql.replay-two-booking-terminal-response/v1", event: existing, current: null, observed_at_utc: new Date(this.now()).toISOString() };
+        if (existing.kind === kind && existing.reason === input.reason && existing.actor_id === actor.id) {
+          return { response: { schema: "oql.replay-two-booking-terminal-response/v1", event: existing, current: null, observed_at_utc: new Date(this.now()).toISOString() } };
+        }
+        return { conflict: existing.kind === "EXPIRED" ? "BOOKING_EXPIRED" : "BOOKING_ALREADY_TERMINAL", event: existing };
       }
       const event = this.insertTerminal(receipt, kind, input.reason, actor.id);
-      return { schema: "oql.replay-two-booking-terminal-response/v1", event, current: null, observed_at_utc: new Date(this.now()).toISOString() };
+      return { response: { schema: "oql.replay-two-booking-terminal-response/v1", event, current: null, observed_at_utc: new Date(this.now()).toISOString() } };
     });
+    requireThat(!outcome.conflict, 409, outcome.conflict);
+    return outcome.response;
   }
 }

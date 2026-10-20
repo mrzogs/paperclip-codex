@@ -43,6 +43,12 @@
     "client_clock_skew_ms": 1000,
     "receipt_hash_includes_nonce": false
   },
+  "current_semantics": {
+    "latest_fence_always_present_after_first_acquisition": true,
+    "active_and_terminal_shape": "The current field contains the latest immutable booking fence and effective_status for ACTIVE, RELEASED, REVOKED or EXPIRED. It is never null after the first acquisition.",
+    "restart_recovery": "A freshly restarted authorized client obtains expected_prior_generation and expected_prior_receipt_hash from current.generation and current.receipt_hash before a successor acquisition.",
+    "no_booking": "The route returns BOOKING_NOT_FOUND before the first acquisition."
+  },
   "hashing": {
     "algorithm": "sha256",
     "format": "^sha256:[0-9a-f]{64}$",
@@ -207,6 +213,28 @@
         ]
       },
       "observed_at_utc": "2026-10-20T16:00:01.000Z"
+    },
+    "terminal_current_readback": {
+      "schema": "oql.replay-two-booking-current/v1",
+      "resource_key": "sierra-replay-two:primary",
+      "current": {
+        "booking_id": "test-booking-0001",
+        "generation": 1,
+        "receipt_hash": "sha256:0223862bee3575669d5fc57446cd2f08634afc9a2e4da553f0323a536c831b17",
+        "effective_status": "RELEASED",
+        "expires_utc": "2026-10-20T16:01:00.000Z",
+        "owner_project": "oql-vwap-wave-pullback",
+        "owner_agent_id": "ocean-booking-oql",
+        "approval_id": "test-approval-0001",
+        "package_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "instance_executable": "D:\\Trading\\SierraChart-Replay Two\\SierraChart_64.exe",
+        "operation_scope": [
+          "Stage",
+          "VerifySelection",
+          "Rollback"
+        ]
+      },
+      "observed_at_utc": "2026-10-20T16:00:30.000Z"
     },
     "terminal_request": {
       "schema": "oql.replay-two-booking-terminal-request/v1",

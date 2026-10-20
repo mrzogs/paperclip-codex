@@ -1,12 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { fork } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { WorkflowBackend } from "./backend.mjs";
 import { issueOceanIdentity, issueTestBrowserSecret } from "./auth.mjs";
 import { objectHash } from "./common.mjs";
+import { WorkflowStore } from "./store.mjs";
 import {
   REPLAY_TWO_ACQUIRE_SCHEMA,
   REPLAY_TWO_BOOKING_RESOURCE,
@@ -246,28 +249,41 @@ test("protected atomic Replay Two registry preserves fencing, immutable receipts
     const afterRevoke = await app.request(`replay-two-bookings/current?resource_key=${encodeURIComponent(REPLAY_TWO_BOOKING_RESOURCE)}`, { role: "TELEMETRY", readNonce: "test-after-revoke" });
     assert.equal(afterRevoke.status, 200);
     assert.equal(afterRevoke.readNonce, "test-after-revoke");
-    assert.equal(afterRevoke.value.current, null);
+    assert.equal(afterRevoke.value.current.effective_status, "REVOKED");
+    assert.equal(afterRevoke.value.current.generation, 2);
+    assert.equal(afterRevoke.value.current.receipt_hash, second.receipt_hash);
 
     app.restart();
     result = await app.request(`replay-two-bookings/${second.booking_id}`, { role: "TELEMETRY" });
     assert.equal(result.status, 200);
     assert.equal(result.value.effective_status, "REVOKED");
+    const recoveredFence = await app.request(`replay-two-bookings/current?resource_key=${encodeURIComponent(REPLAY_TWO_BOOKING_RESOURCE)}`, { role: "TELEMETRY" });
+    assert.equal(recoveredFence.value.current.effective_status, "REVOKED");
     assert.throws(() => app.backend().db.prepare("UPDATE ow_replay_two_bookings SET owner_project='changed' WHERE booking_id=?").run(first.booking_id), /immutable replay two booking receipt/);
     assert.throws(() => app.backend().db.prepare("DELETE FROM ow_replay_two_booking_events WHERE booking_id=?").run(first.booking_id), /immutable replay two booking event/);
 
     result = await app.request("replay-two-bookings", { method: "POST", body: app.acquire({
-      expected_prior_generation: 2,
-      expected_prior_receipt_hash: second.receipt_hash,
+      expected_prior_generation: recoveredFence.value.current.generation,
+      expected_prior_receipt_hash: recoveredFence.value.current.receipt_hash,
       requested_expires_utc: new Date(FIXED_NOW + 2000).toISOString(),
     }) });
     assert.equal(result.status, 200);
     const third = result.value.receipt;
     app.backend().replayTwoBookings.now = () => FIXED_NOW + 3000;
     result = await app.request(`replay-two-bookings/current?resource_key=${encodeURIComponent(REPLAY_TWO_BOOKING_RESOURCE)}`, { role: "TELEMETRY" });
-    assert.equal(result.value.current, null);
+    assert.equal(result.value.current.effective_status, "EXPIRED");
+    const lateRelease = await app.request(`replay-two-bookings/${third.booking_id}/release`, {
+      method: "POST",
+      body: { schema: REPLAY_TWO_TERMINAL_SCHEMA, generation: 3, receipt_hash: third.receipt_hash, reason: "Late cleanup" },
+    });
+    assert.equal(lateRelease.status, 409);
+    assert.equal(lateRelease.value.error.code, "BOOKING_EXPIRED");
+    const expiredReadback = await app.request(`replay-two-bookings/${third.booking_id}`, { role: "TELEMETRY" });
+    assert.equal(expiredReadback.value.effective_status, "EXPIRED");
+    assert.equal(expiredReadback.value.terminal_event.kind, "EXPIRED");
     result = await app.request("replay-two-bookings", { method: "POST", body: app.acquire({
-      expected_prior_generation: 3,
-      expected_prior_receipt_hash: third.receipt_hash,
+      expected_prior_generation: result.value.current.generation,
+      expected_prior_receipt_hash: result.value.current.receipt_hash,
       requested_expires_utc: new Date(FIXED_NOW + 63000).toISOString(),
     }) });
     assert.equal(result.status, 200);
@@ -324,6 +340,126 @@ test("published contract fixtures retain the exact canonical receipt and termina
   assert.equal(contract.fresh_read.response_header, "X-Ocean-Booking-Read-Nonce");
   assert.equal(contract.approval_authority.live_status_authoritative, false);
   assert.match(contract.approval_authority.client_gate, /before and after each mutation/);
+  assert.equal(contract.current_semantics.latest_fence_always_present_after_first_acquisition, true);
+  assert.equal(contract.fixture.terminal_current_readback.current.effective_status, "RELEASED");
+  assert.equal(contract.fixture.terminal_current_readback.current.generation, receipt.generation);
+  assert.equal(contract.fixture.terminal_current_readback.current.receipt_hash, receipt.receipt_hash);
   assert.equal(receipt.registry_comment_id, null);
   assert.equal(receipt.registry_body_sha256, null);
+});
+
+test("stored booking receipts and terminal events fail closed when indexed or canonical integrity changes", { timeout: 120000 }, async () => {
+  const receiptApp = await fixture();
+  try {
+    const created = await receiptApp.request("replay-two-bookings", { method: "POST", body: receiptApp.acquire() });
+    const receipt = created.value.receipt;
+    receiptApp.backend().db.exec("DROP TRIGGER ow_replay_two_bookings_no_update");
+    receiptApp.backend().db.prepare("UPDATE ow_replay_two_bookings SET payload_json=? WHERE booking_id=?")
+      .run(JSON.stringify({ ...receipt, package_sha256: `sha256:${"c".repeat(64)}` }), receipt.booking_id);
+    const corrupted = await receiptApp.request(`replay-two-bookings/${receipt.booking_id}`, { role: "TELEMETRY" });
+    assert.equal(corrupted.status, 503);
+    assert.equal(corrupted.value.error.code, "BOOKING_RECEIPT_INTEGRITY_REQUIRED");
+  } finally {
+    await receiptApp.close();
+  }
+
+  const eventApp = await fixture();
+  try {
+    const created = await eventApp.request("replay-two-bookings", { method: "POST", body: eventApp.acquire() });
+    const receipt = created.value.receipt;
+    await eventApp.request(`replay-two-bookings/${receipt.booking_id}/release`, {
+      method: "POST",
+      body: { schema: REPLAY_TWO_TERMINAL_SCHEMA, generation: 1, receipt_hash: receipt.receipt_hash, reason: "Complete" },
+    });
+    eventApp.backend().db.exec("DROP TRIGGER ow_replay_two_booking_events_no_update");
+    const row = eventApp.backend().db.prepare("SELECT payload_json FROM ow_replay_two_booking_events WHERE booking_id=?").get(receipt.booking_id);
+    const event = JSON.parse(row.payload_json);
+    eventApp.backend().db.prepare("UPDATE ow_replay_two_booking_events SET payload_json=? WHERE booking_id=?")
+      .run(JSON.stringify({ ...event, reason: "Changed offline" }), receipt.booking_id);
+    const corrupted = await eventApp.request(`replay-two-bookings/${receipt.booking_id}`, { role: "TELEMETRY" });
+    assert.equal(corrupted.status, 503);
+    assert.equal(corrupted.value.error.code, "BOOKING_EVENT_INTEGRITY_REQUIRED");
+  } finally {
+    await eventApp.close();
+  }
+});
+
+test("separate SQLite processes race for one resource and exactly one generation wins", { timeout: 120000 }, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ocean-replay-booking-race-"));
+  const database = path.join(directory, "workflow.sqlite");
+  const identities = ["race-owner-one", "race-owner-two"];
+  const config = {
+    enabled: true,
+    test_only: true,
+    resource_key: REPLAY_TWO_BOOKING_RESOURCE,
+    instance_executable: REPLAY_TWO_EXECUTABLE,
+    min_ttl_ms: 1000,
+    max_ttl_ms: 120000,
+    issuers: identities.map((identity, index) => ({ identity_id: identity, owner_project: `race-project-${index + 1}` })),
+    approval_bindings: identities.map((identity, index) => ({
+      identity_id: identity,
+      owner_project: `race-project-${index + 1}`,
+      approval_id: `race-approval-${index + 1}`,
+      approval_snapshot_sha256: APPROVAL_HASH,
+      package_sha256: PACKAGE_HASH,
+      expires_utc: new Date(FIXED_NOW + 90000).toISOString(),
+    })),
+    reader_identity_ids: [],
+  };
+  const setupStore = new WorkflowStore(database);
+  for (const identity of identities) setupStore.db.prepare("INSERT INTO ow_identities VALUES(?,?,?)").run(identity, "STRATEGY", "{}");
+  setupStore.close();
+
+  const children = [];
+  try {
+    const workerPath = fileURLToPath(new URL("./replay-two-booking-race-worker.mjs", import.meta.url));
+    const startWorker = (index) => {
+      const identity = identities[index];
+      const actor = { id: identity, role: "STRATEGY", namespace: "OPERATIONAL", scopes: ["booking.issue", "booking.read"] };
+      const input = {
+        schema: REPLAY_TWO_ACQUIRE_SCHEMA,
+        resource_key: REPLAY_TWO_BOOKING_RESOURCE,
+        owner_project: `race-project-${index + 1}`,
+        owner_agent_id: identity,
+        approval_id: `race-approval-${index + 1}`,
+        approval_snapshot_sha256: APPROVAL_HASH,
+        package_sha256: PACKAGE_HASH,
+        instance_executable: REPLAY_TWO_EXECUTABLE,
+        operation_scope: [...REPLAY_TWO_OPERATION_SCOPE],
+        requested_expires_utc: new Date(FIXED_NOW + 60000).toISOString(),
+        expected_prior_generation: null,
+        expected_prior_receipt_hash: null,
+      };
+      const child = fork(workerPath, [database, JSON.stringify(config), JSON.stringify(actor), JSON.stringify(input), String(FIXED_NOW)], { stdio: ["ignore", "ignore", "inherit", "ipc"] });
+      children.push(child);
+      let readyResolve;
+      const ready = new Promise((resolve) => { readyResolve = resolve; });
+      const result = new Promise((resolve, reject) => {
+        child.on("message", (message) => {
+          if (message.type === "ready") readyResolve();
+          if (message.type === "result") resolve(message);
+        });
+        child.on("error", reject);
+        child.on("exit", (code) => { if (code !== 0) reject(new Error(`Race worker exited ${code}`)); });
+      });
+      return { child, ready, result };
+    };
+
+    const workers = [startWorker(0), startWorker(1)];
+    await Promise.all(workers.map((worker) => worker.ready));
+    for (const worker of workers) worker.child.send({ type: "go" });
+    const outcomes = await Promise.all(workers.map((worker) => worker.result));
+    assert.equal(outcomes.filter((outcome) => outcome.ok).length, 1);
+    assert.deepEqual(outcomes.filter((outcome) => !outcome.ok).map((outcome) => outcome.code), ["BOOKING_RESOURCE_BUSY"]);
+
+    const readStore = new WorkflowStore(database);
+    try {
+      const rows = readStore.db.prepare("SELECT generation FROM ow_replay_two_bookings ORDER BY generation").all();
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].generation, 1);
+    } finally { readStore.close(); }
+  } finally {
+    for (const child of children) if (!child.killed) child.kill();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
