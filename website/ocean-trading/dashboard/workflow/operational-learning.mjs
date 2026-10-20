@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { digest, objectHash, requireThat } from './common.mjs';
 import { coverageOverlaps, readObservedSessionProofs, sessionEvidence } from './operational-research-protocol.mjs';
+import {timedSync} from '../request-timing.mjs';
 
 const REQUEST_VERSION = 'ocean-operational-learning-request/v1';
 const RESPONSE_VERSION = 'ocean-operational-learning-result/v1';
@@ -635,6 +636,9 @@ export class OperationalLearning {
   }
 
   telemetryQualification(run, context, plan, summary) {
+    return timedSync('learning.telemetry-qualification',()=>this.observedTelemetryQualification(run,context,plan,summary));
+  }
+  observedTelemetryQualification(run, context, plan, summary) {
     if (!this.telemetryRequired) return { verified: true, bypassed: true, proof_basis: 'EXPLICIT_MOCK_ONLY' };
     if (!this.telemetryDb || !this.completionRoot) return { verified: false, reasons: ['TELEMETRY_QUALIFICATION_CONFIG_REQUIRED'] };
     if (!fs.existsSync(this.telemetryDb)) return { verified: false, reasons: ['TELEMETRY_DATABASE_REQUIRED'] };
