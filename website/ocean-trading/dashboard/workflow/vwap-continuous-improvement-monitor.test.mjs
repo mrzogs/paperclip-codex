@@ -34,13 +34,16 @@ function insertRows(dbFile,start,count,{role=null,quality='',setup='london-long'
   db.close();
 }
 function exactRoutingAgent(config) {
-  return {adapterConfig:{cwd:config.routing.required_project_root,model:config.routing.required_agent_model},metadata:{active_strategy_id:config.strategy_id,
-    brain_project:config.brain_identity.project,brain_domain:config.brain_identity.domain,brain_credential_ref:config.routing.brain_credential_ref},permissions:{canUseSecrets:true}};
+  return {companyId:config.trigger.company_id,status:'idle',adapterType:'codex_local',
+    adapterConfig:{cwd:config.routing.required_project_root,model:config.routing.required_agent_model},metadata:{active_strategy_id:config.strategy_id,
+    brain_project:config.brain_identity.project,brain_domain:config.brain_identity.domain,brain_credential_ref:config.routing.brain_credential_ref,
+    paperclip_project_id:config.routing.paperclip_project_id,paperclip_workspace_id:config.routing.paperclip_project_workspace_id,
+    environment:'TEST_ONLY',live_real_enabled:false},permissions:{canUseSecrets:true,canCreateAgents:false,canUseLiveTrading:false}};
 }
 function exactRoutingResource(url,config) {
   if(url==='/api/agents/agent')return exactRoutingAgent(config);
-  if(url==='/api/projects/'+PROJECT_ID)return {id:PROJECT_ID,companyId:config.trigger.company_id};
-  if(url==='/api/projects/'+PROJECT_ID+'/workspaces')return [{id:WORKSPACE_ID,projectId:PROJECT_ID,cwd:config.routing.required_project_root}];
+  if(url==='/api/projects/'+PROJECT_ID)return {id:PROJECT_ID,companyId:config.trigger.company_id,primaryWorkspace:{id:WORKSPACE_ID}};
+  if(url==='/api/projects/'+PROJECT_ID+'/workspaces')return [{id:WORKSPACE_ID,projectId:PROJECT_ID,cwd:config.routing.required_project_root,isPrimary:true}];
   return undefined;
 }
 
@@ -53,6 +56,16 @@ test('config enforces non-live safety boundaries',()=>{
   assert.throws(()=>loadVwapContinuousImprovementConfig(file),/ROUTING_BOUNDARY_INVALID/);
   fs.writeFileSync(file,JSON.stringify({...f.config,safety:{...f.config.safety,automatic_approval_enabled:true}}));
   assert.throws(()=>loadVwapContinuousImprovementConfig(file),/SAFETY_BOUNDARY/);
+});
+test('checked-in monitor config pins the approved isolated coordinator route',()=>{
+  const config=loadVwapContinuousImprovementConfig(new URL('../config/vwap-continuous-improvement-monitor.json',import.meta.url));
+  assert.equal(config.trigger.agent_id,'75618a1a-a7ba-44bd-b391-48d58617433c');
+  assert.equal(config.routing.paperclip_project_id,'e0a78492-01d4-4ba8-b733-3dbefa68ae34');
+  assert.equal(config.routing.paperclip_project_workspace_id,'fa3a13dc-7189-4891-8f01-f859886a87b1');
+  assert.equal(config.safety.production_version,null);
+  assert.equal(config.safety.automatic_approval_enabled,false);
+  assert.equal(config.safety.live_real_enabled,false);
+  assert.equal(config.safety.real_order_routing,'PROHIBITED');
 });
 test('first scan baselines rows and incomplete telemetry fails closed',async()=>{
   const f=fixture();insertRows(f.dbFile,1,60,{quality:'vol_state_missing'});let calls=0;
@@ -185,6 +198,33 @@ test('a substituted Brain credential scope blocks before project routing or wake
     assert.equal(requests.some(item=>item.url.startsWith('/api/projects/')),false);
     assert.equal(requests.some(item=>item.url.includes('/wakeup')),false);
   } finally { await new Promise(resolve=>server.close(resolve)); }
+});
+test('approval, project metadata, and non-live permission mismatches never wake a coordinator',async()=>{
+  for(const [label,mutate] of [
+    ['pending approval',agent=>{agent.status='pending_approval';}],
+    ['wrong company',agent=>{agent.companyId='other-company';}],
+    ['wrong project metadata',agent=>{agent.metadata.paperclip_project_id='other-project';}],
+    ['wrong workspace metadata',agent=>{agent.metadata.paperclip_workspace_id='other-workspace';}],
+    ['live permission',agent=>{agent.permissions.canUseLiveTrading=true;}],
+    ['agent creation permission',agent=>{agent.permissions.canCreateAgents=true;}],
+  ]){
+    const f=fixture(),requests=[];
+    const server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{
+      requests.push({url:req.url,method:req.method,body:body?JSON.parse(body):null});res.setHeader('content-type','application/json');
+      if(req.url==='/api/agents/agent'){const agent=exactRoutingAgent(f.config);mutate(agent);res.end(JSON.stringify(agent));}
+      else if(req.method==='GET')res.end('[]');
+      else res.end(JSON.stringify({id:'issue-'+label,identifier:'OCEA-ROUTE-BLOCKED'}));
+    });});
+    await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));f.config.trigger.api_base_url='http://127.0.0.1:'+server.address().port+'/api';
+    try{
+      const receipt=await dispatchVwapImprovementEvent(f.config,{kind:'TRANSPORT_TEST',event_id:'route-'+label,
+        strategy_id:f.config.strategy_id,analysis_hash:'sha256:test',transport_test:true});
+      assert.equal(receipt.routing_state,'BLOCKED_EXACT_PROJECT_ROUTE_REQUIRED',label);
+      assert.equal(receipt.wakeup_id,null,label);
+      assert.equal(requests.some(item=>item.url.startsWith('/api/projects/')),false,label);
+      assert.equal(requests.some(item=>item.url.includes('/wakeup')),false,label);
+    } finally { await new Promise(resolve=>server.close(resolve)); }
+  }
 });
 test('configured project IDs remain blocked when the Paperclip workspace root is different',async()=>{
   const f=fixture(),requests=[],server=http.createServer((req,res)=>{let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{requests.push({url:req.url,method:req.method,body:body?JSON.parse(body):null});res.setHeader('content-type','application/json');if(req.url==='/api/agents/agent')res.end(JSON.stringify(exactRoutingAgent(f.config)));else if(req.url==='/api/projects/'+PROJECT_ID)res.end(JSON.stringify({id:PROJECT_ID,companyId:f.config.trigger.company_id}));else if(req.url==='/api/projects/'+PROJECT_ID+'/workspaces')res.end(JSON.stringify([{id:WORKSPACE_ID,projectId:PROJECT_ID,cwd:'D:\\ExternalRepos\\ocean-quant-lab'}]));else if(req.method==='GET')res.end('[]');else res.end(JSON.stringify({id:'issue-wrong-workspace',identifier:'OCEA-WRONG-WORKSPACE'}));});});

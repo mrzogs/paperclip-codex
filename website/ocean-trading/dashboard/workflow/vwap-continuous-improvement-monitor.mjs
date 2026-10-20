@@ -165,12 +165,21 @@ export async function dispatchVwapImprovementEvent(config,event) {
   const base=String(trigger.api_base_url||'http://127.0.0.1:3100/api').replace(/\/+$/,''),timeout=Number(trigger.timeout_ms||15000);
   const routing=config.routing||{},target=await requestJson(base+'/agents/'+trigger.agent_id,{},timeout);
   const samePath=(left,right)=>path.win32.normalize(String(left||'')).toLowerCase()===path.win32.normalize(String(right||'')).toLowerCase();
-  const agentReady=samePath(target?.adapterConfig?.cwd,routing.required_project_root)
+  const agentReady=target?.companyId===trigger.company_id
+    && (target?.status==='idle'||target?.status==='running')
+    && target?.adapterType==='codex_local'
+    && samePath(target?.adapterConfig?.cwd,routing.required_project_root)
     && target?.adapterConfig?.model===routing.required_agent_model
     && target?.metadata?.active_strategy_id===event.strategy_id
     && target?.metadata?.brain_project===brain.project && target?.metadata?.brain_domain===brain.domain
     && target?.metadata?.brain_credential_ref===routing.brain_credential_ref
-    && target?.permissions?.canUseSecrets===true;
+    && target?.metadata?.paperclip_project_id===routing.paperclip_project_id
+    && target?.metadata?.paperclip_workspace_id===routing.paperclip_project_workspace_id
+    && target?.metadata?.environment==='TEST_ONLY'
+    && target?.metadata?.live_real_enabled===false
+    && target?.permissions?.canUseSecrets===true
+    && target?.permissions?.canCreateAgents===false
+    && target?.permissions?.canUseLiveTrading===false;
   let project=null,workspace=null;
   if(agentReady&&UUID.test(routing.paperclip_project_id||'')&&UUID.test(routing.paperclip_project_workspace_id||'')){
     project=await requestJson(base+'/projects/'+routing.paperclip_project_id,{},timeout);
@@ -178,7 +187,9 @@ export async function dispatchVwapImprovementEvent(config,event) {
     workspace=(Array.isArray(workspaces)?workspaces:workspaces?.items||[]).find(row=>row.id===routing.paperclip_project_workspace_id)||null;
   }
   const routeReady=agentReady && project?.id===routing.paperclip_project_id && project?.companyId===trigger.company_id
-    && workspace?.projectId===routing.paperclip_project_id && samePath(workspace?.cwd,routing.required_project_root);
+    && project?.primaryWorkspace?.id===routing.paperclip_project_workspace_id
+    && workspace?.projectId===routing.paperclip_project_id && workspace?.isPrimary===true
+    && samePath(workspace?.cwd,routing.required_project_root);
   const routingState=routeReady?'EXACT_PROJECT_READY':'BLOCKED_EXACT_PROJECT_ROUTE_REQUIRED';
   const title='[VWAP CI]['+event.strategy_id+'] '+event.kind+' '+event.event_id;
   const listed=await requestJson(base+'/companies/'+trigger.company_id+'/issues?limit=100',{},timeout);
