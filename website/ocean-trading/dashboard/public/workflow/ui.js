@@ -285,6 +285,9 @@ function strategyOnboardingPage(data) {
   const stagingContinuationActive = ['PAPERCLIP_REQUESTER_WAKE_QUEUED','PAPERCLIP_REQUESTER_WAKE_STARTED','OCEAN_LIVENESS_REPAIR_QUEUED','OCEAN_LIVENESS_REPAIR_STARTED'].includes(stagingContinuationState);
   const stagingReceipt = stagingAuthority?.staging_success_receipt || null;
   const runContractPublication = eventMonitor.run_contract_publication || null;
+  const continuity = approvalDispatch.continuity || null;
+  const continuityCurrent = continuity?.freshness?.state === 'CURRENT';
+  const automaticJob = continuityCurrent ? continuity.next_automatic_job : null;
   const comparatorDecisionStatus = unavailableComparatorApprovals.length ? 'PAPERCLIP_STATUS_UNAVAILABLE'
     : deniedComparatorApprovals.length ? 'NOT_GRANTED_IN_PAPERCLIP'
       : allComparatorApprovalsApproved ? 'APPROVED_IN_PAPERCLIP'
@@ -422,11 +425,18 @@ function strategyOnboardingPage(data) {
     : programNextActionText;
   const nextActionOwner = comparatorInvalid ? 'Ocean' : preflightBlocked && stagingApprovalPending ? 'Wayne / Paperclip board' : preflightBlocked ? 'Bound CICD coordinator (Ocean liveness monitor only)' : comparator.state === 'AVAILABLE' ? 'Wayne / Paperclip board' : improvementActive ? 'Ocean continuous-improvement coordinator' : pendingAcceptanceGate?.owner || governedAction?.owner || null;
   const nextActionControls = preflightBlocked
-    ? `<div class='actions'>${stagingAuthority ? `<a class='button primary' href='${esc(stagingAuthority.approval_url)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}${stagingApprovalPending ? 'Review' : 'Open'} staging approval in Paperclip</a><a class='button' href='${esc(stagingAuthority.package_url)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}Open sealed package</a>` : ''}<a class='button' href='${esc(preflightOutcome.next_task.url)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}Open ${esc(preflightOutcome.next_task.issue_identifier)}</a>${stagingExecutionRoute?.engineering_issue_identifier ? `<a class='button' href='http://127.0.0.1:3100/OCEA/issues/${esc(stagingExecutionRoute.engineering_issue_identifier)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}Open ${esc(stagingExecutionRoute.engineering_issue_identifier)}</a>` : ''}</div>`
+    ? `<div class='actions'>${stagingAuthority ? `<a class='button primary' href='${esc(stagingAuthority.approval_url)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}${stagingApprovalPending ? 'Review' : 'Open'} staging approval in Paperclip</a><a class='button' href='${esc(stagingAuthority.package_url)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}Open sealed package</a>` : ''}${automaticJob ? `<a class='button' href='${esc(automaticJob.url)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}Open current work ${esc(automaticJob.identifier)}</a>` : ''}</div>`
     : comparator.state === 'AVAILABLE' || comparatorInvalid || improvementActive || pendingAcceptanceGate || governedAction ? '' : `<div class='actions'><a class='button primary' ${paperRuntimeActive ? '' : 'data-replay-monitor'} href='${esc(nextActionHref)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}${nextActionLabel}</a></div>`;
   const nextAction = onboardingComplete
     ? `<div class='strategy-next-action'><div><span>Current action</span><h3>${esc(nextActionTitle)}</h3><p>${esc(nextActionText)}</p>${nextActionOwner ? `<small>Owner: ${esc(nextActionOwner)}</small>` : ''}</div>${nextActionControls}</div>`
     : `<div class='strategy-next-action'><div><span>Current action</span><h3>Finish the simple setup</h3><p>${registration.can_register ? 'The setup is confirmed. Let Ocean finish the Replay preparation.' : setupConfirmed ? 'Ocean is recording the confirmed setup. Refresh when synchronization is complete.' : 'Review the detected strategy, account, contract, and Replay instance once.'}</p></div><div class='actions'>${setupAction}</div></div>`;
+  const continuitySummary = preflightBlocked && continuity
+    ? section('Current automatic work', continuityCurrent
+      ? (automaticJob ? `<h3>${esc(automaticJob.title)}</h3><p><a href='${esc(automaticJob.url)}' target='_blank' rel='noopener'>${esc(automaticJob.identifier)}</a> · ${esc(automaticJob.owner_name)} · ${badge(automaticJob.status)} · ${badge(automaticJob.worker.state)}</p>${automaticJob.recovery_required ? `<p>${esc(automaticJob.recovery_action)}</p>` : ''}` : '<p>No runnable engineering task is currently proven. The coordinator must reconcile the issue chain.</p>')
+        + `<p>Candidate detection: ${Number(eventMonitor.eligible_trade_count || 0) === 0 ? 'waiting for eligible trades' : 'monitoring eligible evidence'} (${esc(String(eventMonitor.eligible_trade_count || 0))} eligible / ${esc(String(eventMonitor.observed_trade_count || 0))} observed).</p>`
+        + `<details><summary>Authority and handoff requirements</summary><p>Instance admission and host readiness: ${esc(human(continuity.authority.instance_admission))}. Current exclusive booking: ${esc(human(continuity.authority.current_exclusive_booking))}. ${esc(continuity.authority.booking_requirement)}</p><p>Per-run manifest: ${esc(human(continuity.authority.per_run_manifest))}. ${esc(continuity.authority.future_gate)} Standing TEST policy: ${esc(human(continuity.authority.test_standing_policy))}; repeat-run authority is not inferred from the current decisions.</p><p>Paper and Live promotion each require a separate human decision.</p>${table(['Issue','Current status'],continuity.issue_chain.map(item=>[esc(item.identifier)+' — '+esc(item.title),badge(item.status)]))}</details><small>Paperclip readback: ${esc(date(continuity.observed_at_utc))}. Ocean refreshes this automatically.</small>`
+      : '<p>Paperclip continuity evidence is stale. Ocean is refreshing the current owner and work state; no worker start or authority is inferred.</p>', badge(continuityCurrent ? 'PAPERCLIP_LIVE' : 'STALE'))
+    : '';
   const approvalCards = approvals => approvals.map(item => {
     const linkLabel = item.action_required ? 'Review approval in Paperclip' : 'Open approval record';
     const detail = item.authoritative
@@ -544,6 +554,7 @@ function strategyOnboardingPage(data) {
       [paperRuntimeActive ? 'Paper contract' : 'Replay contract', esc((paperRuntimeActive ? program.current_runtime_contracts?.paper : program.current_runtime_contracts?.replay) || instance.symbol)],
     ].map(([label,value]) => `<div><span>${esc(label)}</span><strong>${value}</strong></div>`).join('')}</div>`
     + nextAction
+    + continuitySummary
     + comparatorApprovalSection
     + humanApprovalSection
     + paperQualificationSection

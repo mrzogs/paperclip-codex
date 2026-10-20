@@ -300,17 +300,18 @@ export async function dispatchVwapImprovementEvent(config,event) {
       requiredProjectRoot:routing.required_project_root,brainCredentialRef:routing.brain_credential_ref,
       requiredAgentModel:routing.required_agent_model,paperclipProjectId:routing.paperclip_project_id,
       paperclipProjectWorkspaceId:routing.paperclip_project_workspace_id,routingState},idempotencyKey:event.event_id})},timeout);
-  if(!wakeup?.id)throw new Error('VWAP_MONITOR_WAKE_RECEIPT_INVALID');
+  if(typeof wakeup?.id!=='string'||!wakeup.id)throw new Error('VWAP_MONITOR_WAKE_RECEIPT_INVALID');
   const deadline=Date.now()+Number(trigger.wake_start_timeout_ms||30000);
   let run=wakeup;
+  const started=run=>STARTED_STATUSES.has(String(run?.status||'').toLowerCase())&&Number.isFinite(Date.parse(run?.startedAt||''));
   while(Date.now()<deadline){
-    if(STARTED_STATUSES.has(String(run?.status||'').toLowerCase())&&run?.startedAt)break;
+    if(started(run))break;
     run=await requestJson(base+'/heartbeat-runs/'+wakeup.id,{},timeout);
-    if(STARTED_STATUSES.has(String(run?.status||'').toLowerCase())&&run?.startedAt)break;
+    if(started(run))break;
     await sleep(Number(trigger.wake_poll_interval_ms||500));
   }
-  if(!STARTED_STATUSES.has(String(run?.status||'').toLowerCase())||!run?.startedAt)throw new Error('VWAP_MONITOR_WAKE_NOT_PROVEN_STARTED');
-  if(run?.agentId!==trigger.agent_id||run?.contextSnapshot?.issueId!==issue.id
+  if(!started(run))throw new Error('VWAP_MONITOR_WAKE_NOT_PROVEN_STARTED');
+  if(run?.id!==wakeup.id||run?.agentId!==trigger.agent_id||run?.contextSnapshot?.issueId!==issue.id
     ||run?.contextSnapshot?.wakeReason!==wakeReason)throw new Error('VWAP_MONITOR_WAKE_READBACK_MISMATCH');
   return {triggered:true,dispatch_committed:true,issue_created:issueCreated,issue_id:issue.id,issue_identifier:issue.identifier||null,
     wakeup_id:wakeup.id,wakeup_status:run.status,wakeup_started_at_utc:run.startedAt,target_agent_id:trigger.agent_id,routing_state:routingState,

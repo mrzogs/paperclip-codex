@@ -59,6 +59,13 @@ test('complete onboarding is actionable in the browser without touching producti
   fs.writeFileSync(approvalDispatchState, JSON.stringify({
     schema_version:'ocean-vwap-physical-comparator-approval-dispatch-state/v1', strategy_id:TEST_STRATEGY_ID,
     enabled:true, status:'PREFLIGHT_BLOCKED_PHYSICAL_BINDING', checked_at_utc:'2026-10-20T13:33:06Z',
+    continuity:{schema_version:'ocean-vwap-continuity-projection/v1',source:'PAPERCLIP_LIVE',observed_at_utc:new Date().toISOString(),freshness:{state:'CURRENT'},
+      next_automatic_job:{identifier:'OCEA-30',title:'Restore execution: review supervised host candidate',status:'BLOCKED',
+        owner_name:'Mara Vale - Quant Lab Coordinator',url:'http://127.0.0.1:3100/OCEA/issues/OCEA-30',worker:{state:'NOT_OBSERVED'},
+        recovery_required:true,recovery_action:'Fix the unsupported adapter model and resume the exact review.'},
+      issue_chain:[{identifier:'OCEA-29',title:'Offline candidate complete',status:'DONE'},{identifier:'OCEA-30',title:'Review candidate',status:'BLOCKED'}],
+      authority:{instance_admission:'NOT_PROVEN',current_exclusive_booking:'NOT_PROVEN',booking_requirement:'Atomic current owner/generation, expiry and revocation readback is required.',
+        per_run_manifest:'POST_STAGING_BINDING_NOT_AUTHORIZED',future_gate:'One consolidated post-staging run/measurement decision after physical and controller proof.',test_standing_policy:'NOT_GRANTED'}},
     heartbeat_run_id:'6971a2a5-2a42-4801-b8cc-6c98ccd1df71', heartbeat_run_status:'succeeded',
     preflight_outcome:{ status:'BLOCKED_PHYSICAL_BINDING_MISMATCH', heartbeat_run_id:'6971a2a5-2a42-4801-b8cc-6c98ccd1df71',
       completed_at_utc:'2026-10-20T13:32:41.930Z', brain_record_id:'reasoning-20261020133145-7184475e', supplemental_brain_record_id:'reasoning-20261020133945-6dfa3012', account_alias:'Sim1',
@@ -132,7 +139,7 @@ test('complete onboarding is actionable in the browser without touching producti
   const browserErrors = []; page.on('pageerror', error => browserErrors.push(error.message));
   try {
     await page.goto(`${base}/improvement/strategies/${TEST_STRATEGY_ID}`);
-    assert.match(await page.locator('script[type="module"]').getAttribute('src'),/v238-paperclip-staging-approval-20261020-1/,'the deployed page must request the current workflow module version');
+    assert.match(await page.locator('script[type="module"]').getAttribute('src'),/v238-continuity-current-action-20261020-2/,'the deployed page must request the current workflow module version');
     await page.getByRole('button',{ name:'Sign in', exact:true }).click();
     await page.getByRole('link',{ name:'Help', exact:true }).click();
     await expect(page.getByRole('heading',{ name:'Onboarding help', exact:true })).toBeVisible();
@@ -156,6 +163,11 @@ test('complete onboarding is actionable in the browser without touching producti
     await expect(page.locator(`[data-approval-id="${TEST_COMPARATOR_APPROVAL_ID}"]`).getByRole('link',{ name:'Open approval record', exact:true })).toHaveAttribute('href',`${base}/approvals/${TEST_COMPARATOR_APPROVAL_ID}`);
     await expect(page.locator(`[data-approval-id="${TEST_RELEASE_APPROVAL_ID}"]`).getByRole('link',{ name:'Open approval record', exact:true })).toHaveAttribute('href',`${base}/approvals/${TEST_RELEASE_APPROVAL_ID}`);
     await expect(page.getByText('Approved in Paperclip',{ exact:true })).toBeVisible();
+    await expect(page.getByRole('heading',{name:'Current automatic work',exact:true})).toBeVisible();
+    await expect(page.getByRole('heading',{name:'Restore execution: review supervised host candidate',exact:true})).toBeVisible();
+    await expect(page.getByText('Fix the unsupported adapter model and resume the exact review.',{exact:true})).toBeVisible();
+    await expect(page.getByRole('link',{name:'OCEA-30',exact:true})).toHaveAttribute('href','http://127.0.0.1:3100/OCEA/issues/OCEA-30');
+    await expect(page.getByText('Candidate detection: waiting for eligible trades (0 eligible / 245 observed).',{exact:true})).toBeVisible();
     await expect(page.getByText('Pending human approval',{ exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'Read-only preflight complete — blocked', exact:true })).toBeVisible();
     await expect(page.getByRole('link',{ name:'OCEA-22', exact:true })).toHaveAttribute('href','http://127.0.0.1:3100/OCEA/issues/OCEA-22');
