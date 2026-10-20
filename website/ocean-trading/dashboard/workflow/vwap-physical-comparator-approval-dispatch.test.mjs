@@ -28,6 +28,10 @@ function fixture({statuses = ['approved','approved'], issuePatch = {}, agentPatc
   const issue = {id:config.paperclip.issue_id, identifier:config.paperclip.issue_identifier, companyId:config.paperclip.company_id,
     projectId:config.paperclip.project_id, projectWorkspaceId:config.paperclip.workspace_id,
     assigneeAgentId:config.paperclip.coordinator_agent_id, status:'blocked', ...issuePatch};
+  const nextTask = {id:config.preflight_outcome.next_task.issue_id, identifier:config.preflight_outcome.next_task.issue_identifier,
+    companyId:config.paperclip.company_id, projectId:config.paperclip.project_id, projectWorkspaceId:config.paperclip.workspace_id,
+    parentId:config.paperclip.issue_id, title:config.preflight_outcome.next_task.title,
+    assigneeAgentId:config.paperclip.coordinator_agent_id, status:'in_progress', executionRunId:'cccccccc-cccc-4ccc-8ccc-cccccccccccc'};
   const grants = config.coordinator_gate.required_read_only_paths.map(value => `"${value.replace(/\\/g, '/')}" = "read"`).join(', ');
   const agent = {id:config.paperclip.coordinator_agent_id, companyId:config.paperclip.company_id, name:config.paperclip.coordinator_name,
     adapterType:'codex_local', adapterConfig:{cwd:config.paperclip.coordinator_project_root, model:config.paperclip.coordinator_model,
@@ -41,6 +45,7 @@ function fixture({statuses = ['approved','approved'], issuePatch = {}, agentPatc
     const route = new URL(url).pathname + new URL(url).search;
     if (route.includes('/approvals/')) return response(approvals.get(route.split('/').at(-1)));
     if (route === '/api/issues/' + config.paperclip.issue_id) return response(issue);
+    if (route === '/api/issues/' + config.preflight_outcome.next_task.issue_id) return response(nextTask);
     if (route === '/api/agents/' + config.paperclip.coordinator_agent_id) return response(agent);
     if (route.startsWith('/api/companies/') && route.includes('/heartbeat-runs')) return response(runs);
     if (route.startsWith('/api/agents/') && route.includes('/wakeup')) {
@@ -57,7 +62,7 @@ function fixture({statuses = ['approved','approved'], issuePatch = {}, agentPatc
     }
     return response({error:'not found', route}, 404);
   };
-  return {root, config, approvals, issue, agent, runs, fetchImpl, posts:() => posts};
+  return {root, config, approvals, issue, nextTask, agent, runs, fetchImpl, posts:() => posts};
 }
 
 test('one pending approval remains fail-closed and never wakes', async () => {
@@ -105,6 +110,25 @@ test('both exact approvals dispatch once in either order and require running rea
   assert.equal(f.posts(), 1);
 });
 
+test('completed exact preflight projects the physical mismatch and Paperclip task without another wake', async () => {
+  const f = fixture();
+  f.runs.push({
+    id:f.config.preflight_outcome.heartbeat_run_id,
+    agentId:f.config.paperclip.coordinator_agent_id,
+    status:'succeeded',
+    startedAt:'2026-10-20T13:30:21.351Z',
+    finishedAt:'2026-10-20T13:32:41.930Z',
+    contextSnapshot:{issueId:f.config.paperclip.issue_id, wakeReason:'vwap_v238_dual_approval_read_only_preflight_e9a1f3be3c90bb88bc2e'},
+  });
+  const result = await scanVwapPhysicalComparatorApprovalDispatch({config:f.config, stateFile:f.config.state_path, fetchImpl:f.fetchImpl});
+  assert.equal(result.status, 'PREFLIGHT_BLOCKED_PHYSICAL_BINDING');
+  assert.equal(result.preflight_outcome.account_alias, 'Sim1');
+  assert.equal(result.preflight_outcome.next_task.issue_identifier, 'OCEA-22');
+  assert.equal(result.safety.runtime_write_scope_authorized, false);
+  assert.equal(result.safety.replay_start_authorized, false);
+  assert.equal(f.posts(), 0);
+});
+
 test('queued receipt alone is not accepted as dispatch success', async () => {
   const f = fixture({queuedOnly:true});
   const result = await scanVwapPhysicalComparatorApprovalDispatch({config:f.config, stateFile:f.config.state_path, fetchImpl:f.fetchImpl, sleepImpl:async()=>{}});
@@ -138,6 +162,7 @@ test('HTTP integration reads a queued wake back as running before recording disp
     response.setHeader('content-type', 'application/json');
     if (url.pathname.startsWith('/api/approvals/')) return response.end(JSON.stringify(f.approvals.get(url.pathname.split('/').at(-1))));
     if (url.pathname === '/api/issues/' + f.config.paperclip.issue_id) return response.end(JSON.stringify(f.issue));
+    if (url.pathname === '/api/issues/' + f.config.preflight_outcome.next_task.issue_id) return response.end(JSON.stringify(f.nextTask));
     if (url.pathname === '/api/agents/' + f.config.paperclip.coordinator_agent_id && request.method === 'GET') return response.end(JSON.stringify(f.agent));
     if (url.pathname.includes('/heartbeat-runs') && url.pathname.startsWith('/api/companies/')) return response.end(JSON.stringify(f.runs));
     if (url.pathname === '/api/agents/' + f.config.paperclip.coordinator_agent_id + '/wakeup') {

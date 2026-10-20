@@ -56,7 +56,13 @@ test('complete onboarding is actionable in the browser without touching producti
   const approvalDispatchState = path.join(root, 'vwap-approval-dispatch-state.json');
   fs.writeFileSync(approvalDispatchState, JSON.stringify({
     schema_version:'ocean-vwap-physical-comparator-approval-dispatch-state/v1', strategy_id:TEST_STRATEGY_ID,
-    enabled:true, status:'WAITING_FOR_BOTH_APPROVALS', checked_at_utc:'2026-10-20T13:00:00Z',
+    enabled:true, status:'PREFLIGHT_BLOCKED_PHYSICAL_BINDING', checked_at_utc:'2026-10-20T13:33:06Z',
+    heartbeat_run_id:'6971a2a5-2a42-4801-b8cc-6c98ccd1df71', heartbeat_run_status:'succeeded',
+    preflight_outcome:{ status:'BLOCKED_PHYSICAL_BINDING_MISMATCH', heartbeat_run_id:'6971a2a5-2a42-4801-b8cc-6c98ccd1df71',
+      completed_at_utc:'2026-10-20T13:32:41.930Z', brain_record_id:'reasoning-20261020133145-7184475e', supplemental_brain_record_id:'reasoning-20261020133945-6dfa3012', account_alias:'Sim1',
+      strategy_artifact:{ saved_version:'v0.6.240', saved_hash:'sha256:'+'9'.repeat(64), selected_version:'v0.6.238', selected_hash:'sha256:'+'6'.repeat(64) },
+      telemetry_artifact:{ saved_version:'v0.5.52', saved_hash:'sha256:'+'c'.repeat(64), selected_version:'v0.5.53', selected_hash:'sha256:'+'5'.repeat(64) },
+      next_task:{ issue_id:'33333333-3333-4333-8333-333333333333', issue_identifier:'OCEA-22', title:'Prepare exact Sim1 TEST staging package', status:'IN_PROGRESS', execution_run_id:'44444444-4444-4444-8444-444444444444', url:'http://127.0.0.1:3100/OCEA/issues/OCEA-22' } },
     gate:{ action:'READ_ONLY_PREFLIGHT_ONLY', current_permission_state:'READ_ONLY_EXTERNAL_EVIDENCE_NO_REPLAY_RUNTIME_WRITE',
       post_preflight_gate:'EXACT_TEST_REPLAY_TWO_RUNTIME_OUTPUT_WRITE_START_SCOPE_REQUIRED', post_preflight_action:'REQUEST_OR_DERIVE_ONLY_AFTER_READ_ONLY_PREFLIGHT' },
     safety:{ execution_authority:false, runtime_write_scope_authorized:false, replay_start_authorized:false,
@@ -75,11 +81,11 @@ test('complete onboarding is actionable in the browser without touching producti
     if ([TEST_COMPARATOR_APPROVAL_ID,TEST_RELEASE_APPROVAL_ID].some(id => url.pathname === `/api/approvals/${id}`)) {
       const approvalId = url.pathname.split('/').at(-1);
       response.setHeader('Content-Type','application/json');
-      response.end(JSON.stringify({ id:approvalId, type:'request_board_approval', status:'pending', payload:{
+      response.end(JSON.stringify({ id:approvalId, type:'request_board_approval', status:'approved', payload:{
         title:approvalId === TEST_COMPARATOR_APPROVAL_ID
           ? 'Approve v0.6.238 TEST dataset and physical comparator selection'
           : 'Approve create-new v0.6.238 Sep-2025 Z25 TEST RUN_RELEASE',
-      }, createdAt:'2026-10-20T12:00:00Z', decidedAt:null }));
+      }, createdAt:'2026-10-20T12:00:00Z', decidedAt:'2026-10-20T13:30:17.602Z' }));
       return;
     }
     if (url.pathname.startsWith('/api/workflow/')) { void backend.handle(request, response, url); return; }
@@ -115,7 +121,7 @@ test('complete onboarding is actionable in the browser without touching producti
   const browserErrors = []; page.on('pageerror', error => browserErrors.push(error.message));
   try {
     await page.goto(`${base}/improvement/strategies/${TEST_STRATEGY_ID}`);
-    assert.match(await page.locator('script[type="module"]').getAttribute('src'),/v238-dual-approval-dispatch-20261020-1/,'the deployed page must request the current workflow module version');
+    assert.match(await page.locator('script[type="module"]').getAttribute('src'),/v238-paperclip-preflight-blocker-20261020-1/,'the deployed page must request the current workflow module version');
     await page.getByRole('button',{ name:'Sign in', exact:true }).click();
     await page.getByRole('link',{ name:'Help', exact:true }).click();
     await expect(page.getByRole('heading',{ name:'Onboarding help', exact:true })).toBeVisible();
@@ -132,14 +138,16 @@ test('complete onboarding is actionable in the browser without touching producti
     await expect(page.getByRole('heading',{ name:'Required human approvals', exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'CICD VWAP Recovery Coordinator', exact:true })).toBeVisible();
     await expect(page.getByText('Approved',{ exact:true }).last()).toBeVisible();
-    await expect(page.getByRole('link',{ name:'Open approval record', exact:true })).toHaveAttribute('href',`${base}/approvals/${TEST_APPROVAL_ID}`);
+    await expect(page.locator(`[data-approval-id="${TEST_APPROVAL_ID}"]`).getByRole('link',{ name:'Open approval record', exact:true })).toHaveAttribute('href',`${base}/approvals/${TEST_APPROVAL_ID}`);
     await expect(page.getByRole('heading',{ name:'Physical comparator approvals', exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'Approve v0.6.238 TEST dataset and physical comparator selection', exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'Approve create-new v0.6.238 Sep-2025 Z25 TEST RUN_RELEASE', exact:true })).toBeVisible();
-    const comparatorApprovalLinks = page.getByRole('link',{ name:'Review approval in Paperclip', exact:true });
-    await expect(comparatorApprovalLinks).toHaveCount(2);
-    await expect(comparatorApprovalLinks.nth(0)).toHaveAttribute('href',`${base}/approvals/${TEST_COMPARATOR_APPROVAL_ID}`);
-    await expect(comparatorApprovalLinks.nth(1)).toHaveAttribute('href',`${base}/approvals/${TEST_RELEASE_APPROVAL_ID}`);
+    await expect(page.locator(`[data-approval-id="${TEST_COMPARATOR_APPROVAL_ID}"]`).getByRole('link',{ name:'Open approval record', exact:true })).toHaveAttribute('href',`${base}/approvals/${TEST_COMPARATOR_APPROVAL_ID}`);
+    await expect(page.locator(`[data-approval-id="${TEST_RELEASE_APPROVAL_ID}"]`).getByRole('link',{ name:'Open approval record', exact:true })).toHaveAttribute('href',`${base}/approvals/${TEST_RELEASE_APPROVAL_ID}`);
+    await expect(page.getByText('Approved in Paperclip',{ exact:true })).toBeVisible();
+    await expect(page.getByText('Pending human approval',{ exact:true })).toBeVisible();
+    await expect(page.getByRole('heading',{ name:'Read-only preflight complete — blocked', exact:true })).toBeVisible();
+    await expect(page.getByRole('link',{ name:'OCEA-22', exact:true })).toHaveAttribute('href','http://127.0.0.1:3100/OCEA/issues/OCEA-22');
     await expect(page.getByText('v0.1.1 / v0.6.234-absolute-risk-gate-candidate',{ exact:true })).toBeVisible();
     await expect(page.getByText('Distinct unselected unchanged',{ exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'Event-driven evidence monitor', exact:true })).toBeVisible();
@@ -178,10 +186,10 @@ test('complete onboarding is actionable in the browser without touching producti
     await expect(page.locator('#notice')).toContainText('Open Replay Monitor to view Ocean data');
     await expect(page.getByRole('heading',{ name:'Onboarding complete', exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'CI/CD continuous run', exact:true })).toBeVisible();
-    await expect(page.getByRole('heading',{ name:'Approve the v0.6.238 TEST comparator run', exact:true })).toBeVisible();
-    await expect(page.getByText(/Ocean remains fail-closed; this does not start Replay or alter v0\.1\.1\/v234, v240, historical roles, Paper, or Live\./)).toBeVisible();
-    await expect(page.getByRole('heading',{ name:'Read-only coordinator preflight', exact:true })).toBeVisible();
-    await expect(page.getByText('Waiting for both approvals',{ exact:true })).toBeVisible();
+    await expect(page.getByRole('heading',{ name:'Resolve the saved v0.6.240 / v0.5.52 physical mismatch', exact:true })).toBeVisible();
+    await expect(page.getByText(/Paperclip approved both named decisions and the bound coordinator completed the read-only preflight/)).toBeVisible();
+    await expect(page.getByRole('heading',{ name:'Read-only preflight complete — blocked', exact:true })).toBeVisible();
+    await expect(page.getByText('Preflight blocked physical binding',{ exact:true })).toBeVisible();
     await expect(page.getByText('Read only preflight only',{ exact:true })).toBeVisible();
     await expect(page.getByText('Not authorized',{ exact:true }).first()).toBeVisible();
     await expect(page.getByText('Prohibited',{ exact:true }).last()).toBeVisible();
@@ -203,8 +211,8 @@ test('complete onboarding is actionable in the browser without touching producti
     sources['priority-completion-program.json'].status = 'CICD_GATES_PROVEN_READY_FOR_GOVERNED_CANDIDATE_DECISION';
     fs.writeFileSync(path.join(sourceRoot,'priority-completion-program.json'),JSON.stringify(sources['priority-completion-program.json']));
     await page.locator('#refresh').click();
-    await expect(page.getByRole('heading',{ name:'Approve the v0.6.238 TEST comparator run', exact:true })).toBeVisible();
-    await expect(page.getByText('Owner: Wayne / Ocean board',{ exact:true })).toBeVisible();
+    await expect(page.getByRole('heading',{ name:'Resolve the saved v0.6.240 / v0.5.52 physical mismatch', exact:true })).toBeVisible();
+    await expect(page.getByText('Owner: CICD physical binding and Telemetry owners / Paperclip board',{ exact:true })).toBeVisible();
     await expect(page.getByText('Autonomous improvement implementation',{ exact:true })).toBeVisible();
     await expect(page.getByRole('columnheader',{ name:'Exact next action', exact:true })).toBeVisible();
     await expect(page.getByRole('button',{ name:'Prepare Replay history run', exact:true })).toHaveCount(0);
