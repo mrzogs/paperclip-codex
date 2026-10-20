@@ -8,6 +8,7 @@ import {
   visibleReplayTrades,
 } from "./replay-session-scope.mjs";
 import { manifestBuildLockFile, withManifestBuildLock } from "./manifest-build-lock.mjs";
+import { manifestStatePath } from "./manifest-state-path.mjs";
 import { configuredProcessTimeoutMs } from "./process-timeouts.mjs";
 import { readProjectPaperTelemetry } from "./project-paper-telemetry.mjs";
 import { publishSqliteWithRetry } from "./sqlite-publication.mjs";
@@ -28,7 +29,7 @@ const BACKTEST_DIR = path.join(STRATEGIES_DIR, "backtest_outputs");
 const CACHED_BACKTEST_RESULTS_DIR = path.join(ROOT, "backtesting", "results");
 const REGIME_RESULTS_DIR = path.join(ROOT, "backtesting", "results");
 const REGIME_SUMMARY_FILE = path.join(REGIME_RESULTS_DIR, "regime-summary-mnq-mnqm26_fut_cme-5m.json");
-const OUTPUT_FILE = path.join(ROOT, "dashboard", "dashboard-data.json");
+const OUTPUT_FILE = manifestStatePath(path.join(ROOT, "dashboard"));
 const SQLITE_FILE = process.env.OCEAN_WEBSITE_DB || "D:\\OceanTradingData\\website\\ocean-trading-website.sqlite";
 const SQLITE_PERSIST_SCRIPT = path.join(ROOT, "dashboard", "persist-sqlite.py");
 const OPEN_POSITIONS_BASELINE_FILE = path.join(ROOT, "dashboard", "data", "open-positions-baseline.json");
