@@ -24,16 +24,27 @@ $source = Join-Path $release 'paperclip-source'
 Expand-Archive -LiteralPath $archive -DestinationPath $source
 $dashboard = Join-Path $source 'website\ocean-trading\dashboard'
 
-# Carry operational state forward, never replace committed code/config with an
-# old working tree. Persistent database and physical-binding paths are unchanged.
-foreach ($directory in @('data','uploads')) {
-  $oldDirectory = Join-Path $active.dashboard $directory
-  if (Test-Path -LiteralPath $oldDirectory) {
-    $newDirectory = Join-Path $dashboard $directory
-    New-Item -ItemType Directory -Force -Path $newDirectory | Out-Null
-    foreach ($item in @(Get-ChildItem -LiteralPath $oldDirectory -Force)) {
-      Copy-Item -LiteralPath $item.FullName -Destination $newDirectory -Recurse -Force
-    }
+# Keep the mutable data directory attached to its existing publisher. A
+# website-only restart must not strand the monitor on the previous release's
+# data path while the new website reads a copied, frozen snapshot.
+$oldDataDirectory = Join-Path $active.dashboard 'data'
+if (Test-Path -LiteralPath $oldDataDirectory) {
+  $oldData = Get-Item -LiteralPath $oldDataDirectory
+  $publisher = if ($oldData.LinkType -in @('Junction','SymbolicLink')) { [string]$oldData.Target } else { $oldData.FullName }
+  if (-not [IO.Path]::IsPathRooted($publisher) -or -not (Test-Path -LiteralPath $publisher -PathType Container)) {
+    throw 'Ocean mutable data publisher is missing or not an absolute directory.'
+  }
+  New-Item -ItemType Junction -Path (Join-Path $dashboard 'data') -Target $publisher | Out-Null
+}
+
+# Carry operational uploads forward, never replace committed code/config with
+# an old working tree. Persistent database and physical-binding paths remain.
+$oldUploads = Join-Path $active.dashboard 'uploads'
+if (Test-Path -LiteralPath $oldUploads) {
+  $newUploads = Join-Path $dashboard 'uploads'
+  New-Item -ItemType Directory -Force -Path $newUploads | Out-Null
+  foreach ($item in @(Get-ChildItem -LiteralPath $oldUploads -Force)) {
+    Copy-Item -LiteralPath $item.FullName -Destination $newUploads -Recurse -Force
   }
 }
 $oldManifest = Join-Path $active.dashboard 'dashboard-data.json'
