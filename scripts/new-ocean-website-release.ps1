@@ -24,18 +24,12 @@ $source = Join-Path $release 'paperclip-source'
 Expand-Archive -LiteralPath $archive -DestinationPath $source
 $dashboard = Join-Path $source 'website\ocean-trading\dashboard'
 
+. (Join-Path $PSScriptRoot 'ocean-release-state.ps1')
+
 # Keep the mutable data directory attached to its existing publisher. A
 # website-only restart must not strand the monitor on the previous release's
 # data path while the new website reads a copied, frozen snapshot.
-$oldDataDirectory = Join-Path $active.dashboard 'data'
-if (Test-Path -LiteralPath $oldDataDirectory) {
-  $oldData = Get-Item -LiteralPath $oldDataDirectory
-  $publisher = if ($oldData.LinkType -in @('Junction','SymbolicLink')) { [string]$oldData.Target } else { $oldData.FullName }
-  if (-not [IO.Path]::IsPathRooted($publisher) -or -not (Test-Path -LiteralPath $publisher -PathType Container)) {
-    throw 'Ocean mutable data publisher is missing or not an absolute directory.'
-  }
-  New-Item -ItemType Junction -Path (Join-Path $dashboard 'data') -Target $publisher | Out-Null
-}
+$null = New-OceanReleaseMutableDataLink -PreviousDashboard $active.dashboard -CandidateDashboard $dashboard
 
 # Carry operational uploads forward, never replace committed code/config with
 # an old working tree. Persistent database and physical-binding paths remain.
