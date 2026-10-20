@@ -78,7 +78,7 @@ function Test-OceanWorkflowReady {
   $readiness = Get-OceanWorkflowReadiness
   return [bool]($readiness -and
     $readiness.workflow.state -ceq 'READY' -and
-    [int]$readiness.workflow.schema_version -eq 13 -and
+    [int]$readiness.workflow.schema_version -eq 14 -and
     $readiness.workflow.deployment.release_id -ceq $deployment.ReleaseId -and
     $readiness.workflow.deployment.source_commit -ceq $deployment.SourceCommit -and
     $readiness.workflow.deployment.manifest_sha256 -ceq $deployment.ManifestSha256 -and
@@ -293,9 +293,11 @@ function Get-WebsiteSupervisorCommandPattern {
 function Stop-WebsiteSupervisorProcesses {
   $snapshot = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
   $supervisorPattern = Get-WebsiteSupervisorCommandPattern
+  $hiddenLauncherPattern = [regex]::Escape($HiddenLauncher)
   $roots = @($snapshot | Where-Object {
-    $_.Name -in @('powershell.exe','pwsh.exe') -and
-    ($_.CommandLine -as [string]) -match $supervisorPattern
+    $commandLine = $_.CommandLine -as [string]
+    (($_.Name -in @('powershell.exe','pwsh.exe')) -and $commandLine -match $supervisorPattern) -or
+    (($_.Name -ieq 'wscript.exe') -and $commandLine -match $hiddenLauncherPattern -and $commandLine -match $supervisorPattern)
   })
   if (-not $roots.Count) { return }
   $rootIds = [Collections.Generic.HashSet[int]]::new()
@@ -309,6 +311,14 @@ function Stop-WebsiteSupervisorProcesses {
     Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
     Write-Output "Stopped stale Ocean website supervisor PID $($proc.ProcessId)."
   }
+  $targetIds = @($tree | Select-Object -ExpandProperty ProcessId -Unique)
+  $deadline = (Get-Date).AddSeconds(10)
+  do {
+    $remaining = @($targetIds | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+    if (-not $remaining.Count) { return }
+    Start-Sleep -Milliseconds 100
+  } while ((Get-Date) -lt $deadline)
+  throw "Ocean website supervisor process tree did not exit: $($remaining -join ',')."
 }
 
 function Stop-MonitorProcesses {

@@ -40,6 +40,10 @@ Assert-Test ($manager.Contains("Join-Path `$Root 'scripts\run-ocean-website-supe
   'WEBSITE_SUPERVISOR_MATCH_IS_NOT_BOUND_TO_TRACKED_SCRIPT'
 Assert-Test ($manager.Contains('Stop-WebsiteSupervisorProcesses')) 'WEBSITE_RESTART_DOES_NOT_INVOKE_SUPERVISOR_RETIREMENT'
 Assert-Test ($manager.Contains('Stopped stale Ocean website supervisor child PID')) 'WEBSITE_RESTART_DOES_NOT_CLEAN_SUPERVISOR_CHILDREN'
+Assert-Test ($manager.Contains("`$_.Name -ieq 'wscript.exe'")) 'WEBSITE_RESTART_DOES_NOT_RETIRE_HIDDEN_LAUNCHER'
+Assert-Test ($manager.Contains('[regex]::Escape($HiddenLauncher)')) 'WEBSITE_HIDDEN_LAUNCHER_MATCH_IS_NOT_PATH_BOUND'
+Assert-Test ($manager.Contains('Ocean website supervisor process tree did not exit')) 'WEBSITE_RESTART_REPORTS_SUCCESS_WITH_LIVE_OLD_PROCESSES'
+Assert-Test ($manager.Contains("schema_version -eq 14")) 'MANAGER_DOES_NOT_REQUIRE_CURRENT_WORKFLOW_SCHEMA'
 Assert-Test ($manager.Contains('function Stop-WebsiteOwnedMonitorProcesses')) 'WEBSITE_RESTART_CANNOT_RETIRE_ITS_DETACHED_MONITOR'
 Assert-Test ($manager.Contains('Stop-WebsiteOwnedMonitorProcesses -WebsiteProcessIds $websiteProcessIds')) `
   'WEBSITE_RESTART_DOES_NOT_RETIRE_ITS_DETACHED_MONITOR'
