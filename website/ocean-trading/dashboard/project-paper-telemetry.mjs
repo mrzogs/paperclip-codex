@@ -174,6 +174,50 @@ function openTradeCounts(db, authoritativeAccount) {
   return { openTrades, legacyOpenTrades, unattributedOpenTrades };
 }
 
+function tradeAccountCounts(db, authoritativeAccount) {
+  const columns = tableColumns(db, "trades");
+  const totalTrades = countRows(db, "trades");
+  if (totalTrades === null || !columns.has("trade_account") || !authoritativeAccount) {
+    return {
+      totalTrades,
+      authoritativeTrades: null,
+      excludedTrades: null,
+      foreignAccountTrades: null,
+      foreignAccounts: [],
+    };
+  }
+
+  const simulatedPredicate = columns.has("is_simulated") ? "AND is_simulated = 1" : "";
+  const authoritativeTrades = Number(db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM trades
+    WHERE lower(trim(coalesce(trade_account, ''))) = lower(trim(?))
+      ${simulatedPredicate}
+  `).get(authoritativeAccount).count);
+  const foreignAccountTrades = Number(db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM trades
+    WHERE coalesce(trim(trade_account), '') <> ''
+      AND lower(trim(trade_account)) <> lower(trim(?))
+  `).get(authoritativeAccount).count);
+  const foreignAccounts = db.prepare(`
+    SELECT trim(trade_account) AS account, COUNT(*) AS count
+    FROM trades
+    WHERE coalesce(trim(trade_account), '') <> ''
+      AND lower(trim(trade_account)) <> lower(trim(?))
+    GROUP BY lower(trim(trade_account))
+    ORDER BY count DESC, account ASC
+  `).all(authoritativeAccount).map(row => ({ account: String(row.account), count: Number(row.count) }));
+
+  return {
+    totalTrades,
+    authoritativeTrades,
+    excludedTrades: Math.max(0, totalTrades - authoritativeTrades),
+    foreignAccountTrades,
+    foreignAccounts,
+  };
+}
+
 export function readProjectPaperTelemetry(sqliteFile, options = {}) {
   const nowMs = Number(options.nowMs ?? Date.now());
   const staleAfterMs = Number(options.staleAfterMs ?? DEFAULT_STALE_AFTER_MS);
@@ -210,6 +254,7 @@ export function readProjectPaperTelemetry(sqliteFile, options = {}) {
       && String(account?.account_type_guess || "").toLowerCase() === "simulation";
     const fresh = ageMs !== null && ageMs <= staleAfterMs;
     const tradeCounts = openTradeCounts(db, account?.trade_account || null);
+    const accountTradeCounts = tradeAccountCounts(db, account?.trade_account || null);
     const trades = projectPaperTrades(db, account?.trade_account || null, sqliteFile, instrument);
     const closedTrades = trades.filter(trade => String(trade.status || "").toLowerCase() === "closed");
     const openPositions = trades.filter(trade => String(trade.status || "").toLowerCase() !== "closed");
@@ -217,6 +262,12 @@ export function readProjectPaperTelemetry(sqliteFile, options = {}) {
     const attributionRequired = Number(tradeCounts.unattributedOpenTrades || 0) > 0;
     const healthy = Boolean(account && instrument && health && expectedPaperIdentity && expectedSimulationIdentity && fresh && !reconciliationRequired && !attributionRequired);
     const loggerVersion = String(health?.message || "").match(/\bversion=([^\s]+)/i)?.[1] || null;
+    const foreignAccountSummary = accountTradeCounts.foreignAccounts
+      .map(entry => `${entry.account} (${entry.count})`)
+      .join(", ");
+    const historicalIsolationNotice = Number(accountTradeCounts.foreignAccountTrades || 0) > 0
+      ? `${accountTradeCounts.foreignAccountTrades} historical trade record(s) belong to non-authoritative Paper account(s) ${foreignAccountSummary} and are excluded from ${account?.trade_account || "the authoritative account"} trades and P&L.`
+      : null;
 
     return {
       available: true,
@@ -236,7 +287,10 @@ export function readProjectPaperTelemetry(sqliteFile, options = {}) {
         accountSnapshots: countRows(db, "account_snapshot"),
         orders: countRows(db, "orders"),
         fills: countRows(db, "fills"),
-        trades: countRows(db, "trades"),
+        trades: accountTradeCounts.totalTrades,
+        authoritativeTrades: accountTradeCounts.authoritativeTrades,
+        excludedTrades: accountTradeCounts.excludedTrades,
+        foreignAccountTrades: accountTradeCounts.foreignAccountTrades,
         openTrades: tradeCounts.openTrades,
         legacyOpenTrades: tradeCounts.legacyOpenTrades,
         unattributedOpenTrades: tradeCounts.unattributedOpenTrades,
@@ -244,9 +298,10 @@ export function readProjectPaperTelemetry(sqliteFile, options = {}) {
       trades,
       closedTrades,
       openPositions,
+      foreignAccounts: accountTradeCounts.foreignAccounts,
       closedNetProfitLossDollars: Number(closedTrades.reduce((sum, trade) => sum + Number(trade.realizedPnlDollars || 0), 0).toFixed(2)),
       warning: healthy
-        ? null
+        ? historicalIsolationNotice
         : reconciliationRequired
           ? `${tradeCounts.legacyOpenTrades} open trade record(s) belong to a non-authoritative Paper account and require audited reconciliation.`
           : attributionRequired
@@ -254,7 +309,9 @@ export function readProjectPaperTelemetry(sqliteFile, options = {}) {
           : !fresh
           ? "The dedicated VWAP Paper telemetry heartbeat is stale."
           : "The dedicated telemetry database is not reporting the expected Paper simulation identity.",
-      isolation: "Displayed as a separate observed CICD VWAP Paper feed; approved Paper bundle totals remain unchanged.",
+      isolation: historicalIsolationNotice
+        ? `Displayed as a separate observed CICD VWAP Paper feed. ${historicalIsolationNotice} Approved Paper bundle totals remain unchanged.`
+        : "Displayed as a separate observed CICD VWAP Paper feed; approved Paper bundle totals remain unchanged.",
     };
   } catch (error) {
     return {

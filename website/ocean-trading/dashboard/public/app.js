@@ -4069,6 +4069,16 @@ function renderPaperDashboard(paper) {
   const projectClosedTrades = projectTelemetry.closedTrades || [];
   const projectOpenPositions = projectTelemetry.openPositions || [];
   const projectPnl = pnlSummary(projectClosedTrades);
+  const projectAccount = projectTelemetry.account || "Sim1";
+  const authoritativeTradeCount = projectTelemetry.counts?.authoritativeTrades ?? projectTelemetry.trades?.length ?? 0;
+  const totalTradeCount = projectTelemetry.counts?.trades ?? authoritativeTradeCount;
+  const excludedTradeCount = projectTelemetry.counts?.excludedTrades ?? Math.max(0, totalTradeCount - authoritativeTradeCount);
+  const foreignAccountSummary = (projectTelemetry.foreignAccounts || [])
+    .map((entry) => `${entry.account} (${entry.count})`)
+    .join(", ");
+  const projectTradeScopeNote = excludedTradeCount > 0
+    ? `${authoritativeTradeCount} ${projectAccount} trade(s) are displayed. ${excludedTradeCount} database trade(s) from outside the authoritative Sim1 scope${foreignAccountSummary ? ` — ${foreignAccountSummary}` : ""} are retained for audit and excluded from these tables and P&L.`
+    : `${authoritativeTradeCount} ${projectAccount} trade(s) are displayed; no database trades are excluded from the authoritative account scope.`;
   return `
     <div class="journal-toolbar">
       <span>Account: ${escapeHtml(paper.account || "Sim1")}</span>
@@ -4098,7 +4108,8 @@ function renderPaperDashboard(paper) {
       ${summaryTile("Mode", projectTelemetry.isSimulated ? "Simulation" : "Unknown", projectTelemetry.isSimulated ? "good" : "warn")}
       ${summaryTile("Symbol", projectTelemetry.symbol || "n/a")}
       ${summaryTile("Logger", projectTelemetry.loggerVersion || "n/a", projectTelemetry.loggerVersion ? "good" : "warn")}
-      ${summaryTile("Orders / fills / trades", `${projectTelemetry.counts?.orders ?? 0} / ${projectTelemetry.counts?.fills ?? 0} / ${projectTelemetry.counts?.trades ?? 0}`)}
+      ${summaryTile(`Orders / fills / ${projectAccount} trades`, `${projectTelemetry.counts?.orders ?? 0} / ${projectTelemetry.counts?.fills ?? 0} / ${authoritativeTradeCount}`)}
+      ${summaryTile("All DB / excluded trades", `${totalTradeCount} / ${excludedTradeCount}`, excludedTradeCount > 0 ? "warn" : "good")}
       ${summaryTile("Open / legacy-open trades", `${projectTelemetry.counts?.openTrades ?? 0} / ${projectTelemetry.counts?.legacyOpenTrades ?? 0}`, Number(projectTelemetry.counts?.legacyOpenTrades || 0) > 0 ? "warn" : "good")}
       ${summaryTile("Unattributed open trades", `${projectTelemetry.counts?.unattributedOpenTrades ?? 0}`, Number(projectTelemetry.counts?.unattributedOpenTrades || 0) > 0 ? "warn" : "good")}
       ${summaryTile("Visible CICD closed P&L", formatCurrency(projectPnl.net), projectPnl.net < 0 ? "warn" : "good")}
@@ -4111,8 +4122,8 @@ function renderPaperDashboard(paper) {
       ["Isolation", projectTelemetry.isolation || "Observed CICD VWAP Paper rows are labeled separately; approved-bundle totals remain authoritative for approval status."],
       ["Dedicated telemetry DB", projectTelemetry.sqliteFile || "n/a"],
     ])}
-    <h2>CICD VWAP Paper Trades — Sim1</h2>
-    <p class="section-note">Sierra-observed trades from the dedicated CICD VWAP Paper telemetry database. They appear in the main Dashboard Paper selection, but remain separate from approved-bundle totals.</p>
+    <h2>CICD VWAP Paper Trades — ${escapeHtml(projectAccount)}</h2>
+    <p class="section-note">Sierra-observed trades from the dedicated CICD VWAP Paper telemetry database. ${escapeHtml(projectTradeScopeNote)} They appear in the main Dashboard Paper selection, but remain separate from approved-bundle totals.</p>
     <h3>Open CICD VWAP Position</h3>
     ${projectOpenPositions.length ? renderOpenPositionTable(projectOpenPositions) : '<p class="empty">No CICD VWAP Sim1 position is currently open.</p>'}
     <h3>Recent CICD VWAP Closed Trades</h3>
