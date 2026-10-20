@@ -44,3 +44,13 @@ order authority. Databases, physical binding and Quant Terminal state remain
 unchanged. Once a blocking call is measured, replace only that path with a
 tested asynchronous/cached equivalent preserving freshness and error semantics,
 then perform a fresh undebugged sustained check of the final fix.
+
+## First reproduced long stall
+
+Diagnostic PID 60348 recorded strategy-view request 205 taking 75,811 ms at
+17:35:39.563 UTC, with synchronous view rendering 75,796 ms, 34 run-learning
+projections totaling 9,735 ms, and 42 nested telemetry qualifications totaling
+457 ms. Event-loop drift reached 80,557 ms. The supervisor reached four failures
+and replaced the child with PID 26172. These timings identify the strategy-view
+call as a blocker, not the remaining leaf read. The next diagnostic separates
+full run reads, case reads and onboarding from their learning projections.

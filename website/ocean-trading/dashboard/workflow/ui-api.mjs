@@ -66,9 +66,9 @@ function readWorkflowViewObserved(backend, actor, route) {
   const stamp = { view_version: UI_API_VERSION, namespace: 'TEST', refreshed_at_utc: new Date().toISOString() };
   const strategyName = (value) => parse(backend.one('ow_strategies', value)).strategy_name;
   const operationalReleases = () => new OperationalPreparation(backend).list(actor).items;
-  const caseRow = (value) => ({ ...backend.readCase(actor, value.id), strategy_name: strategyName(value.strategy_id), priority: value.stage === 'ROLLBACK_REVIEW' ? 'URGENT_REVIEW' : null });
+  const caseRow = (value) => ({ ...timedSync('workflow.case-read',()=>backend.readCase(actor, value.id)), strategy_name: strategyName(value.strategy_id), priority: value.stage === 'ROLLBACK_REVIEW' ? 'URGENT_REVIEW' : null });
   const runRow = (value, options = {}) => ({
-    ...backend.readRun(actor, value.id, options),
+    ...timedSync('workflow.run-read',()=>backend.readRun(actor, value.id, options)),
     strategy_name: strategyName(value.strategy_id),
     learning: timedSync('workflow.run-learning',()=>backend.operationalLearning?.statusForRun(value.id) || null),
   });
@@ -91,7 +91,7 @@ function readWorkflowViewObserved(backend, actor, route) {
     const profile = parse(backend.one('ow_profiles', value.profile_id));
     return { strategy_id: value.id, strategy_name: registry.strategy_name, registry_revision: value.revision, activation_status: registry.activation_status, activation_decision_id: registry.activation_decision_id, baseline_version: registry.baseline_version, baseline_hash: value.baseline_hash, production_version: registry.production_version, profile: { profile_id: profile.profile_id, profile_version: profile.profile_version, profile_hash: profile.profile_hash, strategy_code_hash: profile.strategy_code_hash, strategy_config_hash: profile.strategy_config_hash }, cases: strategyCaseSummaries(db,value.id,registry.strategy_name), cases_total: db.prepare('SELECT COUNT(*) AS n FROM ow_cases WHERE strategy_id=?').get(value.id).n };
   };
-  const onboarding = () => {
+  const onboarding = () => timedSync('workflow.onboarding',()=>{
     const strategyId = readOnboardingStrategyId(backend.config.strategy_onboarding_root);
     return loadStrategyOnboarding({
       root: backend.config.strategy_onboarding_root,
@@ -104,7 +104,7 @@ function readWorkflowViewObserved(backend, actor, route) {
       physicalComparatorPath: backend.config.strategy_physical_comparator_contract,
       approvalDispatchStatePath: backend.config.strategy_approval_dispatch_state,
     });
-  };
+  });
   const mergeOnboarding = (row, value) => row && value.strategy_id === row.strategy_id ? { ...value, onboarding: row } : value;
   if (collection === 'dashboard' && parts.length === 2) {
     const pending = db.prepare("SELECT * FROM ow_approval_requests WHERE state='PENDING' ORDER BY rowid DESC").all().map(approvalRow);

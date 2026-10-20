@@ -28,6 +28,6 @@ test('strategy case navigation is bounded, isolated and never reads evidence blo
 test('strategy lists use navigation summaries while case details retain full checks',()=>{
   const source=fs.readFileSync(new URL('./ui-api.mjs',import.meta.url),'utf8');
   assert.match(source,/cases: strategyCaseSummaries\(db,value.id,registry.strategy_name\)/);
-  assert.match(source,/const caseRow = \(value\) => \(\{ \.\.\.backend.readCase\(actor, value.id\)/);
+  assert.match(source,/const caseRow = .*backend\.readCase\(actor, value\.id\)/);
   assert.match(source,/\.\.\.caseRow\(row\), strategy: strategyRow/);
 });
