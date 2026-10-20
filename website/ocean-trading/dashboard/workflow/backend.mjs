@@ -35,7 +35,6 @@ import {
 } from './strategy-onboarding.mjs';
 import { OnboardingBrainSync, retryOnboardingBrain } from './onboarding-brain-sync.mjs';
 import { enrichStrategyApprovalStatuses } from './paperclip-approval-status.mjs';
-import { ReplayTwoBookingRegistry } from './replay-two-booking-registry.mjs';
 
 export const TABLE = JSON.parse(fs.readFileSync(new URL("./workflow-transition-table.json", import.meta.url), "utf8"));
 const candidateRouteImplementationHash=digest(fs.readFileSync(new URL('./backend.mjs',import.meta.url)));
@@ -79,7 +78,6 @@ export class WorkflowBackend {
     this.store = new WorkflowStore(config.db_file);
     this.db = this.store.db;
     this.runs = new RunManager(this);
-    this.replayTwoBookings = new ReplayTwoBookingRegistry(this);
     this.testCommunication = new TestCommunication(this);
     this.operational = new OperationalTransition(this);
     this.operationalResults = new OperationalResults(this);
@@ -949,15 +947,14 @@ export class WorkflowBackend {
     if (!pathname.startsWith("/api/workflow/") && pathname !== "/api/workflow") return false;
     response.setHeader("Content-Type", "application/json; charset=utf-8"); response.setHeader("Cache-Control", "no-store"); response.setHeader("X-Content-Type-Options", "nosniff");
     try {
-      const bookingCurrentQuery=request.method==='GET' && pathname===`/api/workflow/${OPERATIONAL_PREFIX}/replay-two-bookings/current`;
-      requireThat((!requestUrl.search || bookingCurrentQuery) && !/%(?:2f|5c)|\.\./i.test(pathname), 400, "UNSAFE_ROUTE_OR_QUERY");
+      requireThat(!requestUrl.search && !/%(?:2f|5c)|\.\./i.test(pathname), 400, "UNSAFE_ROUTE_OR_QUERY");
       const route = pathname.slice("/api/workflow/".length);
       if (route === 'readiness' && request.method === 'GET') {
         this.auth.browserOrigin(request);
         requireThat(['127.0.0.1','::1','::ffff:127.0.0.1'].includes(request.socket.remoteAddress),403,'LOOPBACK_REQUIRED');
         const readiness=this.auth.readiness();
         const learning=this.operationalLearning.health(),evaluator=this.operationalCandidateEvaluator;
-        response.end(JSON.stringify({machine:this.maintenanceHealth?.state==='ERROR'?'DEGRADED':readiness.machine_readiness,human:this.auth.human.state,human_auth_method:readiness.human_auth_method,human_acceptance_due:readiness.human_acceptance_due,integrations:'PENDING',execution:'TEST_ONLY',ingestion:'OFF',maintenance:this.maintenanceHealth?.state || 'NOT_INSTALLED_ISOLATED',workflow:{state:'READY',schema_version:14,deployment:{release_id:this.environment.OCEAN_DEPLOYMENT_RELEASE_ID || null,source_commit:this.environment.OCEAN_DEPLOYMENT_SOURCE_COMMIT || null,manifest_sha256:this.environment.OCEAN_DEPLOYMENT_MANIFEST_SHA256 || null},operational_learning:{enabled:learning.enabled,state:learning.state,last_error:learning.last_error},candidate_evaluator:{version:CANDIDATE_EVALUATOR_VERSION,state:evaluator.running?'RUNNING':'READY',last_error:evaluator.lastError || null},replay_two_booking_registry:{enabled:this.replayTwoBookings.config.enabled===true,resource_key:this.replayTwoBookings.config.resource_key || null,renewal:'UNAVAILABLE_V1'}}}));return true;
+        response.end(JSON.stringify({machine:this.maintenanceHealth?.state==='ERROR'?'DEGRADED':readiness.machine_readiness,human:this.auth.human.state,human_auth_method:readiness.human_auth_method,human_acceptance_due:readiness.human_acceptance_due,integrations:'PENDING',execution:'TEST_ONLY',ingestion:'OFF',maintenance:this.maintenanceHealth?.state || 'NOT_INSTALLED_ISOLATED',workflow:{state:'READY',schema_version:13,deployment:{release_id:this.environment.OCEAN_DEPLOYMENT_RELEASE_ID || null,source_commit:this.environment.OCEAN_DEPLOYMENT_SOURCE_COMMIT || null,manifest_sha256:this.environment.OCEAN_DEPLOYMENT_MANIFEST_SHA256 || null},operational_learning:{enabled:learning.enabled,state:learning.state,last_error:learning.last_error},candidate_evaluator:{version:CANDIDATE_EVALUATOR_VERSION,state:evaluator.running?'RUNNING':'READY',last_error:evaluator.lastError || null}}}));return true;
       }
       if (route === "session" && request.method === "POST") {
         const input = await jsonBody(request); response.end(JSON.stringify(this.auth.login(request, input, response))); return true;
@@ -973,24 +970,13 @@ export class WorkflowBackend {
       }
       if(route.startsWith(`${OPERATIONAL_PREFIX}/`)) {
         const local=route.slice(OPERATIONAL_PREFIX.length+1);let result;
-        if(request.method==='GET')requireThat(actor.role==='HUMAN' || actor.scopes.includes('read') || (local.startsWith('replay-two-bookings/') && actor.scopes.includes('booking.read')),403,'WRONG_ACTION_SCOPE');
+        if(request.method==='GET')requireThat(actor.role==='HUMAN' || actor.scopes.includes('read'),403,'WRONG_ACTION_SCOPE');
         if(local==='identity' && request.method==='GET')result=identityReadback(this.config,actor,'OPERATIONAL');
         else if(local==='policy' && request.method==='GET')result=operationalPolicy(this.config);
         else if(local==='pending' && request.method==='GET')result=this.operational.pending(actor);
         else if(/^dataset-manifests\/[A-Za-z0-9_.:-]+$/.test(local) && request.method==='GET')result=this.operational.manifestRead(actor,local.slice('dataset-manifests/'.length));
         else if((local==='runs' || local.startsWith('receipts/')) && request.method==='GET')result=this.operational.read(actor,local.startsWith('receipts/')?local.slice(9):null);
         else if(/^runs\/[A-Za-z0-9_.:-]+$/.test(local) && request.method==='GET')result=this.runs.read(actor,local.slice(5));
-        else if(local==='replay-two-bookings/current' && request.method==='GET'){
-          requireThat([...requestUrl.searchParams.keys()].length===1 && requestUrl.searchParams.has('resource_key'),400,'BOOKING_CURRENT_QUERY_REQUIRED');
-          const nonce=this.replayTwoBookings.readNonce(request.headers['x-ocean-booking-read-nonce']);
-          result=this.replayTwoBookings.current(actor,requestUrl.searchParams.get('resource_key'));
-          response.setHeader('X-Ocean-Booking-Read-Nonce',nonce);
-        }
-        else if(/^replay-two-bookings\/[A-Za-z0-9_.:-]+$/.test(local) && request.method==='GET'){
-          const nonce=this.replayTwoBookings.readNonce(request.headers['x-ocean-booking-read-nonce']);
-          result=this.replayTwoBookings.exact(actor,local.slice('replay-two-bookings/'.length));
-          response.setHeader('X-Ocean-Booking-Read-Nonce',nonce);
-        }
         else if(/^no-new-coverage\/[A-Za-z0-9_.:-]+$/.test(local) && request.method==='GET')result=new OperationalPreparation(this).readNoNewCoverage(actor,local.slice('no-new-coverage/'.length));
         else if(/^authority\/[A-Za-z0-9_.:-]+$/.test(local) && request.method==='GET')result=this.operational.authority(actor,local.slice(10));
         else if(/^workflow-events\/[A-Za-z0-9_.:-]+$/.test(local) && request.method==='GET')result=this.operational.workflowEventRead(actor,local.slice(16));
@@ -1040,10 +1026,6 @@ export class WorkflowBackend {
         else if(local==='trade-events' && request.method==='POST')result=this.operational.tradeEvent(actor,await jsonBody(request));
         else if(local==='brain-results/register' && request.method==='POST')result=this.operationalResults.register(actor,await jsonBody(request));
         else if(local==='brain-results/callback' && request.method==='POST')result=this.operationalResults.callback(actor,await jsonBody(request));
-        else if(local==='replay-two-bookings' && request.method==='POST')result=this.replayTwoBookings.acquire(actor,await jsonBody(request));
-        else if(local==='replay-two-bookings/renew' && request.method==='POST')result=this.replayTwoBookings.renew(actor,await jsonBody(request));
-        else if(/^replay-two-bookings\/[A-Za-z0-9_.:-]+\/release$/.test(local) && request.method==='POST')result=this.replayTwoBookings.finish('RELEASED',actor,await jsonBody(request),local.split('/')[1]);
-        else if(/^replay-two-bookings\/[A-Za-z0-9_.:-]+\/revoke$/.test(local) && request.method==='POST')result=this.replayTwoBookings.finish('REVOKED',actor,await jsonBody(request),local.split('/')[1]);
         else if(['outbox/claim','outbox/ack','outbox/fail'].includes(local) && request.method==='POST')result=this.mutate(local.replace('/','.'),actor,await jsonBody(request));
         else if(local==='run/end' && request.method==='POST')result=this.runs.perform('end',actor,await jsonBody(request));
         else if(['run/claim','run/renew','run/activate','run/reconcile','run/pin','run/progress','run/evidence','run/finish'].includes(local) && request.method==='POST')result=this.runs.perform(local.slice(4),actor,await jsonBody(request));
@@ -1094,7 +1076,7 @@ export class WorkflowBackend {
             : view;
           response.end(JSON.stringify(result));
         }
-        else if (route === "status") response.end(JSON.stringify({ api_version: API_VERSION, contract_release: RELEASE, namespace: "TEST", brain_submission: "OFF", live_real: "DISABLED", dispatch_worker: "OFF", auth: "REQUIRED", schema_version: 14, identity: { id: actor.id, role: actor.role, scopes: actor.scopes, strategy_ids: actor.strategyIds, instance_ids: actor.instanceIds }, ...this.auth.readiness(), test_communication:this.testCommunication.readiness(actor), onboarding_brain_sync:this.onboardingBrain.status(), operational_learning:this.operationalLearning.status(), candidate_evaluator:{version:CANDIDATE_EVALUATOR_VERSION,state:this.operationalCandidateEvaluator.running?'RUNNING':'READY'}, maintenance:this.maintenanceHealth || {state:'NOT_INSTALLED_ISOLATED'} }));
+        else if (route === "status") response.end(JSON.stringify({ api_version: API_VERSION, contract_release: RELEASE, namespace: "TEST", brain_submission: "OFF", live_real: "DISABLED", dispatch_worker: "OFF", auth: "REQUIRED", schema_version: 13, identity: { id: actor.id, role: actor.role, scopes: actor.scopes, strategy_ids: actor.strategyIds, instance_ids: actor.instanceIds }, ...this.auth.readiness(), test_communication:this.testCommunication.readiness(actor), onboarding_brain_sync:this.onboardingBrain.status(), operational_learning:this.operationalLearning.status(), candidate_evaluator:{version:CANDIDATE_EVALUATOR_VERSION,state:this.operationalCandidateEvaluator.running?'RUNNING':'READY'}, maintenance:this.maintenanceHealth || {state:'NOT_INSTALLED_ISOLATED'} }));
         else if (route === 'setup-receipts') {
           requireThat(actor.role === 'HUMAN',403,'WAYNE_BROWSER_ONLY');
           response.end(JSON.stringify({ items: orderedSetup(this.db.prepare('SELECT * FROM ow_setup_receipts').all()), order: 'declared setup-task-map sequence; literal amendment IDs; historical statuses preserved' }));
