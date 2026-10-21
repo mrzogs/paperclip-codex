@@ -61,10 +61,17 @@ test('complete onboarding is actionable in the browser without touching producti
     enabled:true, status:'PREFLIGHT_BLOCKED_PHYSICAL_BINDING', checked_at_utc:'2026-10-20T13:33:06Z',
     approval_statuses:{DATASET_PHYSICAL_SELECTION:'APPROVED',RUN_RELEASE:'APPROVED'},approval_statuses_source:'PAPERCLIP_LIVE',
     continuity:{schema_version:'ocean-vwap-continuity-projection/v1',source:'PAPERCLIP_LIVE',observed_at_utc:new Date().toISOString(),freshness:{state:'CURRENT'},
-      next_automatic_job:{identifier:'OCEA-30',title:'Restore execution: review supervised host candidate',status:'BLOCKED',
-        owner_name:'Mara Vale - Quant Lab Coordinator',url:'http://127.0.0.1:3100/OCEA/issues/OCEA-30',worker:{state:'NOT_OBSERVED'},
-        recovery_required:true,recovery_action:'Fix the unsupported adapter model and resume the exact review.'},
-      issue_chain:[{identifier:'OCEA-29',title:'Offline candidate complete',status:'DONE'},{identifier:'OCEA-30',title:'Review candidate',status:'BLOCKED'}],
+      human_authority_blocker:{issue_id:'03390c6f-bbe2-4972-9183-ea349406160f',identifier:'OCEA-28',title:'Route exact source authority and supervised host integration for OCEA-24',status:'BLOCKED',
+        owner_name:'Mara Vale - Quant Lab Coordinator',url:'http://127.0.0.1:3100/OCEA/issues/OCEA-28',worker:{state:'NOT_OBSERVED'},recovery_required:true,
+        recovery_action:'Answer the pending Paperclip question.',human_interaction:{id:'27e9d62e-f900-4b86-8eb1-388ce37bf210',kind:'ask_user_questions',status:'PENDING',
+          title:'Identify exact Telemetry and host authority',continuation_policy:'wake_assignee',owner:'Wayne / Paperclip board',
+          action:'Answer the pending Paperclip question. Paperclip must then wake the assigned issue owner; Ocean only verifies that continuation and grants no runtime authority.',
+          questions:[{id:'authority',prompt:'Select the source-authority handoff route and provide the named authorized Telemetry/Windows host principal.',selection_mode:'single',options:[
+            {id:'snapshot',label:'Owner supplies immutable snapshot',description:'Owner supplies Stage source and custody evidence; agents stay root-bound.'},
+            {id:'authorized-owner',label:'Existing authorized owner patches source',description:'Name the authorized repository owner and exact workspace.'},
+          ]}]}},
+      next_automatic_job:null,
+      issue_chain:[{identifier:'OCEA-24',title:'Build approval-bound host staging executor for OCEA-22',status:'BLOCKED'},{identifier:'OCEA-28',title:'Route exact source authority and supervised host integration for OCEA-24',status:'BLOCKED',pending_interaction_id:'27e9d62e-f900-4b86-8eb1-388ce37bf210'}],
       authority:{instance_admission:'NOT_PROVEN',current_exclusive_booking:'NOT_PROVEN',booking_requirement:'Atomic current owner/generation, expiry and revocation readback is required.',
         per_run_manifest:'POST_STAGING_BINDING_NOT_AUTHORIZED',future_gate:'One consolidated post-staging run/measurement decision after physical and controller proof.',test_standing_policy:'NOT_GRANTED'}},
     heartbeat_run_id:'6971a2a5-2a42-4801-b8cc-6c98ccd1df71', heartbeat_run_status:'succeeded',
@@ -73,15 +80,15 @@ test('complete onboarding is actionable in the browser without touching producti
       strategy_artifact:{ saved_version:'v0.6.240', saved_hash:'sha256:'+'9'.repeat(64), selected_version:'v0.6.238', selected_hash:'sha256:'+'6'.repeat(64) },
       telemetry_artifact:{ saved_version:'v0.5.52', saved_hash:'sha256:'+'c'.repeat(64), selected_version:'v0.5.53', selected_hash:'sha256:'+'5'.repeat(64) },
       next_task:{ issue_id:'33333333-3333-4333-8333-333333333333', issue_identifier:'OCEA-22', title:'Prepare exact Sim1 TEST staging package', status:'IN_PROGRESS', execution_run_id:'44444444-4444-4444-8444-444444444444', url:'http://127.0.0.1:3100/OCEA/issues/OCEA-22' } },
-    staging_authority:{ authoritative:true, approval_id:TEST_STAGING_APPROVAL_ID, approval_status:'PENDING', action_required:true,
-      approval_url:`http://127.0.0.1:3100/OCEA/approvals/${TEST_STAGING_APPROVAL_ID}`, requested_by_agent_id:'75618a1a-a7ba-44bd-b391-48d58617433c', decided_at_utc:null,
+    staging_authority:{ authoritative:true, approval_id:TEST_STAGING_APPROVAL_ID, approval_status:'APPROVED', action_required:false,
+      approval_url:`http://127.0.0.1:3100/OCEA/approvals/${TEST_STAGING_APPROVAL_ID}`, requested_by_agent_id:'75618a1a-a7ba-44bd-b391-48d58617433c', decided_at_utc:'2026-10-21T06:49:09Z',
       title:'CICD Sim1 TEST only: exact v238 / v0.5.53 staging and one gated diagnostic start', approval_scope:'TEST_STAGING_WRITE_SINGLE_DIAGNOSTIC_START_ONLY',
       attachment_id:TEST_STAGING_ATTACHMENT_ID, package_url:`http://127.0.0.1:3100/api/attachments/${TEST_STAGING_ATTACHMENT_ID}/content`,
       package_sha256:'8'.repeat(64), package_bytes:32265, package_recovery:'BYTE_IDENTICAL_SHA256_VERIFIED', database_rule:'No database edit authority.',
       excluded:'RUN_RELEASE materialization, playback, bridge activation, Paper/Live, real orders, historical role/row edits, threshold selection', risks:['Fresh proof remains required.'],
       timeframe:{bar_seconds:300,display:'5 minutes',authority:'v0.6.238 source and current governed CICD profile',one_minute_disposition:'SUPERSEDED_UNQUALIFIED_OBSERVATION_SETUP'},
       mutable_reference:{path:'C:\\Users\\wayne\\OneDrive\\Documents\\Brady - Optimization\\onboarding\\replay-discovery-requalification-20261020.json',captured_sha256:'2'.repeat(64),classification:'INFORMATIONAL_SNAPSHOT_NOT_PHYSICAL_PREFLIGHT_PIN',fresh_reauthentication_required:true},
-      continuation:{requester_agent_id:'75618a1a-a7ba-44bd-b391-48d58617433c',approval_resolution_wakes_requester:true,next_action:'REAUTHENTICATE_PACKAGE_AND_DERIVE_ONLY_EXACT_APPROVED_FILESYSTEM_SCOPE',no_ocean_approval_authority:true,state:'AWAITING_PAPERCLIP_HUMAN_DECISION'} },
+      continuation:{requester_agent_id:'75618a1a-a7ba-44bd-b391-48d58617433c',approval_resolution_wakes_requester:true,next_action:'REAUTHENTICATE_PACKAGE_AND_DERIVE_ONLY_EXACT_APPROVED_FILESYSTEM_SCOPE',no_ocean_approval_authority:true,state:'BLOCKED_BY_PAPERCLIP_HUMAN_AUTHORITY',blocker_issue_identifier:'OCEA-28',interaction_id:'27e9d62e-f900-4b86-8eb1-388ce37bf210'} },
     gate:{ action:'READ_ONLY_PREFLIGHT_ONLY', current_permission_state:'READ_ONLY_EXTERNAL_EVIDENCE_NO_REPLAY_RUNTIME_WRITE',
       post_preflight_gate:'EXACT_TEST_REPLAY_TWO_RUNTIME_OUTPUT_WRITE_START_SCOPE_REQUIRED', post_preflight_action:'REQUEST_OR_DERIVE_ONLY_AFTER_READ_ONLY_PREFLIGHT' },
     safety:{ execution_authority:false, runtime_write_scope_authorized:false, replay_start_authorized:false,
@@ -140,7 +147,7 @@ test('complete onboarding is actionable in the browser without touching producti
   const browserErrors = []; page.on('pageerror', error => browserErrors.push(error.message));
   try {
     await page.goto(`${base}/improvement/strategies/${TEST_STRATEGY_ID}`);
-    assert.match(await page.locator('script[type="module"]').getAttribute('src'),/v238-bounded-navigation-20261020-r5/,'the deployed page must request the current workflow module version');
+    assert.match(await page.locator('script[type="module"]').getAttribute('src'),/v238-paperclip-continuation-20261021-r1/,'the deployed page must request the current workflow module version');
     await page.getByRole('button',{ name:'Sign in', exact:true }).click();
     await page.getByRole('link',{ name:'Help', exact:true }).click();
     await expect(page.getByRole('heading',{ name:'Onboarding help', exact:true })).toBeVisible();
@@ -164,16 +171,18 @@ test('complete onboarding is actionable in the browser without touching producti
     await expect(page.locator(`[data-approval-id="${TEST_COMPARATOR_APPROVAL_ID}"]`).getByRole('link',{ name:'Open approval record', exact:true })).toHaveAttribute('href',`http://127.0.0.1:3100/OCEA/approvals/${TEST_COMPARATOR_APPROVAL_ID}`);
     await expect(page.locator(`[data-approval-id="${TEST_RELEASE_APPROVAL_ID}"]`).getByRole('link',{ name:'Open approval record', exact:true })).toHaveAttribute('href',`http://127.0.0.1:3100/OCEA/approvals/${TEST_RELEASE_APPROVAL_ID}`);
     await expect(page.getByText('Approved in Paperclip',{ exact:true })).toBeVisible();
-    await expect(page.getByRole('heading',{name:'Current automatic work',exact:true})).toBeVisible();
-    await expect(page.getByRole('heading',{name:'Restore execution: review supervised host candidate',exact:true})).toBeVisible();
-    await expect(page.getByText('Fix the unsupported adapter model and resume the exact review.',{exact:true})).toBeVisible();
-    await expect(page.getByRole('link',{name:'OCEA-30',exact:true})).toHaveAttribute('href','http://127.0.0.1:3100/OCEA/issues/OCEA-30');
+    await expect(page.getByRole('heading',{name:'Current Paperclip action',exact:true})).toBeVisible();
+    await expect(page.getByRole('heading',{name:'Identify exact Telemetry and host authority',exact:true})).toBeVisible();
+    await expect(page.getByText('Select the source-authority handoff route and provide the named authorized Telemetry/Windows host principal.',{exact:true})).toBeVisible();
+    await expect(page.getByText('Owner supplies immutable snapshot',{exact:true})).toBeVisible();
+    await expect(page.getByText('Existing authorized owner patches source',{exact:true})).toBeVisible();
+    await expect(page.getByRole('link',{name:'OCEA-28',exact:true})).toHaveAttribute('href','http://127.0.0.1:3100/OCEA/issues/OCEA-28');
     await expect(page.getByText('Candidate detection: waiting for eligible trades (0 eligible / 245 observed).',{exact:true})).toBeVisible();
-    await expect(page.getByText('Pending human approval',{ exact:true })).toBeVisible();
+    await expect(page.getByText('Approved',{ exact:true }).last()).toBeVisible();
     await expect(page.getByRole('heading',{ name:'Read-only preflight complete — blocked', exact:true })).toBeVisible();
     await expect(page.getByRole('link',{ name:'OCEA-22', exact:true })).toHaveAttribute('href','http://127.0.0.1:3100/OCEA/issues/OCEA-22');
     await expect(page.getByRole('heading',{ name:'CICD Sim1 TEST only: exact v238 / v0.5.53 staging and one gated diagnostic start', exact:true })).toBeVisible();
-    await expect(page.locator(`[data-approval-id="${TEST_STAGING_APPROVAL_ID}"]`).getByRole('link',{ name:'Review approval in Paperclip', exact:true })).toHaveAttribute('href',`http://127.0.0.1:3100/OCEA/approvals/${TEST_STAGING_APPROVAL_ID}`);
+    await expect(page.locator(`[data-approval-id="${TEST_STAGING_APPROVAL_ID}"]`).getByRole('link',{ name:'Open approval record', exact:true })).toHaveAttribute('href',`http://127.0.0.1:3100/OCEA/approvals/${TEST_STAGING_APPROVAL_ID}`);
     await expect(page.getByRole('link',{ name:'Open sealed package', exact:true }).first()).toHaveAttribute('href',`http://127.0.0.1:3100/api/attachments/${TEST_STAGING_ATTACHMENT_ID}/content`);
     await expect(page.getByText('5 minutes (300 seconds) · Superseded unqualified observation setup',{ exact:true })).toBeVisible();
     await expect(page.getByText(/mutable requalification draft hash is informational only/)).toBeVisible();
@@ -215,12 +224,12 @@ test('complete onboarding is actionable in the browser without touching producti
     await expect(page.locator('#notice')).toContainText('Open Replay Monitor to view Ocean data');
     await expect(page.getByRole('heading',{ name:'Onboarding complete', exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'CI/CD continuous run', exact:true })).toBeVisible();
-    await expect(page.getByRole('heading',{ name:'Resolve blocked Replay execution work before staging', exact:true })).toBeVisible();
+    await expect(page.getByRole('heading',{ name:'Answer the OCEA-28 authority question in Paperclip', exact:true })).toBeVisible();
     await expect(page.getByText('2 approved in Paperclip · 0 pending',{ exact:true })).toBeVisible();
     await expect(page.getByText('Approved in Paperclip',{ exact:true }).first()).toBeVisible();
-    await expect(page.getByText(/approving it alone cannot install the host or start Replay/)).toBeVisible();
-    await expect(page.getByRole('link',{ name:'Open blocked work OCEA-30', exact:true })).toHaveAttribute('href','http://127.0.0.1:3100/OCEA/issues/OCEA-30');
-    await expect(page.getByText(/OCEA-30 is blocked: Restore execution: review supervised host candidate/)).toBeVisible();
+    await expect(page.getByText(/TEST staging decision is already approved/)).toBeVisible();
+    await expect(page.getByRole('link',{ name:'Answer authority question OCEA-28', exact:true })).toHaveAttribute('href','http://127.0.0.1:3100/OCEA/issues/OCEA-28');
+    await expect(page.getByText(/Continuation is waiting on OCEA-28: Identify exact Telemetry and host authority/)).toBeVisible();
     await expect(page.getByRole('heading',{ name:'Read-only preflight complete — blocked', exact:true })).toBeVisible();
     await expect(page.getByText('Preflight blocked physical binding',{ exact:true })).toBeVisible();
     await expect(page.getByText('Read only preflight only',{ exact:true })).toBeVisible();
@@ -244,8 +253,8 @@ test('complete onboarding is actionable in the browser without touching producti
     sources['priority-completion-program.json'].status = 'CICD_GATES_PROVEN_READY_FOR_GOVERNED_CANDIDATE_DECISION';
     fs.writeFileSync(path.join(sourceRoot,'priority-completion-program.json'),JSON.stringify(sources['priority-completion-program.json']));
     await page.locator('#refresh').click();
-    await expect(page.getByRole('heading',{ name:'Resolve blocked Replay execution work before staging', exact:true })).toBeVisible();
-    await expect(page.getByText('Owner: Mara Vale - Quant Lab Coordinator',{ exact:true })).toBeVisible();
+    await expect(page.getByRole('heading',{ name:'Answer the OCEA-28 authority question in Paperclip', exact:true })).toBeVisible();
+    await expect(page.getByText('Owner: Wayne / Paperclip board',{ exact:true })).toBeVisible();
     await expect(page.getByText('Autonomous improvement implementation',{ exact:true })).toBeVisible();
     await expect(page.getByRole('columnheader',{ name:'Exact next action', exact:true })).toBeVisible();
     await expect(page.getByRole('button',{ name:'Prepare Replay history run', exact:true })).toHaveCount(0);
