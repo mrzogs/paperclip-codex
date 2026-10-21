@@ -146,9 +146,13 @@ test('complete onboarding is actionable in the browser without touching producti
   const page = await browser.newPage({ viewport:{ width:1440, height:950 } });
   const browserErrors = []; page.on('pageerror', error => browserErrors.push(error.message));
   try {
+    assert.equal((await page.request.get(`${base}/api/workflow/session`)).status(),401,'direct API access must still require a protected session');
     await page.goto(`${base}/improvement/strategies/${TEST_STRATEGY_ID}`);
-    assert.match(await page.locator('script[type="module"]').getAttribute('src'),/v238-paperclip-continuation-20261021-r1/,'the deployed page must request the current workflow module version');
-    await page.getByRole('button',{ name:'Sign in', exact:true }).click();
+    assert.match(await page.locator('script[type="module"]').getAttribute('src'),/automatic-local-access-20261021-r1/,'the deployed page must request the automatic local-access workflow module');
+    await expect(page.locator('#login')).toHaveCount(0);
+    await expect(page.locator('#logout')).toHaveCount(0);
+    await expect(page.getByRole('heading',{ name:'E2E Disposable Test Strategy', exact:true })).toBeVisible();
+    assert.equal((await page.request.get(`${base}/api/workflow/session`)).status(),200,'the landing page must establish the protected local session automatically');
     await page.getByRole('link',{ name:'Help', exact:true }).click();
     await expect(page.getByRole('heading',{ name:'Onboarding help', exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'Confirm the detected test setup', exact:true })).toBeVisible();

@@ -217,7 +217,9 @@ test('S29.2 isolated Chrome setup-history projection of verified receipts, witho
     for(const row of inputs)setupOperation({state:a.state,operator_id,action:'setup-import',request:request(row.task_id)});
     backend=new WorkflowBackend({...a.state.config,allowed_origins:[base]},a.state.environment);
     browser=await chromium.launch({channel:'chrome',headless:true});const page=await browser.newPage({viewport:{width:1440,height:900}});
-    await page.goto(base+'/improvement/history');await page.locator('#credential').fill(password);await page.getByRole('button',{name:'Sign in',exact:true}).click();
+    const browserSession=await page.request.post(base+'/api/workflow/session',{headers:{Origin:base},data:{credential:password}});assert.equal(browserSession.status(),200);const browserSessionBody=await browserSession.json();
+    await page.addInitScript(csrf=>sessionStorage.setItem('ocean-workflow-human-csrf',csrf),browserSessionBody.csrf_token);
+    await page.goto(base+'/improvement/history');
     await page.locator('#setup-history summary').click();await page.getByText('Historical installation records. Not strategy approvals.',{exact:true}).waitFor();
     const ids=await page.locator('#setup-history tbody tr td:first-child').allTextContents();assert.equal(ids.length,10);assert.ok(ids.includes('S24.1') && ids.includes('S26.2') && ids.includes('S28.2'));
     assert.ok(!(await page.content()).includes(password));
