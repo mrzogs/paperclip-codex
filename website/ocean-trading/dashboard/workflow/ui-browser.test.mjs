@@ -22,23 +22,13 @@ async function check(name,fn) {
   try { await fn(); results.push({name,status:'PASS',type:'ACTUAL_CHROME_CURRENT_MAIN_SERVER_SQLITE',elapsed_ms:Date.now()-start}); console.log('PASS '+name); }
   catch(error) { results.push({name,status:'FAILED',error:error.message}); await snapshot('failure-'+results.length); throw error; }
 }
-async function login() {
-  await page.locator('#credential').fill(process.env.OCEAN_WAYNE_BROWSER_SECRET);
-  await page.getByRole('button',{name:'Sign in',exact:true}).click();
-  await page.locator('#login').waitFor({state:'detached'});
-  await waitText(page.locator('#freshness'),'Updated');
-}
 async function closeModal() { await page.locator('#modal button[aria-label=Close]').click(); await page.waitForFunction(()=>!document.querySelector('#modal').open); }
 try {
-  await check('GOV-09: authenticated real routes, keyboard login and inaccessible evidence',async()=>{
-    await navigate('/improvement/dashboard'); await page.locator('#credential').waitFor();
-    const unauth=await context.request.get(base+`/api/workflow/artifacts/${fixture.primary.evidence.manifest.artifact_id}/download`); assert.equal(unauth.status(),401);
-    await page.locator('#credential').fill('wrong-browser-credential'); await page.getByRole('button',{name:'Sign in',exact:true}).click(); await waitText(page.locator('.form-error'),'Invalid browser credential');
-    await page.locator('#credential').fill('unfinished-login-entry');
-    await page.waitForTimeout(5500);
-    assert.equal(await page.locator('#credential').inputValue(),'unfinished-login-entry');
-    await page.locator('#credential').focus(); await page.keyboard.press('Tab'); assert.equal(await page.evaluate(()=>document.activeElement.textContent),'Sign in');
-    await login(); assert.equal((await fixture.call('view/dashboard')).counts.action_required,1);
+  await check('GOV-09: automatic local session opens the landing page while direct API access stays protected',async()=>{
+    const unauth=await fetch(base+`/api/workflow/artifacts/${fixture.primary.evidence.manifest.artifact_id}/download`); assert.equal(unauth.status,401);
+    await navigate('/improvement/dashboard'); await waitText(page.locator('h1'),'Overview');
+    assert.equal(await page.locator('#login').count(),0); assert.equal(await page.getByRole('button',{name:'Sign in',exact:true}).count(),0);
+    assert.equal((await fixture.call('view/dashboard')).counts.action_required,1);
     const status=await context.request.get(base+'/api/workflow/session'); assert.equal(status.status(),200);
     await fixture.call('view/dashboard',{role:'BRAIN',expected:403});
   });
@@ -200,13 +190,13 @@ try {
     for(const route of ['/live-dashboard.html','/paper-dashboard.html','/ledger.html','/replay-monitor.html']) { await page.goto(base+route,{waitUntil:'domcontentloaded'}); await page.locator('main').waitFor(); await page.locator('[data-nav-page=improvement]').waitFor(); assert.ok((await page.locator('main').innerText()).trim().length>0); }
     await page.locator('[data-nav-page=improvement]').click(); await waitText(page.locator('h1'),'Overview');
   });
-  await check('GOV-09: expiry clears protected page, reauthentication and logout',async()=>{
+  await check('GOV-09: expiry restores a protected local session without a sign-in surface',async()=>{
     await navigate('/improvement/cases/'+fixture.primary.caseId);
     const db=new DatabaseSync(host.config.db_file); try { db.prepare('UPDATE ow_sessions SET expires_ms=?').run(Date.now()-1); }finally{db.close();}
-    await page.locator('#refresh').click(); await page.locator('#credential').waitFor(); assert.equal(await page.locator('#content table').count(),0); assert.equal(await page.locator('#approval-badge').isVisible(),false);
-    const r=await context.request.get(base+`/api/workflow/artifacts/${fixture.primary.evidence.manifest.artifact_id}/download`); assert.equal(r.status(),401);
-    await login(); await waitText(page.locator('h1'),fixture.primary.caseId); await page.locator('#logout').click(); await waitText(page.locator('#login'),'Signed out');
-    assert.equal((await context.request.get(base+'/api/workflow/view/dashboard')).status(),401);
+    await page.locator('#refresh').click(); await waitText(page.locator('h1'),fixture.primary.caseId);
+    assert.equal(await page.locator('#login').count(),0); assert.equal(await page.locator('#logout').count(),0);
+    assert.equal((await context.request.get(base+'/api/workflow/view/dashboard')).status(),200);
+    assert.equal((await fetch(base+`/api/workflow/artifacts/${fixture.primary.evidence.manifest.artifact_id}/download`)).status,401);
   });
   await check('GOV-09: service values absent from frontend, responses and browser storage',async()=>{
     const strings=await page.evaluate(()=>({html:document.documentElement.outerHTML,local:JSON.stringify(localStorage),session:JSON.stringify(sessionStorage)}));

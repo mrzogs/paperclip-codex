@@ -8,17 +8,15 @@ test('secondary approval-summary binding fault does not hide Strategies', async 
   const context = await browser.newContext({ viewport:{ width:1500, height:1000 } });
   const page = await context.newPage();
   try {
-    const response = await page.goto(`${host.base}/improvement/strategies`, { waitUntil:'domcontentloaded' });
-    assert.equal(response.status(), 200);
-    await page.locator('#credential').waitFor();
     await page.route('**/api/workflow/view/dashboard', route => route.fulfill({
       status:503,
       contentType:'application/json',
       body:JSON.stringify({ error:{ code:'OPERATIONAL_FACTUAL_BINDING_CHANGED' } }),
     }));
-    await page.locator('#credential').fill(process.env.OCEAN_WAYNE_BROWSER_SECRET);
-    await page.getByRole('button', { name:'Sign in', exact:true }).click();
+    const response = await page.goto(`${host.base}/improvement/strategies`, { waitUntil:'domcontentloaded' });
+    assert.equal(response.status(), 200);
     await page.getByRole('heading', { name:'Strategies', exact:true }).waitFor();
+    assert.equal(await page.locator('#login').count(),0);
     await page.locator('tbody').filter({ hasText:'VWAP Wave Pullback' }).waitFor();
     const notice = page.locator('#notice');
     await notice.filter({ hasText:"This page's records are available" }).waitFor();

@@ -10,7 +10,7 @@ const freshness = document.querySelector('#freshness');
 const csrfKey = 'ocean-workflow-human-csrf';
 const replayMonitorOpenedKey = 'ocean-workflow-replay-monitor-opened';
 const initialOnboardingQuestionnaire = new URLSearchParams(location.search).get('onboarding');
-const state = { csrf: sessionStorage.getItem(csrfKey), signedIn: false, data: null, offset: 0, filter: '', lastSuccess: null, timer: null, controller: null, generation: 0, fingerprint: null, mutation: false, imageUrls: [], summaryError: false, onboardingMode: Boolean(initialOnboardingQuestionnaire), onboardingQuestionnaire: initialOnboardingQuestionnaire, onboardingFormDrafts: {} };
+const state = { csrf: sessionStorage.getItem(csrfKey), signedIn: false, authenticating: null, data: null, offset: 0, filter: '', lastSuccess: null, timer: null, controller: null, generation: 0, fingerprint: null, mutation: false, imageUrls: [], summaryError: false, onboardingMode: Boolean(initialOnboardingQuestionnaire), onboardingQuestionnaire: initialOnboardingQuestionnaire, onboardingFormDrafts: {} };
 const text = value => value === null || value === undefined || value === '' ? 'Not recorded' : String(value);
 const esc = value => text(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
 const formEsc = value => String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
@@ -43,7 +43,7 @@ function showNotice(message) { notice.textContent = message; notice.hidden = !me
 function errorText(error) {
   if (error.code === 'HUMAN_UNENROLLED') return 'Human access is not set up yet. Service authentication is separate.';
   if (error.code === 'HUMAN_ACCESS_UNAVAILABLE') return 'Human access needs recovery. Service authentication is separate.';
-  const messages = { WAYNE_LOCAL_ENROLLMENT_REQUIRED: 'Local workflow access is not set up yet. Open Set up or recover access below.', WORKFLOW_DISABLED: 'Workflow setup is pending. The trading dashboard is available.', WORKFLOW_CONFIG_BLOCKED: 'Workflow configuration needs attention.', WORKFLOW_DATABASE_BUSY: 'Workflow data is briefly busy. Ocean will retry automatically.', WORKFLOW_REQUEST_TIMEOUT: 'The workflow response timed out. Refresh and try again; no action was confirmed.', SESSION_EXPIRED_OR_INVALID: 'Your session expired. Sign in again.', AUTHENTICATION_REQUIRED: 'Sign in to review workflow records.', REVISION_CONFLICT: 'This record changed. Refresh and review the latest version.', APPROVAL_REQUEST_STALE_OR_MISMATCH: 'This approval has changed or expired. Open the latest review.', BLOCKED_RECONCILIATION: 'The registered version changed. This case needs reconciliation.', OPERATIONAL_FACTUAL_BINDING_CHANGED: 'Ocean detected a changed operational source binding. Protected actions remain blocked until it is verified; no action was recorded.', CSRF_REJECTED: 'The browser session changed. Sign in again before submitting.', RECIPIENT_ACCEPTANCE_REQUIRED: 'Recipient acknowledgement must come from the recipient account.', ACTIVE_ARTIFACT_CONTENT_REJECTED: 'This file contains active content or private filesystem references.', UNSAFE_IMAGE_REJECTED: 'Use a single PNG up to 128 KiB and 2048 pixels per side, without embedded metadata.', ENTITY_NOT_FOUND: 'This record is unavailable.', UNKNOWN_VIEW: 'This page is unavailable.', ARTIFACT_STAGE_PREREQUISITE_REQUIRED: 'This result does not belong to the current case stage.', ONBOARDING_SOURCE_CHANGED: 'The onboarding source changed. Refresh before recording this answer.', ONBOARDING_SOURCE_INCOMPLETE: 'The onboarding source set is incomplete. Resolve the source status first.', PRIOR_QUESTIONNAIRE_REQUIRED: 'Complete the preceding onboarding question first.', SOURCE_BASELINE_INCOMPLETE: 'The source baseline is incomplete.', ONBOARDING_REQUIRED_FIELD: 'Complete every required onboarding field.', ONBOARDING_CONFIRMATION_REQUIRED: 'Confirm every required onboarding statement.', ONBOARDING_NUMBER_INVALID: 'One of the numeric answers is outside its permitted range.', ONBOARDING_TEXT_INVALID: 'One of the text answers is incomplete or invalid.', ONBOARDING_OPTION_INVALID: 'Select one of the permitted options.', ONBOARDING_REGISTRATION_NOT_READY: 'Registration is available after every questionnaire has been confirmed in the Obsidian Brain.', ONBOARDING_PROFILE_BASELINE_CONFLICT: 'The existing Ocean profile belongs to a different strategy version or source hash. Registration was not changed.', ONBOARDING_STRATEGY_BASELINE_CONFLICT: 'The existing Ocean strategy record does not match the reviewed onboarding source. Registration was not changed.', ONBOARDING_INSTANCE_BINDING_CONFLICT: 'The existing Sierra binding does not match the reviewed Replay instance. Registration was not changed.', ONBOARDING_REGISTRATION_BRAIN_SYNC_REQUIRED: 'Activation is available after the registration receipt is confirmed in the Obsidian Brain.', ONBOARDING_ACTIVATION_PREFLIGHT_REQUIRED: 'Complete every activation preflight reference.', ONBOARDING_CAPABILITY_NOT_APPROVED: 'This environment was not approved during onboarding.', LIVE_ACTIVATION_REQUIRES_PRODUCTION_PROMOTION: 'Live requires a separate production promotion and cannot be activated here.', ONBOARDING_BRAIN_RETRY_NOT_REQUIRED: 'This Brain record is already current or is retrying automatically.' };
+  const messages = { WAYNE_LOCAL_ENROLLMENT_REQUIRED: 'Local workflow access is not set up yet. Open the local access recovery instructions below.', WORKFLOW_DISABLED: 'Workflow setup is pending. The trading dashboard is available.', WORKFLOW_CONFIG_BLOCKED: 'Workflow configuration needs attention.', WORKFLOW_DATABASE_BUSY: 'Workflow data is briefly busy. Ocean will retry automatically.', WORKFLOW_REQUEST_TIMEOUT: 'The workflow response timed out. Refresh and try again; no action was confirmed.', SESSION_EXPIRED_OR_INVALID: 'The local browser session could not be restored.', AUTHENTICATION_REQUIRED: 'Local browser access could not be established.', REVISION_CONFLICT: 'This record changed. Refresh and review the latest version.', APPROVAL_REQUEST_STALE_OR_MISMATCH: 'This approval has changed or expired. Open the latest review.', BLOCKED_RECONCILIATION: 'The registered version changed. This case needs reconciliation.', OPERATIONAL_FACTUAL_BINDING_CHANGED: 'Ocean detected a changed operational source binding. Protected actions remain blocked until it is verified; no action was recorded.', CSRF_REJECTED: 'The browser session changed. Ocean restored local access; review the page before submitting again.', RECIPIENT_ACCEPTANCE_REQUIRED: 'Recipient acknowledgement must come from the recipient account.', ACTIVE_ARTIFACT_CONTENT_REJECTED: 'This file contains active content or private filesystem references.', UNSAFE_IMAGE_REJECTED: 'Use a single PNG up to 128 KiB and 2048 pixels per side, without embedded metadata.', ENTITY_NOT_FOUND: 'This record is unavailable.', UNKNOWN_VIEW: 'This page is unavailable.', ARTIFACT_STAGE_PREREQUISITE_REQUIRED: 'This result does not belong to the current case stage.', ONBOARDING_SOURCE_CHANGED: 'The onboarding source changed. Refresh before recording this answer.', ONBOARDING_SOURCE_INCOMPLETE: 'The onboarding source set is incomplete. Resolve the source status first.', PRIOR_QUESTIONNAIRE_REQUIRED: 'Complete the preceding onboarding question first.', SOURCE_BASELINE_INCOMPLETE: 'The source baseline is incomplete.', ONBOARDING_REQUIRED_FIELD: 'Complete every required onboarding field.', ONBOARDING_CONFIRMATION_REQUIRED: 'Confirm every required onboarding statement.', ONBOARDING_NUMBER_INVALID: 'One of the numeric answers is outside its permitted range.', ONBOARDING_TEXT_INVALID: 'One of the text answers is incomplete or invalid.', ONBOARDING_OPTION_INVALID: 'Select one of the permitted options.', ONBOARDING_REGISTRATION_NOT_READY: 'Registration is available after every questionnaire has been confirmed in the Obsidian Brain.', ONBOARDING_PROFILE_BASELINE_CONFLICT: 'The existing Ocean profile belongs to a different strategy version or source hash. Registration was not changed.', ONBOARDING_STRATEGY_BASELINE_CONFLICT: 'The existing Ocean strategy record does not match the reviewed onboarding source. Registration was not changed.', ONBOARDING_INSTANCE_BINDING_CONFLICT: 'The existing Sierra binding does not match the reviewed Replay instance. Registration was not changed.', ONBOARDING_REGISTRATION_BRAIN_SYNC_REQUIRED: 'Activation is available after the registration receipt is confirmed in the Obsidian Brain.', ONBOARDING_ACTIVATION_PREFLIGHT_REQUIRED: 'Complete every activation preflight reference.', ONBOARDING_CAPABILITY_NOT_APPROVED: 'This environment was not approved during onboarding.', LIVE_ACTIVATION_REQUIRES_PRODUCTION_PROMOTION: 'Live requires a separate production promotion and cannot be activated here.', ONBOARDING_BRAIN_RETRY_NOT_REQUIRED: 'This Brain record is already current or is retrying automatically.' };
   return messages[error.code] || `${human(error.code || 'CONNECTION_FAILED')}. The action was not confirmed.`;
 }
 async function request(path, options = {}) {
@@ -64,31 +64,43 @@ async function post(path, data, message = newId('message')) {
 async function postOperational(path, data) {
   return request(`operational/v1/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf || '' }, body: JSON.stringify(data) });
 }
-function signIn(message = '') {
-  freshness.textContent = 'Sign-in required';
+function localAccessProblem(error = null) {
+  freshness.textContent = 'Local access unavailable';
   showNotice('');
   state.signedIn = false; state.data = null; state.fingerprint = null; state.csrf = null;
   sessionStorage.removeItem(csrfKey);
   if (modal.open) modal.close();
   for (const url of state.imageUrls) URL.revokeObjectURL(url);
   state.imageUrls = [];
-  document.querySelector('#logout').hidden = true; document.querySelector('#approval-badge').hidden = true;
+  document.querySelector('#approval-badge').hidden = true;
   content.setAttribute('aria-busy', 'false');
-  content.innerHTML = `<form class='login' id='login'><h1>Sign in to Ocean</h1><p class='muted'>Wayne's workflow account</p><div class='field'><label for='credential'>Optional recovery password</label><input id='credential' type='password' autocomplete='current-password' maxlength='256' spellcheck='false' placeholder='Leave blank for local access'></div><p class='form-error' role='alert'>${message ? esc(message) : ''}</p><button class='primary' type='submit'>Sign in</button><details class='access-help'><summary>Set up or recover access</summary><p>Run the protected local operator command in your Windows PowerShell window. It creates local access without asking for a password.</p><code>&amp; 'D:\\Paperclip-codex\\scripts\\ocean-workflow-operator.ps1' -Action Initialize</code><p><code>-Action Reset-Password</code> is optional and only needed if you deliberately switch to password recovery mode. Then restart the website:</p><code>&amp; 'D:\\Paperclip-codex\\scripts\\start-ocean-trading-stack.ps1' -WebsiteOnly -RestartWebsite</code><p>Access setup does not approve a strategy or start trading.</p></details></form>`;
-  document.querySelector('#login').addEventListener('submit', async event => {
-    event.preventDefault(); const form = event.currentTarget; const submit = form.querySelector('button'); submit.disabled = true;
-    const input = form.querySelector('#credential'); const credential = input.value; input.value = '';
-    try {
-      const session = await request('session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ credential }) });
-      state.csrf = session.csrf_token; sessionStorage.setItem(csrfKey, state.csrf); state.signedIn = true;
-      document.querySelector('#logout').hidden = false; showNotice(''); await refresh(true);
-    } catch (error) { form.querySelector('.form-error').textContent = errorText(error); submit.disabled = false; input.focus(); }
-  });
+  const detail = error ? errorText(error) : 'Ocean could not establish its protected local browser session.';
+  content.innerHTML = `${heading('Ocean local access unavailable', detail)}<section class='local-access' id='local-access'><p>No sign-in is required. Restore the local operator binding, then refresh this page.</p><details class='access-help' open><summary>Recover local access</summary><p>Run the protected local operator command in your Windows PowerShell window:</p><code>&amp; 'D:\\Paperclip-codex\\scripts\\ocean-workflow-operator.ps1' -Action Initialize</code><p>Then restart only the website:</p><code>&amp; 'D:\\Paperclip-codex\\scripts\\start-ocean-trading-stack.ps1' -WebsiteOnly -RestartWebsite</code><p>This restores website access only. It does not approve a strategy or start trading.</p></details></section>`;
   const status = document.createElement('p'); status.className='muted'; status.id='service-readiness';
-  document.querySelector('#login h1').after(status);
+  document.querySelector('.page-heading > div').append(status);
   request('readiness').then(value => {
     if(status.isConnected)status.textContent=`Services: ${human(value.machine)}. Human access: ${human(value.human)}. Auth: ${human(value.human_auth_method || 'operator')}. Due: ${esc(value.human_acceptance_due || 'Not recorded')}. Ingestion: off.`;
   }).catch(()=>{if(status.isConnected)status.textContent='Service readiness unavailable.';});
+}
+async function establishLocalSession() {
+  if (state.authenticating) return state.authenticating;
+  state.authenticating = request('session', { method:'POST', headers:{ 'Content-Type':'application/json' }, body:JSON.stringify({ credential:'' }) })
+    .then(session => {
+      state.csrf = session.csrf_token;
+      sessionStorage.setItem(csrfKey, state.csrf);
+      state.signedIn = true;
+      showNotice('');
+      return session;
+    })
+    .finally(() => { state.authenticating = null; });
+  return state.authenticating;
+}
+async function restoreLocalAccess(error) {
+  try {
+    await establishLocalSession();
+    showNotice('Local access restored. Review the current page before repeating the action.');
+    await refresh(true);
+  } catch (restoreError) { localAccessProblem(restoreError || error); }
 }
 function heading(title, subtitle = '', actions = '') {
   return `<div class='page-heading'><div><h1>${esc(title)}</h1>${subtitle ? `<p class='subline'>${esc(subtitle)}</p>` : ''}</div><div class='actions'>${actions}</div></div>`;
@@ -824,9 +836,11 @@ async function refresh(force = false) {
   const controller = new AbortController(); state.controller = controller;
   const timeout = setTimeout(() => controller.abort(), 12000);
   try {
-    const session = await request('session', { signal:controller.signal });
-    if (!state.csrf) { signIn(); return; }
-    state.signedIn = true; document.querySelector('#logout').hidden = false;
+    let session;
+    try { session = await request('session', { signal:controller.signal }); }
+    catch (error) { if (error.status !== 401) throw error; session = await establishLocalSession(); }
+    if (!state.csrf) session = await establishLocalSession();
+    state.signedIn = true;
     const current = route();
     const endpoint = current.view === 'artifacts' ? `artifacts/${current.key}${current.fullResearchReport?'/research-report':''}` : `view/${current.view}${current.key ? `/${current.key}` : current.view === 'dashboard' ? '' : `/page/${state.offset}`}`;
     const [viewResult, summaryResult] = await Promise.allSettled([current.view === 'onboarding-guide' ? Promise.resolve({}) : request(endpoint, { signal:controller.signal }), current.view === 'dashboard' ? Promise.resolve(null) : request('view/dashboard', { signal:controller.signal })]);
@@ -865,7 +879,7 @@ async function refresh(force = false) {
     document.querySelectorAll('[data-view]').forEach(anchor => { if (anchor.dataset.view === current.view) anchor.setAttribute('aria-current','page'); else anchor.removeAttribute('aria-current'); });
   } catch (error) {
     if (generation !== state.generation) return;
-    if (error.status === 401 || ['WAYNE_LOCAL_ENROLLMENT_REQUIRED','WORKFLOW_CONFIG_BLOCKED','WORKFLOW_DISABLED'].includes(error.code)) signIn(errorText(error));
+    if (error.status === 401 || ['WAYNE_LOCAL_ENROLLMENT_REQUIRED','WORKFLOW_CONFIG_BLOCKED','WORKFLOW_DISABLED'].includes(error.code)) localAccessProblem(error);
     else {
       state.connectionError = true;
       showNotice(errorText(error)); freshness.textContent = state.lastSuccess ? `Refresh failed; last success ${date(state.lastSuccess.toISOString())}` : 'Not connected';
@@ -891,7 +905,7 @@ function openModal(title,body,submitLabel,submit) {
     event.preventDefault(); if (state.mutation) return;
     const form = event.currentTarget; const submitButton = form.querySelector('[type=submit]'); submitButton.disabled = true; state.mutation = true;
     try { await submit(form); modal.close(); state.fingerprint = null; await refresh(true); }
-    catch (error) { if (error.status === 401 || ['WAYNE_LOCAL_ENROLLMENT_REQUIRED','WORKFLOW_CONFIG_BLOCKED','WORKFLOW_DISABLED'].includes(error.code)) signIn(errorText(error)); else { form.querySelector('.form-error').textContent = errorText(error); submitButton.disabled = ['REVISION_CONFLICT','APPROVAL_REQUEST_STALE_OR_MISMATCH','BLOCKED_RECONCILIATION'].includes(error.code); } }
+    catch (error) { if (error.status === 401 || ['WAYNE_LOCAL_ENROLLMENT_REQUIRED','WORKFLOW_CONFIG_BLOCKED','WORKFLOW_DISABLED'].includes(error.code)) void restoreLocalAccess(error); else { form.querySelector('.form-error').textContent = errorText(error); submitButton.disabled = ['REVISION_CONFLICT','APPROVAL_REQUEST_STALE_OR_MISMATCH','BLOCKED_RECONCILIATION'].includes(error.code); } }
     finally { state.mutation = false; schedule(); }
   });
   renderIcons(); modal.showModal();
@@ -1164,7 +1178,7 @@ document.addEventListener('click',event => {
     if (status) status.innerHTML = badge('OPENED_FROM_THIS_BROWSER');
   }
   const action = event.target.closest('[data-action]');
-  if (action) { event.preventDefault(); void act(action.dataset.action,action).catch(error => { if (error.status === 401 || ['WAYNE_LOCAL_ENROLLMENT_REQUIRED','WORKFLOW_CONFIG_BLOCKED','WORKFLOW_DISABLED'].includes(error.code)) signIn(errorText(error)); else showNotice(errorText(error)); }); return; }
+  if (action) { event.preventDefault(); void act(action.dataset.action,action).catch(error => { if (error.status === 401 || ['WAYNE_LOCAL_ENROLLMENT_REQUIRED','WORKFLOW_CONFIG_BLOCKED','WORKFLOW_DISABLED'].includes(error.code)) void restoreLocalAccess(error); else showNotice(errorText(error)); }); return; }
   const anchor = event.target.closest('a[href^="/improvement/"]');
   if (!anchor || event.ctrlKey || event.metaKey || event.shiftKey || event.button !== 0) return;
   if (anchor.hasAttribute('data-onboarding-native')) return;
@@ -1176,9 +1190,6 @@ document.addEventListener('input',event => {
 });
 modal.addEventListener('close',() => { document.querySelector('#modal-body').replaceChildren(); state.fingerprint = null; if (state.signedIn && !state.mutation) void refresh(true); });
 document.querySelector('#refresh').addEventListener('click',() => { showNotice(''); void refresh(true); });
-document.querySelector('#logout').addEventListener('click',async () => {
-  try { await request('session/logout',{ method:'POST',headers:{ 'Content-Type':'application/json','X-CSRF-Token':state.csrf || '' },body:'{}' }); signIn('Signed out.'); } catch(error) { showNotice(errorText(error)); }
-});
 window.addEventListener('popstate',() => { const questionnaire = new URLSearchParams(location.search).get('onboarding'); state.offset = 0; state.filter = ''; state.data = null; state.fingerprint = null; state.onboardingMode = Boolean(questionnaire); state.onboardingQuestionnaire = questionnaire; state.onboardingFormDrafts = {}; void refresh(true); });
 document.addEventListener('visibilitychange',() => { if (!document.hidden) void refresh(true); });
 renderIcons(); void refresh(true);

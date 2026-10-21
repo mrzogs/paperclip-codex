@@ -124,7 +124,9 @@ test('S23.2 isolated protected receipt import and actual browser history project
     assert.equal(backend.db.prepare('SELECT COUNT(*) AS n FROM ow_decisions').get().n,0);
     assert.deepEqual(backend.db.prepare("SELECT DISTINCT operator_id FROM ow_auth_audit WHERE action='setup-import'").all().map(row=>row.operator_id),[operator_id]);
     browser=await chromium.launch({channel:'chrome',headless:true});const page=await browser.newPage({viewport:{width:1440,height:900}});
-    await page.goto(`${base}/improvement/history`);await page.locator('#credential').fill(password);await page.getByRole('button',{name:'Sign in',exact:true}).click();
+    const browserSession=await page.request.post(`${base}/api/workflow/session`,{headers:{Origin:base},data:{credential:password}});assert.equal(browserSession.status(),200);const browserSessionBody=await browserSession.json();
+    await page.addInitScript(csrf=>sessionStorage.setItem('ocean-workflow-human-csrf',csrf),browserSessionBody.csrf_token);
+    await page.goto(`${base}/improvement/history`);
     await page.locator('#setup-history summary').click();await page.getByText('Historical installation records. Not strategy approvals.',{exact:true}).waitFor();
     assert.deepEqual(await page.locator('#setup-history tbody tr td:first-child').allTextContents(),['S09-R1','S23','S23.1','S23.2']);
     if(process.env.OCEAN_S232_EVIDENCE)await page.screenshot({path:path.join(process.env.OCEAN_S232_EVIDENCE,'isolated-history.png'),fullPage:true});

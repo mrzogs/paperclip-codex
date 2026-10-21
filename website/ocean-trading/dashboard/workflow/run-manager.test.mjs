@@ -151,7 +151,7 @@ try {
   await check('UI-S22 actual Chrome wizard, scope changes, fresh confirmation, READY and mobile layout',async()=>{
     // Diagnostic scope on FORWARD avoids the deliberately protected discovery fixture above.
     browser=await app.chromium.launch({channel:'chrome',headless:true});const page=await browser.newPage({viewport:{width:1440,height:1000}});activePage=page;const errors=[];page.on('pageerror',e=>errors.push(e.message));
-    await page.goto(`${app.base}/improvement/runs`);await page.locator('#credential').fill(process.env.OCEAN_WAYNE_BROWSER_SECRET);await page.getByRole('button',{name:'Sign in',exact:true}).click();await page.getByRole('button',{name:'Start New Run',exact:true}).click();
+    await page.goto(`${app.base}/improvement/runs`);await page.getByRole('button',{name:'Start New Run',exact:true}).click();
     await page.locator('#run-environment').selectOption('PAPER_FORWARD');await page.locator('#run-purpose').selectOption('NOT_ELIGIBLE');await page.locator('#run-dataset').selectOption('test-permission-0-FORWARD:0');await page.locator('#run-next').click();
     await page.locator('#run-start').fill('2026-05-01T00:00');await page.locator('#run-end').fill('2026-05-02T00:00');await page.locator('#run-next').click();await page.waitForSelector('#run-review .facts');assert.equal(await page.locator('#run-next').isDisabled(),true);
     await page.screenshot({path:path.join(evidence,'s22-wizard-desktop.png'),fullPage:true});

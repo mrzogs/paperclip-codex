@@ -9,9 +9,8 @@ const page = await browser.newPage({viewport:{width:1500,height:1000}});
 const results = [];
 try {
   await page.goto(host.base+'/improvement/dashboard');
-  await page.locator('#credential').fill(process.env.OCEAN_WAYNE_BROWSER_SECRET);
-  await page.getByRole('button',{name:'Sign in',exact:true}).click();
-  await page.locator('#login').waitFor({state:'detached'});
+  await page.getByRole('heading',{name:'Overview',exact:true}).waitFor();
+  if (await page.locator('#login').count()) throw new Error('Unexpected sign-in surface');
   for (const [route,title] of [['cases','Cases'],['approvals','Approvals'],['runs','Runs'],['runs/test-ui-run-0','test-ui-run-0']]) {
     const response = await page.goto(host.base+'/improvement/'+route);
     assert.equal(response.status(),200);
