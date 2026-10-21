@@ -208,13 +208,14 @@ export function approvalRoutes(
             companyId: approval.companyId,
             actorType: "user",
             actorId: req.actor.userId ?? "board",
-            action: "approval.requester_wakeup_queued",
+            action: wakeRun ? "approval.requester_wakeup_queued" : "approval.requester_wakeup_skipped",
             entityType: "approval",
             entityId: approval.id,
             details: {
               requesterAgentId: approval.requestedByAgentId,
               wakeRunId: wakeRun?.id ?? null,
               linkedIssueIds,
+              ...(!wakeRun ? { reason: "NO_HEARTBEAT_RUN_QUEUED" } : {}),
             },
           });
         } catch (err) {

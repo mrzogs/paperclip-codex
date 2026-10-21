@@ -181,6 +181,75 @@ describe("approval routes idempotent retries", () => {
     expect(mockLogActivity).not.toHaveBeenCalled();
   });
 
+  it("records a skipped requester wake truthfully when approval cannot enqueue a run", async () => {
+    const approval = {
+      id: "approval-skipped-wake",
+      companyId: "company-1",
+      type: "request_board_approval",
+      status: "approved",
+      payload: {},
+      requestedByAgentId: "agent-1",
+    };
+    mockApprovalService.getById.mockResolvedValue({ ...approval, status: "pending" });
+    mockApprovalService.approve.mockResolvedValue({ approval, applied: true });
+    mockHeartbeatService.wakeup.mockResolvedValue(null);
+
+    const res = await request(await createApp())
+      .post("/api/approvals/approval-skipped-wake/approve")
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledOnce();
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "approval.requester_wakeup_skipped",
+        entityId: approval.id,
+        details: expect.objectContaining({
+          requesterAgentId: "agent-1",
+          wakeRunId: null,
+          linkedIssueIds: ["issue-1"],
+          reason: "NO_HEARTBEAT_RUN_QUEUED",
+        }),
+      }),
+    );
+    expect(mockLogActivity).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "approval.requester_wakeup_queued" }),
+    );
+  });
+
+  it("records a queued requester wake only when Paperclip returns a run", async () => {
+    const approval = {
+      id: "approval-queued-wake",
+      companyId: "company-1",
+      type: "request_board_approval",
+      status: "approved",
+      payload: {},
+      requestedByAgentId: "agent-1",
+    };
+    mockApprovalService.getById.mockResolvedValue({ ...approval, status: "pending" });
+    mockApprovalService.approve.mockResolvedValue({ approval, applied: true });
+
+    const res = await request(await createApp())
+      .post("/api/approvals/approval-queued-wake/approve")
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "approval.requester_wakeup_queued",
+        entityId: approval.id,
+        details: expect.objectContaining({ wakeRunId: "wake-1" }),
+      }),
+    );
+    expect(mockLogActivity).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "approval.requester_wakeup_skipped" }),
+    );
+  });
+
   it("rejects approval decisions for companies outside the caller scope", async () => {
     mockApprovalService.getById.mockResolvedValue({
       id: "approval-2",
