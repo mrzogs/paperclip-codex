@@ -20,7 +20,8 @@ function byteResponse(body, status = 200) {
   const bytes = Buffer.from(body);
   return {ok:status >= 200 && status < 300, status, arrayBuffer:async () => bytes};
 }
-function fixture({statuses = ['approved','approved'], stagingStatus = 'pending', issuePatch = {}, agentPatch = {}, queuedOnly = false, configPatch = {}} = {}) {
+function fixture({statuses = ['approved','approved'], stagingStatus = 'pending', issuePatch = {}, agentPatch = {}, queuedOnly = false,
+  skippedContinuationWake = false, configPatch = {}} = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ocean-vwap-approval-dispatch-'));
   const config = JSON.parse(JSON.stringify(loadVwapPhysicalComparatorApprovalDispatchConfig(BASE_CONFIG)));
   Object.assign(config, {state_path:path.join(root, 'state.json'), contract_path:CONTRACT.pathname.replace(/^\/(.:)/, '$1'), wake_start_timeout_ms:20, wake_poll_interval_ms:1}, configPatch);
@@ -70,6 +71,8 @@ function fixture({statuses = ['approved','approved'], stagingStatus = 'pending',
     companyId:config.paperclip.company_id,projectId:config.paperclip.project_id,projectWorkspaceId:config.paperclip.workspace_id,
     parentId:config.staging_authority.issue_id,title:config.staging_authority.continuation.execution_route.engineering_issue_title,
     assigneeAgentId:config.paperclip.coordinator_agent_id,status:'todo'};
+  const issues = new Map([[issue.id,issue],[nextTask.id,nextTask],[executorIssue.id,executorIssue]]);
+  const interactions = new Map();
   const grants = config.coordinator_gate.required_read_only_paths.map(value => `"${value.replace(/\\/g, '/')}" = "read"`).join(', ');
   const agent = {id:config.paperclip.coordinator_agent_id, companyId:config.paperclip.company_id, name:config.paperclip.coordinator_name,
     adapterType:'codex_local', adapterConfig:{cwd:config.paperclip.coordinator_project_root, model:config.paperclip.coordinator_model,
@@ -78,6 +81,7 @@ function fixture({statuses = ['approved','approved'], stagingStatus = 'pending',
       paperclip_project_id:config.paperclip.project_id, paperclip_workspace_id:config.paperclip.workspace_id,
       environment:'TEST_ONLY', live_real_enabled:false}, permissions:{canUseLiveTrading:false}, ...agentPatch};
   let posts = 0;
+  let skipContinuationWake = skippedContinuationWake;
   const requests = [];
   const runs = [];
   const fetchImpl = async (url, options = {}) => {
@@ -85,9 +89,10 @@ function fixture({statuses = ['approved','approved'], stagingStatus = 'pending',
     requests.push({route,method:options.method||'GET',body:options.body?JSON.parse(options.body):null});
     if (route.includes('/approvals/')) return response(approvals.get(route.split('/').at(-1)));
     if (route === '/api/attachments/' + config.staging_authority.attachment_id + '/content') return byteResponse(stagingPackage);
-    if (route === '/api/issues/' + config.paperclip.issue_id) return response(issue);
-    if (route === '/api/issues/' + config.preflight_outcome.next_task.issue_id) return response(nextTask);
-    if (route === '/api/issues/' + config.staging_authority.continuation.execution_route.engineering_issue_id) return response(executorIssue);
+    const issueInteractionMatch = route.match(/^\/api\/issues\/([^/?]+)\/interactions$/);
+    if (issueInteractionMatch) return response(interactions.get(issueInteractionMatch[1]) || []);
+    const issueMatch = route.match(/^\/api\/issues\/([^/?]+)$/);
+    if (issueMatch && issues.has(issueMatch[1])) return response(issues.get(issueMatch[1]));
     if (route === '/api/agents/' + config.paperclip.coordinator_agent_id) return response(agent);
     if (route.startsWith('/api/companies/') && route.includes('/heartbeat-runs')) return response(runs);
     if (route.startsWith('/api/agents/') && route.includes('/wakeup')) {
@@ -95,6 +100,9 @@ function fixture({statuses = ['approved','approved'], stagingStatus = 'pending',
       const body = JSON.parse(options.body);
       const engineering = body.payload.action === 'CONTINUE_EXACT_ENGINEERING_ISSUE_OR_OPEN_TYPED_RECOVERY';
       const continuation = !engineering && body.payload.approvalId === config.staging_authority.approval_id;
+      if (continuation && skipContinuationWake) return response({status:'skipped',reason:'issue_execution_deferred',
+        message:'Issue execution is deferred by a prerequisite.',issueId:body.payload.issueId,
+        executionRunId:null,executionAgentId:config.paperclip.coordinator_agent_id});
       const run = {id:engineering?'99999999-9999-4999-8999-999999999999':continuation?'dddddddd-dddd-4ddd-8ddd-dddddddddddd':'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', agentId:config.paperclip.coordinator_agent_id,
         status:'queued', startedAt:null, contextSnapshot:{issueId:body.payload.issueId,wakeReason:body.reason}};
       runs.push(run);
@@ -115,7 +123,8 @@ function fixture({statuses = ['approved','approved'], stagingStatus = 'pending',
     }
     return response({error:'not found', route}, 404);
   };
-  return {root, config, approvals, issue, nextTask, executorIssue, agent, runs, stagingPackage, fetchImpl, posts:() => posts,requests};
+  return {root, config, approvals, issue, nextTask, executorIssue, issues, interactions, agent, runs, stagingPackage, fetchImpl,
+    posts:() => posts,setSkippedContinuationWake:value=>{skipContinuationWake=value;},requests};
 }
 
 test('one pending approval remains fail-closed and never wakes', async () => {
@@ -239,6 +248,89 @@ test('approved staging authority repairs a missing requester wake once and prove
   assert.equal(second.engineering_continuity.state,'WAKE_QUEUED');
   assert.equal(second.engineering_continuity.wake_run_id,first.engineering_continuity.wake_run_id);
   assert.equal(f.posts(),2);
+});
+
+test('approved staging waits on the exact pending OCEA-28 authority interaction without waking blocked OCEA-22', async () => {
+  const f = fixture({stagingStatus:'approved'});
+  f.config.staging_authority.continuation.paperclip_wakeup_grace_ms = 0;
+  f.runs.push({id:f.config.preflight_outcome.heartbeat_run_id,agentId:f.config.paperclip.coordinator_agent_id,
+    status:'succeeded',startedAt:'2026-10-20T13:30:21.351Z',finishedAt:'2026-10-20T13:32:41.930Z',
+    contextSnapshot:{issueId:f.config.paperclip.issue_id,wakeReason:'vwap_v238_dual_approval_read_only_preflight_e9a1f3be3c90bb88bc2e'}});
+  const blocker={id:'03390c6f-bbe2-4972-9183-ea349406160f',identifier:'OCEA-28',
+    companyId:f.config.paperclip.company_id,projectId:f.config.paperclip.project_id,projectWorkspaceId:f.config.paperclip.workspace_id,
+    title:'Route exact source authority and supervised host integration for OCEA-24',status:'blocked',
+    assigneeAgentId:f.config.paperclip.coordinator_agent_id,blockedBy:[]};
+  f.executorIssue.blockedBy=[{id:blocker.id,identifier:blocker.identifier,status:blocker.status}];
+  f.issues.set(blocker.id,blocker);
+  f.interactions.set(blocker.id,[{id:'27e9d62e-f900-4b86-8eb1-388ce37bf210',companyId:f.config.paperclip.company_id,
+    issueId:blocker.id,kind:'ask_user_questions',status:'pending',continuationPolicy:'wake_assignee',
+    title:'Identify exact Telemetry and host authority',payload:{questions:[{id:'authority',
+      prompt:'Select the source-authority handoff route and provide the named authorized principal.',selectionMode:'single',
+      options:[{id:'snapshot',label:'Owner supplies immutable snapshot',description:'Agents stay root-bound.'}]}]}}]);
+  const first = await scanVwapPhysicalComparatorApprovalDispatch({config:f.config,stateFile:f.config.state_path,fetchImpl:f.fetchImpl});
+  assert.equal(first.status,'PREFLIGHT_BLOCKED_PHYSICAL_BINDING',first.reason);
+  assert.equal(first.approval_statuses_source,'PAPERCLIP_LIVE');
+  assert.equal(first.staging_authority.approval_status,'APPROVED');
+  assert.equal(first.staging_authority.continuation.state,'BLOCKED_BY_PAPERCLIP_HUMAN_AUTHORITY');
+  assert.equal(first.staging_authority.continuation.blocker_issue_identifier,'OCEA-28');
+  assert.equal(first.staging_authority.continuation.interaction_id,'27e9d62e-f900-4b86-8eb1-388ce37bf210');
+  assert.equal(first.continuity.human_authority_blocker.identifier,'OCEA-28');
+  assert.equal(first.continuity.next_automatic_job,null);
+  assert.equal(first.engineering_continuity.state,'BLOCKED_BY_PREREQUISITE');
+  assert.equal(f.posts(),0);
+  const second = await scanVwapPhysicalComparatorApprovalDispatch({config:f.config,stateFile:f.config.state_path,fetchImpl:f.fetchImpl});
+  assert.equal(second.staging_authority.continuation.state,'BLOCKED_BY_PAPERCLIP_HUMAN_AUTHORITY');
+  assert.equal(f.posts(),0);
+});
+
+test('a Paperclip skipped fallback response preserves live approval truth and is not retried', async () => {
+  const f = fixture({stagingStatus:'approved',skippedContinuationWake:true});
+  f.config.staging_authority.continuation.paperclip_wakeup_grace_ms = 0;
+  f.runs.push({id:f.config.preflight_outcome.heartbeat_run_id,agentId:f.config.paperclip.coordinator_agent_id,
+    status:'succeeded',startedAt:'2026-10-20T13:30:21.351Z',finishedAt:'2026-10-20T13:32:41.930Z',
+    contextSnapshot:{issueId:f.config.paperclip.issue_id,wakeReason:'vwap_v238_dual_approval_read_only_preflight_e9a1f3be3c90bb88bc2e'}});
+  const first = await scanVwapPhysicalComparatorApprovalDispatch({config:f.config,stateFile:f.config.state_path,fetchImpl:f.fetchImpl});
+  assert.equal(first.status,'PREFLIGHT_BLOCKED_PHYSICAL_BINDING',first.reason);
+  assert.equal(first.approval_statuses_source,'PAPERCLIP_LIVE');
+  assert.equal(first.staging_authority.approval_status,'APPROVED');
+  assert.equal(first.staging_authority.continuation.state,'PAPERCLIP_WAKE_SKIPPED');
+  assert.equal(first.staging_authority.continuation.skipped_reason,'issue_execution_deferred');
+  const postCount=f.posts();
+  const second = await scanVwapPhysicalComparatorApprovalDispatch({config:f.config,stateFile:f.config.state_path,fetchImpl:f.fetchImpl});
+  assert.equal(second.status,'PREFLIGHT_BLOCKED_PHYSICAL_BINDING');
+  assert.equal(second.staging_authority.continuation.state,'PAPERCLIP_WAKE_SKIPPED');
+  assert.equal(f.posts(),postCount);
+});
+
+test('a new Paperclip eligibility generation clears prior skip suppression and records one real wake', async () => {
+  const f = fixture({stagingStatus:'approved',skippedContinuationWake:true});
+  f.config.staging_authority.continuation.paperclip_wakeup_grace_ms = 0;
+  f.runs.push({id:f.config.preflight_outcome.heartbeat_run_id,agentId:f.config.paperclip.coordinator_agent_id,
+    status:'succeeded',startedAt:'2026-10-20T13:30:21.351Z',finishedAt:'2026-10-20T13:32:41.930Z',
+    contextSnapshot:{issueId:f.config.paperclip.issue_id,wakeReason:'vwap_v238_dual_approval_read_only_preflight_e9a1f3be3c90bb88bc2e'}});
+  f.executorIssue.status='blocked';
+  const skipped = await scanVwapPhysicalComparatorApprovalDispatch({config:f.config,stateFile:f.config.state_path,fetchImpl:f.fetchImpl});
+  assert.equal(skipped.staging_authority.continuation.state,'PAPERCLIP_WAKE_SKIPPED');
+  const skippedFingerprint=skipped.staging_authority.continuation.eligibility_fingerprint;
+  const continuationPostCount=()=>f.requests.filter(item=>item.method==='POST'
+    &&item.body?.payload?.action==='CONTINUE_APPROVED_STAGING_OR_REPORT_EXECUTOR_BLOCKER_NO_PLAYBACK').length;
+  const continuationPostsAfterSkip=continuationPostCount();
+  f.executorIssue.status='todo';
+  f.setSkippedContinuationWake(false);
+  const resumed = await scanVwapPhysicalComparatorApprovalDispatch({config:f.config,stateFile:f.config.state_path,fetchImpl:f.fetchImpl});
+  assert.equal(resumed.status,'PREFLIGHT_BLOCKED_PHYSICAL_BINDING');
+  assert.equal(resumed.staging_authority.approval_status,'APPROVED');
+  assert.equal(resumed.staging_authority.continuation.state,'OCEAN_LIVENESS_REPAIR_STARTED');
+  assert.equal(resumed.staging_authority.continuation.heartbeat_run_id,'dddddddd-dddd-4ddd-8ddd-dddddddddddd');
+  assert.notEqual(skippedFingerprint,null);
+  assert.equal(continuationPostCount(),continuationPostsAfterSkip+1);
+  const postCount=f.posts();
+  const continuationPostCountAfterResume=continuationPostCount();
+  const idempotent = await scanVwapPhysicalComparatorApprovalDispatch({config:f.config,stateFile:f.config.state_path,fetchImpl:f.fetchImpl});
+  assert.equal(idempotent.staging_authority.continuation.heartbeat_run_id,'dddddddd-dddd-4ddd-8ddd-dddddddddddd');
+  assert.equal(f.posts(),postCount);
+  assert.equal(continuationPostCount(),continuationPostCountAfterResume);
+  assert.equal(idempotent.safety.replay_start_authorized,false);
 });
 
 test('a queued Paperclip requester wake suppresses the Ocean fallback', async () => {

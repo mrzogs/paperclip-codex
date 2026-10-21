@@ -451,10 +451,33 @@ function continuationWithRun(stagingAuthority, state, source, run) {
     heartbeat_run_id:run?.id || null,heartbeat_run_status:run?.status || null,
     heartbeat_started_at_utc:run?.startedAt || null,heartbeat_finished_at_utc:run?.finishedAt || null}};
 }
+function continuationWithPaperclipBlocker(stagingAuthority, state, continuity, details = {}) {
+  const blocker = continuity?.human_authority_blocker || continuity?.next_automatic_job || null;
+  return {...stagingAuthority, continuation:{...stagingAuthority.continuation,state,source:'PAPERCLIP_LIVE',
+    blocker_issue_id:blocker?.issue_id || null,blocker_issue_identifier:blocker?.identifier || null,
+    blocker_issue_title:blocker?.title || null,blocker_url:blocker?.url || null,
+    interaction_id:blocker?.human_interaction?.id || null,
+    interaction_kind:blocker?.human_interaction?.kind || null,
+    interaction_continuation_policy:blocker?.human_interaction?.continuation_policy || null,
+    heartbeat_run_id:blocker?.worker?.run_id || null,heartbeat_run_status:blocker?.worker?.status || null,
+    ...details}};
+}
+function continuationEligibilityFingerprint(continuity) {
+  return digest(JSON.stringify({
+    human_interaction_id:continuity?.human_authority_blocker?.human_interaction?.id || null,
+    next_issue_id:continuity?.next_automatic_job?.issue_id || null,
+    next_issue_status:continuity?.next_automatic_job?.status || null,
+    next_worker_state:continuity?.next_automatic_job?.worker?.state || null,
+    issue_chain:(continuity?.issue_chain || []).map(issue => ({
+      id:issue.id,status:issue.status,pending_interaction_id:issue.pending_interaction_id || null,
+      unresolved_blocker_ids:[...(issue.unresolved_blocker_ids || [])].sort(),
+    })).sort((a,b)=>String(a.id).localeCompare(String(b.id))),
+  }));
+}
 function observedQueuedRun(runs) {
   return runs.find(run => String(run?.status || '').toLowerCase() === 'queued') || null;
 }
-async function reconcileApprovedContinuation(config, stagingAuthority, initialRuns, resolvedState, fetchImpl, sleepImpl) {
+async function reconcileApprovedContinuation(config, stagingAuthority, initialRuns, resolvedState, fetchImpl, sleepImpl, continuity, previousContinuation = null) {
   if (stagingAuthority.approval_status !== 'APPROVED') return stagingAuthority;
   const classify = runs => {
     const paperclip = approvalResolutionRuns(config, runs), fallback = fallbackContinuationRuns(config, runs, continuationWakeReason(config));
@@ -471,6 +494,27 @@ async function reconcileApprovedContinuation(config, stagingAuthority, initialRu
   };
   const observed = classify(initialRuns);
   if (observed) return observed;
+  if (continuity?.source !== 'PAPERCLIP_LIVE' || continuity?.freshness?.state !== 'CURRENT') {
+    return {...stagingAuthority,continuation:{...stagingAuthority.continuation,
+      state:'CONTINUATION_READBACK_UNAVAILABLE',source:'PAPERCLIP_UNAVAILABLE',
+      blocker:'Ocean will not issue a fallback wake without a current Paperclip blocker and interaction readback.'}};
+  }
+  if (continuity.human_authority_blocker) {
+    return continuationWithPaperclipBlocker(stagingAuthority,'BLOCKED_BY_PAPERCLIP_HUMAN_AUTHORITY',continuity,{
+      blocker:'The staging approval is approved. Continuation is waiting on the exact pending Paperclip interaction; Ocean does not duplicate or bypass that human decision.'});
+  }
+  const executorIssueId = config.staging_authority.continuation.execution_route.engineering_issue_id;
+  if (!continuity.next_automatic_job || continuity.next_automatic_job.issue_id !== executorIssueId) {
+    return continuationWithPaperclipBlocker(stagingAuthority,'BLOCKED_BY_PAPERCLIP_PREREQUISITE',continuity,{
+      blocker:'The approved staging request is blocked by a different Paperclip prerequisite. Ocean will not wake the blocked parent issue.'});
+  }
+  const eligibilityFingerprint = continuationEligibilityFingerprint(continuity);
+  if (previousContinuation?.state === 'PAPERCLIP_WAKE_SKIPPED'
+    && previousContinuation?.wake_reason === continuationWakeReason(config)
+    && previousContinuation?.eligibility_fingerprint === eligibilityFingerprint) {
+    return {...stagingAuthority,continuation:{...stagingAuthority.continuation,...previousContinuation,
+      source:'PAPERCLIP_LIVE',blocker:'Paperclip previously declined this exact idempotent fallback wake. Ocean will not retry it automatically.'}};
+  }
   const decidedAt = Date.parse(stagingAuthority.decided_at_utc || stagingAuthority.updated_at_utc || '');
   requireValue(Number.isFinite(decidedAt), 'APPROVAL_DISPATCH_STAGING_DECISION_TIME_INVALID');
   const graceMs = Number(stagingAuthority.continuation.paperclip_wakeup_grace_ms);
@@ -509,6 +553,15 @@ async function reconcileApprovedContinuation(config, stagingAuthority, initialRu
           instruction:'Reauthenticate the exact approved attachment, package digest, Sim1 TEST identity, stopped Replay, flat/no-order state, and the six exact allowed staging paths. Paperclip approval does not override filesystem restrictions. If an approval-bound narrow executor with write-time live approval validation and a diagnostics-only command policy is not proven, record that exact blocker and do not stage. Never mutate this agent adapter configuration. A vwap-hook START is a measurement START that calls Sierra replay/order-reset paths; never treat it as the diagnostic start and do not invoke it here. The existing RUN_RELEASE approval pins the pre-staging chartbook hash and cannot be reused after chartbook selection changes without an approved deterministic pre/post transformation or a superseding contract. Require fresh loaded-controller identity and lifecycle proof; the historical v0.2.0 receipt is not current proof, while disk v0.2.3 facts are recorded in Brain reasoning-20261020151153-961eaa4a. Do not advance replay/playback, place orders, mutate historical evidence, touch Paper/Live, or broaden filesystem scope. After a staging receipt and controller proof, prepare one consolidated human gate for the post-staging run contract plus measurement START.'},
       }),
     }, fetchImpl);
+    if (String(wake?.status || '').toLowerCase() === 'skipped') {
+      return {...stagingAuthority,continuation:{...stagingAuthority.continuation,
+        state:'PAPERCLIP_WAKE_SKIPPED',source:'PAPERCLIP_LIVE',wake_reason:reason,
+        eligibility_fingerprint:eligibilityFingerprint,
+        skipped_reason:String(wake?.reason || 'wakeup_skipped'),
+        blocker_issue_id:wake?.issueId || config.staging_authority.issue_id,
+        execution_run_id:wake?.executionRunId || null,execution_agent_id:wake?.executionAgentId || null,
+        blocker:'Paperclip declined the exact idempotent wake. Ocean preserves the approved decision and will not retry the same blocked parent wake.'}};
+    }
     requireValue(UUID.test(String(wake?.id || '')), 'APPROVAL_DISPATCH_CONTINUATION_WAKE_RECEIPT_INVALID');
     const deadline = Date.now() + Number(config.wake_start_timeout_ms || 30000);
     let run = wake;
@@ -569,7 +622,7 @@ async function continuityReadback(config,executorIssue,stagingAuthority,fetchImp
   catch(error) { const lastKnown = currentVwapContinuity(previous);
     return {schema_version:'ocean-vwap-continuity-projection/v1',source:'PAPERCLIP_UNAVAILABLE',
     observed_at_utc:lastKnown?.observed_at_utc || null,freshness:{state:'UNAVAILABLE',max_age_ms:90000},
-    reason:String(error?.message||'CONTINUITY_READBACK_FAILED').split(':')[0],next_automatic_job:null,
+    reason:String(error?.message||'CONTINUITY_READBACK_FAILED').split(':')[0],human_authority_blocker:null,next_automatic_job:null,
     other_ready_jobs:[],last_known_next_automatic_job:previous?.next_automatic_job || previous?.last_known_next_automatic_job || null,
     issue_chain:lastKnown?.issue_chain || [],human_decision:{...(lastKnown?.human_decision || {}),source:'STALE_READBACK',required:false},
     authority:{runtime_execution_authorized:false}}; }
@@ -610,9 +663,10 @@ export async function scanVwapPhysicalComparatorApprovalDispatch({config, stateF
     if (priorStarted) {
       const completed = completedPreflightDetails(config, priorStarted, statuses, reason, nextTask, executorIssue, stagingAuthority);
       if (completed) {
-        completed.staging_authority = await reconcileApprovedContinuation(config, stagingAuthority, runList, resolvedState, fetchImpl, sleepImpl);
+        completed.continuity = await continuityReadback(config,executorIssue,stagingAuthority,fetchImpl,previousState?.continuity);
+        completed.staging_authority = await reconcileApprovedContinuation(config, stagingAuthority, runList, resolvedState, fetchImpl, sleepImpl,
+          completed.continuity,previousState?.staging_authority?.continuation);
         completed.staging_authority.staging_success_receipt = stagingSuccessReceiptReadback(config);
-        completed.continuity = await continuityReadback(config,executorIssue,completed.staging_authority,fetchImpl,previousState?.continuity);
         completed.engineering_continuity = await reconcileVwapEngineeringContinuity({config,executorIssue,
           stagingAuthority:completed.staging_authority,continuity:completed.continuity,
           previous:previousState?.engineering_continuity,
@@ -636,9 +690,10 @@ export async function scanVwapPhysicalComparatorApprovalDispatch({config, stateF
       if (insideStarted) {
         const completed = completedPreflightDetails(config, insideStarted, statuses, reason, nextTask, executorIssue, stagingAuthority);
         if (completed) {
-          completed.staging_authority = await reconcileApprovedContinuation(config, stagingAuthority, insideList, resolvedState, fetchImpl, sleepImpl);
+          completed.continuity = await continuityReadback(config,executorIssue,stagingAuthority,fetchImpl,previousState?.continuity);
+          completed.staging_authority = await reconcileApprovedContinuation(config, stagingAuthority, insideList, resolvedState, fetchImpl, sleepImpl,
+            completed.continuity,previousState?.staging_authority?.continuation);
           completed.staging_authority.staging_success_receipt = stagingSuccessReceiptReadback(config);
-          completed.continuity = await continuityReadback(config,executorIssue,completed.staging_authority,fetchImpl,previousState?.continuity);
           completed.engineering_continuity = await reconcileVwapEngineeringContinuity({config,executorIssue,
             stagingAuthority:completed.staging_authority,continuity:completed.continuity,
             previous:previousState?.engineering_continuity,
@@ -681,7 +736,7 @@ export async function scanVwapPhysicalComparatorApprovalDispatch({config, stateF
   } catch (error) {
     const priorContinuity = previousState?.continuity || null;
     const staleContinuity = priorContinuity ? {...priorContinuity,source:'PAPERCLIP_UNAVAILABLE',
-      freshness:{state:'STALE',max_age_ms:90000},next_automatic_job:null,other_ready_jobs:[],
+      freshness:{state:'STALE',max_age_ms:90000},human_authority_blocker:null,next_automatic_job:null,other_ready_jobs:[],
       last_known_next_automatic_job:priorContinuity.next_automatic_job || priorContinuity.last_known_next_automatic_job || null,
       human_decision:{...(priorContinuity.human_decision || {}),source:'STALE_READBACK',required:false}} : null;
     return write('ATTENTION_REQUIRED', {reason:String(error?.message || error), dispatched:false,

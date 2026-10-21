@@ -10,10 +10,11 @@ function fixture() {
   const issues=new Map([[24,issue(24,'blocked',[28])],[28,issue(28,'blocked',[29,30])],
     [29,issue(29,'done')],[30,issue(30,'blocked',[29])]]);
   const agents=new Map([...issues.keys()].map(n=>[id(100+n),{id:id(100+n),companyId:id(1),name:'Owner '+n}]));
-  const runs=new Map(),requests=[];
+  const runs=new Map(),interactions=new Map(),requests=[];
   const getJson=async route=>{
     requests.push(route);
-    const [kind,key]=route.slice(1).split('/');
+    const [kind,key,child]=route.slice(1).split('/');
+    if(kind==='issues'&&child==='interactions')return interactions.get(key) || [];
     if(kind==='issues')return [...issues.values()].find(i=>i.id===key);
     if(kind==='agents')return agents.get(key);
     if(kind==='heartbeat-runs')return runs.get(key);
@@ -21,7 +22,7 @@ function fixture() {
   };
   const stagingAuthority={approval_id:id(200),approval_status:'PENDING',approval_url:'http://127.0.0.1:3100/OCEA/approvals/'+id(200),
     approval_scope:'TEST_STAGING_WRITE_SINGLE_DIAGNOSTIC_START_ONLY'};
-  return {config,issues,agents,runs,requests,stagingAuthority,getJson,
+  return {config,issues,agents,runs,interactions,requests,stagingAuthority,getJson,
     project:()=>projectVwapContinuity({config,executorIssue:issues.get(24),stagingAuthority,getJson})};
 }
 
@@ -38,6 +39,39 @@ test('completed candidate no longer hides the review owner behind a stale blocke
   assert.equal(p.authority.current_exclusive_booking,'NOT_PROVEN');
   assert.equal(p.authority.test_standing_policy,'NOT_GRANTED');
   assert(f.requests.every(route=>/^\/(issues|agents|heartbeat-runs)\//.test(route)));
+});
+
+test('a pending Paperclip question is projected as the exact human authority blocker, not automatic work',async()=>{
+  const f=fixture(),issue=f.issues.get(30);
+  f.interactions.set(issue.id,[{id:id(500),companyId:id(1),issueId:issue.id,kind:'ask_user_questions',status:'pending',
+    continuationPolicy:'wake_assignee',title:'Identify exact Telemetry and host authority',summary:null,payload:{questions:[{
+      id:'authority',prompt:'Name the authorized supervised host principal.',selectionMode:'single',options:[
+        {id:'snapshot',label:'Owner supplies immutable snapshot',description:'Keep agents root-bound.'},
+        {id:'authorized-owner',label:'Existing authorized owner patches source',description:'Name the exact owner and workspace.'},
+      ],
+    }]}}]);
+  const p=await f.project();
+  assert.equal(p.next_automatic_job,null);
+  assert.equal(p.human_authority_blocker.identifier,'OCEA-30');
+  assert.equal(p.human_authority_blocker.human_interaction.id,id(500));
+  assert.equal(p.human_authority_blocker.human_interaction.continuation_policy,'wake_assignee');
+  assert.equal(p.human_authority_blocker.human_interaction.questions[0].prompt,'Name the authorized supervised host principal.');
+  assert.equal(p.issue_chain.find(item=>item.identifier==='OCEA-30').pending_interaction_id,id(500));
+  assert.match(p.human_authority_blocker.recovery_action,/Answer the pending Paperclip question/);
+});
+
+test('resolved interaction disappears and exposes the owner wake for independent verification',async()=>{
+  const f=fixture(),issue=f.issues.get(30);
+  issue.status='in_progress';issue.executionRunId=id(300);
+  f.interactions.set(issue.id,[{id:id(500),companyId:id(1),issueId:issue.id,kind:'ask_user_questions',status:'answered',
+    continuationPolicy:'wake_assignee',title:'Identify authority',payload:{questions:[]}}]);
+  f.runs.set(id(300),{id:id(300),agentId:issue.assigneeAgentId,companyId:id(1),status:'running',startedAt:'2026-10-20T16:00:00Z',
+    contextSnapshot:{issueId:issue.id,paperclipWorkspace:{projectId:id(2),workspaceId:id(3),cwd:'C:\\fixture'}}});
+  const p=await f.project();
+  assert.equal(p.human_authority_blocker,null);
+  assert.equal(p.next_automatic_job.identifier,'OCEA-30');
+  assert.equal(p.next_automatic_job.worker.state,'RUNNING_VERIFIED');
+  assert.equal(p.next_automatic_job.recovery_required,false);
 });
 
 test('current worker is read independently and must match issue, owner, company and run ID',async()=>{
