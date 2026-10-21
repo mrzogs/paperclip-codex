@@ -622,7 +622,8 @@ async function continuityReadback(config,executorIssue,stagingAuthority,fetchImp
   catch(error) { const lastKnown = currentVwapContinuity(previous);
     return {schema_version:'ocean-vwap-continuity-projection/v1',source:'PAPERCLIP_UNAVAILABLE',
     observed_at_utc:lastKnown?.observed_at_utc || null,freshness:{state:'UNAVAILABLE',max_age_ms:90000},
-    reason:String(error?.message||'CONTINUITY_READBACK_FAILED').split(':')[0],human_authority_blocker:null,next_automatic_job:null,
+    reason:String(error?.message||'CONTINUITY_READBACK_FAILED').split(':')[0],human_authority_blocker:null,
+    human_owner_blocker:null,other_human_owner_blockers:[],next_automatic_job:null,
     other_ready_jobs:[],last_known_next_automatic_job:previous?.next_automatic_job || previous?.last_known_next_automatic_job || null,
     issue_chain:lastKnown?.issue_chain || [],human_decision:{...(lastKnown?.human_decision || {}),source:'STALE_READBACK',required:false},
     authority:{runtime_execution_authorized:false}}; }
@@ -736,7 +737,8 @@ export async function scanVwapPhysicalComparatorApprovalDispatch({config, stateF
   } catch (error) {
     const priorContinuity = previousState?.continuity || null;
     const staleContinuity = priorContinuity ? {...priorContinuity,source:'PAPERCLIP_UNAVAILABLE',
-      freshness:{state:'STALE',max_age_ms:90000},human_authority_blocker:null,next_automatic_job:null,other_ready_jobs:[],
+      freshness:{state:'STALE',max_age_ms:90000},human_authority_blocker:null,human_owner_blocker:null,
+      other_human_owner_blockers:[],next_automatic_job:null,other_ready_jobs:[],
       last_known_next_automatic_job:priorContinuity.next_automatic_job || priorContinuity.last_known_next_automatic_job || null,
       human_decision:{...(priorContinuity.human_decision || {}),source:'STALE_READBACK',required:false}} : null;
     return write('ATTENTION_REQUIRED', {reason:String(error?.message || error), dispatched:false,

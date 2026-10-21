@@ -230,6 +230,25 @@ test('complete onboarding is actionable in the browser without touching producti
     await expect(page.getByText(/TEST staging decision is already approved/)).toBeVisible();
     await expect(page.getByRole('link',{ name:'Answer authority question OCEA-28', exact:true })).toHaveAttribute('href','http://127.0.0.1:3100/OCEA/issues/OCEA-28');
     await expect(page.getByText(/Continuation is waiting on OCEA-28: Identify exact Telemetry and host authority/)).toBeVisible();
+    const priorDispatch = fs.readFileSync(approvalDispatchState,'utf8');
+    const humanOwnedDispatch = JSON.parse(priorDispatch);
+    humanOwnedDispatch.continuity.observed_at_utc = new Date().toISOString();
+    humanOwnedDispatch.continuity.human_authority_blocker = null;
+    humanOwnedDispatch.continuity.human_owner_blocker = {issue_id:'60d1f150-b541-41e8-aa1f-833ff0cb6560',
+      identifier:'OCEA-31',title:'Obtain authorized Telemetry active-source and hardened custody receipt',status:'TODO',
+      owner_user_id:'local-board',owner_name:'Wayne / Paperclip board',url:'http://127.0.0.1:3100/OCEA/issues/OCEA-31',
+      action:'This task is assigned to a human Board owner for cross-owner routing. No agent wake or trading authority is inferred.'};
+    humanOwnedDispatch.continuity.next_automatic_job = {issue_id:'fa919a56-79ff-475e-abbd-9336cbef5cd8',
+      identifier:'OCEA-32',title:'Engineer supervised host worker',status:'IN_PROGRESS',owner_name:'CICD coordinator',
+      url:'http://127.0.0.1:3100/OCEA/issues/OCEA-32',worker:{state:'RUNNING_VERIFIED'},recovery_required:false};
+    fs.writeFileSync(approvalDispatchState,JSON.stringify(humanOwnedDispatch));
+    await page.locator('#refresh').click();
+    await expect(page.getByRole('heading',{name:'Complete OCEA-31 cross-owner evidence routing',exact:true})).toBeVisible();
+    await expect(page.getByRole('link',{name:'Open cross-owner work OCEA-31',exact:true})).toHaveAttribute('href','http://127.0.0.1:3100/OCEA/issues/OCEA-31');
+    await expect(page.getByText(/OCEA-32 is separately Running verified under CICD coordinator/)).toBeVisible();
+    await expect(page.getByText(/No Stage, diagnostic start, playback, or trading authority follows/)).toBeVisible();
+    fs.writeFileSync(approvalDispatchState,priorDispatch);
+    await page.locator('#refresh').click();
     await expect(page.getByRole('heading',{ name:'Read-only preflight complete — blocked', exact:true })).toBeVisible();
     await expect(page.getByText('Preflight blocked physical binding',{ exact:true })).toBeVisible();
     await expect(page.getByText('Read only preflight only',{ exact:true })).toBeVisible();

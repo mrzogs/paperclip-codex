@@ -111,6 +111,35 @@ test('cycles, cross-project dependencies and unassigned leaves fail closed',asyn
   await assert.rejects(f.project(),/OWNER_MISSING/);
 });
 
+test('a human Board-owned source handoff does not erase the parallel agent worker',async()=>{
+  const f=fixture();
+  f.issues.get(28).blockedBy=[{id:id(31)},{id:id(32)},{id:id(33)}];
+  f.issues.set(31,{...f.issues.get(30),id:id(31),identifier:'OCEA-31',title:'Telemetry custody receipt',
+    status:'todo',assigneeAgentId:null,assigneeUserId:'local-board',executionRunId:null,blockedBy:[]});
+  f.issues.set(32,{...f.issues.get(30),id:id(32),identifier:'OCEA-32',title:'Host worker',
+    status:'in_progress',assigneeAgentId:id(132),executionRunId:id(300),blockedBy:[]});
+  f.issues.set(33,{...f.issues.get(30),id:id(33),identifier:'OCEA-33',title:'Independent review',
+    status:'blocked',assigneeAgentId:id(133),blockedBy:[{id:id(31)},{id:id(32)}]});
+  f.agents.set(id(132),{id:id(132),companyId:id(1),name:'Worker owner'});
+  f.agents.set(id(133),{id:id(133),companyId:id(1),name:'Reviewer'});
+  f.runs.set(id(300),{id:id(300),agentId:id(132),companyId:id(1),status:'running',startedAt:'2026-10-20T16:00:00Z',
+    contextSnapshot:{issueId:id(32),paperclipWorkspace:{projectId:id(2),workspaceId:id(3),cwd:'C:\\fixture'}}});
+  const p=await f.project();
+  assert.equal(p.source,'PAPERCLIP_LIVE');
+  assert.equal(p.human_owner_blocker.identifier,'OCEA-31');
+  assert.equal(p.human_owner_blocker.owner_user_id,'local-board');
+  assert.equal(p.human_owner_blocker.owner_name,'Wayne / Paperclip board');
+  assert.equal(p.next_automatic_job.identifier,'OCEA-32');
+  assert.equal(p.next_automatic_job.worker.state,'RUNNING_VERIFIED');
+  assert.equal(p.issue_chain.find(item=>item.identifier==='OCEA-31').owner_user_id,'local-board');
+  assert.equal(p.authority.runtime_execution_authorized,false);
+  const stale=currentVwapContinuity(p,Date.parse(p.observed_at_utc)+90001);
+  assert.equal(stale.human_owner_blocker,null);
+  assert.equal(stale.next_automatic_job,null);
+  f.issues.get(31).assigneeUserId='untrusted-owner';
+  await assert.rejects(f.project(),/HUMAN_OWNER_INVALID/);
+});
+
 test('stale readback withdraws current action and human-decision claims',async()=>{
   const p=await fixture().project(),at=Date.parse(p.observed_at_utc);
   assert.equal(currentVwapContinuity(p,at+89999).freshness.state,'CURRENT');

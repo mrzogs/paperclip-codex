@@ -4,7 +4,7 @@ const STATUSES = new Set(['backlog','todo','in_progress','in_review','done','blo
 
 // This is a read model. Issue completion and heartbeat transport never grant runtime authority.
 export async function projectVwapContinuity({config, executorIssue, stagingAuthority, getJson, observedAt = new Date().toISOString()}) {
-  const issues = new Map(), agents = new Map(), edges = [], humanAuthorityBlockers = [];
+  const issues = new Map(), agents = new Map(), edges = [], humanAuthorityBlockers = [], humanOwnerBlockers = [];
   const check = (condition, code) => { if (!condition) throw new Error(code); };
   async function visit(issue, ancestors = []) {
     check(UUID.test(String(issue?.id || '')) && /^OCEA-\d+$/.test(String(issue?.identifier || ''))
@@ -32,6 +32,16 @@ export async function projectVwapContinuity({config, executorIssue, stagingAutho
     if (recovery) check(recovery.companyId === config.paperclip.company_id && recovery.sourceIssueId === issue.id
       && recovery.ownerType === 'agent' && UUID.test(String(recovery.ownerAgentId || '')), 'VWAP_CONTINUITY_RECOVERY_BINDING_INVALID');
     const ownerId = recovery?.ownerAgentId || issue.assigneeAgentId;
+    // A Board-owned cross-project handoff is real work, but cannot be presented as a runnable agent job.
+    if (!ownerId && issue.assigneeUserId) {
+      check(issue.assigneeUserId === 'local-board' || UUID.test(String(issue.assigneeUserId)), 'VWAP_CONTINUITY_HUMAN_OWNER_INVALID');
+      check(!issue.executionRunId && !recovery, 'VWAP_CONTINUITY_HUMAN_WORKER_INVALID');
+      humanOwnerBlockers.push({issue_id:issue.id,identifier:issue.identifier,title:issue.title,status:issue.status.toUpperCase(),
+        owner_user_id:issue.assigneeUserId,owner_name:issue.assigneeUserId === 'local-board' ? 'Wayne / Paperclip board' : 'Paperclip board user',
+        url:'http://127.0.0.1:3100/OCEA/issues/' + issue.identifier,
+        action:'This task is assigned to a human Board owner for cross-owner routing. Open the linked Paperclip issue for the exact evidence and owner action. No agent wake or trading authority is inferred.'});
+      continue;
+    }
     check(UUID.test(String(ownerId || '')), 'VWAP_CONTINUITY_OWNER_MISSING');
     let agent = agents.get(ownerId);
     if (!agent) {
@@ -105,9 +115,10 @@ export async function projectVwapContinuity({config, executorIssue, stagingAutho
     scope:stagingAuthority.approval_scope};
   return {schema_version:'ocean-vwap-continuity-projection/v1',source:'PAPERCLIP_LIVE',observed_at_utc:observedAt,
     freshness:{state:'CURRENT',max_age_ms:90000},human_decision:approval,
-    human_authority_blocker:humanAuthorityBlockers[0] || null,next_automatic_job:jobs[0] || null,
+    human_authority_blocker:humanAuthorityBlockers[0] || null,human_owner_blocker:humanOwnerBlockers[0] || null,
+    other_human_owner_blockers:humanOwnerBlockers.slice(1),next_automatic_job:jobs[0] || null,
     other_ready_jobs:jobs.slice(1),issue_chain:[...issues.values()].map(issue=>({id:issue.id,identifier:issue.identifier,
-      title:issue.title,status:issue.status.toUpperCase(),owner_agent_id:issue.assigneeAgentId,
+      title:issue.title,status:issue.status.toUpperCase(),owner_agent_id:issue.assigneeAgentId,owner_user_id:issue.assigneeUserId || null,
       pending_interaction_id:humanAuthorityBlockers.find(job=>job.issue_id===issue.id)?.human_interaction?.id || null,
       pending_interaction_kind:humanAuthorityBlockers.find(job=>job.issue_id===issue.id)?.human_interaction?.kind || null,
       unresolved_blocker_ids:edges.filter(edge=>edge.issue_id===issue.id&&issues.get(edge.blocker_id)?.status!=='done').map(edge=>edge.blocker_id)})),
@@ -123,7 +134,8 @@ export function currentVwapContinuity(projection, now = Date.now()) {
   if (!projection) return null;
   const age = now - Date.parse(projection.observed_at_utc || '');
   if (projection.freshness?.state !== 'CURRENT' || !Number.isFinite(age) || age < 0 || age > 90000) return {...projection,
-    freshness:{state:'STALE',max_age_ms:90000},human_authority_blocker:null,next_automatic_job:null,other_ready_jobs:[],
+    freshness:{state:'STALE',max_age_ms:90000},human_authority_blocker:null,human_owner_blocker:null,
+    other_human_owner_blockers:[],next_automatic_job:null,other_ready_jobs:[],
     human_decision:{...projection.human_decision,source:'STALE_READBACK',required:false}};
   return projection;
 }
