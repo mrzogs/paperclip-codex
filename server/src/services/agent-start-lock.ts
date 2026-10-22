@@ -3,12 +3,18 @@ import { logger } from "../middleware/logger.js";
 const AGENT_START_LOCK_STALE_MS = 30_000;
 const startLocksByAgent = new Map<string, { promise: Promise<void>; startedAtMs: number }>();
 
+export class AgentStartLockBusyError extends Error {
+  constructor(agentId: string) {
+    super(`Agent start lock is still held for ${agentId}; retry on the next recovery tick`);
+    this.name = "AgentStartLockBusyError";
+  }
+}
+
 async function waitForAgentStartLock(agentId: string, lock: { promise: Promise<void>; startedAtMs: number }) {
   const elapsedMs = Date.now() - lock.startedAtMs;
   const remainingMs = AGENT_START_LOCK_STALE_MS - elapsedMs;
   if (remainingMs <= 0) {
-    logger.warn({ agentId, staleMs: elapsedMs }, "agent start lock stale; continuing queued-run start");
-    return;
+    throw new AgentStartLockBusyError(agentId);
   }
 
   let timedOut = false;
@@ -25,14 +31,21 @@ async function waitForAgentStartLock(agentId: string, lock: { promise: Promise<v
   if (timeout) clearTimeout(timeout);
 
   if (timedOut) {
-    logger.warn({ agentId, staleMs: AGENT_START_LOCK_STALE_MS }, "agent start lock timed out; continuing queued-run start");
+    logger.warn({ agentId, staleMs: AGENT_START_LOCK_STALE_MS }, "agent start lock timed out; deferring queued-run start");
+    throw new AgentStartLockBusyError(agentId);
   }
 }
 
 export async function withAgentStartLock<T>(agentId: string, fn: () => Promise<T>) {
-  const previous = startLocksByAgent.get(agentId);
-  const waitForPrevious = previous ? waitForAgentStartLock(agentId, previous) : Promise.resolve();
-  const run = waitForPrevious.then(fn);
+  // A timeout cannot revoke an in-flight owner's ability to claim runs. Keep
+  // ownership until it settles, and recheck after waiting because another waiter
+  // may already have acquired the lock.
+  while (true) {
+    const previous = startLocksByAgent.get(agentId);
+    if (!previous) break;
+    await waitForAgentStartLock(agentId, previous);
+  }
+  const run = Promise.resolve().then(fn);
   const marker = run.then(
     () => undefined,
     () => undefined,

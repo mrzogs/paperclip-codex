@@ -29,6 +29,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { runningProcesses } from "../adapters/index.ts";
+import { withAgentStartLock } from "../services/agent-start-lock.ts";
 
 const mockAdapterExecute = vi.hoisted(() =>
   vi.fn(async () => ({
@@ -151,6 +152,46 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
 
   afterAll(async () => {
     await tempDb?.cleanup();
+  });
+
+  it("resumes other agents while a start owner is stalled, then retries after release", async () => {
+    const companyId = randomUUID();
+    const stalledAgentId = randomUUID();
+    const readyAgentId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId, name: "Lock recovery", issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([stalledAgentId, readyAgentId].map((id) => ({
+      id, companyId, name: id, role: "engineer", status: "active", adapterType: "codex_local",
+      adapterConfig: {}, runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } }, permissions: {},
+    })));
+    const [stalledRun, readyRun] = await db.insert(heartbeatRuns).values([stalledAgentId, readyAgentId].map((agentId) => ({
+      companyId, agentId, status: "queued", invocationSource: "assignment",
+    }))).returning();
+
+    let release!: () => void;
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() - 31_000);
+    const owner = withAgentStartLock(stalledAgentId, () => new Promise<void>((resolve) => { release = resolve; }));
+    await Promise.resolve();
+    clock.mockRestore();
+    try {
+      await heartbeat.resumeQueuedRuns();
+      expect(await waitForCondition(async () => {
+        const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, readyRun.id));
+        return run.status === "succeeded";
+      })).toBe(true);
+      const [waiting] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, stalledRun.id));
+      expect(waiting.status).toBe("queued");
+    } finally {
+      release();
+      await owner;
+    }
+    await heartbeat.resumeQueuedRuns();
+    expect(await waitForCondition(async () => {
+      const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, stalledRun.id));
+      return run.status === "succeeded";
+    })).toBe(true);
   });
 
   it("keeps blocked descendants idle until their blockers resolve", async () => {
