@@ -106,7 +106,12 @@ function scheduleWorkflowStartupRetry() {
 
 function initializeWorkflowBackend() {
   try {
-    const candidate = workflowFromEnvironment(process.env, PYTHON_EXE);
+    const workflowEnvironment = {
+      ...process.env,
+      OCEAN_PAPERCLIP_INTERACTION_CONFIG: process.env.OCEAN_PAPERCLIP_INTERACTION_CONFIG
+        || path.join(__dirname, 'config', 'paperclip-interaction-projection.json'),
+    };
+    const candidate = workflowFromEnvironment(workflowEnvironment, PYTHON_EXE);
     if (candidate && process.env.OCEAN_OPERATIONAL_LEARNING_PHYSICAL_BINDING_FILE) {
       try {
         const reconciliation = reconcileOperationalReplayRunSettings(candidate, process.env.OCEAN_OPERATIONAL_LEARNING_PHYSICAL_BINDING_FILE);

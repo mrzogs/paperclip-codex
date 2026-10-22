@@ -146,6 +146,23 @@ function operationalReleaseTable(items) {
     return [`${esc(context.dataset_manifest_id)} / r${esc(context.dataset_manifest_revision)}<div class='subline'>${hash(review.manifest_hash)}</div>`,esc(context.execution_instance_id),badge(row.state),esc(date(review.expires_at_utc)),action];
   }));
 }
+function paperclipInteractionCards(items) {
+  if (!items.length) return empty('No pending Paperclip decisions.');
+  return items.map(item => {
+    const questions=Array.isArray(item.questions)?item.questions:[];
+    const questionList=questions.length?`<details><summary>${questions.length} designation question${questions.length===1?'':'s'}</summary><ol>${questions.map(question=>`<li>${esc(question.prompt)}</li>`).join('')}</ol></details>`:'';
+    return `<article class='human-approval-card' data-interaction-id='${esc(item.interaction_id)}'><div><span>Paperclip question · ${esc(item.issue_identifier)}</span><h3>${esc(item.title)}</h3><p>${esc(item.summary || item.purpose)}</p>${questionList}<small>Interaction ${esc(item.interaction_id)} · Response owner ${esc(item.response_owner)} · Ocean is read-only</small></div><div class='human-approval-state'>${badge(item.status)}<a class='button primary' href='${esc(item.url)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}Answer in Paperclip</a></div></article>`;
+  }).join('');
+}
+function paperclipInteractionSection(data) {
+  const items=Array.isArray(data.paperclip_interactions)?data.paperclip_interactions:[];
+  const status=data.paperclip_interactions_status;
+  if (!status && !items.length) return '';
+  const body=status?.state==='UNAVAILABLE'
+    ? `<p class='form-error'>Paperclip decisions are temporarily unavailable. No decision or authority is inferred.</p>`
+    : paperclipInteractionCards(items);
+  return section('Paperclip decisions',body,`<span class='muted'>${items.length} pending · answer only in Paperclip</span>`);
+}
 function timeline(items) {
   if (!items.length) return empty('No history recorded.');
   return `<ol class='timeline'>${items.map(event => `<li><span class='timestamp'>${esc(date(event.created_at_utc))}</span><p><strong>${esc(human(event.action.replaceAll('.', ' ')))}</strong> <span class='muted subline'>${esc(event.entity_id)}</span></p><p>${esc(event.actor_id)} <span class='muted'>${esc(event.actor_role)}</span></p>${event.payload?.reason || event.payload?.note ? `<p>${esc(event.payload.reason || event.payload.note)}</p>` : ''}<details><summary>Recorded details</summary><pre>${esc(JSON.stringify(event.payload, null, 2))}</pre></details></li>`).join('')}</ol>`;
@@ -161,7 +178,7 @@ function overview(data) {
     ['Maintenance',badge(operations.readiness.maintenance)],['Identity capacity',`${operations.registry.used} / ${operations.registry.capacity}`],['Receipt registry',`${operations.receipts.registered} / ${operations.receipts.known_tasks}`],
     ['Pending delivery',String(operations.queues.pending)],['Repeated auth failures',String(operations.auth_failures.repeated.length)],['Automatic approval',badge(operations.safety.automatic_approval)],
   ])+table(['Service','Role / namespace','State','Version','Expiry','Renewal'],operations.services.map(row=>[esc(row.identity_id),`${esc(row.role)} / ${esc(row.namespace)}`,badge(row.state),String(row.credential_version),esc(date(row.expires_at_utc)),esc(row.renewal)])),`<span class='muted'>Credential values and references are never shown. ${operations.registry.remaining} identity slots remain; tombstones are retained.</span>`):'';
-  return heading('Overview', 'Reviews, case progress and integration health') + `<div class='stats'>${[['Action required', count.action_required], ['Active cases', count.active_cases], ['Blocked / failed', count.blocked_cases], ['Active runs', count.active_runs], ['Pending sync', count.pending_sync]].map(([name, value], index) => `<div class='stat ${index === 0 || index === 2 ? 'attention' : ''}'><span>${esc(name)}</span><strong>${value}</strong></div>`).join('')}</div>${operationsPanel}${data.operational_releases?.length?section('Operational dataset release',operationalReleaseTable(data.operational_releases),'<a data-route href="/improvement/approvals">All approvals</a>'):''}<div class='columns'><div>${section('Awaiting decisions', approvalTable(data.pending), `<span class='muted'>${count.pending_gates} pending gates / ${count.urgent_reviews} urgent reviews</span>`)}${section('Current cases', caseTable(data.cases), '<a data-route href="/improvement/cases">All cases</a>')}</div><div>${section('Integration health', data.health.length ? data.health.map(row => `<div class='list-row'><div class='row-head'><strong>${esc(row.provider_id)}</strong>${badge(row.stale ? 'STALE' : row.status)}</div><p>${esc(row.instance_id)}</p><p>${esc(row.next_action)}</p><p class='muted'>${esc(row.next_owner)} / ${esc(date(row.observed_at_utc))}</p></div>`).join('') : empty('No provider observations recorded.'))}<p class='muted'>Local access ready. Dispatch and normal ingestion remain off.</p>${section('Recent history', timeline(data.history), '<a data-route href="/improvement/history">All history</a>')}</div></div>`;
+  return heading('Overview', 'Reviews, case progress and integration health') + `<div class='stats'>${[['Action required', count.action_required], ['Active cases', count.active_cases], ['Blocked / failed', count.blocked_cases], ['Active runs', count.active_runs], ['Pending sync', count.pending_sync]].map(([name, value], index) => `<div class='stat ${index === 0 || index === 2 ? 'attention' : ''}'><span>${esc(name)}</span><strong>${value}</strong></div>`).join('')}</div>${operationsPanel}${paperclipInteractionSection(data)}${data.operational_releases?.length?section('Operational dataset release',operationalReleaseTable(data.operational_releases),'<a data-route href="/improvement/approvals">All approvals</a>'):''}<div class='columns'><div>${section('Awaiting decisions', approvalTable(data.pending), `<span class='muted'>${count.pending_gates} pending gates / ${count.urgent_reviews} urgent reviews</span>`)}${section('Current cases', caseTable(data.cases), '<a data-route href="/improvement/cases">All cases</a>')}</div><div>${section('Integration health', data.health.length ? data.health.map(row => `<div class='list-row'><div class='row-head'><strong>${esc(row.provider_id)}</strong>${badge(row.stale ? 'STALE' : row.status)}</div><p>${esc(row.instance_id)}</p><p>${esc(row.next_action)}</p><p class='muted'>${esc(row.next_owner)} / ${esc(date(row.observed_at_utc))}</p></div>`).join('') : empty('No provider observations recorded.'))}<p class='muted'>Local access ready. Dispatch and normal ingestion remain off.</p>${section('Recent history', timeline(data.history), '<a data-route href="/improvement/history">All history</a>')}</div></div>`;
 }
 function strategyPage(data) {
   if (data.onboarding) return strategyOnboardingPage(data);
@@ -798,8 +815,10 @@ function collectionPage(view, data) {
     ];
   })) : view === 'cases' ? caseTable(items) : view === 'runs' ? runTable(items) : view === 'approvals' ? approvalTable(items) : timeline(items);
   const setup = view === 'history' && data.setup?.length ? `<details class='access-help' id='setup-history'><summary>Installation receipts (${data.setup.length})</summary>${table(['Task','Result','Project','Operator'],data.setup.map(row=>[esc(row.task_id),badge(row.status),esc(row.project),esc(row.operator_id)]))}<p class='muted'>Historical installation records. Not strategy approvals.</p></details>` : '';
+  const paperclip=view==='approvals'?paperclipInteractionSection(data):'';
   const operational=view==='approvals' && data.operational_releases?.length?section('Operational dataset release',operationalReleaseTable(data.operational_releases),'<span class="muted">Exact manifest-hash decision required</span>'):'';
-  return heading(titles[view], `${data.total} records`, view === 'runs' ? button('prepare-run','Start New Run','', 'plus') : '') + `<div class='toolbar'><label for='filter'>Filter this page</label><input type='search' id='filter' value='${state.filter ? esc(state.filter) : ''}' autocomplete='off'></div>${operational}${setup}${rows}${pager(data)}`;
+  const subtitle=view==='approvals'?`${data.total} workflow records · ${data.paperclip_interactions_total || 0} Paperclip actions`:`${data.total} records`;
+  return heading(titles[view], subtitle, view === 'runs' ? button('prepare-run','Start New Run','', 'plus') : '') + `<div class='toolbar'><label for='filter'>Filter this page</label><input type='search' id='filter' value='${state.filter ? esc(state.filter) : ''}' autocomplete='off'></div>${paperclip}${operational}${setup}${rows}${pager(data)}`;
 }
 async function renderArtifact(data, generation) {
   if(route().fullResearchReport)return renderResearchReport(data,generation);

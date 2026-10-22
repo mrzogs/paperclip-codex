@@ -8,6 +8,7 @@ import { API_VERSION, RELEASE, MAX_BODY_BYTES, WorkflowError, canonical, digest,
 import { OceanAuth } from "./auth.mjs";
 import { WorkflowStore } from "./store.mjs";
 import { readWorkflowView, recordManualAcknowledgement } from "./ui-api.mjs";
+import { enrichPaperclipPendingInteractions } from "./paperclip-interaction-status.mjs";
 import { RunManager } from "./run-manager.mjs";
 import { attachMaintenance, protectedOperatorHost, protectedOperatorTimeoutMs } from './maintenance.mjs';
 import { orderedSetup, knownSetupTask } from './setup-operator.mjs';
@@ -1086,13 +1087,21 @@ export class WorkflowBackend {
         else if (/^run-manager\/context\/[A-Za-z0-9_.:-]+$/.test(route)) response.end(JSON.stringify(this.runs.read(actor,route.split('/')[2])));
         else if (route.startsWith("view/")) {
           const view=readWorkflowView(this,actor,route);
-          const result=/^view\/strategies\/[A-Za-z0-9_.:-]+$/.test(route)
+          let result=/^view\/strategies\/[A-Za-z0-9_.:-]+$/.test(route)
             ? await enrichStrategyApprovalStatuses(view,{
               apiBase:this.environment.PAPERCLIP_API || 'http://127.0.0.1:3100/api',
               timeoutMs:this.environment.OCEAN_PAPERCLIP_APPROVAL_TIMEOUT_MS || 2000,
               dispatchConfigPath:this.environment.OCEAN_VWAP_APPROVAL_DISPATCH_CONFIG,
             })
             : view;
+          if (this.environment.OCEAN_PAPERCLIP_INTERACTION_CONFIG
+            && (route === 'view/dashboard' || /^view\/approvals(?:\/page\/\d+)?$/.test(route))) {
+            result=await enrichPaperclipPendingInteractions(result,{
+              apiBase:this.environment.PAPERCLIP_API || 'http://127.0.0.1:3100/api',
+              timeoutMs:this.environment.OCEAN_PAPERCLIP_APPROVAL_TIMEOUT_MS || 2000,
+              configPath:this.environment.OCEAN_PAPERCLIP_INTERACTION_CONFIG,
+            });
+          }
           response.end(JSON.stringify(result));
         }
         else if (route === "status") response.end(JSON.stringify({ api_version: API_VERSION, contract_release: RELEASE, namespace: "TEST", brain_submission: "OFF", live_real: "DISABLED", dispatch_worker: "OFF", auth: "REQUIRED", schema_version: 14, identity: { id: actor.id, role: actor.role, scopes: actor.scopes, strategy_ids: actor.strategyIds, instance_ids: actor.instanceIds }, ...this.auth.readiness(), test_communication:this.testCommunication.readiness(actor), onboarding_brain_sync:this.onboardingBrain.status(), operational_learning:this.operationalLearning.status(), candidate_evaluator:{version:CANDIDATE_EVALUATOR_VERSION,state:this.operationalCandidateEvaluator.running?'RUNNING':'READY'}, maintenance:this.maintenanceHealth || {state:'NOT_INSTALLED_ISOLATED'} }));
