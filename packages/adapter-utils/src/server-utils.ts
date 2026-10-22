@@ -1189,11 +1189,90 @@ async function pathExists(candidate: string) {
   }
 }
 
+function looksLikeCodexCommandBasename(command: string): boolean {
+  const base = path.basename(command).toLowerCase();
+  return base === "codex" || base === "codex.exe" || base === "codex.cmd";
+}
+
+function isWindowsAppsCodexAlias(commandPath: string): boolean {
+  const normalized = path.normalize(commandPath).toLowerCase();
+  return normalized.includes(`${path.sep}windowsapps${path.sep}openai.codex_`)
+    && normalized.endsWith(`${path.sep}codex.exe`);
+}
+
+function resolveWindowsCodexBinRoot(commandPath: string): string | null {
+  const absolute = path.resolve(commandPath);
+  const commandBase = path.basename(absolute);
+  if (!looksLikeCodexCommandBasename(commandBase)) return null;
+  const versionDir = path.dirname(absolute);
+  const binDir = path.dirname(versionDir);
+  const codexDir = path.dirname(binDir);
+  const openAiDir = path.dirname(codexDir);
+  if (path.basename(binDir).toLowerCase() !== "bin") return null;
+  if (path.basename(codexDir).toLowerCase() !== "codex") return null;
+  if (path.basename(openAiDir).toLowerCase() !== "openai") return null;
+  return binDir;
+}
+
+async function findLatestCodexInstallInBinRoot(
+  binRoot: string,
+  commandBase: string,
+): Promise<string | null> {
+  let entries: Dirent[] = [];
+  try {
+    entries = await fs.readdir(binRoot, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  const candidates: Array<{ filePath: string; mtimeMs: number }> = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const candidate = path.join(binRoot, entry.name, commandBase);
+    if (!(await pathExists(candidate))) continue;
+    try {
+      const stat = await fs.stat(candidate);
+      candidates.push({ filePath: candidate, mtimeMs: stat.mtimeMs });
+    } catch {
+      continue;
+    }
+  }
+
+  candidates.sort((left, right) => right.mtimeMs - left.mtimeMs || left.filePath.localeCompare(right.filePath));
+  return candidates[0]?.filePath ?? null;
+}
+
+async function resolveWindowsCodexInstall(
+  command: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+): Promise<string | null> {
+  if (process.platform !== "win32") return null;
+
+  if (command.includes("/") || command.includes("\\")) {
+    const absolute = path.isAbsolute(command) ? command : path.resolve(cwd, command);
+    const binRoot = resolveWindowsCodexBinRoot(absolute);
+    if (!binRoot) return null;
+    const latest = await findLatestCodexInstallInBinRoot(binRoot, path.basename(absolute));
+    if (!latest || path.normalize(latest) === path.normalize(absolute)) return null;
+    return latest;
+  }
+
+  if (!looksLikeCodexCommandBasename(command)) return null;
+  // Respect the invocation's environment; do not fall back to the host user's install.
+  const localAppData = env.LOCALAPPDATA?.trim();
+  if (!localAppData) return null;
+  const commandBase = path.extname(command) ? path.basename(command) : "codex.exe";
+  const binRoot = path.join(localAppData, "OpenAI", "Codex", "bin");
+  return await findLatestCodexInstallInBinRoot(binRoot, commandBase);
+}
+
 async function resolveCommandPath(command: string, cwd: string, env: NodeJS.ProcessEnv): Promise<string | null> {
   const hasPathSeparator = command.includes("/") || command.includes("\\");
   if (hasPathSeparator) {
     const absolute = path.isAbsolute(command) ? command : path.resolve(cwd, command);
-    return (await pathExists(absolute)) ? absolute : null;
+    if (await pathExists(absolute)) return absolute;
+    return await resolveWindowsCodexInstall(absolute, cwd, env);
   }
 
   const pathValue = env.PATH ?? env.Path ?? "";
@@ -1210,11 +1289,16 @@ async function resolveCommandPath(command: string, cwd: string, env: NodeJS.Proc
           : exts.map((ext) => path.join(dir, `${command}${ext}`))
         : [path.join(dir, command)];
     for (const candidate of candidates) {
-      if (await pathExists(candidate)) return candidate;
+      if (!(await pathExists(candidate))) continue;
+      if (process.platform === "win32" && looksLikeCodexCommandBasename(command) && isWindowsAppsCodexAlias(candidate)) {
+        const preferred = await resolveWindowsCodexInstall(command, cwd, env);
+        if (preferred) return preferred;
+      }
+      return candidate;
     }
   }
 
-  return null;
+  return await resolveWindowsCodexInstall(command, cwd, env);
 }
 
 export async function resolveCommandForLogs(
