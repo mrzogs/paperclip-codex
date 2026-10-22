@@ -23,7 +23,7 @@ async function fixture(t, changes = {}) {
   const issues = new Map([[source.id, source]]);
   const calls = [], runs = [];
   const controls = { autoRun: true, dropCreate: false, createStatus: 201, artifactCompany: companyId,
-    assigneeStatus: "idle", searchDuplicates: false, sourcePatchStatus: 200 };
+    assigneeStatus: "idle", searchDuplicates: false, searchOverflow: false, dropStatus: null, sourcePatchStatus: 200 };
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
     const parts = [];
@@ -43,7 +43,13 @@ async function fixture(t, changes = {}) {
     if (url.pathname === `/api/companies/${companyId}/issues`) {
       if (req.method === "GET") {
         const matches = [...issues.values()].filter((issue) => issue.description?.includes(url.searchParams.get("q")));
-        return json(controls.searchDuplicates && matches.length ? [...matches, { ...matches[0], id: randomUUID() }] : matches);
+        if (controls.searchOverflow) return json(Array.from({ length: 21 }, () => ({ id: randomUUID() })));
+        if (controls.searchDuplicates && matches.length) {
+          const duplicate = { ...matches[0], id: randomUUID() };
+          issues.set(duplicate.id, duplicate);
+          matches.push(duplicate);
+        }
+        return json(matches.map((issue) => ({ ...issue, description: issue.description.slice(0, 1200) })));
       }
       if (controls.createStatus !== 201) return json({ error: "Outside actor boundary" }, controls.createStatus);
       const input = JSON.parse(body);
@@ -51,7 +57,9 @@ async function fixture(t, changes = {}) {
       issues.set(issue.id, issue);
       if (controls.autoRun && issue.status === "todo") runs.push({ id: randomUUID(), companyId, agentId: assigneeAgentId,
         status: "queued", contextSnapshot: { issueId: issue.id } });
-      if (controls.dropCreate) { controls.dropCreate = false; req.socket.destroy(); return; }
+      if (controls.dropCreate || controls.dropStatus === issue.status) {
+        controls.dropCreate = false; controls.dropStatus = null; req.socket.destroy(); return;
+      }
       return json(issue, 201);
     }
     const issue = issues.get(url.pathname.replace("/api/issues/", ""));
@@ -298,4 +306,30 @@ test("completed handoff observation never reblocks an automatically resumed sour
   assert.equal(next.disposition, "completed");
   assert.equal(f.source.status, "in_progress");
   assert.equal(f.calls.filter((call) => call.method === "PATCH").length, patchCount);
+});
+
+for (const scenario of ["ready", "parked", "activation"]) {
+  test(`long ${scenario} lost-response restart reconciles full records behind truncated previews`, async (t) => {
+    const f = await fixture(t, { instructions: "Frozen review instructions. ".repeat(150),
+      ...(scenario === "ready" ? {} : { mode: "awaiting_inputs", missingInputs: ["Classified evidence upload"] }) });
+    f.controls.dropStatus = scenario === "parked" ? "backlog" : "todo";
+    assert.equal((await f.cli()).exitCode, 1);
+    const firstIds = [...f.issues.keys()].filter((id) => id !== f.source.id);
+    const recovered = await f.cli();
+    assert.equal(recovered.exitCode, 0, recovered.stderr);
+    assert.equal(f.creates().length, scenario === "ready" ? 1 : 2);
+    assert.ok(firstIds.every((id) => f.issues.has(id)));
+    assert.equal(recovered.receipt.deliverableIssueId, firstIds[0]);
+    if (scenario === "activation") assert.equal(recovered.receipt.nextIssueId, firstIds[1]);
+    const searches = f.calls.filter((call) => call.method === "GET" && call.path.endsWith("/issues"));
+    assert.ok(searches.every((call) => call.query.get("limit") === "21"
+      && call.query.get("parentId") === f.source.id && call.query.get("projectId") === f.manifest.projectId));
+  });
+}
+
+test("saturated candidate search fails closed instead of trusting a partial page", async (t) => {
+  const f = await fixture(t);
+  f.controls.searchOverflow = true;
+  await assert.rejects(f.invoke(), /exceeds 20 candidates/);
+  assert.equal(f.creates().length, 0);
 });

@@ -142,11 +142,22 @@ export async function releaseHandoffOnce({ manifest, stateDirectory, apiUrl, api
       };
       if (state.stages[stage]?.id) return verify(await scopedIssue(state.stages[stage].id));
       // Search reconciles a create whose successful response was lost before journal commit.
-      const matches = (await request(`/companies/${manifest.companyId}/issues?q=${encodeURIComponent(marker)}`))
-        .filter((issue) => issue.description?.includes(marker));
+      // List descriptions are 1200-character previews. Match only full records.
+      // Request one beyond our bound and refuse to create if the search saturates;
+      // this prevents an unseen duplicate on a later page from being ignored.
+      const candidates = await request(`/companies/${manifest.companyId}/issues?q=${encodeURIComponent(marker)}`
+        + `&projectId=${manifest.projectId}&parentId=${source.id}&limit=21`);
+      requireThat(Array.isArray(candidates) && candidates.length <= 20,
+        "Handoff search exceeds 20 candidates; owner must reconcile before retry");
+      const matches = [];
+      for (const candidate of candidates) {
+        requireThat(uuid.test(candidate.id), "Invalid handoff search candidate");
+        const full = await scopedIssue(candidate.id);
+        if (full.description?.includes(marker)) matches.push(full);
+      }
       requireThat(matches.length <= 1, "Duplicate handoff marker; owner must reconcile");
       if (matches.length === 1) {
-        const issue = verify(await scopedIssue(matches[0].id));
+        const issue = verify(matches[0]);
         state.stages[stage] = { id: issue.id, reconciled: true };
         save();
         return issue;

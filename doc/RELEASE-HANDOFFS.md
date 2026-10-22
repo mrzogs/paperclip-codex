@@ -87,6 +87,11 @@ Duplicate matches fail closed. An uncertain or rejected create with no match is
 not blindly retried: the authorized owner inspects API/audit state and reconciles
 the journal before continuing. A 403 never grants additional authority.
 
+Issue-list descriptions are previews, so reconciliation fetches full issue records
+before matching a marker or frozen input. Search is restricted to the exact project
+and source parent, requests 21 rows and accepts at most 20 candidates. A saturated
+result fails closed before creation rather than assuming an unseen page is empty.
+
 A process crash can leave a `.lock` file. Verify the recorded host/PID/run has
 ended and no writer remains before an authorized operator removes that exact lock.
 Do not automatically steal it. Preserve the journal. Cross-host failover requires
