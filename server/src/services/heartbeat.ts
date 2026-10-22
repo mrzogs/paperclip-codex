@@ -154,7 +154,8 @@ import {
 } from "./recovery/model-profile-hint.js";
 import { recoveryService } from "./recovery/service.js";
 import { productivityReviewService } from "./productivity-review.js";
-import { withAgentStartLock } from "./agent-start-lock.js";
+import { AgentStartLockBusyError, withAgentStartLock } from "./agent-start-lock.js";
+import { singleFlight } from "./single-flight.js";
 import {
   evaluateAgentInvokability,
   evaluateAgentInvokabilityFromDb,
@@ -7684,6 +7685,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         });
       }
       return claimedRuns;
+    }).catch((err) => {
+      // Persisted queued work remains available for a later recovery pass. A
+      // busy agent must not abort recovery or timer admission for other agents.
+      if (err instanceof AgentStartLockBusyError) return [];
+      throw err;
     });
   }
 
@@ -11125,7 +11131,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     buildRunOutputSilence,
 
-    tickTimers: async (now = new Date()) => {
+    tickTimers: singleFlight(async (now: Date = new Date()) => {
       const allAgents = await db
         .select({ ...getTableColumns(agents) })
         .from(agents)
@@ -11146,6 +11152,22 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         const baseline = new Date(agent.lastHeartbeatAt ?? agent.createdAt).getTime();
         const elapsedMs = now.getTime() - baseline;
         if (elapsedMs < policy.intervalSec * 1000) continue;
+
+        // Interval wakes are redundant while execution-backed work is pending.
+        // Avoid repeatedly writing coalesced wake requests until a run finishes.
+        const [pendingRun] = await db
+          .select({ id: heartbeatRuns.id })
+          .from(heartbeatRuns)
+          .where(and(
+            eq(heartbeatRuns.companyId, agent.companyId),
+            eq(heartbeatRuns.agentId, agent.id),
+            inArray(heartbeatRuns.status, [...EXECUTION_PATH_HEARTBEAT_RUN_STATUSES]),
+          ))
+          .limit(1);
+        if (pendingRun) {
+          skipped += 1;
+          continue;
+        }
 
         const run = await enqueueWakeup(agent.id, {
           source: "timer",
@@ -11170,7 +11192,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         enqueued: enqueued + issueMonitors.triggered,
         skipped: skipped + issueMonitors.skipped,
       };
-    },
+    }, () => ({ checked: 0, enqueued: 0, skipped: 1 })),
 
     cancelRun: (runId: string, reason?: string) => cancelRunInternal(runId, reason),
 

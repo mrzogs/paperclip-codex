@@ -555,3 +555,16 @@ For a board operator, the intended meaning is:
 - blockers explain waiting
 
 That is the execution contract Paperclip should present to operators.
+
+## 15. Scheduler backpressure and start ownership
+
+Within one server process, timer passes and periodic heartbeat recovery each allow
+only one unsettled pass. Later interval ticks are skipped until that pass settles,
+including after failure. Timer wakes are suppressed while the agent has a queued,
+running, or scheduled-retry run; assignment and dependency wakes remain eligible.
+
+An agent start-lock timeout defers queued work without releasing the live owner's
+lock. Other agents can continue recovery, and a later pass retries deferred work
+after the owner settles. A permanently stalled owner requires investigation and
+controlled recovery; elapsed time alone cannot safely revoke ownership. These
+guards do not provide locking between multiple server processes.

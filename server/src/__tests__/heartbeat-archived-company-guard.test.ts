@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   agents,
@@ -44,6 +45,22 @@ describeEmbeddedPostgres("heartbeat archived-company guard", () => {
 
   afterAll(async () => {
     await tempDb?.cleanup();
+  });
+
+  it.each(["queued", "running", "scheduled_retry"])("does not write interval wakes while a %s run is pending", async (status) => {
+    const { companyId, agentId } = await insertArchivedAgent();
+    await db.update(companies).set({ status: "active" }).where(eq(companies.id, companyId));
+    await db.update(agents).set({ lastHeartbeatAt: new Date("2026-01-01T00:00:00Z") }).where(eq(agents.id, agentId));
+    await db.insert(heartbeatRuns).values({
+      companyId, agentId, status, invocationSource: "assignment",
+    });
+    const heartbeat = heartbeatService(db);
+    const now = new Date("2026-10-22T10:00:00Z");
+    for (let i = 0; i < 3; i += 1) {
+      expect(await heartbeat.tickTimers(now)).toMatchObject({ enqueued: 0 });
+    }
+    expect(await db.select().from(agentWakeupRequests)).toHaveLength(0);
+    expect(await db.select().from(heartbeatRuns)).toHaveLength(1);
   });
 
   async function insertArchivedAgent() {
