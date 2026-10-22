@@ -278,3 +278,11 @@ test("journal lock excludes concurrent writers and state cannot be stored under 
 test("invalid ready manifests require frozen inputs and cannot hide parked work", () => {
   assert.throws(() => validateManifest({ version: 1, flow: "other" }), /VWAP release/);
 });
+
+test("retryable error status retains the server's existing invocation semantics", async (t) => {
+  const f = await fixture(t);
+  f.controls.assigneeStatus = "error";
+  const receipt = await f.invoke();
+  assert.equal(receipt.disposition, "dispatch_observed");
+  assert.equal(f.creates().length, 1);
+});

@@ -107,7 +107,9 @@ export async function releaseHandoffOnce({ manifest, stateDirectory, apiUrl, api
     requireThat(!["done", "cancelled", "in_review"].includes(source.status), "Source is terminal or awaiting review; no automatic resume");
     const assignee = await request(`/agents/${manifest.assigneeAgentId}`);
     requireThat(assignee.companyId === manifest.companyId, "Assignee belongs to another company");
-    requireThat(["idle", "active", "running"].includes(assignee.status), "Assignee is not invokable; owner must resolve the gate");
+    // Match shared/agent-eligibility.ts: error is retryable, unlike pause/termination.
+    // Full reporting-chain/budget/admission eligibility remains the server's decision.
+    requireThat(["idle", "active", "running", "error"].includes(assignee.status), "Assignee is not invokable; owner must resolve the gate");
     // Attachment metadata proves tenancy; content proves the frozen bytes. Never follow redirects with credentials.
     const attachments = await request(`/issues/${source.id}/attachments`);
     for (const artifact of manifest.artifacts) {
