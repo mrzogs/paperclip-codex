@@ -333,6 +333,12 @@ test('complete onboarding is actionable in the browser without touching producti
       await page.locator('#refresh').click();
       const card = page.locator(`[data-approval-id="${TEST_COMPARATOR_APPROVAL_ID}"]`);
       await expect(card.locator('.badge')).toHaveText(label);
+      const comparatorSummary = page.locator('.muted').filter({ hasText:'approved in Paperclip' });
+      await expect(comparatorSummary).toHaveText(
+        mode === 'approved' ? '2 approved in Paperclip · 0 pending'
+          : mode === 'pending' ? '0 approved in Paperclip · 2 pending'
+            : '0 approved in Paperclip · 0 pending · 2 unverified');
+      await expect(comparatorSummary).not.toContainText('\uFFFD');
       await expect(page.locator('.strategy-next-action')).toContainText('booking issuer source correction independent PASS');
       await expect(page.locator('.strategy-next-action')).toContainText('OCEA-28/44 physical gates pending');
       await expect(page.locator('.strategy-next-action')).toContainText('Separate comparator RUN_RELEASE gate');

@@ -553,7 +553,7 @@ function strategyOnboardingPage(data) {
         ['Codex polling heartbeat', badge('NOT_REQUIRED')],
       ])
       + `<p class='readonly-note'>${icon('shield-check')}Paperclip is the approval authority. Ocean reads those decisions, verifies the sealed package, inspects—but never mutates—the coordinator sandbox, and repairs a missing requester wake; it cannot approve or execute staging itself. A successful wake proves only transport delivery. The package’s mutable requalification draft hash is informational only and must be freshly reauthenticated. The package-bound immutable staging receipt is still required, and the existing RUN_RELEASE approval cannot cross the chartbook mutation. After staging and controller proof, one consolidated Paperclip decision must bind the post-staging run context and bounded measurement START. Paper and Live remain untouched.</p>`,
-    `<span class='muted'>${comparatorApprovals.filter(item => item.status === 'APPROVED').length} approved in Paperclip · ${pendingComparatorApprovals.length} pending${unavailableComparatorApprovals.length ? ` � ${unavailableComparatorApprovals.length} unverified` : ''}</span>`)
+    `<span class='muted'>${comparatorApprovals.filter(item => item.status === 'APPROVED').length} approved in Paperclip · ${pendingComparatorApprovals.length} pending${unavailableComparatorApprovals.length ? ` · ${unavailableComparatorApprovals.length} unverified` : ''}</span>`)
     : comparatorInvalid
       ? section('Physical comparator contract', `<p class='form-error'>Ocean rejected the bundled contract: ${esc(human(comparator.reason || 'contract invalid'))}. No approval or run authority is inferred.</p>`, badge('BLOCKED_FAIL_CLOSED'))
       : '';
