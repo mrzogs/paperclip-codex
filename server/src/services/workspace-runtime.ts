@@ -2448,6 +2448,12 @@ function registerRuntimeService(db: Db | undefined, record: RuntimeServiceRecord
   record.child?.on("exit", (code, signal) => {
     const current = runtimeServicesById.get(record.id);
     if (!current) return;
+    // A Windows shell can exit with owned descendants still serving requests.
+    // Keep both runtime/reuse ownership and the registry until the guarded stop
+    // path verifies the tree and listener are gone. In particular, this callback
+    // must not race an explicit/partial stop by deleting its retry evidence.
+    // Leave the idle timer armed so the configured stop policy can still act.
+    if (process.platform === "win32") return;
     clearIdleTimer(current);
     current.status = code === 0 || signal === "SIGTERM" ? "stopped" : "failed";
     current.healthStatus = current.status === "failed" ? "unhealthy" : "unknown";

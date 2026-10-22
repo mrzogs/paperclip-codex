@@ -5,9 +5,11 @@ import path from "node:path";
 import { once } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as tree from "../services/windows-service-process-tree.js";
+import { resolvePaperclipInstanceRoot } from "../home-paths.js";
 import {
   findAdoptableLocalService, listLocalServiceRegistryRecords, readLocalServiceRegistryRecord,
   removeLocalServiceRegistryRecord, terminateLocalService, writeLocalServiceRegistryRecord,
+  isPidAlive,
   type LocalServiceRegistryRecord,
 } from "../services/local-service-supervisor.js";
 import {
@@ -45,6 +47,95 @@ describe.skipIf(process.platform !== "win32")("Windows service custody", () => {
     owned.push(record);
     return { record, root, info };
   }
+
+  async function publicOrphanFixture(name: string) {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-public-orphan-"));
+    const trigger = path.join(cwd, "exit-parent");
+    const listener = "require('node:http').createServer((q,r)=>r.end('ok')).listen(Number(process.env.PORT),'127.0.0.1')";
+    await fs.writeFile(path.join(cwd, "parent.cjs"),
+      `const {spawn}=require('node:child_process');spawn(process.execPath,['-e',${JSON.stringify(listener)}],{stdio:'ignore',windowsHide:true,detached:true}).unref();setInterval(()=>{if(require('node:fs').existsSync(${JSON.stringify(trigger)}))process.exit(0)},50);`);
+    const services = await startRuntimeServicesForWorkspaceControl({
+      actor: { id: null, name: "test", companyId: "company-1" }, issue: null,
+      workspace: { baseCwd: cwd, cwd, source: "project_primary", projectId: "p", workspaceId: "w", repoUrl: null,
+        repoRef: "HEAD", strategy: "project_primary", branchName: null, worktreePath: null, warnings: [], created: false },
+      executionWorkspaceId: name, adapterEnv: {},
+      config: { workspaceRuntime: { services: [{ name, port: { type: "auto" }, lifecycle: "shared",
+        reuseScope: "execution_workspace", command: "node parent.cjs",
+        readiness: { type: "http", urlTemplate: "http://127.0.0.1:{{port}}", timeoutSec: 10, intervalMs: 100 } }] } },
+    });
+    const registry = (await listLocalServiceRegistryRecords()).find((record) => record.runtimeServiceId === services[0]!.id)!;
+    owned.push(registry);
+    const exitRoot = async () => {
+      await fs.writeFile(trigger, "exit");
+      await vi.waitFor(() => expect(isPidAlive(registry.pid)).toBe(false), { timeout: 3000, interval: 50 });
+      // Let the public runtime ChildProcess exit callback run before assertions.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    };
+    return { services, registry, exitRoot };
+  }
+
+  it("retains public runtime custody after shell exit and stops the live descendant", async () => {
+    const target = await publicOrphanFixture("public-root-exit");
+    const sibling = await fixture("public-root-sibling");
+    await target.exitRoot();
+    expect((await readLocalServiceRegistryRecord(target.registry.serviceKey))?.runtimeServiceId).toBe(target.services[0]!.id);
+    expect((await fetch(target.services[0]!.url!)).ok).toBe(true);
+    await stopRuntimeServicesForExecutionWorkspace({ executionWorkspaceId: "public-root-exit" });
+    expect(await readLocalServiceRegistryRecord(target.registry.serviceKey)).toBeNull();
+    await expect(fetch(target.services[0]!.url!)).rejects.toThrow();
+    expect((await fetch(sibling.record.url!)).ok).toBe(true);
+  }, 30_000);
+
+  it("retains public runtime custody when the root exits during a failed partial stop", async () => {
+    const target = await publicOrphanFixture("partial-root-exit");
+    const original = tree.windowsServiceProcessTree;
+    const spy = vi.spyOn(tree, "windowsServiceProcessTree").mockImplementation(async (input) => {
+      if (input.action !== "stop") return original(input);
+      await target.exitRoot();
+      return { identities: input.identities ?? [], error: "injected partial stop after root exit" };
+    });
+    await expect(stopRuntimeServicesForExecutionWorkspace({ executionWorkspaceId: "partial-root-exit" }))
+      .rejects.toThrow("injected partial stop");
+    const retained = await readLocalServiceRegistryRecord(target.registry.serviceKey);
+    expect(retained?.stopError).toContain("injected partial stop");
+    expect(retained?.windowsProcessTree).toEqual(target.registry.windowsProcessTree);
+    expect((await fetch(target.services[0]!.url!)).ok).toBe(true);
+    spy.mockRestore();
+    await stopRuntimeServicesForExecutionWorkspace({ executionWorkspaceId: "partial-root-exit" });
+    expect(await readLocalServiceRegistryRecord(target.registry.serviceKey)).toBeNull();
+    await expect(fetch(target.services[0]!.url!)).rejects.toThrow();
+  }, 30_000);
+
+  it.each([
+    { label: "missing", identities: undefined },
+    { label: "empty", identities: [] },
+    { label: "malformed", identities: [{ pid: 1, parentPid: 0, startedAtTicks: "invalid" }] },
+  ])(
+    "refuses legacy/malformed registry stop without signalling or rewriting ($label)", async ({ identities }) => {
+      const target = await fixture("legacy-stop");
+      const registryPath = path.join(resolvePaperclipInstanceRoot(), "runtime-services", `${target.record.serviceKey}.json`);
+      const legacy = { ...target.record, windowsProcessTree: identities };
+      const raw = JSON.stringify(legacy);
+      await fs.writeFile(registryPath, raw);
+      const [listed] = await listLocalServiceRegistryRecords();
+      await expect(terminateLocalService(listed!)).rejects.toThrow("Windows identity unavailable");
+      // Also enforce validation for direct callers before native helper/signals.
+      await expect(terminateLocalService(legacy as LocalServiceRegistryRecord)).rejects.toThrow("Windows identity unavailable");
+      expect(await fs.readFile(registryPath, "utf8")).toBe(raw);
+      expect((await fetch(target.record.url!)).ok).toBe(true);
+    }, 30_000,
+  );
+
+  it("preserves raw heartbeat process termination without a registry key", async () => {
+    const root = spawn(process.execPath, ["-e", "console.log('ready');setInterval(()=>{},1000)"], {
+      windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
+    });
+    try {
+      await once(root.stdout!, "data");
+      await terminateLocalService({ pid: root.pid!, processGroupId: null });
+      expect(isPidAlive(root.pid!)).toBe(false);
+    } finally { if (isPidAlive(root.pid!)) root.kill(); }
+  }, 30_000);
 
   it("adopts saved descendants after the original root exits and leaves a sibling alive", async () => {
     const target = await fixture("target");

@@ -71,6 +71,14 @@ function getRuntimeServiceRegistryPath(serviceKey: string) {
   return path.resolve(getRuntimeServicesDir(), `${serviceKey}.json`);
 }
 
+function hasWindowsProcessIdentities(value: unknown): value is WindowsServiceProcessIdentity[] {
+  return Array.isArray(value) && value.length > 0 && value.every((identity) =>
+    identity && typeof identity === "object"
+    && Number.isSafeInteger(identity.pid) && identity.pid > 0
+    && Number.isSafeInteger(identity.parentPid) && identity.parentPid >= 0
+    && typeof identity.startedAtTicks === "string" && /^[1-9]\d*$/.test(identity.startedAtTicks));
+}
+
 function normalizeRegistryRecord(raw: unknown): LocalServiceRegistryRecord | null {
   if (!raw || typeof raw !== "object") return null;
   const rec = raw as Record<string, unknown>;
@@ -99,11 +107,8 @@ function normalizeRegistryRecord(raw: unknown): LocalServiceRegistryRecord | nul
     url: typeof rec.url === "string" ? rec.url : null,
     pid: rec.pid,
     processGroupId: typeof rec.processGroupId === "number" ? rec.processGroupId : null,
-    windowsProcessTree: Array.isArray(rec.windowsProcessTree) && rec.windowsProcessTree.every((identity) =>
-      identity && typeof identity === "object"
-      && Number.isSafeInteger(identity.pid) && identity.pid > 0
-      && Number.isSafeInteger(identity.parentPid) && identity.parentPid >= 0
-      && typeof identity.startedAtTicks === "string" && /^\d+$/.test(identity.startedAtTicks))
+    windowsProcessTree: Array.isArray(rec.windowsProcessTree)
+      && (rec.windowsProcessTree.length === 0 || hasWindowsProcessIdentities(rec.windowsProcessTree))
       ? rec.windowsProcessTree as WindowsServiceProcessIdentity[] : undefined,
     stopError: typeof rec.stopError === "string" ? rec.stopError : null,
     provider: "local_process",
@@ -266,7 +271,7 @@ async function isLikelyMatchingCommand(record: LocalServiceRegistryRecord) {
 }
 
 async function verifyWindowsRegistryRecord(record: LocalServiceRegistryRecord) {
-  if (!record.windowsProcessTree?.length) {
+  if (!hasWindowsProcessIdentities(record.windowsProcessTree)) {
     throw new Error(`Windows identity unavailable for ${record.serviceKey}; registry retained`);
   }
   const captured = await windowsServiceProcessTree({ action: "verify", rootPid: record.pid, identities: record.windowsProcessTree });
@@ -349,7 +354,14 @@ export async function terminateLocalService(
   record: Pick<LocalServiceRegistryRecord, "pid" | "processGroupId"> & Partial<LocalServiceRegistryRecord>,
   opts?: { signal?: NodeJS.Signals; forceAfterMs?: number },
 ) {
-  if (process.platform === "win32" && record.windowsProcessTree) {
+  // Registry-backed stops must never fall back to PID-only signalling. Raw
+  // heartbeat/recovery callers omit serviceKey and retain their existing contract.
+  if (process.platform === "win32" && (record.serviceKey !== undefined || record.windowsProcessTree !== undefined)) {
+    if (!hasWindowsProcessIdentities(record.windowsProcessTree)) {
+      // Do not touch/rewrite a legacy record: the writer captures missing
+      // identities, which would turn an untrusted saved PID into fresh custody.
+      throw new Error(`Windows identity unavailable for ${record.serviceKey ?? record.pid}; registry retained`);
+    }
     try {
       const stopped = await windowsServiceProcessTree({
         action: "stop", rootPid: record.pid, identities: record.windowsProcessTree, waitMs: opts?.forceAfterMs,

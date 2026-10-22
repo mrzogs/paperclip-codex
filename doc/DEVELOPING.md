@@ -264,6 +264,12 @@ An exited shell alone is not shutdown proof. Failed stops retain the registry an
 `stopError` for diagnosis and retry; an unexpected listener is never killed by
 port number. Legacy Windows registry entries without process identities require
 operator verification rather than automatic adoption or tree termination.
+Windows shell-exit callbacks retain runtime/reuse ownership, registry evidence,
+and configured idle-stop timers; a controlled stop verifies tree and listener
+shutdown before releasing custody. Registry-backed stops, including `dev:stop`,
+reject missing or malformed identities without refreshing them from a saved PID.
+Raw heartbeat/recovery termination without a registry service key retains its
+separate process-termination contract.
 Unix process-group signal behavior is unchanged.
 
 When developing from multiple git worktrees, do not point two Paperclip servers at the same embedded PostgreSQL data directory.
