@@ -15,6 +15,7 @@ export interface RunProcessResult {
   exitCode: number | null;
   signal: string | null;
   timedOut: boolean;
+  terminalResultCleanupTriggered?: boolean;
   stdout: string;
   stderr: string;
   pid: number | null;
@@ -2272,6 +2273,7 @@ export async function runChildProcess(
                 exitCode: code,
                 signal,
                 timedOut,
+                terminalResultCleanupTriggered: terminalCleanupStarted,
                 stdout,
                 stderr,
                 pid: child.pid ?? null,

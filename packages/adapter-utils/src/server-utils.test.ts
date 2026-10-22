@@ -506,7 +506,7 @@ describe("runChildProcess", () => {
     expect(await waitForPidExit(descendantPid, 2_000)).toBe(true);
   });
 
-  it.skipIf(process.platform === "win32")("cleans up a still-running child after terminal output", async () => {
+  it("cleans up a still-running child after terminal output", async () => {
     const result = await runChildProcess(
       randomUUID(),
       process.execPath,
@@ -520,7 +520,7 @@ describe("runChildProcess", () => {
       {
         cwd: process.cwd(),
         env: {},
-        timeoutSec: 0,
+        timeoutSec: 5,
         graceSec: 1,
         onLog: async () => {},
         terminalResultCleanup: {
@@ -531,7 +531,7 @@ describe("runChildProcess", () => {
     );
 
     expect(result.timedOut).toBe(false);
-    expect(result.signal).toBe("SIGTERM");
+    expect(result.terminalResultCleanupTriggered).toBe(true);
     expect(result.stdout).toContain('"type":"result"');
   });
 

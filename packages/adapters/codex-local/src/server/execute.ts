@@ -40,6 +40,7 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 import {
   parseCodexJsonl,
+  codexTerminalTurnStatus,
   extractCodexRetryNotBefore,
   isCodexTransientUpstreamError,
   isCodexUnknownSessionError,
@@ -714,6 +715,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       timeoutSec,
       graceSec,
       onSpawn,
+      terminalResultCleanup: {
+        graceMs: 15_000,
+        hasTerminalResult: ({ stdout }) => codexTerminalTurnStatus(stdout) !== null,
+      },
       onLog: async (stream, chunk) => {
         if (stream !== "stderr") {
           await onLog(stream, chunk);
@@ -736,7 +741,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   };
 
   const toResult = (
-    attempt: { proc: { exitCode: number | null; signal: string | null; timedOut: boolean; stdout: string; stderr: string }; rawStderr: string; parsed: ReturnType<typeof parseCodexJsonl> },
+    attempt: { proc: { exitCode: number | null; signal: string | null; timedOut: boolean; terminalResultCleanupTriggered?: boolean; stdout: string; stderr: string }; rawStderr: string; parsed: ReturnType<typeof parseCodexJsonl> },
     clearSessionOnMissingSession = false,
     isRetry = false,
   ): AdapterExecutionResult => {
@@ -774,8 +779,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       parsedError ||
       stderrLine ||
       `Codex exited with code ${attempt.proc.exitCode ?? -1}`;
+    const terminalStatus = codexTerminalTurnStatus(attempt.proc.stdout);
+    const terminalCleanupCompleted =
+      attempt.proc.terminalResultCleanupTriggered === true &&
+      terminalStatus === "completed" &&
+      !attempt.parsed.errorMessage;
+    const effectiveExitCode = terminalCleanupCompleted
+      ? 0
+      : attempt.proc.terminalResultCleanupTriggered && terminalStatus === "failed"
+        ? (attempt.proc.exitCode || 1)
+        : attempt.proc.exitCode;
     const transientRetryNotBefore =
-      (attempt.proc.exitCode ?? 0) !== 0
+      (effectiveExitCode ?? 0) !== 0
         ? extractCodexRetryNotBefore({
             stdout: attempt.proc.stdout,
             stderr: attempt.proc.stderr,
@@ -783,7 +798,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           })
         : null;
     const transientUpstream =
-      (attempt.proc.exitCode ?? 0) !== 0 &&
+      (effectiveExitCode ?? 0) !== 0 &&
       isCodexTransientUpstreamError({
         stdout: attempt.proc.stdout,
         stderr: attempt.proc.stderr,
@@ -791,11 +806,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       });
 
     return {
-      exitCode: attempt.proc.exitCode,
-      signal: attempt.proc.signal,
+      exitCode: effectiveExitCode,
+      signal: terminalCleanupCompleted ? null : attempt.proc.signal,
       timedOut: false,
       errorMessage:
-        (attempt.proc.exitCode ?? 0) === 0
+        (effectiveExitCode ?? 0) === 0
           ? null
           : fallbackErrorMessage,
       errorCode:
@@ -816,6 +831,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       resultJson: {
         stdout: attempt.proc.stdout,
         stderr: attempt.proc.stderr,
+        ...(attempt.proc.terminalResultCleanupTriggered ? { terminalResultCleanupTriggered: true } : {}),
         ...(transientUpstream ? { errorFamily: "transient_upstream" } : {}),
         ...(transientRetryNotBefore ? { retryNotBefore: transientRetryNotBefore.toISOString() } : {}),
         ...(transientRetryNotBefore ? { transientRetryNotBefore: transientRetryNotBefore.toISOString() } : {}),
@@ -830,6 +846,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (
       sessionId &&
       !initial.proc.timedOut &&
+      !(initial.proc.terminalResultCleanupTriggered && codexTerminalTurnStatus(initial.proc.stdout) === "completed") &&
       (initial.proc.exitCode ?? 0) !== 0 &&
       isCodexUnknownSessionError(initial.proc.stdout, initial.rawStderr)
     ) {
