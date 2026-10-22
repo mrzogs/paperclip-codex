@@ -124,6 +124,18 @@ These browser suites are intended for targeted local verification, not the defau
 
 For normal issue work, start with the smallest targeted check that proves the change. Reserve repo-wide typecheck/build/test runs for PR-ready handoff or changes broad enough that narrow checks do not cover the risk.
 
+On Windows, use `corepack.cmd pnpm` if `pnpm` is not on PATH. Package scripts
+also invoke `pnpm`, so ensure the pnpm command shim is available to child
+processes before running the full validation commands. The stable test runner
+uses `npm_execpath` when launched through pnpm, avoiding direct spawning of a
+Windows command shim.
+
+Embedded PostgreSQL tests use temporary databases. Their cleanup waits for the
+database process to stop, then retries transient directory removal failures
+(such as Windows `EPERM` or `EBUSY`) up to ten times with increasing 100 ms
+delays. Persistent cleanup failures still fail validation; this does not skip
+database tests or increase their startup deadlines.
+
 ## One-Command Local Run
 
 For a first-time local install, you can bootstrap and run in one command:
