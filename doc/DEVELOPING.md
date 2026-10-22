@@ -256,6 +256,16 @@ Local adapters require their corresponding CLI/session setup on the machine runn
 
 ## Worktree-local Instances
 
+On Windows, local runtime services retain PID, parent PID and process start-time
+identities in the instance's runtime-service registry. Stopping a service checks
+those identities, saves the owned descendant set, terminates it using held process
+handles, and verifies shutdown before discarding registry/runtime ownership.
+An exited shell alone is not shutdown proof. Failed stops retain the registry and
+`stopError` for diagnosis and retry; an unexpected listener is never killed by
+port number. Legacy Windows registry entries without process identities require
+operator verification rather than automatic adoption or tree termination.
+Unix process-group signal behavior is unchanged.
+
 When developing from multiple git worktrees, do not point two Paperclip servers at the same embedded PostgreSQL data directory.
 
 Instead, create a repo-local Paperclip config plus an isolated instance for the worktree:

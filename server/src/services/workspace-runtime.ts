@@ -21,10 +21,12 @@ import {
   findLocalServiceRegistryRecordByRuntimeServiceId,
   findAdoptableLocalService,
   readLocalServicePortOwner,
+  readLocalServiceRegistryRecord,
   removeLocalServiceRegistryRecord,
   terminateLocalService,
   touchLocalServiceRegistryRecord,
   writeLocalServiceRegistryRecord,
+  type LocalServiceRegistryRecord,
 } from "./local-service-supervisor.js";
 import type { WorkspaceOperationRecorder } from "./workspace-operations.js";
 import { readExecutionWorkspaceConfig } from "./execution-workspaces.js";
@@ -2268,7 +2270,32 @@ async function startLocalRuntimeService(input: {
       spawnErrorPromise,
     ]);
   } catch (err) {
-    terminateChildProcess(child);
+    if (process.platform === "win32" && child.pid) {
+      const failedRegistry: LocalServiceRegistryRecord = {
+        version: 1, serviceKey, profileKind: "workspace-runtime", serviceName, command, cwd: serviceCwd,
+        envFingerprint: serviceIdentityFingerprint, port, url, pid: child.pid, processGroupId: child.pid,
+        provider: "local_process", runtimeServiceId: null, reuseKey: input.reuseKey,
+        startedAt: new Date().toISOString(), lastSeenAt: new Date().toISOString(),
+        metadata: { startupFailed: true, executionWorkspaceId: input.executionWorkspaceId ?? null },
+      };
+      try {
+        await writeLocalServiceRegistryRecord(failedRegistry);
+        await terminateLocalService(failedRegistry);
+        await removeLocalServiceRegistryRecord(serviceKey);
+      } catch (cleanupError) {
+        // If identity capture itself failed, retain a visible, non-adoptable
+        // ownership record. Never guess at a reused shell PID or port owner.
+        const retained = await readLocalServiceRegistryRecord(serviceKey) ?? failedRegistry;
+        await writeLocalServiceRegistryRecord({
+          ...retained,
+          windowsProcessTree: retained.windowsProcessTree ?? [],
+          stopError: String(cleanupError),
+        });
+        throw new Error(`Failed to start runtime service "${serviceName}": ${String(err)}; cleanup failed; registry ${serviceKey} retained: ${String(cleanupError)}`);
+      }
+    } else {
+      terminateChildProcess(child);
+    }
     throw new Error(
       `Failed to start runtime service "${serviceName}": ${err instanceof Error ? err.message : String(err)}${stderrExcerpt ? ` | stderr: ${stderrExcerpt.trim()}` : ""}`,
     );
@@ -2357,15 +2384,13 @@ async function stopRuntimeService(serviceId: string) {
   const record = runtimeServicesById.get(serviceId);
   if (!record) return;
   clearIdleTimer(record);
-  record.status = "stopped";
-  record.healthStatus = "unknown";
-  record.lastUsedAt = new Date().toISOString();
-  record.stoppedAt = new Date().toISOString();
-  runtimeServicesById.delete(serviceId);
-  if (record.reuseKey && runtimeServicesByReuseKey.get(record.reuseKey) === record.id) {
-    runtimeServicesByReuseKey.delete(record.reuseKey);
+  const registry = process.platform === "win32" ? await readLocalServiceRegistryRecord(record.serviceKey) : null;
+  if (process.platform === "win32" && !registry?.windowsProcessTree?.length) {
+    throw new Error(`Cannot stop runtime service ${serviceId}: Windows process identity is unavailable; ownership retained`);
   }
-  if (record.child && record.child.pid) {
+  if (registry) {
+    await terminateLocalService(registry);
+  } else if (record.child && record.child.pid) {
     await terminateLocalService({
       pid: record.child.pid,
       processGroupId: record.processGroupId ?? record.child.pid,
@@ -2380,6 +2405,14 @@ async function stopRuntimeService(serviceId: string) {
     }
   }
   await removeLocalServiceRegistryRecord(record.serviceKey);
+  record.status = "stopped";
+  record.healthStatus = "unknown";
+  record.lastUsedAt = new Date().toISOString();
+  record.stoppedAt = new Date().toISOString();
+  runtimeServicesById.delete(serviceId);
+  if (record.reuseKey && runtimeServicesByReuseKey.get(record.reuseKey) === record.id) {
+    runtimeServicesByReuseKey.delete(record.reuseKey);
+  }
   await persistRuntimeServiceRecord(record.db, record);
 }
 
@@ -2847,6 +2880,7 @@ export async function reconcilePersistedRuntimeServicesOnStartup(db: Db) {
     if (adoptedRecord) {
       const adoptedUrl = adoptedRecord.url ?? row.url ?? null;
       if (!(await isRuntimeServiceUrlHealthy(adoptedUrl))) {
+        if (process.platform === "win32") await terminateLocalService(adoptedRecord);
         await removeLocalServiceRegistryRecord(adoptedRecord.serviceKey);
       } else {
         const record: RuntimeServiceRecord = {

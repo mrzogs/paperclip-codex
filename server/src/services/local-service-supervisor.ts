@@ -2,9 +2,11 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { createConnection } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { resolvePaperclipInstanceRoot } from "../home-paths.js";
+import { windowsServiceProcessTree, type WindowsServiceProcessIdentity } from "./windows-service-process-tree.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -26,6 +28,8 @@ export interface LocalServiceRegistryRecord {
   startedAt: string;
   lastSeenAt: string;
   metadata: Record<string, unknown> | null;
+  windowsProcessTree?: WindowsServiceProcessIdentity[];
+  stopError?: string | null;
 }
 
 export interface LocalServiceIdentityInput {
@@ -95,6 +99,13 @@ function normalizeRegistryRecord(raw: unknown): LocalServiceRegistryRecord | nul
     url: typeof rec.url === "string" ? rec.url : null,
     pid: rec.pid,
     processGroupId: typeof rec.processGroupId === "number" ? rec.processGroupId : null,
+    windowsProcessTree: Array.isArray(rec.windowsProcessTree) && rec.windowsProcessTree.every((identity) =>
+      identity && typeof identity === "object"
+      && Number.isSafeInteger(identity.pid) && identity.pid > 0
+      && Number.isSafeInteger(identity.parentPid) && identity.parentPid >= 0
+      && typeof identity.startedAtTicks === "string" && /^\d+$/.test(identity.startedAtTicks))
+      ? rec.windowsProcessTree as WindowsServiceProcessIdentity[] : undefined,
+    stopError: typeof rec.stopError === "string" ? rec.stopError : null,
     provider: "local_process",
     runtimeServiceId: typeof rec.runtimeServiceId === "string" ? rec.runtimeServiceId : null,
     reuseKey: typeof rec.reuseKey === "string" ? rec.reuseKey : null,
@@ -136,6 +147,11 @@ export function createLocalServiceKey(input: LocalServiceIdentityInput) {
 }
 
 export async function writeLocalServiceRegistryRecord(record: LocalServiceRegistryRecord) {
+  if (process.platform === "win32" && !record.windowsProcessTree) {
+    const captured = await windowsServiceProcessTree({ action: "capture", rootPid: record.pid });
+    if (captured.error) throw new Error(captured.error);
+    record.windowsProcessTree = captured.identities;
+  }
   await fs.mkdir(getRuntimeServicesDir(), { recursive: true });
   await fs.writeFile(
     getRuntimeServiceRegistryPath(record.serviceKey),
@@ -186,6 +202,8 @@ export async function findLocalServiceRegistryRecordByRuntimeServiceId(input: {
   );
   const record = records.find((entry) => entry.runtimeServiceId === input.runtimeServiceId) ?? null;
   if (!record) return null;
+
+  if (process.platform === "win32") return await verifyWindowsRegistryRecord(record);
 
   let candidate = record;
   if (!isPidAlive(candidate.pid)) {
@@ -247,6 +265,35 @@ async function isLikelyMatchingCommand(record: LocalServiceRegistryRecord) {
   }
 }
 
+async function verifyWindowsRegistryRecord(record: LocalServiceRegistryRecord) {
+  if (!record.windowsProcessTree?.length) {
+    throw new Error(`Windows identity unavailable for ${record.serviceKey}; registry retained`);
+  }
+  const captured = await windowsServiceProcessTree({ action: "verify", rootPid: record.pid, identities: record.windowsProcessTree });
+  if (captured.error) throw new Error(captured.error);
+  if (!captured.identities.length) {
+    if (record.stopError) throw new Error(`Service ${record.serviceKey} has unresolved stop evidence: ${record.stopError}; registry retained`);
+    if (record.port && await isLocalServicePortListening(record.port)) {
+      throw new Error(`Service ${record.serviceKey} still has a listener without verified process custody; registry retained`);
+    }
+    await removeLocalServiceRegistryRecord(record.serviceKey);
+    return null;
+  }
+  // Preserve the original root PID. An orphan descendant remains reachable via
+  // its saved identity; never substitute an arbitrary current port owner.
+  return record;
+}
+
+export async function isLocalServicePortListening(port: number) {
+  return await new Promise<boolean>((resolve) => {
+    const socket = createConnection({ port, host: "127.0.0.1" });
+    const finish = (listening: boolean) => { socket.destroy(); resolve(listening); };
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+    socket.setTimeout(1000, () => finish(true)); // Uncertain shutdown fails closed.
+  });
+}
+
 export async function findAdoptableLocalService(input: {
   serviceKey: string;
   command?: string | null;
@@ -256,6 +303,15 @@ export async function findAdoptableLocalService(input: {
 }) {
   const record = await readLocalServiceRegistryRecord(input.serviceKey);
   if (!record) return null;
+
+  if (process.platform === "win32") {
+    if (!(await verifyWindowsRegistryRecord(record))) return null;
+    if (input.command && record.command !== input.command) return null;
+    if (input.cwd && path.resolve(record.cwd) !== path.resolve(input.cwd)) return null;
+    if (input.envFingerprint && record.envFingerprint !== input.envFingerprint) return null;
+    if (input.port != null && record.port !== input.port) return null;
+    return record;
+  }
 
   if (!isPidAlive(record.pid)) {
     await removeLocalServiceRegistryRecord(input.serviceKey);
@@ -290,9 +346,26 @@ export async function touchLocalServiceRegistryRecord(
 }
 
 export async function terminateLocalService(
-  record: Pick<LocalServiceRegistryRecord, "pid" | "processGroupId">,
+  record: Pick<LocalServiceRegistryRecord, "pid" | "processGroupId"> & Partial<LocalServiceRegistryRecord>,
   opts?: { signal?: NodeJS.Signals; forceAfterMs?: number },
 ) {
+  if (process.platform === "win32" && record.windowsProcessTree) {
+    try {
+      const stopped = await windowsServiceProcessTree({
+        action: "stop", rootPid: record.pid, identities: record.windowsProcessTree, waitMs: opts?.forceAfterMs,
+        registryPath: record.serviceKey ? getRuntimeServiceRegistryPath(record.serviceKey) : undefined,
+        registryRecord: { ...record },
+      });
+      if (stopped.error) throw new Error(stopped.error);
+      if (record.port && await isLocalServicePortListening(record.port)) {
+        throw new Error(`Service port ${record.port} still listens after owned-tree termination; ownership retained`);
+      }
+    } catch (error) {
+      if (record.serviceKey) await touchLocalServiceRegistryRecord(record.serviceKey, { stopError: String(error) });
+      throw error;
+    }
+    return;
+  }
   const signal = opts?.signal ?? "SIGTERM";
   const targetProcessGroup = process.platform !== "win32" && record.processGroupId && record.processGroupId > 0;
   try {
