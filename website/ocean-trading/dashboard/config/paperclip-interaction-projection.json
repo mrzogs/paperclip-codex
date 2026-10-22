@@ -1,0 +1,22 @@
+{
+  "schema_version": "ocean-paperclip-interaction-projection/v1",
+  "paperclip": {
+    "company_id": "49d243c6-0dda-4adb-878c-2ef8ed0be6ac",
+    "project_id": "e0a78492-01d4-4ba8-b733-3dbefa68ae34",
+    "workspace_id": "fa3a13dc-7189-4891-8f01-f859886a87b1",
+    "company_prefix": "OCEA"
+  },
+  "issues": [
+    {
+      "issue_id": "6a2908ea-7396-4db8-aa8d-df478b04732f",
+      "issue_identifier": "OCEA-55",
+      "purpose": "Supervised-host capability designations",
+      "response_owner": "Wayne / Paperclip board"
+    }
+  ],
+  "safety": {
+    "read_only": true,
+    "automatic_approval": false,
+    "runtime_authority": false
+  }
+}
