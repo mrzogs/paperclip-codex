@@ -13,6 +13,7 @@ import { queryKeys } from "../lib/queryKeys";
 import { Button } from "@/components/ui/button";
 import { Settings, CloudUpload, Download, Upload } from "lucide-react";
 import { CompanyPatternIcon } from "../components/CompanyPatternIcon";
+import { CompletionRelayStatus } from "../components/CompletionRelayStatus";
 import {
   Field,
   ToggleField,
@@ -401,6 +402,7 @@ export function CompanySettings() {
       </div>
 
       {/* Danger Zone */}
+      {selectedCompanyId && <CompletionRelayStatus companyId={selectedCompanyId} />}
       <div className="space-y-4">
         <div className="text-xs font-medium text-destructive uppercase tracking-wide">
           Danger Zone

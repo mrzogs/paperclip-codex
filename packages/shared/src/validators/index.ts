@@ -532,3 +532,4 @@ export {
   type SetPluginState,
   type ListPluginState,
 } from "./plugin.js";
+export { completionRelayMappingSchema, type CompletionRelayBinding } from "./completion-relay.js";
