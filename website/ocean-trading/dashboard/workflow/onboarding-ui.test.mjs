@@ -8,8 +8,11 @@ import { chromium, expect } from '@playwright/test';
 import { issueOceanIdentity, issueTestBrowserSecret } from './auth.mjs';
 import { WorkflowBackend } from './backend.mjs';
 import { sealedHash } from './common.mjs';
+import { loadVwapPhysicalComparatorApprovalDispatchConfig } from './vwap-physical-comparator-approval-dispatch.mjs';
 import { DEFAULT_VWAP_PHYSICAL_COMPARATOR_CONTRACT } from './vwap-physical-comparator-contract.mjs';
 
+const dispatchConfig = loadVwapPhysicalComparatorApprovalDispatchConfig();
+const TEST_COMPANY_ID = dispatchConfig.paperclip.company_id;
 const TEST_STRATEGY_ID = 'cicd-vwap-pull-back-strategy';
 const TEST_APPROVAL_ID = 'd6bb0adb-2704-4e44-8aa8-011ee2b9baee';
 const TEST_COMPARATOR_APPROVAL_ID = '11111111-1111-4111-8111-111111111111';
@@ -97,17 +100,24 @@ test('complete onboarding is actionable in the browser without touching producti
   const publicRoot = path.resolve('public/workflow');
   const environment = {};
   let backend;
+  let approvalMode = 'approved';
   const server = http.createServer((request, response) => {
     const url = new URL(request.url, `http://${request.headers.host}`);
     if (url.pathname === `/api/approvals/${TEST_APPROVAL_ID}`) {
       response.setHeader('Content-Type','application/json');
-      response.end(JSON.stringify({ id:TEST_APPROVAL_ID, type:'hire_agent', status:'approved', payload:{ name:'CICD VWAP Recovery Coordinator' }, createdAt:'2026-10-19T15:46:53.575Z', decidedAt:'2026-10-20T09:51:07.457Z' }));
+      response.end(JSON.stringify({ id:TEST_APPROVAL_ID, companyId:TEST_COMPANY_ID, type:'hire_agent', status:'approved', payload:{ name:'CICD VWAP Recovery Coordinator' }, createdAt:'2026-10-19T15:46:53.575Z', decidedAt:'2026-10-20T09:51:07.457Z' }));
       return;
     }
     if ([TEST_COMPARATOR_APPROVAL_ID,TEST_RELEASE_APPROVAL_ID].some(id => url.pathname === `/api/approvals/${id}`)) {
       const approvalId = url.pathname.split('/').at(-1);
       response.setHeader('Content-Type','application/json');
-      response.end(JSON.stringify({ id:approvalId, type:'request_board_approval', status:'approved', payload:{
+      if (['denied','unavailable'].includes(approvalMode)) { response.writeHead(approvalMode === 'denied' ? 403 : 503); response.end('{}'); return; }
+      response.end(JSON.stringify({ id:approvalId, companyId:approvalMode === 'company' ? 'other-company' : TEST_COMPANY_ID, type:'request_board_approval', status:approvalMode === 'pending' ? 'pending' : 'approved', payload:{
+        strategy_id:TEST_STRATEGY_ID, namespace:'TEST', contract_id:physicalComparator.contract_id,
+        contract_hash:approvalMode === 'contract' ? 'changed' : physicalComparator.contract_hash,
+        context_hash:physicalComparator.run_context.context_hash, run_id:physicalComparator.run_context.run_id,
+        decision_scope:approvalId === TEST_COMPARATOR_APPROVAL_ID ? 'DATASET_PHYSICAL_SELECTION' : 'RUN_RELEASE',
+        output_root:dispatchConfig.staging_authority.continuation.run_release_output_root,
         title:approvalId === TEST_COMPARATOR_APPROVAL_ID
           ? 'Approve v0.6.238 TEST dataset and physical comparator selection'
           : 'Approve create-new v0.6.238 Sep-2025 Z25 TEST RUN_RELEASE',
@@ -168,12 +178,12 @@ test('complete onboarding is actionable in the browser without touching producti
     await expect(page.getByRole('heading',{ name:'Required human approvals', exact:true })).toBeVisible({ timeout:10_000 });
     await expect(page.getByRole('heading',{ name:'CICD VWAP Recovery Coordinator', exact:true })).toBeVisible();
     await expect(page.getByText('Approved',{ exact:true }).last()).toBeVisible();
-    await expect(page.locator(`[data-approval-id="${TEST_APPROVAL_ID}"]`).getByRole('link',{ name:'Open approval record', exact:true })).toHaveAttribute('href',`${base}/approvals/${TEST_APPROVAL_ID}`);
+    await expect(page.locator(`[data-approval-id="${TEST_APPROVAL_ID}"]`).getByRole('link',{ name:'Open approval record', exact:true })).toHaveAttribute('href',`${base}/OCEA/approvals/${TEST_APPROVAL_ID}`);
     await expect(page.getByRole('heading',{ name:'Physical comparator approvals', exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'Approve v0.6.238 TEST dataset and physical comparator selection', exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'Approve create-new v0.6.238 Sep-2025 Z25 TEST RUN_RELEASE', exact:true })).toBeVisible();
-    await expect(page.locator(`[data-approval-id="${TEST_COMPARATOR_APPROVAL_ID}"]`).getByRole('link',{ name:'Open approval record', exact:true })).toHaveAttribute('href',`http://127.0.0.1:3100/OCEA/approvals/${TEST_COMPARATOR_APPROVAL_ID}`);
-    await expect(page.locator(`[data-approval-id="${TEST_RELEASE_APPROVAL_ID}"]`).getByRole('link',{ name:'Open approval record', exact:true })).toHaveAttribute('href',`http://127.0.0.1:3100/OCEA/approvals/${TEST_RELEASE_APPROVAL_ID}`);
+    await expect(page.locator(`[data-approval-id="${TEST_COMPARATOR_APPROVAL_ID}"]`).getByRole('link',{ name:'Open approval record', exact:true })).toHaveAttribute('href',`${base}/OCEA/approvals/${TEST_COMPARATOR_APPROVAL_ID}`);
+    await expect(page.locator(`[data-approval-id="${TEST_RELEASE_APPROVAL_ID}"]`).getByRole('link',{ name:'Open approval record', exact:true })).toHaveAttribute('href',`${base}/OCEA/approvals/${TEST_RELEASE_APPROVAL_ID}`);
     await expect(page.getByText('Approved in Paperclip',{ exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{name:'Current Paperclip action',exact:true})).toBeVisible();
     await expect(page.getByRole('heading',{name:'Identify exact Telemetry and host authority',exact:true})).toBeVisible();
@@ -228,12 +238,12 @@ test('complete onboarding is actionable in the browser without touching producti
     await expect(page.locator('#notice')).toContainText('Open Replay Monitor to view Ocean data');
     await expect(page.getByRole('heading',{ name:'Onboarding complete', exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'CI/CD continuous run', exact:true })).toBeVisible();
-    await expect(page.getByRole('heading',{ name:'Answer the OCEA-28 authority question in Paperclip', exact:true })).toBeVisible();
+    await expect(page.getByRole('heading',{ name:'Continue current program and physical gates', exact:true })).toBeVisible();
     await expect(page.getByText('2 approved in Paperclip · 0 pending',{ exact:true })).toBeVisible();
     await expect(page.getByText('Approved in Paperclip',{ exact:true }).first()).toBeVisible();
-    await expect(page.getByText(/TEST staging decision is already approved/)).toBeVisible();
+    await expect(page.locator('.strategy-next-action')).toContainText('Separate comparator RUN_RELEASE gate');
     await expect(page.getByRole('link',{ name:'Answer authority question OCEA-28', exact:true })).toHaveAttribute('href','http://127.0.0.1:3100/OCEA/issues/OCEA-28');
-    await expect(page.getByText(/Continuation is waiting on OCEA-28: Identify exact Telemetry and host authority/)).toBeVisible();
+    await expect(page.getByRole('heading',{name:'Identify exact Telemetry and host authority',exact:true})).toBeVisible();
     const priorDispatch = fs.readFileSync(approvalDispatchState,'utf8');
     const humanOwnedDispatch = JSON.parse(priorDispatch);
     humanOwnedDispatch.continuity.observed_at_utc = new Date().toISOString();
@@ -247,10 +257,10 @@ test('complete onboarding is actionable in the browser without touching producti
       url:'http://127.0.0.1:3100/OCEA/issues/OCEA-32',worker:{state:'RUNNING_VERIFIED'},recovery_required:false};
     fs.writeFileSync(approvalDispatchState,JSON.stringify(humanOwnedDispatch));
     await page.locator('#refresh').click();
-    await expect(page.getByRole('heading',{name:'Complete OCEA-31 cross-owner evidence routing',exact:true})).toBeVisible();
+    await expect(page.getByRole('heading',{name:'Continue current program and physical gates',exact:true})).toBeVisible();
     await expect(page.getByRole('link',{name:'Open cross-owner work OCEA-31',exact:true})).toHaveAttribute('href','http://127.0.0.1:3100/OCEA/issues/OCEA-31');
-    await expect(page.getByText(/OCEA-32 is separately Running verified under CICD coordinator/)).toBeVisible();
-    await expect(page.getByText(/No Stage, diagnostic start, playback, or trading authority follows/)).toBeVisible();
+    await expect(page.getByText(/Parallel agent work:/)).toBeVisible();
+    await expect(page.locator('.strategy-next-action')).toContainText('source completion does not grant Stage');
     fs.writeFileSync(approvalDispatchState,priorDispatch);
     await page.locator('#refresh').click();
     await expect(page.getByRole('heading',{ name:'Read-only preflight complete — blocked', exact:true })).toBeVisible();
@@ -276,8 +286,8 @@ test('complete onboarding is actionable in the browser without touching producti
     sources['priority-completion-program.json'].status = 'CICD_GATES_PROVEN_READY_FOR_GOVERNED_CANDIDATE_DECISION';
     fs.writeFileSync(path.join(sourceRoot,'priority-completion-program.json'),JSON.stringify(sources['priority-completion-program.json']));
     await page.locator('#refresh').click();
-    await expect(page.getByRole('heading',{ name:'Answer the OCEA-28 authority question in Paperclip', exact:true })).toBeVisible();
-    await expect(page.getByText('Owner: Wayne / Paperclip board',{ exact:true })).toBeVisible();
+    await expect(page.getByRole('heading',{ name:'Continue current program and physical gates', exact:true })).toBeVisible();
+    await expect(page.getByText('Owner: Program coordinator / named physical gate owners',{ exact:true })).toBeVisible();
     await expect(page.getByText('Autonomous improvement implementation',{ exact:true })).toBeVisible();
     await expect(page.getByRole('columnheader',{ name:'Exact next action', exact:true })).toBeVisible();
     await expect(page.getByRole('button',{ name:'Prepare Replay history run', exact:true })).toHaveCount(0);
@@ -305,6 +315,35 @@ test('complete onboarding is actionable in the browser without touching producti
     const mobileStrategyFits = await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth);
     assert.equal(mobileStrategyFits,true,'completed onboarding must not overflow the mobile viewport');
     await page.setViewportSize({ width:1440, height:950 });
+    // Exercise the real GET -> enrichment -> render -> refresh path. The old
+    // monitor still says approved throughout; it must not override these reads.
+    const program = sources['autonomous-continuous-improvement-program.json'];
+    program.next_action = 'TEST-only booking issuer source correction independent PASS; PR26 merged develop 08667719b1e004802b8716982f2bf167afa70b37; OCEA-28/44 physical gates pending.';
+    writeSources(sourceRoot);
+    if (process.env.OCEAN_PROJECTION_BEFORE_UI && process.env.OCEAN_PROJECTION_EVIDENCE) {
+      await page.route('**/workflow/ui.js*',route=>route.fulfill({path:process.env.OCEAN_PROJECTION_BEFORE_UI,contentType:'text/javascript'}));
+      await page.reload();
+      await expect(page.locator('.strategy-next-action h3')).toHaveText('Answer the OCEA-28 authority question in Paperclip');
+      await page.screenshot({path:path.join(process.env.OCEAN_PROJECTION_EVIDENCE,'projection-before.png'),fullPage:true});
+      await page.unroute('**/workflow/ui.js*');
+      await page.reload();
+    }
+    for (const [mode,label] of [['pending','Pending'],['unavailable','Unavailable'],['denied','Scoped access denied'],['company','Company mismatch'],['contract','Contract mismatch'],['approved','Approved']]) {
+      approvalMode = mode;
+      await page.locator('#refresh').click();
+      const card = page.locator(`[data-approval-id="${TEST_COMPARATOR_APPROVAL_ID}"]`);
+      await expect(card.locator('.badge')).toHaveText(label);
+      await expect(page.locator('.strategy-next-action')).toContainText('booking issuer source correction independent PASS');
+      await expect(page.locator('.strategy-next-action')).toContainText('OCEA-28/44 physical gates pending');
+      await expect(page.locator('.strategy-next-action')).toContainText('Separate comparator RUN_RELEASE gate');
+      await expect(page.locator('.strategy-next-action h3')).toHaveText('Continue current program and physical gates');
+      if (mode === 'denied') await expect(card).toContainText('HTTP 403');
+      if (process.env.OCEAN_PROJECTION_EVIDENCE) {
+        fs.mkdirSync(process.env.OCEAN_PROJECTION_EVIDENCE,{recursive:true});
+        await page.screenshot({path:path.join(process.env.OCEAN_PROJECTION_EVIDENCE,`projection-${mode}.png`),fullPage:true});
+      }
+    }
+    await page.locator('details.onboarding-system-details > summary').click();
     await replay.getByRole('button',{ name:'Pause', exact:true }).click();
     await page.locator('#activation-control-confirm').check();
     await page.getByRole('button',{ name:'Pause', exact:true }).last().click();
