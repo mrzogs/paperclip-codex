@@ -63,6 +63,16 @@ setInterval(() => {}, 1_000);
   await fs.writeFile(commandPath, script, "utf8");
 }
 
+async function writeErroredCompletedHangingCodexCommand(commandPath: string): Promise<void> {
+  const script = `
+console.log(JSON.stringify({ type: "thread.started", thread_id: "codex-errored-session" }));
+console.log(JSON.stringify({ type: "error", message: "provider returned an error" }));
+console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 0 } }));
+setInterval(() => {}, 1_000);
+`;
+  await fs.writeFile(commandPath, script, "utf8");
+}
+
 type CapturePayload = {
   argv: string[];
   prompt: string;
@@ -114,6 +124,37 @@ function createLocalSandboxRunner() {
 }
 
 describe("codex execute", () => {
+  it("retains a parsed error when a completed terminal event is followed by a hung CLI", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-terminal-error-"));
+    const workspace = path.join(root, "workspace");
+    await fs.mkdir(workspace, { recursive: true });
+    await writeErroredCompletedHangingCodexCommand(path.join(workspace, "exec"));
+    try {
+      const result = await execute({
+        runId: "run-terminal-error",
+        agent: { id: "agent-1", companyId: "company-1", name: "Codex Coder", adapterType: "codex_local", adapterConfig: {} },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: "issue-1" },
+        config: {
+          command: process.execPath,
+          cwd: workspace,
+          env: { CODEX_HOME: path.join(root, "codex-home") },
+          promptTemplate: "Follow the paperclip heartbeat.",
+          timeoutSec: 30,
+          graceSec: 1,
+        },
+        context: {},
+        authToken: "run-jwt-token",
+        onLog: async () => {},
+      });
+      expect(result.exitCode).not.toBe(0);
+      expect(result.timedOut).toBe(false);
+      expect(result.errorMessage).toBe("provider returned an error");
+      expect(result.resultJson).toMatchObject({ terminalResultCleanupTriggered: true });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 25_000);
+
   it("does not convert a failed terminal turn into a successful run during cleanup", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-terminal-failed-"));
     const workspace = path.join(root, "workspace");

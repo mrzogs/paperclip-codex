@@ -71,7 +71,9 @@ function signalRunningProcess(
       // Fall back to the direct child signal if group signaling fails.
     }
   }
-  if (!running.child.killed) {
+  // `killed` means a signal was sent, not that the process exited. A child may
+  // ignore SIGTERM, so allow the later SIGKILL escalation while it is alive.
+  if (running.child.exitCode === null && running.child.signalCode === null) {
     running.child.kill(signal);
   }
 }

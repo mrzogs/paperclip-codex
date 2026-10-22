@@ -784,9 +784,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       attempt.proc.terminalResultCleanupTriggered === true &&
       terminalStatus === "completed" &&
       !attempt.parsed.errorMessage;
+    const terminalCleanupFailed =
+      attempt.proc.terminalResultCleanupTriggered === true &&
+      (terminalStatus === "failed" || Boolean(attempt.parsed.errorMessage));
     const effectiveExitCode = terminalCleanupCompleted
       ? 0
-      : attempt.proc.terminalResultCleanupTriggered && terminalStatus === "failed"
+      : terminalCleanupFailed
         ? (attempt.proc.exitCode || 1)
         : attempt.proc.exitCode;
     const transientRetryNotBefore =
