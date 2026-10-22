@@ -1,10 +1,20 @@
 import { describe, expect, it } from "vitest";
 import {
+  codexTerminalTurnStatus,
   extractCodexRetryNotBefore,
   isCodexTransientUpstreamError,
   isCodexUnknownSessionError,
   parseCodexJsonl,
 } from "./parse.js";
+
+describe("codexTerminalTurnStatus", () => {
+  it("recognizes only top-level terminal JSONL events", () => {
+    expect(codexTerminalTurnStatus('{"type":"item.completed","item":{"text":"turn.completed"}}\n')).toBeNull();
+    expect(codexTerminalTurnStatus('{"type":"turn.completed"}\n')).toBe("completed");
+    expect(codexTerminalTurnStatus('{"type":"turn.completed"}\n{"type":"turn.failed"}\n')).toBe("failed");
+    expect(codexTerminalTurnStatus('{"type":"turn.comple')).toBeNull();
+  });
+});
 
 describe("parseCodexJsonl", () => {
   it("captures session id, assistant summary, usage, and error message", () => {

@@ -42,6 +42,37 @@ process.exit(1);
   await fs.chmod(commandPath, 0o755);
 }
 
+async function writeCompletedHangingCodexCommand(commandPath: string): Promise<void> {
+  const script = `#!/usr/bin/env node
+console.log(JSON.stringify({ type: "thread.started", thread_id: "codex-completed-session" }));
+console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "durable result" } }));
+console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 2, cached_input_tokens: 0, output_tokens: 1 } }));
+console.error("2026-10-22T10:52:02.817Z ERROR codex_core::session: failed to record rollout items: thread codex-completed-session not found");
+setInterval(() => {}, 1_000);
+`;
+  await fs.writeFile(commandPath, script, "utf8");
+  await fs.chmod(commandPath, 0o755);
+}
+
+async function writeFailedHangingCodexCommand(commandPath: string): Promise<void> {
+  const script = `
+console.log(JSON.stringify({ type: "thread.started", thread_id: "codex-failed-session" }));
+console.log(JSON.stringify({ type: "turn.failed", error: { message: "terminal failure" } }));
+setInterval(() => {}, 1_000);
+`;
+  await fs.writeFile(commandPath, script, "utf8");
+}
+
+async function writeErroredCompletedHangingCodexCommand(commandPath: string): Promise<void> {
+  const script = `
+console.log(JSON.stringify({ type: "thread.started", thread_id: "codex-errored-session" }));
+console.log(JSON.stringify({ type: "error", message: "provider returned an error" }));
+console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 0 } }));
+setInterval(() => {}, 1_000);
+`;
+  await fs.writeFile(commandPath, script, "utf8");
+}
+
 type CapturePayload = {
   argv: string[];
   prompt: string;
@@ -93,6 +124,119 @@ function createLocalSandboxRunner() {
 }
 
 describe("codex execute", () => {
+  it("retains a parsed error when a completed terminal event is followed by a hung CLI", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-terminal-error-"));
+    const workspace = path.join(root, "workspace");
+    await fs.mkdir(workspace, { recursive: true });
+    await writeErroredCompletedHangingCodexCommand(path.join(workspace, "exec"));
+    try {
+      const result = await execute({
+        runId: "run-terminal-error",
+        agent: { id: "agent-1", companyId: "company-1", name: "Codex Coder", adapterType: "codex_local", adapterConfig: {} },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: "issue-1" },
+        config: {
+          command: process.execPath,
+          cwd: workspace,
+          env: { CODEX_HOME: path.join(root, "codex-home") },
+          promptTemplate: "Follow the paperclip heartbeat.",
+          timeoutSec: 30,
+          graceSec: 1,
+        },
+        context: {},
+        authToken: "run-jwt-token",
+        onLog: async () => {},
+      });
+      expect(result.exitCode).not.toBe(0);
+      expect(result.timedOut).toBe(false);
+      expect(result.errorMessage).toBe("provider returned an error");
+      expect(result.resultJson).toMatchObject({ terminalResultCleanupTriggered: true });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 25_000);
+
+  it("does not convert a failed terminal turn into a successful run during cleanup", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-terminal-failed-"));
+    const workspace = path.join(root, "workspace");
+    await fs.mkdir(workspace, { recursive: true });
+    await writeFailedHangingCodexCommand(path.join(workspace, "exec"));
+    try {
+      const result = await execute({
+        runId: "run-terminal-failed",
+        agent: { id: "agent-1", companyId: "company-1", name: "Codex Coder", adapterType: "codex_local", adapterConfig: {} },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: "issue-1" },
+        config: {
+          command: process.execPath,
+          cwd: workspace,
+          env: { CODEX_HOME: path.join(root, "codex-home") },
+          promptTemplate: "Follow the paperclip heartbeat.",
+          timeoutSec: 30,
+          graceSec: 1,
+        },
+        context: {},
+        authToken: "run-jwt-token",
+        onLog: async () => {},
+      });
+      expect(result.exitCode).not.toBe(0);
+      expect(result.timedOut).toBe(false);
+      expect(result.errorMessage).toBe("terminal failure");
+      expect(result.resultJson).toMatchObject({ terminalResultCleanupTriggered: true });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 25_000);
+
+  it("finalizes a completed Codex turn when the CLI remains alive after rollout persistence fails", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-terminal-cleanup-"));
+    const workspace = path.join(root, "workspace");
+    // `node exec ...` executes this fixture without a shell or Windows symlink privileges.
+    const commandPath = path.join(workspace, "exec");
+    await fs.mkdir(workspace, { recursive: true });
+    await writeCompletedHangingCodexCommand(commandPath);
+
+    try {
+      const result = await execute({
+        runId: "run-terminal-cleanup",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Codex Coder",
+          adapterType: "codex_local",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: "codex-completed-session",
+          sessionParams: { sessionId: "codex-completed-session", cwd: workspace },
+          sessionDisplayId: "codex-completed-session",
+          taskKey: "issue-1",
+        },
+        config: {
+          command: process.execPath,
+          cwd: workspace,
+          env: { CODEX_HOME: path.join(root, "codex-home") },
+          promptTemplate: "Follow the paperclip heartbeat.",
+          timeoutSec: 30,
+          graceSec: 1,
+        },
+        context: {},
+        authToken: "run-jwt-token",
+        onLog: async () => {},
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect([null, "SIGTERM"]).toContain(result.signal);
+      expect(result.timedOut).toBe(false);
+      expect(result.errorMessage).toBeNull();
+      expect(result.errorCode).toBeNull();
+      expect(result.summary).toBe("durable result");
+      expect(result.sessionId).toBe("codex-completed-session");
+      expect(result.clearSession).toBe(false);
+      expect(result.resultJson).toMatchObject({ terminalResultCleanupTriggered: true });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 25_000);
+
   it("uses a Paperclip-managed CODEX_HOME outside worktree mode while preserving shared auth and config", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-default-"));
     const workspace = path.join(root, "workspace");

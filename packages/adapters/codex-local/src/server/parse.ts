@@ -11,6 +11,17 @@ const CODEX_REMOTE_COMPACTION_RE = /remote\s+compact\s+task/i;
 const CODEX_USAGE_LIMIT_RE =
   /you(?:'|’)ve hit your usage limit for .+\.\s+switch to another model now,\s+or try again at\s+([^.!\n]+)(?:[.!]|\n|$)/i;
 
+export function codexTerminalTurnStatus(stdout: string): "completed" | "failed" | null {
+  let status: "completed" | "failed" | null = null;
+  for (const rawLine of stdout.split(/\r?\n/)) {
+    const event = parseJson(rawLine.trim());
+    if (!event) continue;
+    if (event.type === "turn.completed") status = "completed";
+    if (event.type === "turn.failed") status = "failed";
+  }
+  return status;
+}
+
 export function parseCodexJsonl(stdout: string) {
   let sessionId: string | null = null;
   let finalMessage: string | null = null;
