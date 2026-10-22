@@ -156,6 +156,17 @@ describe("Codex command resolution", () => {
       await fs.rm(root, { recursive: true, force: true });
     }
   });
+
+  windowsOnly("does not borrow the host Codex install when LOCALAPPDATA is absent", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-no-localappdata-"));
+    try {
+      const env = { PATH: "" };
+      await expect(resolveCommandForLogs("codex", root, env)).resolves.toBe("codex");
+      await expect(ensureCommandResolvable("codex", root, env)).rejects.toThrow("Command not found in PATH");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("sanitizeSshRemoteEnv", () => {

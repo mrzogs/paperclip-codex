@@ -1259,7 +1259,8 @@ async function resolveWindowsCodexInstall(
   }
 
   if (!looksLikeCodexCommandBasename(command)) return null;
-  const localAppData = env.LOCALAPPDATA?.trim() || process.env.LOCALAPPDATA?.trim();
+  // Respect the invocation's environment; do not fall back to the host user's install.
+  const localAppData = env.LOCALAPPDATA?.trim();
   if (!localAppData) return null;
   const commandBase = path.extname(command) ? path.basename(command) : "codex.exe";
   const binRoot = path.join(localAppData, "OpenAI", "Codex", "bin");
