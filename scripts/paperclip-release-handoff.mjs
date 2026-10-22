@@ -202,21 +202,21 @@ export async function releaseHandoffOnce({ manifest, stateDirectory, apiUrl, api
       if (next.status === "done" && deliverable.status !== "backlog") next = deliverable;
     }
     requireThat(deliverable.status !== "cancelled" && next.status !== "cancelled", "Cancelled handoff requires explicit owner disposition");
+    const completed = deliverable.status === "done" && next.status === "done";
     const latest = await scopedIssue(source.id);
     requireThat(latest.status === source.status, "Source changed concurrently; owner must reconcile blockers");
     const blockers = new Set((latest.blockedBy ?? []).map((issue) => issue.id));
     if (deliverable.status !== "done") blockers.add(deliverable.id);
     if (next.status !== "done") blockers.add(next.id);
-    if (blockers.size && (latest.status !== "blocked" || blockers.size !== (latest.blockedBy ?? []).length)) {
+    if (!completed && blockers.size && (latest.status !== "blocked" || blockers.size !== (latest.blockedBy ?? []).length)) {
       // Only the source is updated; existing unrelated blocker relations are preserved.
       await request(`/issues/${source.id}`, "PATCH", { status: "blocked", blockedByIssueIds: [...blockers] });
     }
     // The live endpoint avoids materializing a large historical transcript list.
     // Its server cap is 50; absence remains unverified, never inferred as dispatch.
-    const runs = await request(`/companies/${manifest.companyId}/live-runs?limit=50`);
+    const runs = completed ? [] : await request(`/companies/${manifest.companyId}/live-runs?limit=50`);
     const observed = runs.find((run) => run.companyId === manifest.companyId && run.agentId === manifest.assigneeAgentId
       && (run.issueId ?? run.contextSnapshot?.issueId) === next.id && ["queued", "running"].includes(run.status));
-    const completed = deliverable.status === "done" && next.status === "done";
     const receipt = {
       digest, deliverableIssueId: deliverable.id, nextIssueId: next.id, ownerAgentId: manifest.assigneeAgentId,
       observedAt: new Date().toISOString(),

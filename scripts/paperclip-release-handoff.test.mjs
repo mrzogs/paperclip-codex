@@ -287,3 +287,15 @@ test("retryable error status retains the server's existing invocation semantics"
   assert.equal(receipt.disposition, "dispatch_observed");
   assert.equal(f.creates().length, 1);
 });
+
+test("completed handoff observation never reblocks an automatically resumed source", async (t) => {
+  const f = await fixture(t);
+  const first = await f.invoke();
+  f.issues.get(first.deliverableIssueId).status = "done";
+  f.source.status = "in_progress"; // Paperclip's blocker-resolution continuation.
+  const patchCount = f.calls.filter((call) => call.method === "PATCH").length;
+  const next = await f.invoke();
+  assert.equal(next.disposition, "completed");
+  assert.equal(f.source.status, "in_progress");
+  assert.equal(f.calls.filter((call) => call.method === "PATCH").length, patchCount);
+});
