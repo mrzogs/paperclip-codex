@@ -211,7 +211,9 @@ export async function releaseHandoffOnce({ manifest, stateDirectory, apiUrl, api
       // Only the source is updated; existing unrelated blocker relations are preserved.
       await request(`/issues/${source.id}`, "PATCH", { status: "blocked", blockedByIssueIds: [...blockers] });
     }
-    const runs = await request(`/companies/${manifest.companyId}/heartbeat-runs?agentId=${manifest.assigneeAgentId}&limit=1000`);
+    // The live endpoint avoids materializing a large historical transcript list.
+    // Its server cap is 50; absence remains unverified, never inferred as dispatch.
+    const runs = await request(`/companies/${manifest.companyId}/live-runs?limit=50`);
     const observed = runs.find((run) => run.companyId === manifest.companyId && run.agentId === manifest.assigneeAgentId
       && (run.issueId ?? run.contextSnapshot?.issueId) === next.id && ["queued", "running"].includes(run.status));
     const completed = deliverable.status === "done" && next.status === "done";

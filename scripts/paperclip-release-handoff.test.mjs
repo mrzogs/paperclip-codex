@@ -39,7 +39,7 @@ async function fixture(t, changes = {}) {
       return json([{ id: attachmentId, issueId: source.id, companyId: controls.artifactCompany }]);
     }
     if (url.pathname === `/api/attachments/${attachmentId}/content`) { res.end(bytes); return; }
-    if (req.method === "GET" && url.pathname === `/api/companies/${companyId}/heartbeat-runs`) return json(runs);
+    if (req.method === "GET" && url.pathname === `/api/companies/${companyId}/live-runs`) return json(runs);
     if (url.pathname === `/api/companies/${companyId}/issues`) {
       if (req.method === "GET") {
         const matches = [...issues.values()].filter((issue) => issue.description?.includes(url.searchParams.get("q")));
@@ -105,6 +105,7 @@ test("ready handoff carries immutable inputs and todo in the first POST, preserv
   const receipt = await f.invoke();
   assert.equal(receipt.disposition, "dispatch_observed");
   assert.equal(receipt.run.status, "queued");
+  assert.equal(f.calls.find((call) => call.path.endsWith("/live-runs")).query.get("limit"), "50");
   assert.equal(f.creates().length, 1);
   assert.equal(f.creates()[0].body.status, "todo");
   assert.ok(f.creates()[0].body.description.includes(f.manifest.artifacts[0].sha256));
