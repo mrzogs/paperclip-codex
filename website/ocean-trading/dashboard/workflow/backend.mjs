@@ -1090,6 +1090,7 @@ export class WorkflowBackend {
             ? await enrichStrategyApprovalStatuses(view,{
               apiBase:this.environment.PAPERCLIP_API || 'http://127.0.0.1:3100/api',
               timeoutMs:this.environment.OCEAN_PAPERCLIP_APPROVAL_TIMEOUT_MS || 2000,
+              dispatchConfigPath:this.environment.OCEAN_VWAP_APPROVAL_DISPATCH_CONFIG,
             })
             : view;
           response.end(JSON.stringify(result));

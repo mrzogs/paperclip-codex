@@ -1,95 +1,55 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { enrichStrategyApprovalStatuses, readPaperclipApprovalStatus } from './paperclip-approval-status.mjs';
-
-const APPROVAL_ID = 'd6bb0adb-2704-4e44-8aa8-011ee2b9baee';
-const COMPARATOR_APPROVAL_ID = 'd2710454-1cc5-4058-b219-1bfae717042a';
-const RELEASE_APPROVAL_ID = 'f3b264eb-f081-4b51-b105-6a09c2b42860';
-
-test('projects only the live read-only Paperclip approval fields and link', async () => {
-  let request;
-  const fetchImpl = async (url, options) => {
-    request = { url, options };
-    return new Response(JSON.stringify({
-      id:APPROVAL_ID, companyId:'company-1', type:'hire_agent', status:'approved',
-      payload:{ name:'CICD VWAP Recovery Coordinator', adapterConfig:{ token:'must-not-leak' } },
-      decidedAt:'2026-10-20T09:51:07.457Z', createdAt:'2026-10-19T15:46:53.575Z',
-    }), { status:200, headers:{ 'content-type':'application/json' } });
+import { loadVwapPhysicalComparatorApprovalDispatchConfig } from './vwap-physical-comparator-approval-dispatch.mjs';
+import { readVwapPhysicalComparatorContract } from './vwap-physical-comparator-contract.mjs';
+const config=loadVwapPhysicalComparatorApprovalDispatchConfig(), comparator=readVwapPhysicalComparatorContract();
+const company=config.paperclip.company_id, id=comparator.required_human_approvals[0].approval_id;
+const binding={strategy_id:comparator.strategy_id,namespace:comparator.namespace,contract_id:comparator.contract_id,
+  contract_hash:comparator.contract_hash,context_hash:comparator.run_context.context_hash,run_id:comparator.run_context.run_id,decision_scope:'DATASET_PHYSICAL_SELECTION'};
+const reference={approval_id:id,expected_company_id:company,expected_payload:binding};
+const reply=(status='approved',changes={})=>new Response(JSON.stringify({id,companyId:company,type:'request_board_approval',status,
+  payload:{...binding,title:'Exact comparator',secret:'must-not-leak'},...changes}),{status:200});
+for(const status of ['approved','pending','revision_requested','rejected','cancelled']) {
+  test(`verified ${status} requires matching company and binding`,async()=>{
+    const result=await readPaperclipApprovalStatus(reference,{fetchImpl:async(url,options)=>{
+      assert.ok(url.endsWith(`/api/approvals/${id}`)); assert.equal(options.method,'GET'); assert.equal(options.cache,'no-store');
+      assert.equal(options.headers.Authorization,undefined,'do not borrow privileged credentials'); return reply(status);
+    }});
+    assert.equal(result.status,status.toUpperCase()); assert.equal(result.authoritative,true);
+    assert.equal(result.action_required,['pending','revision_requested'].includes(status));
+    assert.equal(result.expected_contract_hash,binding.contract_hash); assert.equal(JSON.stringify(result).includes('must-not-leak'),false);
+  });
+}
+for(const [httpStatus,expected] of [[401,'SCOPED_ACCESS_DENIED'],[403,'SCOPED_ACCESS_DENIED'],[404,'UNAVAILABLE'],[503,'UNAVAILABLE']]) {
+  test(`HTTP ${httpStatus} never grants approval authority`,async()=>{
+    const result=await readPaperclipApprovalStatus(reference,{fetchImpl:async()=>new Response('{}',{status:httpStatus})});
+    assert.equal(result.status,expected); assert.equal(result.http_status,httpStatus); assert.equal(result.authoritative,false); assert.equal(result.action_required,false);
+  });
+}
+test('company, contract, context, scope and output changes fail closed',async()=>{
+  for(const changes of [{companyId:'another-company'},...Object.keys(binding).map(key=>({payload:{...binding,[key]:'changed'}}))]) {
+    const result=await readPaperclipApprovalStatus(reference,{fetchImpl:async()=>reply('approved',changes)});
+    assert.equal(result.status,changes.companyId?'COMPANY_MISMATCH':'CONTRACT_MISMATCH'); assert.equal(result.authoritative,false);
+  }
+  const result=await readPaperclipApprovalStatus({...reference,expected_payload:{...binding,output_root:'expected'}},{fetchImpl:async()=>reply()});
+  assert.equal(result.status,'CONTRACT_MISMATCH');
+});
+test('missing expected company cannot authenticate an approval',async()=>{
+  const result=await readPaperclipApprovalStatus({approval_id:id},{fetchImpl:async()=>reply()}); assert.equal(result.authoritative,false);
+});
+test('refresh reads live statuses and preserves program and runtime boundaries',async()=>{
+  const view={marker:'preserved',onboarding:{continuous_delivery:{autonomous_improvement:{state:'AVAILABLE',next_action:'Source PASS; physical gates pending',required_human_approvals:[]},physical_comparator:comparator}}};
+  let status='pending',calls=0;
+  const fetchImpl=async url=>{
+    calls++; const approvalId=url.split('/').at(-1),ref=comparator.required_human_approvals.find(item=>item.approval_id===approvalId);
+    return reply(status,{id:approvalId,payload:{...binding,decision_scope:ref.decision_scope,
+      ...(ref.decision_scope==='RUN_RELEASE'?{output_root:config.staging_authority.continuation.run_release_output_root}:{})}});
   };
-  const result = await readPaperclipApprovalStatus({
-    approval_id:APPROVAL_ID, purpose:'Approve the dedicated coordinator', source:'program',
-  }, { apiBase:'http://127.0.0.1:3100/api', fetchImpl });
-  assert.equal(request.url, `http://127.0.0.1:3100/api/approvals/${APPROVAL_ID}`);
-  assert.equal(request.options.method, 'GET');
-  assert.equal(request.options.cache, 'no-store');
-  assert.deepEqual(result, {
-    approval_id:APPROVAL_ID,
-    purpose:'Approve the dedicated coordinator',
-    source:'program',
-    decision_scope:null,
-    title:'CICD VWAP Recovery Coordinator',
-    type:'HIRE_AGENT',
-    status:'APPROVED',
-    authoritative:true,
-    action_required:false,
-    decided_at_utc:'2026-10-20T09:51:07.457Z',
-    requested_at_utc:'2026-10-19T15:46:53.575Z',
-    url:`http://127.0.0.1:3100/approvals/${APPROVAL_ID}`,
-    checked_at_utc:result.checked_at_utc,
-  });
-  assert.equal(JSON.stringify(result).includes('must-not-leak'), false);
-});
-
-test('unavailable Paperclip status remains visibly non-authoritative and fail-closed', async () => {
-  const result = await readPaperclipApprovalStatus({ approval_id:APPROVAL_ID, purpose:'Human gate' }, {
-    apiBase:'http://127.0.0.1:3100/api',
-    fetchImpl:async () => new Response(JSON.stringify({ error:'offline' }), { status:503 }),
-  });
-  assert.equal(result.status, 'UNAVAILABLE');
-  assert.equal(result.authoritative, false);
-  assert.equal(result.action_required, false);
-  assert.equal(result.error_code, 'PAPERCLIP_APPROVAL_UNAVAILABLE');
-});
-
-test('enriches only strategy approval references and preserves the remaining view', async () => {
-  const view = { marker:'preserved', onboarding:{ continuous_delivery:{ autonomous_improvement:{
-    state:'AVAILABLE', required_human_approvals:[{ approval_id:APPROVAL_ID, purpose:'Human gate', source:'next_action' }],
-  } } } };
-  const result = await enrichStrategyApprovalStatuses(view, {
-    apiBase:'http://127.0.0.1:3100/api',
-    fetchImpl:async () => new Response(JSON.stringify({
-      id:APPROVAL_ID, type:'hire_agent', status:'pending', payload:{ title:'Approve coordinator' }, createdAt:'2026-10-20T09:00:00Z',
-    }), { status:200 }),
-  });
-  assert.equal(result.marker, 'preserved');
-  const approval = result.onboarding.continuous_delivery.autonomous_improvement.required_human_approvals[0];
-  assert.equal(approval.status, 'PENDING');
-  assert.equal(approval.action_required, true);
-  assert.equal(approval.authoritative, true);
-});
-
-test('enriches both physical comparator decisions without changing their scopes', async () => {
-  const view = { onboarding:{ continuous_delivery:{
-    autonomous_improvement:{ state:'AVAILABLE', required_human_approvals:[] },
-    physical_comparator:{ state:'AVAILABLE', required_human_approvals:[
-      { approval_id:COMPARATOR_APPROVAL_ID, decision_scope:'DATASET_PHYSICAL_SELECTION', purpose:'Select exact inputs', source:'physical_comparator_contract' },
-      { approval_id:RELEASE_APPROVAL_ID, decision_scope:'RUN_RELEASE', purpose:'Release exact run', source:'physical_comparator_contract' },
-    ] },
-  } } };
-  const result = await enrichStrategyApprovalStatuses(view, {
-    apiBase:'http://127.0.0.1:3100/api',
-    fetchImpl:async url => {
-      const approvalId = url.split('/').at(-1);
-      return new Response(JSON.stringify({
-        id:approvalId, type:'request_board_approval', status:'pending',
-        payload:{ title:approvalId === COMPARATOR_APPROVAL_ID ? 'Approve exact comparator inputs' : 'Approve exact RUN_RELEASE' },
-        createdAt:'2026-10-20T12:00:00Z',
-      }), { status:200 });
-    },
-  });
-  const approvals = result.onboarding.continuous_delivery.physical_comparator.required_human_approvals;
-  assert.deepEqual(approvals.map(item => item.status), ['PENDING','PENDING']);
-  assert.deepEqual(approvals.map(item => item.source), ['physical_comparator_contract','physical_comparator_contract']);
-  assert.deepEqual(approvals.map(item => item.decision_scope), ['DATASET_PHYSICAL_SELECTION','RUN_RELEASE']);
-  assert.equal(approvals.every(item => item.action_required), true);
+  const first=await enrichStrategyApprovalStatuses(view,{fetchImpl}); status='approved'; const second=await enrichStrategyApprovalStatuses(view,{fetchImpl});
+  assert.equal(calls,4);
+  assert.deepEqual(first.onboarding.continuous_delivery.physical_comparator.required_human_approvals.map(x=>x.status),['PENDING','PENDING']);
+  assert.deepEqual(second.onboarding.continuous_delivery.physical_comparator.required_human_approvals.map(x=>x.status),['APPROVED','APPROVED']);
+  assert.equal(second.marker,'preserved'); assert.equal(second.onboarding.continuous_delivery.autonomous_improvement.next_action,view.onboarding.continuous_delivery.autonomous_improvement.next_action);
+  assert.equal(second.onboarding.continuous_delivery.physical_comparator.safety.replay_start_authorized,false);
 });

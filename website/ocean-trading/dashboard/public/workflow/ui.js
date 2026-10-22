@@ -276,13 +276,11 @@ function strategyOnboardingPage(data) {
   const unavailableHumanApprovals = humanApprovals.filter(item => !item.authoritative);
   const deniedHumanApprovals = humanApprovals.filter(item => ['REJECTED','CANCELLED'].includes(item.status));
   const allHumanApprovalsApproved = humanApprovals.length > 0 && humanApprovals.every(item => item.authoritative && item.status === 'APPROVED');
-  const comparatorStatusesCurrent = approvalDispatch.approval_statuses_source === 'PAPERCLIP_LIVE';
   const comparatorApprovals = Array.isArray(comparator.required_human_approvals) ? comparator.required_human_approvals.map(item => ({
     ...item,
-    status:String(approvalDispatch.approval_statuses?.[item.decision_scope] || 'UNAVAILABLE').toUpperCase(),
-    authoritative:comparatorStatusesCurrent,
-    action_required:comparatorStatusesCurrent && ['PENDING','REVISION_REQUESTED'].includes(String(approvalDispatch.approval_statuses?.[item.decision_scope] || '').toUpperCase()),
-    url:`http://127.0.0.1:3100/OCEA/approvals/${encodeURIComponent(item.approval_id)}`,
+    status:item.status || 'UNAVAILABLE',
+    authoritative:item.authoritative === true,
+    action_required:item.authoritative === true && ['PENDING','REVISION_REQUESTED'].includes(item.status),
   })) : [];
   const pendingComparatorApprovals = comparatorApprovals.filter(item => ['PENDING','REVISION_REQUESTED'].includes(item.status));
   const unavailableComparatorApprovals = comparatorApprovals.filter(item => !item.authoritative);
@@ -326,7 +324,9 @@ function strategyOnboardingPage(data) {
   const comparatorDecisionLabel = comparatorDecisionStatus === 'APPROVED_IN_PAPERCLIP' ? 'Approved in Paperclip'
     : comparatorDecisionStatus === 'NOT_GRANTED_IN_PAPERCLIP' ? 'Not granted in Paperclip'
       : comparatorDecisionStatus === 'PENDING_IN_PAPERCLIP' ? 'Pending in Paperclip'
-        : 'Paperclip status unavailable';
+        : comparatorApprovals.some(item => item.status === 'SCOPED_ACCESS_DENIED') ? 'Paperclip scoped access denied'
+          : comparatorApprovals.some(item => /MISMATCH/.test(item.status)) ? 'Paperclip company/contract mismatch'
+            : 'Paperclip status unavailable';
   const comparatorDecisionBadge = `<span class='badge ${comparatorDecisionStatus === 'APPROVED_IN_PAPERCLIP' ? 'good' : comparatorDecisionStatus === 'NOT_GRANTED_IN_PAPERCLIP' ? 'bad' : 'warn'}'>${esc(comparatorDecisionLabel)}</span>`;
   const paperQualificationGate = improvement.paper_qualification_gate || null;
   const paperQualificationApprovalRequired = paperQualificationGate?.status === 'APPROVAL_REQUIRED';
@@ -420,7 +420,9 @@ function strategyOnboardingPage(data) {
     <li class='${paperRuntimeActive || paperRuns.length ? 'current' : 'waiting'}'><span class='journey-marker'>3</span><div class='journey-copy'><div><h3>3. Paper forward testing</h3>${badge(paperState)}</div><p>After Replay evidence is reviewed, run the strategy in Paper. Completed Paper periods add trade and no-trade evidence continuously.</p><p class='journey-evidence'>${paperCompleted.length} completed run${paperCompleted.length === 1 ? '' : 's'} / ${paperTrades} trade${paperTrades === 1 ? '' : 's'} captured</p></div></li>
     <li class='${liveRuns.length ? 'current' : 'waiting'}'><span class='journey-marker'>4</span><div class='journey-copy'><div><h3>4. Live trading</h3>${badge(liveState)}</div><p>Live is a separate, explicit human decision after Replay and Paper evidence has been reviewed. Ocean never promotes a strategy automatically.</p></div></li>
   </ol>`;
+  const programActionCurrent = improvementActive && Boolean(String(improvement.next_action || '').trim());
   const nextActionTitle = comparatorInvalid ? 'Repair the v0.6.238 TEST comparator contract'
+    : programActionCurrent ? 'Continue current program and physical gates'
     : comparatorStatusUnavailable ? 'Verify the current Paperclip comparator decisions'
     : comparatorNeedsDecision ? 'Approve the v0.6.238 TEST comparator run'
     : preflightBlocked && humanAuthorityBlocker ? `Answer the ${humanAuthorityBlocker.identifier} authority question in Paperclip`
@@ -443,6 +445,7 @@ function strategyOnboardingPage(data) {
   const nextActionLabel = paperRuntimeActive ? 'Open Paper Dashboard' : 'Open Replay Monitor';
   const programNextActionText = improvementActive ? improvement.next_action : pendingAcceptanceGate?.resolution_action || governedAction?.action || paperWorkstream?.next_action || campaign.next_action;
   const nextActionText = comparatorInvalid ? `Ocean rejected the comparator contract (${human(comparator.reason || 'contract invalid')}). No run or release authority exists.`
+    : programActionCurrent ? `${improvement.next_action} Separate comparator RUN_RELEASE gate: ${comparatorDecisionLabel}. Only the exact bound run/context can be covered; source completion does not grant Stage, Replay START, Paper or Live authority. Physical admission, current booking and post-staging evidence remain separate gates.`
     : comparatorStatusUnavailable ? 'Ocean cannot currently prove the two comparator decisions from Paperclip. The last recorded values are displayed only as stale evidence; no new approval or runtime authority is inferred.'
     : comparatorNeedsDecision ? unavailableComparatorApprovals.length
       ? 'Ocean cannot verify one or more comparator approvals. No authority is inferred. Verify both linked approval records before any run materialization.'
@@ -462,7 +465,7 @@ function strategyOnboardingPage(data) {
       ? `Telemetry ${paperTelemetryRepair.version} STTL2 run identity code is merged and locally verified. It is not deployed to Paper and is not Paper-qualified. The next action is to obtain a separate Paper manifest and qualification approval for the exact strategy and six lineage inputs, then verify one new simulated Paper trade end to end. The approved coordinator record does not authorize that deployment or qualification.`
       : `Paperclip confirms every approval referenced by the current program action is approved. Continue only through the remaining exact-binding and evidence gates; this does not approve a strategy change, Paper, Live, or promotion.${paperQualificationApprovalRequired ? ' A separate Paper manifest and qualification approval is still required and has not been granted; prospective Paper rows are not eligible evidence until their lineage manifest and run identity are verified.' : ''}`
     : programNextActionText;
-  const nextActionOwner = comparatorInvalid ? 'Ocean' : preflightBlocked && humanAuthorityBlocker ? humanAuthorityBlocker.human_interaction.owner : preflightBlocked && humanOwnerBlocker ? humanOwnerBlocker.owner_name : preflightBlocked && blockedExecutionJob ? blockedExecutionJob.owner_name : preflightBlocked && stagingApprovalPending ? 'Wayne / Paperclip board' : preflightBlocked ? 'Bound CICD coordinator (Ocean liveness monitor only)' : comparator.state === 'AVAILABLE' ? 'Wayne / Paperclip board' : improvementActive ? 'Ocean continuous-improvement coordinator' : pendingAcceptanceGate?.owner || governedAction?.owner || null;
+  const nextActionOwner = comparatorInvalid ? 'Ocean' : programActionCurrent ? 'Program coordinator / named physical gate owners' : preflightBlocked && humanAuthorityBlocker ? humanAuthorityBlocker.human_interaction.owner : preflightBlocked && humanOwnerBlocker ? humanOwnerBlocker.owner_name : preflightBlocked && blockedExecutionJob ? blockedExecutionJob.owner_name : preflightBlocked && stagingApprovalPending ? 'Wayne / Paperclip board' : preflightBlocked ? 'Bound CICD coordinator (Ocean liveness monitor only)' : comparator.state === 'AVAILABLE' ? 'Wayne / Paperclip board' : improvementActive ? 'Ocean continuous-improvement coordinator' : pendingAcceptanceGate?.owner || governedAction?.owner || null;
   const nextActionControls = preflightBlocked
     ? `<div class='actions'>${blockedExecutionJob ? `<a class='button primary' href='${esc(blockedExecutionJob.url)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}${humanAuthorityBlocker ? 'Answer authority question' : humanOwnerBlocker ? 'Open cross-owner work' : 'Open blocked work'} ${esc(blockedExecutionJob.identifier)}</a>` : ''}${stagingAuthority ? `<a class='button ${blockedExecutionJob ? '' : 'primary'}' href='${esc(stagingAuthority.approval_url)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}${stagingApprovalPending ? 'Review' : 'Open'} staging approval in Paperclip</a><a class='button' href='${esc(stagingAuthority.package_url)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}Open sealed package</a>` : ''}${automaticJob && automaticJob.identifier !== blockedExecutionJob?.identifier ? `<a class='button' href='${esc(automaticJob.url)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}Open current work ${esc(automaticJob.identifier)}</a>` : ''}</div>`
     : comparator.state === 'AVAILABLE' || comparatorInvalid || improvementActive || pendingAcceptanceGate || governedAction ? '' : `<div class='actions'><a class='button primary' ${paperRuntimeActive ? '' : 'data-replay-monitor'} href='${esc(nextActionHref)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}${nextActionLabel}</a></div>`;
@@ -485,7 +488,10 @@ function strategyOnboardingPage(data) {
         : item.status === 'PENDING' ? 'Awaiting a human decision in Paperclip. Ocean remains fail-closed.'
           : item.status === 'REVISION_REQUESTED' ? 'Paperclip requires a revision before this gate can be reconsidered.'
             : `Paperclip records this approval as ${human(item.status)}; no authority is granted.`
-      : 'Current Paperclip status is unavailable. No approval is inferred.';
+      : item.status === 'SCOPED_ACCESS_DENIED' ? `Paperclip denied scoped access (HTTP ${item.http_status}). Expected company ${item.expected_company_id || 'not configured'}. No approval is inferred.`
+        : item.status === 'COMPANY_MISMATCH' ? `Paperclip company does not match expected company ${item.expected_company_id || 'not configured'}. No approval is inferred.`
+          : item.status === 'CONTRACT_MISMATCH' ? `Paperclip decision does not match the exact contract ${item.expected_contract_hash || 'not configured'} and run/context binding. No approval is inferred.`
+            : 'Current Paperclip status is unavailable. No approval is inferred.';
     return `<article class='human-approval-card' data-approval-id='${esc(item.approval_id)}'><div><span>Human approval</span><h3>${esc(item.title || item.purpose)}</h3><p>${esc(detail)}</p><small>${esc(item.purpose)}${item.decision_scope ? ` · ${esc(human(item.decision_scope))}` : ''}</small></div><div class='human-approval-state'>${badge(item.status)}<a class='button ${item.action_required ? 'primary' : ''}' href='${esc(item.url)}' target='_blank' rel='noopener'>${icon('arrow-up-right')}${esc(linkLabel)}</a></div></article>`;
   }).join('');
   const humanApprovalBody = approvalCards(humanApprovals);
@@ -547,7 +553,7 @@ function strategyOnboardingPage(data) {
         ['Codex polling heartbeat', badge('NOT_REQUIRED')],
       ])
       + `<p class='readonly-note'>${icon('shield-check')}Paperclip is the approval authority. Ocean reads those decisions, verifies the sealed package, inspects—but never mutates—the coordinator sandbox, and repairs a missing requester wake; it cannot approve or execute staging itself. A successful wake proves only transport delivery. The package’s mutable requalification draft hash is informational only and must be freshly reauthenticated. The package-bound immutable staging receipt is still required, and the existing RUN_RELEASE approval cannot cross the chartbook mutation. After staging and controller proof, one consolidated Paperclip decision must bind the post-staging run context and bounded measurement START. Paper and Live remain untouched.</p>`,
-    `<span class='muted'>${comparatorApprovals.filter(item => item.status === 'APPROVED').length} approved in Paperclip · ${pendingComparatorApprovals.length} pending</span>`)
+    `<span class='muted'>${comparatorApprovals.filter(item => item.status === 'APPROVED').length} approved in Paperclip · ${pendingComparatorApprovals.length} pending${unavailableComparatorApprovals.length ? ` · ${unavailableComparatorApprovals.length} unverified` : ''}</span>`)
     : comparatorInvalid
       ? section('Physical comparator contract', `<p class='form-error'>Ocean rejected the bundled contract: ${esc(human(comparator.reason || 'contract invalid'))}. No approval or run authority is inferred.</p>`, badge('BLOCKED_FAIL_CLOSED'))
       : '';
