@@ -753,9 +753,24 @@ export class OperationalLearning {
     if (!plan?.operational_review) reasons.push('OPERATIONAL_REVIEW_REQUIRED');
     if (!this.db.prepare('SELECT run_id FROM ow_operational_releases WHERE run_id=? AND context_hash=?').get(run.id, context.context_hash)) reasons.push('OPERATIONAL_RELEASE_REQUIRED');
     const summary = plan ? this.backend.runs.summary(run, plan) : null;
-    if (!summary?.completion_current || summary.completion?.status !== 'COMPLETED') reasons.push('CURRENT_COMPLETION_RECEIPT_REQUIRED');
+    const completionCurrent = summary?.completion_current === true && summary.completion?.status === 'COMPLETED';
+    if (!completionCurrent) reasons.push('CURRENT_COMPLETION_RECEIPT_REQUIRED');
     if (summary && (summary.open_pins || summary.unresolved_records || summary.progress?.pending_events
       || summary.progress?.gaps?.length || summary.progress?.failures?.length)) reasons.push('UNRESOLVED_OR_INCOMPLETE_EVIDENCE');
+    if (!completionCurrent) {
+      return {
+        eligible: false,
+        reasons: [...new Set(reasons)],
+        context,
+        plan,
+        summary,
+        telemetry: {
+          verified: false,
+          skipped: true,
+          reasons: ['TELEMETRY_QUALIFICATION_SKIPPED_WITHOUT_CURRENT_COMPLETION'],
+        },
+      };
+    }
     const telemetry = this.telemetryQualification(run, context, plan, summary);
     if (!telemetry.verified) reasons.push(...telemetry.reasons);
     return { eligible: reasons.length === 0, reasons: [...new Set(reasons)], context, plan, summary, telemetry };

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { dispatchVwapImprovementEvent, loadVwapContinuousImprovementConfig, scanVwapContinuousImprovement } from './vwap-continuous-improvement-monitor.mjs';
+import { dispatchVwapImprovementEvent, loadVwapContinuousImprovementConfig, readVwapLearningRows, scanVwapContinuousImprovement } from './vwap-continuous-improvement-monitor.mjs';
 
 const PROJECT_ID='11111111-1111-4111-8111-111111111111';
 const WORKSPACE_ID='22222222-2222-4222-8222-222222222222';
@@ -127,6 +127,19 @@ test('new discovery evidence triggers once and unchanged scans stay local',async
   assert.equal(third.new_trade_count,0);assert.equal(calls,1);
   const fourth=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:false,dispatch:async()=>{calls++;}});
   assert.equal(fourth.skipped_unchanged,true);assert.equal(calls,1);
+});
+test('healthy WAL signature churn respects the configured database query budget while preserving last-good facts',async()=>{
+  const f=fixture();f.config.minimum_query_interval_ms=60_000;insertRows(f.dbFile,1,1);let reads=0;
+  const readSource=async(source,config)=>{reads++;return readVwapLearningRows(source,config);};
+  const first=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,readSource,dispatch:async()=>({triggered:false})});
+  assert.equal(first.observed_trade_count,1);assert.equal(reads,1);
+  insertRows(f.dbFile,2,1);
+  const deferred=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:false,readSource,dispatch:async()=>({triggered:false})});
+  assert.equal(deferred.status,'HEALTHY');assert.equal(deferred.skipped_query_budget,true);assert.equal(deferred.observed_trade_count,1);assert.equal(reads,1);
+  assert.notEqual(deferred.observed_database_signature,deferred.database_signature);
+  assert.ok(Number.isFinite(Date.parse(deferred.next_database_interrogation_at_utc)));
+  const forced=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,readSource,dispatch:async()=>({triggered:false})});
+  assert.equal(forced.observed_trade_count,2);assert.equal(forced.skipped_query_budget,false);assert.equal(reads,2);
 });
 test('existing trade IDs trigger once when a frozen run assignment makes them newly eligible',async()=>{
   const f=fixture();delete f.config.sources[0].run_assignments;insertRows(f.dbFile,1,60,{role:null,runId:'prospective-run'});let calls=0,event=null;
