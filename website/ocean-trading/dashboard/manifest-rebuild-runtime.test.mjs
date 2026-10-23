@@ -10,6 +10,7 @@ import {
   createManifestRebuildPolicy,
   dtcSnapshotProcessTimeoutMs,
   runBoundedProcess,
+  settleActiveRebuildForStop,
   stoppedMonitorState,
   terminateProcessTree,
 } from "./manifest-rebuild-runtime.mjs";
@@ -76,10 +77,54 @@ test("stopping the monitor preserves durable retry and notification checkpoints"
   };
   const stopped = stoppedMonitorState(previous, "2026-10-23T17:00:00.000Z");
   assert.equal(stopped.running, false);
-  assert.equal(stopped.status, "stopped");
+  assert.equal(stopped.status, "blocked");
   assert.equal(stopped.pid, null);
   assert.deepEqual(stopped.manifestRebuild, previous.manifestRebuild);
   assert.deepEqual(stopped.closedTradeNotificationPending, previous.closedTradeNotificationPending);
+});
+
+test("shutdown termination failure persists a fail-closed rebuild block across restart", async () => {
+  const terminationFailure = Object.assign(new Error("taskkill denied"), {
+    code: "PROCESS_TREE_TERMINATION_FAILED",
+    terminationReason: "abort",
+  });
+  const activeRebuild = Promise.reject(terminationFailure);
+  const shutdown = await settleActiveRebuildForStop({
+    activeRebuildPromise: activeRebuild,
+    abort: () => {},
+    timeoutMs: 100,
+  });
+  assert.equal(shutdown.terminationVerified, false);
+  assert.equal(shutdown.error, terminationFailure);
+
+  const firstProcess = createManifestRebuildPolicy({ nowMs: 5_000 });
+  const attempt = firstProcess.observe("sha256:active", 5_000);
+  const blocked = firstProcess.block(attempt.signature, shutdown.error.message, 5_010);
+  const persisted = {
+    ...blocked,
+    blockedAtUtc: new Date(blocked.blockedAtMs).toISOString(),
+    lastFailureAtUtc: new Date(blocked.lastFailureAtMs).toISOString(),
+  };
+  const stopped = stoppedMonitorState({ manifestRebuild: persisted }, "2026-10-23T20:00:00.000Z");
+  assert.equal(stopped.status, "blocked");
+
+  const restarted = createManifestRebuildPolicy({ initialState: stopped.manifestRebuild, nowMs: 10_000 });
+  const decision = restarted.observe("sha256:new", 20_000);
+  assert.equal(decision.action, "blocked");
+  assert.equal(decision.blockedReason, "taskkill denied");
+  assert.equal(decision.nextAllowedAtMs, 0);
+});
+
+test("shutdown timeout is an unverified termination failure", async () => {
+  const activeRebuild = new Promise(() => {});
+  const shutdown = await settleActiveRebuildForStop({
+    activeRebuildPromise: activeRebuild,
+    abort: () => {},
+    timeoutMs: 10,
+  });
+  assert.equal(shutdown.terminationVerified, false);
+  assert.equal(shutdown.error?.code, "PROCESS_TREE_TERMINATION_FAILED");
+  assert.equal(shutdown.error?.terminationReason, "shutdown_timeout");
 });
 
 test("failed signatures wait for backoff and coalesce newer signatures without overlap", () => {

@@ -2683,10 +2683,11 @@ function monitorState() {
   const running = monitorProcess && !monitorProcess.killed && monitorProcess.exitCode === null;
   const externalRunning = isProcessAlive(state.pid);
   const isRunning = Boolean(running || externalRunning);
+  const durableInactiveStatus = ["blocked", "error"].includes(state.status) ? state.status : "stopped";
   return {
     ...state,
     running: isRunning,
-    status: isRunning ? state.status || "running" : "stopped",
+    status: isRunning ? state.status || "running" : durableInactiveStatus,
     managedByServer: Boolean(running),
   };
 }

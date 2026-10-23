@@ -27,13 +27,58 @@ export function dtcSnapshotProcessTimeoutMs(socketTimeoutMs = 3_000, configuredT
 
 export function stoppedMonitorState(previousState, updatedAtUtc = new Date().toISOString()) {
   const previous = previousState && typeof previousState === "object" ? previousState : {};
+  const rebuildBlocked = Boolean(previous.manifestRebuild?.blockedReason || previous.manifestRebuild?.blocked);
   return {
     ...previous,
     running: false,
-    status: "stopped",
+    status: rebuildBlocked ? "blocked" : "stopped",
     pid: null,
     updatedAtUtc,
   };
+}
+
+export async function settleActiveRebuildForStop({
+  activeRebuildPromise = null,
+  abort = null,
+  timeoutMs = 5_000,
+} = {}) {
+  try {
+    abort?.();
+  } catch (error) {
+    return {
+      terminationVerified: false,
+      error: processError(
+        `Unable to request manifest rebuild termination: ${error?.message || error}`,
+        "PROCESS_TREE_TERMINATION_FAILED",
+        { cause: error, terminationReason: "shutdown_abort" },
+      ),
+    };
+  }
+  if (!activeRebuildPromise) return { terminationVerified: true, error: null };
+
+  const boundedTimeoutMs = positiveInteger(timeoutMs, 5_000);
+  let timeoutTimer = null;
+  const settled = Promise.resolve(activeRebuildPromise).then(
+    () => ({ settled: true, error: null }),
+    (error) => ({ settled: true, error }),
+  );
+  const timedOut = new Promise((resolve) => {
+    timeoutTimer = setTimeout(() => resolve({
+      settled: false,
+      error: processError(
+        `Manifest rebuild termination was not verified within ${boundedTimeoutMs} ms.`,
+        "PROCESS_TREE_TERMINATION_FAILED",
+        { terminationReason: "shutdown_timeout", timeoutMs: boundedTimeoutMs },
+      ),
+    }), boundedTimeoutMs);
+    timeoutTimer.unref?.();
+  });
+  const outcome = await Promise.race([settled, timedOut]);
+  clearTimeout(timeoutTimer);
+  if (!outcome.settled || outcome.error?.code === "PROCESS_TREE_TERMINATION_FAILED") {
+    return { terminationVerified: false, error: outcome.error };
+  }
+  return { terminationVerified: true, error: outcome.error || null };
 }
 
 export function createManifestRebuildPolicy({

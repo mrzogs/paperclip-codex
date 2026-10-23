@@ -2,7 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { createManifestRebuildPolicy, dtcSnapshotProcessTimeoutMs, runBoundedProcess } from "./manifest-rebuild-runtime.mjs";
+import {
+  createManifestRebuildPolicy,
+  dtcSnapshotProcessTimeoutMs,
+  runBoundedProcess,
+  settleActiveRebuildForStop,
+} from "./manifest-rebuild-runtime.mjs";
 import { configuredProcessTimeoutMs } from "./process-timeouts.mjs";
 import { manifestStatePath } from "./manifest-state-path.mjs";
 import {
@@ -1279,6 +1284,7 @@ async function scan() {
     }
     await notifyVwapPaperSim1Events(decision.action === "rebuild" ? "file_change_scan_after_rebuild" : "periodic_scan");
   } catch (error) {
+    if (stopping) return;
     if (rebuildAttempt) {
       const errorMessage = String(error?.message || error);
       const terminationBlocked = error?.code === "PROCESS_TREE_TERMINATION_FAILED";
@@ -1320,16 +1326,37 @@ async function scan() {
 async function stop() {
   if (stopping) return;
   stopping = true;
-  activeRebuildAbortController?.abort();
-  if (activeRebuildPromise) {
-    await Promise.race([
-      activeRebuildPromise.catch(() => {}),
-      new Promise((resolve) => setTimeout(resolve, 5_000)),
-    ]);
+  const stoppingRebuild = manifestRebuildPolicy.snapshot();
+  const shutdown = await settleActiveRebuildForStop({
+    activeRebuildPromise,
+    abort: () => activeRebuildAbortController?.abort(),
+    timeoutMs: 5_000,
+  });
+  if (!shutdown.terminationVerified) {
+    const errorMessage = String(shutdown.error?.message || "Manifest rebuild process-tree termination could not be verified.");
+    manifestRebuildPolicy.block(
+      stoppingRebuild.attemptSignature || stoppingRebuild.pendingSignature,
+      errorMessage,
+    );
+    writeState({
+      running: false,
+      status: "blocked",
+      pid: null,
+      error: `Monitor shutdown failed closed: ${errorMessage}`,
+      lastErrorAtUtc: new Date().toISOString(),
+      shutdownBlockedAtUtc: new Date().toISOString(),
+      manifestRebuild: manifestRebuildState("blocked"),
+    }, createMonitorEvent("error", "stop-blocked", "Monitor shutdown failed closed because process-tree termination could not be verified", {
+      error: errorMessage,
+      errorCode: shutdown.error?.code || "PROCESS_TREE_TERMINATION_FAILED",
+    }));
+    process.exit(1);
+    return;
   }
   writeState({
     running: false,
     status: "stopped",
+    pid: null,
     stoppedAtUtc: new Date().toISOString(),
   }, createMonitorEvent("info", "stop", "Monitor worker stopped"));
   process.exit(0);
