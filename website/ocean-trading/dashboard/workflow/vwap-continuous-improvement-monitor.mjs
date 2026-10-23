@@ -330,8 +330,17 @@ export async function scanVwapContinuousImprovement({config,stateFile,reason='pe
       run_assignments:source.run_assignments||null,require_explicit_dataset_role:source.require_explicit_dataset_role===true,
       run_contracts:source.run_contracts||null,default_dataset_role:source.default_dataset_role||null})),critical_quality_flags:config.critical_quality_flags||[]});
   if(!force&&previous.status==='HEALTHY'&&previous.database_signature===signature&&!previous.pending_dispatch){
-    const unchanged={...previous,last_checked_at_utc:checkedAt,last_check_reason:reason,skipped_unchanged:true};
+    const unchanged={...previous,last_checked_at_utc:checkedAt,last_check_reason:reason,skipped_unchanged:true,skipped_query_budget:false,next_database_interrogation_at_utc:null};
     writeJson(stateFile,unchanged);return unchanged;
+  }
+  const minimumQueryIntervalMs=Math.max(0,Number(config.minimum_query_interval_ms||0));
+  const lastInterrogationMs=Date.parse(previous.last_database_interrogation_at_utc||'');
+  const nextInterrogationMs=lastInterrogationMs+minimumQueryIntervalMs;
+  if(!force&&previous.status==='HEALTHY'&&!previous.pending_dispatch&&minimumQueryIntervalMs>0
+    &&Number.isFinite(lastInterrogationMs)&&Date.now()<nextInterrogationMs){
+    const deferred={...previous,last_checked_at_utc:checkedAt,last_check_reason:reason,skipped_unchanged:false,skipped_query_budget:true,
+      observed_database_signature:signature,next_database_interrogation_at_utc:new Date(nextInterrogationMs).toISOString()};
+    writeJson(stateFile,deferred);return deferred;
   }
   try {
     writeJson(stateFile,{...previous,schema_version:VWAP_MONITOR_SCHEMA,strategy_id:config.strategy_id,enabled:true,status:'SCANNING',last_checked_at_utc:checkedAt,last_check_reason:reason,current_phase:'READING_SOURCES',current_source_id:null,safety:config.safety});
@@ -391,7 +400,8 @@ export async function scanVwapContinuousImprovement({config,stateFile,reason='pe
       : detector.next_action||detector.sufficiency.blockers.map(item=>item.code).join(', ');
     const state={schema_version:VWAP_MONITOR_SCHEMA,strategy_id:config.strategy_id,strategy_name:config.strategy_name||'VWAP Pullback',enabled:true,status:'HEALTHY',
       initialized_at_utc:previous.initialized_at_utc||checkedAt,last_checked_at_utc:checkedAt,last_database_interrogation_at_utc:checkedAt,last_check_reason:reason,
-      skipped_unchanged:false,database_query_count:Number(previous.database_query_count||0)+1,database_signature:signature,
+      skipped_unchanged:false,skipped_query_budget:false,observed_database_signature:signature,next_database_interrogation_at_utc:null,
+      database_query_count:Number(previous.database_query_count||0)+1,database_signature:signature,
       sources:sources.map(item=>({id:item.source.id,environment:item.source.environment,account:item.source.account,database_path:item.source.database_path,
         observed_trade_count:item.rows.filter(row=>!row.foreign_account).length,eligible_trade_count:item.rows.filter(eligible).length,
         foreign_account_trade_count:item.rows.filter(row=>row.foreign_account).length,
@@ -419,7 +429,7 @@ export async function scanVwapContinuousImprovement({config,stateFile,reason='pe
       } catch(dispatchFailure) { dispatchError=String(dispatchFailure?.message||dispatchFailure); }
     }
     const inProgress=readJson(stateFile,previous)||previous;
-    const state={...inProgress,schema_version:VWAP_MONITOR_SCHEMA,strategy_id:config.strategy_id,enabled:true,status:'DEGRADED',last_checked_at_utc:checkedAt,last_check_reason:reason,skipped_unchanged:false,
+    const state={...inProgress,schema_version:VWAP_MONITOR_SCHEMA,strategy_id:config.strategy_id,enabled:true,status:'DEGRADED',last_checked_at_utc:checkedAt,last_check_reason:reason,skipped_unchanged:false,skipped_query_budget:false,
       consecutive_failures:consecutiveFailures,last_error:errorText,last_failure_trigger_receipt:failureReceipt,last_triggered_failure_event_id:lastFailureId,last_dispatch_error:dispatchError,
       current_phase:null,current_source_id:null,
       recent_events:[...(previous.recent_events||[]),{at_utc:checkedAt,reason,database_query:true,error:errorText,trigger:failureReceipt,dispatch_error:dispatchError}].slice(-25),safety:config.safety};

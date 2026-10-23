@@ -1,9 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { createManifestRebuildPolicy, dtcSnapshotProcessTimeoutMs, runBoundedProcess } from "./manifest-rebuild-runtime.mjs";
 import { configuredProcessTimeoutMs } from "./process-timeouts.mjs";
+import { manifestStatePath } from "./manifest-state-path.mjs";
 import {
   loadVwapPaperSim1EmailConfig,
   scanVwapPaperSim1EmailEvents,
@@ -30,10 +31,23 @@ const VWAP_PAPER_SIM1_EMAIL_STATE_FILE = path.join(DATA_DIR, "vwap-paper-sim1-em
 const VWAP_IMPROVEMENT_CONFIG_FILE = path.join(__dirname, "config", "vwap-continuous-improvement-monitor.json");
 const VWAP_IMPROVEMENT_STATE_FILE = path.join(DATA_DIR, "vwap-continuous-improvement-monitor-state.json");
 const VWAP_APPROVAL_DISPATCH_CONFIG_FILE = path.join(__dirname, "config", "cicd-vwap-v238-approval-dispatch.json");
-const DASHBOARD_DATA_FILE = path.join(__dirname, "dashboard-data.json");
+const DASHBOARD_DATA_FILE = manifestStatePath(__dirname);
 const BUILD_SCRIPT = path.join(__dirname, "build-manifest.mjs");
 const DTC_SNAPSHOT_SCRIPT = path.join(__dirname, "dtc-snapshot.mjs");
 const SIERRA_SYMBOL_CONFIG_FILE = path.join(__dirname, "config", "sierra-symbols.json");
+const MANIFEST_BUILD_IDENTITY_FILES = [
+  BUILD_SCRIPT,
+  path.join(__dirname, "replay-session-scope.mjs"),
+  path.join(__dirname, "manifest-build-lock.mjs"),
+  path.join(__dirname, "manifest-state-path.mjs"),
+  path.join(__dirname, "process-timeouts.mjs"),
+  path.join(__dirname, "project-paper-telemetry.mjs"),
+  path.join(__dirname, "sqlite-publication.mjs"),
+  path.join(__dirname, "persist-sqlite.py"),
+  path.join(__dirname, "sqlite_write_lock.py"),
+  DTC_SNAPSHOT_SCRIPT,
+  SIERRA_SYMBOL_CONFIG_FILE,
+];
 const PATRADING_LIVE_SQLITE_FILE =
   process.env.PATRADING_LIVE_SQLITE_FILE ||
   "E:\\SierraChart-LiveTrading\\Data\\TradeTelemetry\\Live\\TradeTelemetry_Live.sqlite";
@@ -49,6 +63,14 @@ const INTERVAL_MS = Number(process.env.OCEAN_MONITOR_INTERVAL_MS || 5000);
 const EMAIL_QUEUE_FILE = path.join(DATA_DIR, "outbound-email-queue.json");
 const EMAIL_LOG_FILE = path.join(DATA_DIR, "outbound-email-log.json");
 const MAX_RECENT_EVENTS = 20;
+const MANIFEST_REBUILD_MIN_INTERVAL_MS = configuredProcessTimeoutMs("OCEAN_MANIFEST_REBUILD_MIN_INTERVAL_MS", 60_000);
+const MANIFEST_REBUILD_BACKOFF_MS = configuredProcessTimeoutMs("OCEAN_MANIFEST_REBUILD_BACKOFF_MS", 60_000);
+const MANIFEST_REBUILD_MAX_BACKOFF_MS = configuredProcessTimeoutMs("OCEAN_MANIFEST_REBUILD_MAX_BACKOFF_MS", 15 * 60_000);
+const DTC_SNAPSHOT_SOCKET_TIMEOUT_MS = configuredProcessTimeoutMs("OCEAN_DTC_SNAPSHOT_TIMEOUT_MS", 3_000);
+const DTC_SNAPSHOT_PROCESS_TIMEOUT_MS = configuredProcessTimeoutMs(
+  "OCEAN_DTC_SNAPSHOT_PROCESS_TIMEOUT_MS",
+  dtcSnapshotProcessTimeoutMs(DTC_SNAPSHOT_SOCKET_TIMEOUT_MS),
+);
 
 let lastSignature = "";
 let scanCount = 0;
@@ -56,6 +78,18 @@ let importCount = 0;
 let stopping = false;
 let scanInFlight = false;
 let approvalDispatchScanInFlight = false;
+let activeRebuildAbortController = null;
+let activeRebuildPromise = null;
+const manifestRebuildPolicy = createManifestRebuildPolicy({
+  minimumIntervalMs: MANIFEST_REBUILD_MIN_INTERVAL_MS,
+  baseBackoffMs: MANIFEST_REBUILD_BACKOFF_MS,
+  maximumBackoffMs: MANIFEST_REBUILD_MAX_BACKOFF_MS,
+  initialState: manifestRebuildInitialState(
+    readMonitorState().manifestRebuild,
+    publishedManifestAvailable(),
+  ),
+});
+lastSignature = manifestRebuildPolicy.snapshot().lastSuccessfulSignature;
 
 function readJson(filePath, fallback = null) {
   try {
@@ -86,6 +120,25 @@ function createMonitorEvent(level, action, message, details = {}) {
 
 function readMonitorState() {
   return readJson(STATE_FILE, { running: false, status: "stopped", recentEvents: [] }) || { running: false, status: "stopped", recentEvents: [] };
+}
+
+function publishedManifestAvailable(filePath = DASHBOARD_DATA_FILE) {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, ""));
+    return Boolean(manifest && typeof manifest === "object");
+  } catch {
+    return false;
+  }
+}
+
+function manifestRebuildInitialState(persistedState, manifestAvailable) {
+  const state = persistedState && typeof persistedState === "object" ? persistedState : {};
+  if (manifestAvailable) return state;
+  return {
+    ...state,
+    lastSuccessfulSignature: "",
+    lastSuccessfulSignatureSha256: "",
+  };
 }
 
 function closedTradeEmailConfig() {
@@ -717,6 +770,84 @@ async function notifyNewClosedTrades(reason) {
   }
 }
 
+async function reconcileClosedTradeNotifications(checkpoint, {
+  notify = notifyNewClosedTrades,
+  persist = writeState,
+  policy = manifestRebuildPolicy,
+  nowMs = Date.now(),
+  eventFactory = createMonitorEvent,
+} = {}) {
+  if (!checkpoint || typeof checkpoint !== "object") return { action: "no_pending_checkpoint" };
+  const eligibleAtMs = Date.parse(String(checkpoint.nextAttemptAtUtc || ""));
+  if (Number.isFinite(eligibleAtMs) && nowMs < eligibleAtMs) {
+    return { action: "deferred", checkpoint };
+  }
+  const attemptedAtUtc = new Date(nowMs).toISOString();
+  try {
+    await notify(checkpoint.reason || "manifest_rebuild");
+    const policyState = policy.snapshot();
+    const policyDegraded = policyState.consecutiveFailures > 0 || Boolean(policyState.blockedReason);
+    const patch = {
+      status: policyDegraded ? "degraded" : "running",
+      closedTradeNotificationPending: null,
+      lastClosedTradeNotificationReconciledAtUtc: attemptedAtUtc,
+    };
+    if (!policyDegraded) patch.error = null;
+    persist(patch, eventFactory("info", "closed-trade-notification-reconciled", "Closed-trade notification checkpoint reconciled", {
+      signatureSha256: checkpoint.signatureSha256 || null,
+      reason: checkpoint.reason || null,
+    }));
+    return { action: "complete", checkpoint: null };
+  } catch (error) {
+    const attempts = Number(checkpoint.attempts || 0) + 1;
+    const retryDelayMs = Math.min(
+      MANIFEST_REBUILD_MAX_BACKOFF_MS,
+      MANIFEST_REBUILD_BACKOFF_MS * (2 ** Math.max(0, attempts - 1)),
+    );
+    const errorMessage = String(error?.message || error);
+    const pending = {
+      ...checkpoint,
+      attempts,
+      firstQueuedAtUtc: checkpoint.firstQueuedAtUtc || attemptedAtUtc,
+      lastAttemptAtUtc: attemptedAtUtc,
+      nextAttemptAtUtc: new Date(nowMs + retryDelayMs).toISOString(),
+      lastError: errorMessage,
+    };
+    persist({
+      status: "degraded",
+      error: `Closed-trade notification reconciliation failed; retry is deferred: ${errorMessage}`,
+      closedTradeNotificationPending: pending,
+    }, eventFactory("error", "closed-trade-notification-failed", "Closed-trade notification reconciliation failed; retry is deferred", {
+      signatureSha256: pending.signatureSha256 || null,
+      reason: pending.reason || null,
+      attempts,
+      retryDelayMs,
+      error: errorMessage,
+    }));
+    return { action: "deferred_after_failure", checkpoint: pending, error: errorMessage };
+  }
+}
+
+function coalesceClosedTradeNotificationCheckpoint(existingCheckpoint, signatureSha256, reason, nowMs = Date.now()) {
+  const queuedAtUtc = new Date(nowMs).toISOString();
+  if (!existingCheckpoint || typeof existingCheckpoint !== "object") {
+    return {
+      signatureSha256,
+      reason,
+      attempts: 0,
+      firstQueuedAtUtc: queuedAtUtc,
+      nextAttemptAtUtc: queuedAtUtc,
+    };
+  }
+  return {
+    ...existingCheckpoint,
+    signatureSha256,
+    reason,
+    firstQueuedAtUtc: existingCheckpoint.firstQueuedAtUtc || queuedAtUtc,
+    nextAttemptAtUtc: existingCheckpoint.nextAttemptAtUtc || queuedAtUtc,
+  };
+}
+
 async function notifyVwapPaperSim1Events(reason) {
   try {
     const config = loadVwapPaperSim1EmailConfig(VWAP_PAPER_SIM1_EMAIL_CONFIG_FILE);
@@ -912,6 +1043,45 @@ function vwapProjectPaperSqliteFiles(configFile = VWAP_IMPROVEMENT_CONFIG_FILE) 
   }
 }
 
+function manifestBuildEnvironment(environment = process.env) {
+  const names = [
+    "LOCALAPPDATA",
+    "OCEAN_DEPLOYMENT_MANIFEST_SHA256",
+    "OCEAN_DEPLOYMENT_RELEASE_ID",
+    "OCEAN_DEPLOYMENT_SOURCE_COMMIT",
+    "OCEAN_STRATEGY_REPO_DIR",
+    "OCEAN_TRADING_PYTHON",
+    "OCEAN_WEBSITE_DB",
+    "OQL_REPO_ROOT",
+    "PATRADING_LIVE_SQLITE_FILE",
+    "PATRADING_PAPER_SQLITE_FILE",
+    "PATRADING_REPLAY_SQLITE_FILE",
+    "PYTHON",
+    "SIERRA_LIVE_ROOT",
+    "SIERRA_PAPER_ROOT",
+    "SIERRA_REPLAY_ROOT",
+    "VWAP_PROJECT_PAPER_SQLITE_FILE",
+  ];
+  return Object.fromEntries(names.map(name => [name, String(environment?.[name] || "")]));
+}
+
+function manifestBuildIdentity(filePaths = MANIFEST_BUILD_IDENTITY_FILES, buildContext = manifestBuildEnvironment()) {
+  const hash = createHash("sha256");
+  hash.update(JSON.stringify(buildContext));
+  hash.update("\0");
+  for (const filePath of [...filePaths].map(value => path.resolve(value)).sort()) {
+    hash.update(filePath);
+    hash.update("\0");
+    try {
+      hash.update(fs.readFileSync(filePath));
+    } catch (error) {
+      hash.update(`unavailable:${error?.code || error?.message || error}`);
+    }
+    hash.update("\0");
+  }
+  return `sha256:${hash.digest("hex")}`;
+}
+
 function signatureForLogs() {
   const config = readSierraInstances({ configFile: SIERRA_SYMBOL_CONFIG_FILE });
   const liveLogDir = tradeActivityLogDir(config.live);
@@ -944,16 +1114,55 @@ function signatureForLogs() {
     replayLogDir,
     replaySqliteFile,
     paperSymbol: config.paper.displaySymbol || config.paper.symbol || null,
-    signature: logs.map((item) => `${item.mode}:${item.path}:${item.size}:${item.mtimeMs}`).join("\n"),
+    signature: [
+      `manifest_build:${manifestBuildIdentity()}`,
+      ...logs.map((item) => `${item.mode}:${item.path}:${item.size}:${item.mtimeMs}`),
+    ].join("\n"),
   };
 }
 
-function snapshotDtc(reason) {
+function signatureDigest(signature) {
+  const value = String(signature || "");
+  if (!value) return null;
+  if (/^sha256:[0-9a-f]{64}$/i.test(value)) return value.toLowerCase();
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+function utcFromMs(value) {
+  return Number.isFinite(value) && value > 0 ? new Date(value).toISOString() : null;
+}
+
+function manifestRebuildState(action = null) {
+  const state = manifestRebuildPolicy.snapshot();
+  return {
+    action,
+    pending: Boolean(state.pendingSignature),
+    inFlight: state.inFlight,
+    consecutiveFailures: state.consecutiveFailures,
+    blocked: Boolean(state.blockedReason),
+    blockedReason: state.blockedReason || null,
+    blockedAtUtc: utcFromMs(state.blockedAtMs),
+    minimumIntervalMs: state.minimumIntervalMs,
+    baseBackoffMs: state.baseBackoffMs,
+    maximumBackoffMs: state.maximumBackoffMs,
+    lastAttemptAtUtc: utcFromMs(state.lastAttemptAtMs),
+    lastSuccessAtUtc: utcFromMs(state.lastSuccessAtMs),
+    lastFailureAtUtc: utcFromMs(state.lastFailureAtMs),
+    nextAttemptAtUtc: utcFromMs(state.nextAllowedAtMs),
+    lastSuccessfulSignatureSha256: signatureDigest(state.lastSuccessfulSignature),
+    pendingSignatureSha256: signatureDigest(state.pendingSignature),
+    attemptSignatureSha256: signatureDigest(state.attemptSignature),
+  };
+}
+
+async function snapshotDtc(reason, signal) {
   try {
-    execFileSync(process.execPath, [DTC_SNAPSHOT_SCRIPT, "--reason", reason], {
+    await runBoundedProcess(process.execPath, [DTC_SNAPSHOT_SCRIPT, "--reason", reason], {
       cwd: __dirname,
       stdio: "ignore",
       env: process.env,
+      timeoutMs: DTC_SNAPSHOT_PROCESS_TIMEOUT_MS,
+      signal,
     });
     writeState({
       lastSnapshotAtUtc: new Date().toISOString(),
@@ -961,6 +1170,7 @@ function snapshotDtc(reason) {
       lastSnapshotError: null,
     });
   } catch (error) {
+    if (signal?.aborted || error?.code === "PROCESS_TREE_TERMINATION_FAILED") throw error;
     writeState({
       lastSnapshotAtUtc: new Date().toISOString(),
       lastSnapshotReason: reason,
@@ -973,45 +1183,53 @@ function snapshotDtc(reason) {
 }
 
 async function rebuild(reason) {
+  const unresolvedFailure = manifestRebuildPolicy.snapshot().consecutiveFailures > 0;
   writeState({
     running: true,
-    status: "running",
+    status: unresolvedFailure ? "degraded" : "running",
     lastImportReason: reason,
+    manifestRebuild: manifestRebuildState("rebuild"),
   }, createMonitorEvent("info", "rebuild-start", `Monitor rebuild started for ${reason}`, { reason, scanCount }));
-  snapshotDtc(reason);
-  execFileSync(process.execPath, [BUILD_SCRIPT], {
-    cwd: __dirname,
-    stdio: "ignore",
-    env: process.env,
-    timeout: configuredProcessTimeoutMs("OCEAN_MANIFEST_BUILD_TIMEOUT_MS", 300000),
-    windowsHide: true,
-  });
-  await notifyNewClosedTrades(reason);
-  importCount += 1;
-  writeState({
-    running: true,
-    status: "running",
-    lastImportAtUtc: new Date().toISOString(),
-    lastImportReason: reason,
-    importCount,
-    error: null,
-  }, createMonitorEvent("info", "rebuild-complete", `Monitor rebuild finished for ${reason}`, {
-    reason,
-    importCount,
-    scanCount,
-  }));
+  const controller = new AbortController();
+  activeRebuildAbortController = controller;
+  activeRebuildPromise = (async () => {
+    await snapshotDtc(reason, controller.signal);
+    return runBoundedProcess(process.execPath, [BUILD_SCRIPT], {
+      cwd: __dirname,
+      stdio: "ignore",
+      env: process.env,
+      timeoutMs: configuredProcessTimeoutMs("OCEAN_MANIFEST_BUILD_TIMEOUT_MS", 300_000),
+      signal: controller.signal,
+    });
+  })();
+  try {
+    return await activeRebuildPromise;
+  } finally {
+    activeRebuildPromise = null;
+    activeRebuildAbortController = null;
+  }
 }
 
 async function scan() {
   if (stopping || scanInFlight) return;
   scanInFlight = true;
   scanCount += 1;
+  let rebuildAttempt = null;
   try {
     const { logs, signature, liveLogDir, liveSqliteFile, paperLogDir, paperSqliteFile, replayLogDir, replaySqliteFile, paperSymbol } = signatureForLogs();
-    const changed = signature !== lastSignature;
+    const observedSignature = signatureDigest(signature) || "";
+    const decision = manifestRebuildPolicy.observe(observedSignature);
+    if (decision.action === "rebuild") rebuildAttempt = decision;
+    const changed = observedSignature !== lastSignature;
+    const priorState = readMonitorState();
+    const policyState = manifestRebuildPolicy.snapshot();
+    const pendingNotification = priorState.closedTradeNotificationPending || null;
+    const degraded = policyState.consecutiveFailures > 0
+      || Boolean(policyState.blockedReason)
+      || Boolean(pendingNotification);
     writeState({
       running: true,
-      status: "running",
+      status: degraded ? "degraded" : "running",
       scanCount,
       watchedFiles: logs.length,
       liveLogDir,
@@ -1022,18 +1240,69 @@ async function scan() {
       replaySqliteFile,
       paperSymbol,
       lastScanAtUtc: new Date().toISOString(),
-      error: null,
+      error: degraded ? priorState.error : null,
+      manifestRebuild: manifestRebuildState(decision.action),
     });
     await monitorVwapContinuousImprovement(
       changed ? "file_change_scan_before_rebuild" : "periodic_scan",
       vwapImprovementScanOptions(scanCount),
     );
-    if (changed) {
-      await rebuild(scanCount === 1 ? "startup_reconcile" : "file_change");
-      lastSignature = signature;
+    if (decision.action === "rebuild") {
+      const reason = scanCount === 1 ? "startup_reconcile" : "file_change";
+      const result = await rebuild(reason);
+      manifestRebuildPolicy.succeed(decision.signature);
+      lastSignature = decision.signature;
+      rebuildAttempt = null;
+      importCount += 1;
+      writeState({
+        running: true,
+        status: "degraded",
+        lastImportAtUtc: new Date().toISOString(),
+        lastImportReason: reason,
+        importCount,
+        error: "Closed-trade notification reconciliation is pending for the newly published manifest.",
+        closedTradeNotificationPending: coalesceClosedTradeNotificationCheckpoint(
+          pendingNotification,
+          decision.signature,
+          reason,
+        ),
+        manifestRebuild: manifestRebuildState("complete"),
+      }, createMonitorEvent("info", "rebuild-complete", `Monitor rebuild finished for ${reason}`, {
+        reason,
+        importCount,
+        scanCount,
+        elapsedMs: result.elapsedMs,
+      }));
+      await reconcileClosedTradeNotifications(readMonitorState().closedTradeNotificationPending);
+    } else if (pendingNotification) {
+      await reconcileClosedTradeNotifications(pendingNotification);
     }
-    await notifyVwapPaperSim1Events(changed ? "file_change_scan_after_rebuild" : "periodic_scan");
+    await notifyVwapPaperSim1Events(decision.action === "rebuild" ? "file_change_scan_after_rebuild" : "periodic_scan");
   } catch (error) {
+    if (rebuildAttempt) {
+      const errorMessage = String(error?.message || error);
+      const terminationBlocked = error?.code === "PROCESS_TREE_TERMINATION_FAILED";
+      const failure = terminationBlocked
+        ? manifestRebuildPolicy.block(rebuildAttempt.signature, errorMessage)
+        : manifestRebuildPolicy.fail(rebuildAttempt.signature);
+      writeState({
+        running: true,
+        status: "degraded",
+        error: `Manifest rebuild failed; serving the last successful manifest: ${errorMessage}`,
+        lastErrorAtUtc: new Date().toISOString(),
+        manifestRebuild: manifestRebuildState(terminationBlocked ? "blocked" : "backoff"),
+      }, createMonitorEvent("error", "rebuild-failed", terminationBlocked
+        ? "Monitor rebuild failed closed because process-tree termination could not be verified"
+        : "Monitor rebuild failed; retry is deferred", {
+        error: errorMessage,
+        errorCode: error?.code || null,
+        elapsedMs: error?.elapsedMs ?? null,
+        backoffMs: failure.backoffMs ?? null,
+        nextAttemptAtUtc: terminationBlocked ? null : utcFromMs(failure.nextAllowedAtMs),
+        scanCount,
+      }));
+      return;
+    }
     writeState({
       running: true,
       status: "error",
@@ -1048,8 +1317,16 @@ async function scan() {
   }
 }
 
-function stop() {
+async function stop() {
+  if (stopping) return;
   stopping = true;
+  activeRebuildAbortController?.abort();
+  if (activeRebuildPromise) {
+    await Promise.race([
+      activeRebuildPromise.catch(() => {}),
+      new Promise((resolve) => setTimeout(resolve, 5_000)),
+    ]);
+  }
   writeState({
     running: false,
     status: "stopped",
@@ -1062,7 +1339,12 @@ export {
   buildClosedTradeEmail,
   closedTradeEmailConfig,
   handoffClosedTradeEmail,
+  manifestBuildIdentity,
+  manifestBuildEnvironment,
+  manifestRebuildInitialState,
   notifyNewClosedTrades,
+  coalesceClosedTradeNotificationCheckpoint,
+  reconcileClosedTradeNotifications,
   notifyVwapPaperSim1Events,
   monitorVwapContinuousImprovement,
   monitorVwapPhysicalComparatorApprovalDispatch,
@@ -1072,8 +1354,8 @@ export {
 };
 
 function startMonitor() {
-  process.on("SIGTERM", stop);
-  process.on("SIGINT", stop);
+  process.on("SIGTERM", () => { void stop(); });
+  process.on("SIGINT", () => { void stop(); });
   process.on("uncaughtException", (error) => {
     writeState({ running: false, status: "error", error: String(error?.message || error) }, createMonitorEvent("error", "uncaught-exception", "Monitor worker crashed", {
       error: String(error?.message || error),

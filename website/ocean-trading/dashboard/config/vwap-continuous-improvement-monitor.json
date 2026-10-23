@@ -17,6 +17,7 @@
     "paperclip_project_workspace_id": "fa3a13dc-7189-4891-8f01-f859886a87b1"
   },
   "baseline_existing_trades_on_first_run": true,
+  "minimum_query_interval_ms": 60000,
   "source_read_timeout_ms": 45000,
   "critical_quality_flags": ["code_hash_missing", "config_hash_missing", "context_hash_missing", "dataset_identity_missing", "dataset_missing", "dataset_role_missing", "raw_managed_context_conflict", "strategy_hash_missing", "strategy_version_mismatch", "vol_state_missing"],
   "sources": [

@@ -9,6 +9,7 @@ import { applyReplayClearsToSession, clearReplayAccount } from "./replay-session
 import { configuredProcessTimeoutMs } from "./process-timeouts.mjs";
 import {websiteTiming,timedSync} from './request-timing.mjs';
 import {manifestStatePath} from './manifest-state-path.mjs';
+import { combineVwapMonitorStatus, stoppedMonitorState } from "./manifest-rebuild-runtime.mjs";
 import { shouldWebsiteScheduleManifestRebuild } from "./manifest-refresh-policy.mjs";
 import { workflowFromEnvironment } from "./workflow/backend.mjs";
 import { installWebsiteControl } from "./workflow/process-control.mjs";
@@ -2711,6 +2712,7 @@ function startMonitor() {
 }
 
 function stopMonitor() {
+  const previousState = readJsonFile(MONITOR_STATE_FILE, {});
   if (monitorProcess && !monitorProcess.killed && monitorProcess.exitCode === null) {
     monitorProcess.kill();
   }
@@ -2718,7 +2720,7 @@ function stopMonitor() {
   fs.mkdirSync(path.dirname(MONITOR_STATE_FILE), { recursive: true });
   fs.writeFileSync(
     MONITOR_STATE_FILE,
-    JSON.stringify({ running: false, status: "stopped", updatedAtUtc: new Date().toISOString() }, null, 2),
+    JSON.stringify(stoppedMonitorState(previousState), null, 2),
   );
   return monitorState();
 }
@@ -3809,10 +3811,10 @@ const server = http.createServer((req, res) => websiteTiming.request(req,res,()=
 
   if (req.url === "/api/vwap-improvement-monitor/status") {
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({
-      ...readVwapContinuousImprovementState(VWAP_IMPROVEMENT_STATE_FILE),
-      website_monitor: monitorState(),
-    }));
+    res.end(JSON.stringify(combineVwapMonitorStatus(
+      readVwapContinuousImprovementState(VWAP_IMPROVEMENT_STATE_FILE),
+      monitorState(),
+    )));
     return;
   }
 

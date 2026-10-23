@@ -1010,10 +1010,18 @@ test('an incomplete receipt cannot enter the learning cohort',()=>{
   const f=fixture();
   try{
     f.backend.runs.summary=run=>run.id===f.trigger?{...f.backend.runs.summary,completion_current:false}:null;
+    let telemetryQualificationCalls=0;
+    f.learner.telemetryQualification=()=>{
+      telemetryQualificationCalls+=1;
+      throw new Error('telemetry qualification must not run without a current completion receipt');
+    };
     const run=f.db.prepare('SELECT * FROM ow_runs WHERE id=?').get(f.trigger);
     const status=f.learner.classification(run);
     assert.equal(status.eligible,false);
     assert.ok(status.reasons.includes('CURRENT_COMPLETION_RECEIPT_REQUIRED'));
+    assert.equal(telemetryQualificationCalls,0);
+    assert.equal(status.telemetry.skipped,true);
+    assert.deepEqual(status.telemetry.reasons,['TELEMETRY_QUALIFICATION_SKIPPED_WITHOUT_CURRENT_COMPLETION']);
   }finally{f.close();}
 });
 
