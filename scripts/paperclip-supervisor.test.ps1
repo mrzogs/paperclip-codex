@@ -39,6 +39,22 @@ Assert-Test ((Get-PaperclipFencedRecoveryAction -CustodyKnown $true -ActiveRunCo
 Assert-Test ((Get-PaperclipFencedRecoveryAction -CustodyKnown $true -ActiveRunCount 0) -eq 'shutdown_database') `
   'FENCED_ZERO_ACTIVE_RUNS_DO_NOT_PERMIT_DATABASE_SHUTDOWN'
 
+$deadlineNow = [DateTimeOffset]::Parse('2026-10-26T10:00:00Z')
+$longLeaseDeadline = Get-PaperclipServerStopDeadline -NowUtc $deadlineNow `
+  -LeaseExpiresAtUtc $deadlineNow.AddSeconds(60) -MaxStopSeconds 30 -LeaseSafetyMarginSeconds 5
+Assert-Test ($longLeaseDeadline -eq $deadlineNow.AddSeconds(30)) 'SERVER_STOP_DOES_NOT_USE_THE_HARD_30_SECOND_CEILING'
+$shortLeaseDeadline = Get-PaperclipServerStopDeadline -NowUtc $deadlineNow `
+  -LeaseExpiresAtUtc $deadlineNow.AddSeconds(12) -MaxStopSeconds 30 -LeaseSafetyMarginSeconds 5
+Assert-Test ($shortLeaseDeadline -eq $deadlineNow.AddSeconds(7)) 'SERVER_STOP_CAN_OUTLIVE_THE_LEASE_SAFETY_MARGIN'
+$unsafeLeaseRejected = $false
+try {
+  Get-PaperclipServerStopDeadline -NowUtc $deadlineNow -LeaseExpiresAtUtc $deadlineNow.AddSeconds(4) `
+    -MaxStopSeconds 30 -LeaseSafetyMarginSeconds 5 | Out-Null
+} catch {
+  $unsafeLeaseRejected = $true
+}
+Assert-Test $unsafeLeaseRejected 'EXPIRED_DURING_STOP_LEASE_IS_NOT_REJECTED_BEFORE_PROCESS_TERMINATION'
+
 # Deterministically inject the review race: custody is empty before the fence,
 # then a run appears before the under-fence read. The same policy functions used
 # by the supervisor must restore the server and leave PostgreSQL running.
@@ -92,7 +108,7 @@ $fenceHeldBeforeEnter = $supervisor.IndexOf('$fenceHeld = $true', $recoveryLoopS
 $fenceAcknowledgement = $supervisor.IndexOf('$fenceAcknowledgement = Invoke-PaperclipDispatchFence -Action enter -LeaseToken $fenceLease', $recoveryLoopStart)
 $fencedCustodyCheck = $supervisor.IndexOf('$fencedCustody = Get-ActiveRunCustody', $fenceAcknowledgement)
 $fencedDecision = $supervisor.IndexOf('Get-PaperclipFencedRecoveryAction', $fencedCustodyCheck)
-$leaseCheck = $supervisor.IndexOf('Invoke-PaperclipDispatchFence -Action check -LeaseToken $fenceLease', $fencedDecision)
+$leaseCheck = $supervisor.IndexOf('$leaseCheckAcknowledgement = Invoke-PaperclipDispatchFence -Action check -LeaseToken $fenceLease', $fencedDecision)
 $fenceCall = $supervisor.IndexOf('Stop-ExpectedPaperclipServerForFence', $leaseCheck)
 $databaseStopAfterFence = $supervisor.IndexOf('Stop-EmbeddedPostgresSafely', $fencedDecision)
 
@@ -106,6 +122,7 @@ Assert-Test (-not $safeStop.Contains('Stop-Process')) 'POSTGRES_SHUTDOWN_CAN_FOR
 Assert-Test ($safeStop.Contains('recovery refused')) 'POSTGRES_SHUTDOWN_DOES_NOT_FAIL_CLOSED'
 Assert-Test (-not $serverFence.Contains('Stop-EmbeddedPostgresSafely')) 'SERVER_STOP_STOPS_DATABASE_BEFORE_FINAL_CUSTODY_CHECK'
 Assert-Test ($serverFence.Contains('dispatch fence established')) 'SERVER_STOP_HAS_NO_EXPLICIT_QUIESCENCE_EVIDENCE'
+Assert-Test ($serverFence.Contains('Get-PaperclipServerStopDeadline')) 'SERVER_STOP_IS_NOT_BOUNDED_INSIDE_THE_LEASE'
 Assert-Test ($supervisor.Contains('Get-ExpectedPaperclipServerProcesses')) 'DISPATCH_FENCE_DEPENDS_ONLY_ON_THE_HTTP_LISTENER'
 Assert-Test ($supervisor.Contains('starting the server without restarting embedded PostgreSQL')) `
   'ABSENT_SERVER_PATH_RESTARTS_THE_DATABASE_UNNECESSARILY'
@@ -118,6 +135,10 @@ Assert-Test ($supervisor.Contains('Invoke-PaperclipDispatchFence -Action exit -L
   'DEFERRED_RECOVERY_DOES_NOT_RELEASE_THE_ADMISSION_FENCE'
 Assert-Test ($supervisor.Contains('PAPERCLIP_SUPERVISOR_CONTROL_TOKEN')) `
   'SUPERVISOR_DOES_NOT_INJECT_A_PROTECTED_SERVER_CONTROL_CREDENTIAL'
+Assert-Test ($supervisor.Contains('Test-PaperclipSupervisorControl')) `
+  'RUNTIME_READINESS_DOES_NOT_REQUIRE_THE_SERVER_TO_ACKNOWLEDGE_SUPERVISOR_CONTROL'
+Assert-Test ($supervisor.Contains("supervisor-dispatch-fence/capability")) `
+  'SUPERVISOR_HAS_NO_CONTROL_CREDENTIAL_CAPABILITY_HANDSHAKE'
 Assert-Test ($supervisor.Contains('Restore-PaperclipServerAfterAbortedFence')) 'ABORTED_FENCE_CANNOT_RESTORE_PAPERCLIP_WITH_DATABASE_LEFT_RUNNING'
 Assert-Test ($probe.Contains('/api/issues/')) 'PROBE_HAS_NO_ISSUE_DATA_CHECK'
 Assert-Test ($probe.Contains('<div id="root"></div>')) 'PROBE_ACCEPTS_ARBITRARY_HTML'

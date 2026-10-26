@@ -5,7 +5,7 @@ import net from "node:net";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import type { AdapterRuntimeServiceReport } from "@paperclipai/adapter-utils";
+import { sanitizeSupervisorControlEnv, type AdapterRuntimeServiceReport } from "@paperclipai/adapter-utils";
 import type { Db } from "@paperclipai/db";
 import { executionWorkspaces, projectWorkspaces, workspaceRuntimeServices } from "@paperclipai/db";
 import {
@@ -487,7 +487,7 @@ async function executeProcess(input: {
     const child = spawn(input.command, input.args, {
       cwd: input.cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      env: input.env ?? process.env,
+      env: sanitizeSupervisorControlEnv(input.env ?? process.env),
     });
     const stdout = createProcessOutputCapture(input.maxStdoutBytes ?? DEFAULT_EXECUTE_PROCESS_OUTPUT_BYTES);
     const stderr = createProcessOutputCapture(input.maxStderrBytes ?? DEFAULT_EXECUTE_PROCESS_OUTPUT_BYTES);
@@ -794,7 +794,7 @@ function terminateChildProcess(child: ChildProcess) {
   }
 }
 
-function buildWorkspaceCommandEnv(input: {
+export function buildWorkspaceCommandEnv(input: {
   base: ExecutionWorkspaceInput;
   repoRoot: string;
   worktreePath: string;
@@ -803,7 +803,7 @@ function buildWorkspaceCommandEnv(input: {
   agent: ExecutionWorkspaceAgentRef;
   created: boolean;
 }) {
-  const env: NodeJS.ProcessEnv = { ...process.env };
+  const env: NodeJS.ProcessEnv = sanitizeRuntimeServiceBaseEnv(process.env);
   env.PAPERCLIP_WORKSPACE_CWD = input.worktreePath;
   env.PAPERCLIP_WORKSPACE_PATH = input.worktreePath;
   env.PAPERCLIP_WORKSPACE_WORKTREE_PATH = input.worktreePath;

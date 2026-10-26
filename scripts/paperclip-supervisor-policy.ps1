@@ -64,3 +64,23 @@ function Get-PaperclipFencedRecoveryAction {
   if ($ActiveRunCount -gt 0) { return 'restore_server_defer_active_runs' }
   return 'shutdown_database'
 }
+
+function Get-PaperclipServerStopDeadline {
+  param(
+    [Parameter(Mandatory)][DateTimeOffset]$NowUtc,
+    [Parameter(Mandatory)][DateTimeOffset]$LeaseExpiresAtUtc,
+    [int]$MaxStopSeconds = 30,
+    [int]$LeaseSafetyMarginSeconds = 5
+  )
+
+  if ($MaxStopSeconds -lt 1 -or $LeaseSafetyMarginSeconds -lt 1) {
+    throw 'Server stop deadline parameters must be positive.'
+  }
+  $hardDeadline = $NowUtc.AddSeconds($MaxStopSeconds)
+  $leaseDeadline = $LeaseExpiresAtUtc.AddSeconds(-$LeaseSafetyMarginSeconds)
+  $deadline = if ($hardDeadline -lt $leaseDeadline) { $hardDeadline } else { $leaseDeadline }
+  if ($deadline -le $NowUtc) {
+    throw 'Supervisor fence lease has no safe server-stop window remaining.'
+  }
+  return $deadline
+}

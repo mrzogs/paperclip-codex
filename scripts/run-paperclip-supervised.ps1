@@ -58,10 +58,27 @@ try {
     return [bool](Get-NetTCPConnection -State Listen -LocalPort 3100 -ErrorAction SilentlyContinue)
   }
 
+  function Test-PaperclipSupervisorControl {
+    try {
+      $response = Invoke-RestMethod -Method Post `
+        -Uri 'http://127.0.0.1:3100/api/health/supervisor-dispatch-fence/capability' `
+        -Headers @{ 'x-paperclip-supervisor-token' = $SupervisorControlToken } `
+        -TimeoutSec 4
+      return ($response.status -eq 'ok' -and [bool]$response.controlled)
+    } catch {
+      return $false
+    }
+  }
+
   function Invoke-RuntimeProbe {
     $output = & $NodeExe $ProbeScript health --base-url 'http://127.0.0.1:3100' --issue 'OCE-918' --timeout-ms 4000 2>&1
     $exitCode = $LASTEXITCODE
-    return [pscustomobject]@{ Ok = ($exitCode -eq 0 -and (Test-EmbeddedPostgres)); Output = ($output -join "`n") }
+    $controlReady = Test-PaperclipSupervisorControl
+    return [pscustomobject]@{
+      Ok = ($exitCode -eq 0 -and (Test-EmbeddedPostgres) -and $controlReady)
+      ControlReady = $controlReady
+      Output = ($output -join "`n")
+    }
   }
 
   function Get-ActiveRunCustody {
@@ -165,7 +182,11 @@ try {
     return $response
   }
 
-  function Stop-ExpectedPaperclipServerForFence {
+  function Stop-ExpectedPaperclipServerForFence(
+    [Parameter(Mandatory)][DateTimeOffset]$LeaseExpiresAt
+  ) {
+    $stopDeadline = Get-PaperclipServerStopDeadline -NowUtc ([DateTimeOffset]::UtcNow) `
+      -LeaseExpiresAtUtc $LeaseExpiresAt -MaxStopSeconds 30 -LeaseSafetyMarginSeconds 5
     $listeners = @(Get-NetTCPConnection -State Listen -LocalPort 3100 -ErrorAction SilentlyContinue)
     $expected = @(Get-ExpectedPaperclipServerProcesses)
     $ownersById = @{}
@@ -180,9 +201,12 @@ try {
     }
 
     foreach ($owner in @($ownersById.Values | Sort-Object ProcessId)) {
+      if ([DateTimeOffset]::UtcNow -ge $stopDeadline) {
+        throw 'Paperclip server stop deadline reached before all expected processes were stopped; database shutdown refused.'
+      }
       Stop-Process -Id $owner.ProcessId -Force -ErrorAction SilentlyContinue
-      $deadline = (Get-Date).AddSeconds(10)
-      while ((Get-Process -Id $owner.ProcessId -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {
+      while ((Get-Process -Id $owner.ProcessId -ErrorAction SilentlyContinue) -and `
+          [DateTimeOffset]::UtcNow -lt $stopDeadline) {
         Start-Sleep -Milliseconds 100
       }
       if (Get-Process -Id $owner.ProcessId -ErrorAction SilentlyContinue) {
@@ -301,8 +325,9 @@ try {
         continue
       }
 
-      Invoke-PaperclipDispatchFence -Action check -LeaseToken $fenceLease | Out-Null
-      $serverStoppedForFence = Stop-ExpectedPaperclipServerForFence
+      $leaseCheckAcknowledgement = Invoke-PaperclipDispatchFence -Action check -LeaseToken $fenceLease
+      $serverStoppedForFence = Stop-ExpectedPaperclipServerForFence `
+        -LeaseExpiresAt ([DateTimeOffset]::Parse([string]$leaseCheckAcknowledgement.leaseExpiresAt))
       if (-not $serverStoppedForFence) {
         throw 'Paperclip dispatch fence was acknowledged but no expected server process could be stopped; database shutdown refused.'
       }
@@ -345,8 +370,9 @@ try {
           if ($retryFenceAction -ne 'shutdown_database') {
             throw "Recovery retry refused after fenced custody check: $retryFenceAction."
           }
-          Invoke-PaperclipDispatchFence -Action check -LeaseToken $retryFenceLease | Out-Null
-          $retryServerStopped = [bool](Stop-ExpectedPaperclipServerForFence)
+          $retryLeaseCheckAcknowledgement = Invoke-PaperclipDispatchFence -Action check -LeaseToken $retryFenceLease
+          $retryServerStopped = [bool](Stop-ExpectedPaperclipServerForFence `
+            -LeaseExpiresAt ([DateTimeOffset]::Parse([string]$retryLeaseCheckAcknowledgement.leaseExpiresAt)))
           if (-not $retryServerStopped) {
             throw 'Recovery retry fence was acknowledged but no expected server process could be stopped.'
           }

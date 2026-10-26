@@ -98,6 +98,15 @@ describe("supervisor dispatch fence route", () => {
       companyDeletionEnabled: true,
     }));
 
+    await request(app)
+      .post("/api/health/supervisor-dispatch-fence/capability")
+      .set("x-paperclip-supervisor-token", "wrong-token")
+      .expect(401, { error: "supervisor_control_unauthorized" });
+    await request(app)
+      .post("/api/health/supervisor-dispatch-fence/capability")
+      .set("x-paperclip-supervisor-token", "route-control-token")
+      .expect(200, { status: "ok", controlled: true });
+
     const enter = await request(app)
       .post("/api/health/supervisor-dispatch-fence/enter")
       .set("x-paperclip-supervisor-token", "route-control-token")

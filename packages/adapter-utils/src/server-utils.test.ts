@@ -21,6 +21,7 @@ import {
   rewriteWorkspaceCwdEnvVarsForExecution,
   stringifyPaperclipWakePayload,
 } from "./server-utils.js";
+import { sanitizeSupervisorControlEnv } from "./process-env.js";
 
 describe("sanitizeInheritedPaperclipEnv", () => {
   it("does not expose the supervisor control credential to agent processes", () => {
@@ -36,6 +37,38 @@ describe("sanitizeInheritedPaperclipEnv", () => {
       PAPERCLIP_LISTEN_PORT: "3100",
       SAFE_VALUE: "visible",
     });
+  });
+});
+
+describe("sanitizeSupervisorControlEnv", () => {
+  it("removes supervisor credentials even after an adapter copied the parent environment", () => {
+    expect(sanitizeSupervisorControlEnv({
+      PAPERCLIP_AGENT_ID: "agent-1",
+      PAPERCLIP_SUPERVISOR_CONTROL_TOKEN: "server-only-secret",
+      paperclip_supervisor_future_lease: "future-secret",
+      SAFE_VALUE: "visible",
+    })).toEqual({
+      PAPERCLIP_AGENT_ID: "agent-1",
+      SAFE_VALUE: "visible",
+    });
+  });
+
+  it("removes supervisor credentials at the final local agent spawn boundary", async () => {
+    const result = await runChildProcess(
+      `supervisor-env-${randomUUID()}`,
+      process.execPath,
+      ["-e", "process.stdout.write(process.env.PAPERCLIP_SUPERVISOR_CONTROL_TOKEN ?? 'unset')"],
+      {
+        cwd: process.cwd(),
+        env: { PAPERCLIP_SUPERVISOR_CONTROL_TOKEN: "adapter-copied-secret" },
+        timeoutSec: 5,
+        graceSec: 1,
+        onLog: async () => undefined,
+      },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("unset");
   });
 });
 

@@ -93,6 +93,11 @@ export function healthRoutes(
     }
   };
 
+  router.post("/supervisor-dispatch-fence/capability", (req, res) => {
+    if (!requireSupervisorControl(req, res)) return;
+    res.json({ status: "ok", controlled: true });
+  });
+
   router.post("/supervisor-dispatch-fence/enter", async (req, res) => {
     if (!requireSupervisorControl(req, res)) return;
     const leaseToken = req.get("x-paperclip-supervisor-lease")?.trim() ?? "";
