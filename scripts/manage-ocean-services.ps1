@@ -17,6 +17,8 @@ $Runtime = 'D:\OceanTradingData\website\ocean-runtime'
 . (Join-Path $PSScriptRoot 'ocean-deployment.ps1')
 $script:Deployment = $null
 $PaperclipConfigPath = Join-Path $PaperclipHome 'instances\default\config.json'
+$PaperclipProbePath = Join-Path $Root 'scripts\paperclip-runtime-probe.mjs'
+$NodeExe = 'C:\Program Files\nodejs\node.exe'
 $Powershell = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 $Wscript = 'C:\Windows\System32\wscript.exe'
 $HiddenLauncher = Join-Path $Root 'scripts\run-hidden-service.vbs'
@@ -56,6 +58,13 @@ function Test-HttpOk([string]$Url, [int]$TimeoutSec = 5) {
   } catch {
     return $false
   }
+}
+
+function Test-PaperclipReady {
+  if (-not (Test-Path -LiteralPath $NodeExe -PathType Leaf) -or
+      -not (Test-Path -LiteralPath $PaperclipProbePath -PathType Leaf)) { return $false }
+  & $NodeExe $PaperclipProbePath health --base-url 'http://127.0.0.1:3100' --issue 'OCE-918' --timeout-ms 4000 *> $null
+  return $LASTEXITCODE -eq 0 -and ((Get-PostgresPort) -and (Test-PortListening (Get-PostgresPort)))
 }
 
 function Get-OceanWorkflowReadiness([int]$TimeoutSec = 5) {
@@ -432,7 +441,7 @@ function Wait-ComponentHealthy([string]$Name) {
       $pgPort = Get-PostgresPort
       $deadline = (Get-Date).AddMinutes(3)
       do {
-        $ok = (Test-HttpOk 'http://127.0.0.1:3100/api/health') -and ($pgPort -and (Test-PortListening $pgPort))
+        $ok = Test-PaperclipReady
         if (-not $ok) { Start-Sleep -Seconds 2 }
       } while (-not $ok -and (Get-Date) -lt $deadline)
       if (-not $ok) { throw 'Paperclip/Postgres did not become healthy.' }
@@ -506,7 +515,7 @@ function Get-ServiceSnapshot {
       [pscustomobject]@{ component=$_; task=$spec.TaskName; state=Get-TaskState $_; lastRun=$info.LastRunTime; lastResult=$info.LastTaskResult; nextRun=$info.NextRunTime }
     }
     health = [pscustomobject]@{
-      paperclip = Test-HttpOk 'http://127.0.0.1:3100/api/health'
+      paperclip = Test-PaperclipReady
       postgres = if ($pgPort) { Test-PortListening $pgPort } else { $false }
       website = Test-HttpOk 'http://127.0.0.1:3102/'
       workflow = Test-OceanWorkflowReady
@@ -540,7 +549,7 @@ switch ($Action) {
     Ensure-Tasks $selected
     foreach ($name in $selected) {
       $alreadyHealthy = switch ($name) {
-        'Paperclip' { (Test-HttpOk 'http://127.0.0.1:3100/api/health') -and ((Get-PostgresPort) -and (Test-PortListening (Get-PostgresPort))) }
+        'Paperclip' { Test-PaperclipReady }
         'Website' { Test-OceanWorkflowReady }
         'Monitor' { [bool]@(Get-MonitorProcesses).Count }
         'ReplayBridge' {

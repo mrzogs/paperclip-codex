@@ -20,6 +20,7 @@ import {
 import { eq } from "drizzle-orm";
 import {
   buildWorkspaceRuntimeDesiredStatePatch,
+  buildWorkspaceCommandEnv,
   cleanupExecutionWorkspaceArtifacts,
   ensurePersistedExecutionWorkspaceAvailable,
   ensureServerWorkspaceLinksCurrent,
@@ -172,6 +173,7 @@ afterEach(async () => {
   delete process.env.PAPERCLIP_HOME;
   delete process.env.PAPERCLIP_INSTANCE_ID;
   delete process.env.PAPERCLIP_WORKTREES_DIR;
+  delete process.env.PAPERCLIP_SUPERVISOR_CONTROL_TOKEN;
   delete process.env.DATABASE_URL;
   await resetRuntimeServicesForTests();
 });
@@ -194,6 +196,33 @@ describe("sanitizeRuntimeServiceBaseEnv", () => {
     expect(sanitized.npm_config_tailscale_auth).toBeUndefined();
     expect(sanitized.npm_config_authenticated_private).toBeUndefined();
     expect(sanitized.HOST).toBe("0.0.0.0");
+  });
+});
+
+describe("buildWorkspaceCommandEnv", () => {
+  it("removes supervisor credentials before a repo-managed provision command runs", () => {
+    process.env.PAPERCLIP_SUPERVISOR_CONTROL_TOKEN = "must-not-reach-provision-command";
+
+    const env = buildWorkspaceCommandEnv({
+      base: {
+        baseCwd: "C:\\repo",
+        source: "project_primary",
+        projectId: "project-1",
+        workspaceId: "workspace-1",
+        repoUrl: null,
+        repoRef: "HEAD",
+      },
+      repoRoot: "C:\\repo",
+      worktreePath: "C:\\repo\\worktree",
+      branchName: "feature/test",
+      issue: { id: "issue-1", identifier: "PAP-1", title: "Test" },
+      agent: { id: "agent-1", name: "Codex", companyId: "company-1" },
+      created: true,
+    });
+
+    expect(env.PAPERCLIP_SUPERVISOR_CONTROL_TOKEN).toBeUndefined();
+    expect(env.PAPERCLIP_WORKSPACE_BRANCH).toBe("feature/test");
+    expect(env.PAPERCLIP_AGENT_ID).toBe("agent-1");
   });
 });
 

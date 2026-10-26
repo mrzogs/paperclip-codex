@@ -29,7 +29,11 @@ const sharedOpts = {
 
 export const logger = pino({
   level: "debug",
-  redact: ["req.headers.authorization"],
+  redact: [
+    "req.headers.authorization",
+    "req.headers.x-paperclip-supervisor-token",
+    "req.headers.x-paperclip-supervisor-lease",
+  ],
 }, pino.transport({
   targets: [
     {

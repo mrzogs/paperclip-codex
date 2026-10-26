@@ -8,6 +8,7 @@ import type { CommandManagedRuntimeRunner } from "./command-managed-runtime.js";
 import type { RunProcessResult } from "./server-utils.js";
 import type { DirectorySnapshot } from "./workspace-restore-merge.js";
 import { mergeDirectoryWithBaseline } from "./workspace-restore-merge.js";
+import { sanitizeSupervisorControlEnv } from "./process-env.js";
 
 export interface SshConnectionConfig {
   host: string;
@@ -192,6 +193,7 @@ async function execFileText(
       {
         timeout: options.timeout ?? 15_000,
         maxBuffer: options.maxBuffer ?? 1024 * 128,
+        env: sanitizeSupervisorControlEnv(process.env),
       },
       (error, stdout, stderr) => {
         if (error) {
@@ -219,6 +221,7 @@ async function spawnText(
   return await new Promise<SshCommandResult>((resolve, reject) => {
     const child = spawn(file, args, {
       stdio: [options.stdin != null ? "pipe" : "ignore", "pipe", "pipe"],
+      env: sanitizeSupervisorControlEnv(process.env),
     });
 
     const maxBuffer = options.maxBuffer ?? 1024 * 128;
@@ -402,11 +405,11 @@ function tarExcludeArgs(exclude: string[] | undefined): string[] {
 }
 
 function tarSpawnEnv(): NodeJS.ProcessEnv {
-  return {
+  return sanitizeSupervisorControlEnv({
     ...process.env,
     // Prevent macOS bsdtar from emitting AppleDouble metadata files like ._README.md.
     COPYFILE_DISABLE: "1",
-  };
+  });
 }
 
 async function runSshScript(
@@ -507,6 +510,7 @@ async function streamLocalFileToSsh(input: {
     const source = createReadStream(input.localFile);
     const ssh = spawn("ssh", sshArgs, {
       stdio: ["pipe", "ignore", "pipe"],
+      env: sanitizeSupervisorControlEnv(process.env),
     });
 
     let sshStderr = "";
@@ -555,6 +559,7 @@ async function streamSshToLocalFile(input: {
   await new Promise<void>((resolve, reject) => {
     const ssh = spawn("ssh", sshArgs, {
       stdio: ["ignore", "pipe", "pipe"],
+      env: sanitizeSupervisorControlEnv(process.env),
     });
     const sink = createWriteStream(input.localFile, { mode: 0o600 });
 
@@ -1055,6 +1060,7 @@ export async function syncDirectoryToSsh(input: {
     });
     const ssh = spawn("ssh", sshArgs, {
       stdio: ["pipe", "ignore", "pipe"],
+      env: sanitizeSupervisorControlEnv(process.env),
     });
 
     let tarStderr = "";
@@ -1139,6 +1145,7 @@ export async function syncDirectoryFromSsh(input: {
     await new Promise<void>((resolve, reject) => {
       const ssh = spawn("ssh", sshArgs, {
         stdio: ["ignore", "pipe", "pipe"],
+        env: sanitizeSupervisorControlEnv(process.env),
       });
       const tar = spawn("tar", ["-xf", "-", "-C", stagingDir], {
         stdio: ["pipe", "ignore", "pipe"],
@@ -1455,6 +1462,7 @@ export async function startSshEnvLabFixture(input: {
   const child = spawn(sshdPath, ["-D", "-f", sshdConfigPath, "-E", sshdLogPath], {
     detached: true,
     stdio: "ignore",
+    env: sanitizeSupervisorControlEnv(process.env),
   });
   child.unref();
 

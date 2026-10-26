@@ -6,6 +6,7 @@ import path from "node:path";
 import { sanitizeRemoteExecutionEnv } from "./remote-execution-env.js";
 import { buildSshSpawnTarget, type SshRemoteExecutionSpec } from "./ssh.js";
 import { redactCommandText } from "./command-redaction.js";
+import { sanitizeSupervisorControlEnv } from "./process-env.js";
 import type {
   AdapterSkillEntry,
   AdapterSkillSnapshot,
@@ -2091,10 +2092,11 @@ export async function runChildProcess(
 ): Promise<RunProcessResult> {
   const onLogError = opts.onLogError ?? ((err, id, msg) => console.warn({ err, runId: id }, msg));
   return new Promise<RunProcessResult>((resolve, reject) => {
-    const rawMerged: NodeJS.ProcessEnv = {
+    const sanitizedExplicitEnv = sanitizeSupervisorControlEnv(opts.env) as Record<string, string>;
+    const rawMerged: NodeJS.ProcessEnv = sanitizeSupervisorControlEnv({
       ...sanitizeInheritedPaperclipEnv(process.env),
-      ...opts.env,
-    };
+      ...sanitizedExplicitEnv,
+    });
 
     // Strip Claude Code nesting-guard env vars so spawned `claude` processes
     // don't refuse to start with "cannot be launched inside another session".
@@ -2114,7 +2116,7 @@ export async function runChildProcess(
     const mergedEnv = ensurePathInEnv(rawMerged);
     void resolveSpawnTarget(command, args, opts.cwd, mergedEnv, {
       remoteExecution: opts.remoteExecution ?? null,
-      remoteEnv: opts.remoteExecution ? opts.env : null,
+      remoteEnv: opts.remoteExecution ? sanitizedExplicitEnv : null,
     })
       .then((target) => {
         const child = spawn(target.command, target.args, {

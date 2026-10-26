@@ -2,6 +2,7 @@ import { execFile as execFileCallback } from "node:child_process";
 import { constants as fsConstants, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { sanitizeSupervisorControlEnv } from "./process-env.js";
 import { promisify } from "node:util";
 import { captureDirectorySnapshot, mergeDirectoryWithBaseline } from "./workspace-restore-merge.js";
 
@@ -121,10 +122,10 @@ async function withTempDir<T>(prefix: string, fn: (dir: string) => Promise<T>): 
 
 async function execTar(args: string[]): Promise<void> {
   await execFile("tar", args, {
-    env: {
+    env: sanitizeSupervisorControlEnv({
       ...process.env,
       COPYFILE_DISABLE: "1",
-    },
+    }),
     maxBuffer: 32 * 1024 * 1024,
   });
 }
