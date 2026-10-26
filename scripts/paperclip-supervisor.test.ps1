@@ -32,6 +32,23 @@ Assert-Test ((Get-Action -Healthy $false -Failures 3 -CustodyKnown $false -Serve
   'COLD_START_IS_BLOCKED_WITH_NO_RUNTIME_LISTENERS'
 Assert-Test ((Get-Action -Healthy $false -Failures 3 -ActiveRuns 0) -eq 'restart') `
   'ZERO_ACTIVE_RUNS_DO_NOT_PERMIT_RECOVERY'
+Assert-Test ((Get-PaperclipFencedRecoveryAction -CustodyKnown $false -ActiveRunCount 0) -eq 'restore_server_defer_unknown_custody') `
+  'FENCED_UNKNOWN_CUSTODY_DOES_NOT_DEFER_DATABASE_SHUTDOWN'
+Assert-Test ((Get-PaperclipFencedRecoveryAction -CustodyKnown $true -ActiveRunCount 1) -eq 'restore_server_defer_active_runs') `
+  'FENCED_ACTIVE_RUN_DOES_NOT_DEFER_DATABASE_SHUTDOWN'
+Assert-Test ((Get-PaperclipFencedRecoveryAction -CustodyKnown $true -ActiveRunCount 0) -eq 'shutdown_database') `
+  'FENCED_ZERO_ACTIVE_RUNS_DO_NOT_PERMIT_DATABASE_SHUTDOWN'
+
+# Deterministically inject the review race: custody is empty before the fence,
+# then a run appears before the under-fence read. The same policy functions used
+# by the supervisor must restore the server and leave PostgreSQL running.
+$preFenceRaceAction = Get-Action -Healthy $false -Failures 3 -CustodyKnown $true -ActiveRuns 0
+$postFenceRaceAction = Get-PaperclipFencedRecoveryAction -CustodyKnown $true -ActiveRunCount 1
+Assert-Test ($preFenceRaceAction -eq 'restart') 'CONCURRENT_START_FIXTURE_DID_NOT_REACH_THE_DISPATCH_FENCE'
+Assert-Test ($postFenceRaceAction -eq 'restore_server_defer_active_runs') `
+  'CONCURRENT_START_AFTER_INITIAL_ZERO_READ_CAN_REACH_DATABASE_SHUTDOWN'
+Assert-Test ($postFenceRaceAction -ne 'shutdown_database') `
+  'CONCURRENT_START_AFTER_INITIAL_ZERO_READ_IS_NOT_FAIL_CLOSED'
 
 # The actual loop transition must observe exactly three consecutive failures.
 $state = New-PaperclipSupervisorState
@@ -65,8 +82,16 @@ $supervisor = Get-Content -LiteralPath (Join-Path $scriptsRoot 'run-paperclip-su
 $probe = Get-Content -LiteralPath (Join-Path $scriptsRoot 'paperclip-runtime-probe.mjs') -Raw
 $skill = Get-Content -LiteralPath (Join-Path (Split-Path -Parent $scriptsRoot) 'skills\paperclip\SKILL.md') -Raw
 $safeStopStart = $supervisor.IndexOf('function Stop-EmbeddedPostgresSafely')
-$safeStopEnd = $supervisor.IndexOf('function Stop-ExpectedPaperclipRuntime', $safeStopStart)
+$safeStopEnd = $supervisor.IndexOf('function Stop-ExpectedPaperclipServerForFence', $safeStopStart)
 $safeStop = $supervisor.Substring($safeStopStart, $safeStopEnd - $safeStopStart)
+$serverFenceStart = $supervisor.IndexOf('function Stop-ExpectedPaperclipServerForFence')
+$serverFenceEnd = $supervisor.IndexOf('function Stop-StartedPaperclipChildIfDatabaseIndependent', $serverFenceStart)
+$serverFence = $supervisor.Substring($serverFenceStart, $serverFenceEnd - $serverFenceStart)
+$recoveryLoopStart = $supervisor.IndexOf('$serverStoppedForFence = Stop-ExpectedPaperclipServerForFence')
+$fenceCall = $supervisor.IndexOf('Stop-ExpectedPaperclipServerForFence', $recoveryLoopStart)
+$fencedCustodyCheck = $supervisor.IndexOf('$fencedCustody = Get-ActiveRunCustody', $fenceCall)
+$fencedDecision = $supervisor.IndexOf('Get-PaperclipFencedRecoveryAction', $fencedCustodyCheck)
+$databaseStopAfterFence = $supervisor.IndexOf('Stop-EmbeddedPostgresSafely', $fencedDecision)
 
 Assert-Test ($supervisor.Contains('[IO.FileShare]::None')) 'SUPERVISOR_HAS_NO_SINGLE_INSTANCE_LOCK'
 Assert-Test ($supervisor.Contains('Get-PaperclipRecoveryAction')) 'SUPERVISOR_BYPASSES_EXECUTED_RECOVERY_POLICY'
@@ -76,6 +101,15 @@ Assert-Test ($supervisor.Contains('pg_ctl.exe')) 'POSTGRES_SHUTDOWN_DOES_NOT_USE
 Assert-Test ($safeStop.Contains('-m fast -w -t 30')) 'POSTGRES_SHUTDOWN_IS_NOT_BOUNDED_FAST_MODE'
 Assert-Test (-not $safeStop.Contains('Stop-Process')) 'POSTGRES_SHUTDOWN_CAN_FORCE_TERMINATE_DATABASE'
 Assert-Test ($safeStop.Contains('recovery refused')) 'POSTGRES_SHUTDOWN_DOES_NOT_FAIL_CLOSED'
+Assert-Test (-not $serverFence.Contains('Stop-EmbeddedPostgresSafely')) 'SERVER_FENCE_STOPS_DATABASE_BEFORE_FINAL_CUSTODY_CHECK'
+Assert-Test ($serverFence.Contains('dispatch fence established')) 'SERVER_FENCE_HAS_NO_EXPLICIT_QUIESCENCE_EVIDENCE'
+Assert-Test ($supervisor.Contains('Get-ExpectedPaperclipServerProcesses')) 'DISPATCH_FENCE_DEPENDS_ONLY_ON_THE_HTTP_LISTENER'
+Assert-Test ($supervisor.Contains('starting the server without restarting embedded PostgreSQL')) `
+  'ABSENT_SERVER_PATH_RESTARTS_THE_DATABASE_UNNECESSARILY'
+Assert-Test ($fenceCall -gt $recoveryLoopStart -and $fencedCustodyCheck -gt $fenceCall -and `
+  $fencedDecision -gt $fencedCustodyCheck -and $databaseStopAfterFence -gt $fencedDecision) `
+  'RECOVERY_DOES_NOT_RECHECK_CUSTODY_UNDER_THE_DISPATCH_FENCE_BEFORE_DATABASE_SHUTDOWN'
+Assert-Test ($supervisor.Contains('Restore-PaperclipServerAfterAbortedFence')) 'ABORTED_FENCE_CANNOT_RESTORE_PAPERCLIP_WITH_DATABASE_LEFT_RUNNING'
 Assert-Test ($probe.Contains('/api/issues/')) 'PROBE_HAS_NO_ISSUE_DATA_CHECK'
 Assert-Test ($probe.Contains('<div id="root"></div>')) 'PROBE_ACCEPTS_ARBITRARY_HTML'
 Assert-Test ($probe.Contains("where status in ('queued', 'running')")) 'CUSTODY_QUERY_IGNORES_ACTIVE_RUNS'

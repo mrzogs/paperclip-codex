@@ -132,38 +132,53 @@ try {
     Write-SupervisorLog "Embedded PostgreSQL completed a bounded fast shutdown on port $postgresPort."
   }
 
-  function Stop-ExpectedPaperclipRuntime {
+  function Get-ExpectedPaperclipServerProcesses {
+    return @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+      $commandLine = ($_.CommandLine -as [string]) -replace '\\\\', '\'
+      $_.Name -ieq 'node.exe' -and
+        $commandLine -match 'cli[\\/]src[\\/]index\.ts' -and
+        $commandLine -match '(?:^|\s|["''])run(?:\s|["'']|$)' -and
+        $commandLine.Contains($PaperclipHome)
+    })
+  }
+
+  function Stop-ExpectedPaperclipServerForFence {
     $listeners = @(Get-NetTCPConnection -State Listen -LocalPort 3100 -ErrorAction SilentlyContinue)
-    $owners = @()
+    $expected = @(Get-ExpectedPaperclipServerProcesses)
+    $ownersById = @{}
+    foreach ($process in $expected) { $ownersById[[int]$process.ProcessId] = $process }
     foreach ($listener in $listeners) {
       $owner = Get-CimInstance Win32_Process -Filter "ProcessId=$($listener.OwningProcess)" -ErrorAction SilentlyContinue
       $commandLine = $owner.CommandLine -as [string]
-      if (-not $owner -or $commandLine -notmatch 'paperclipai|cli[\\/]src[\\/]index\.ts') {
+      if (-not $owner -or -not $ownersById.ContainsKey([int]$owner.ProcessId) -or `
+          $commandLine -notmatch 'cli[\\/]src[\\/]index\.ts') {
         throw "Port 3100 is owned by an unexpected process; recovery refused."
       }
-      $owners += $owner
     }
 
-    Stop-EmbeddedPostgresSafely
-    foreach ($owner in $owners) {
+    foreach ($owner in @($ownersById.Values | Sort-Object ProcessId)) {
       Stop-Process -Id $owner.ProcessId -Force -ErrorAction SilentlyContinue
       $deadline = (Get-Date).AddSeconds(10)
       while ((Get-Process -Id $owner.ProcessId -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {
         Start-Sleep -Milliseconds 100
       }
       if (Get-Process -Id $owner.ProcessId -ErrorAction SilentlyContinue) {
-        throw "Paperclip server PID $($owner.ProcessId) did not exit after PostgreSQL shutdown."
+        throw "Paperclip server PID $($owner.ProcessId) did not exit while establishing the dispatch fence."
       }
-      Write-SupervisorLog "Stopped unhealthy Paperclip server PID $($owner.ProcessId) after safe database shutdown."
+      Write-SupervisorLog "Stopped unhealthy Paperclip server PID $($owner.ProcessId); dispatch fence established before the final custody check."
     }
+    if (Test-PaperclipListener -or @(Get-ExpectedPaperclipServerProcesses).Count -gt 0) {
+      throw 'Paperclip still listens on port 3100 after the dispatch fence; database shutdown refused.'
+    }
+    return ($ownersById.Count -gt 0)
   }
 
-  function Stop-StartedChildAfterDatabaseShutdown([Diagnostics.Process]$Child) {
+  function Stop-StartedPaperclipChildIfDatabaseIndependent([Diagnostics.Process]$Child) {
     if (-not $Child -or $Child.HasExited) { return }
     $tree = @(Get-ProcessTree -RootProcessId ([int]$Child.Id))
     $postgresProcesses = @($tree | Where-Object { $_.Name -ieq 'postgres.exe' })
     if ($postgresProcesses.Count) {
-      throw 'PostgreSQL remained in the failed child tree after safe shutdown; force termination refused.'
+      throw 'PostgreSQL is present in the failed child tree; force termination refused.'
     }
     foreach ($process in @($tree | Sort-Object ProcessId -Descending)) {
       Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
@@ -186,6 +201,19 @@ try {
       Start-Sleep -Seconds 2
     } while ((Get-Date) -lt $deadline)
     return $false
+  }
+
+  function Restore-PaperclipServerAfterAbortedFence {
+    $childStamp = Get-Date -Format 'yyyyMMddTHHmmss'
+    $childOutLog = Join-Path $LogDir "paperclip-fence-restore-$childStamp.out.log"
+    $childErrLog = Join-Path $LogDir "paperclip-fence-restore-$childStamp.err.log"
+    $child = Start-PaperclipRuntime -ChildOutLog $childOutLog -ChildErrLog $childErrLog
+    Write-SupervisorLog "Restoring Paperclip server as PID $($child.Id) with embedded PostgreSQL left running."
+    if (-not (Wait-RuntimeReady -Child $child)) {
+      Stop-StartedPaperclipChildIfDatabaseIndependent -Child $child
+      throw 'Paperclip server did not recover after the fenced custody check deferred database shutdown.'
+    }
+    Write-SupervisorLog 'Paperclip server restored after the fenced custody check deferred database shutdown.'
   }
 
   Write-SupervisorLog 'Paperclip single-instance supervisor started.'
@@ -230,7 +258,28 @@ try {
       Write-SupervisorLog "Safe restart will hand $($custody.RecoverableCount) queued or dead-process run(s) to Paperclip startup reconciliation."
     }
 
-    Stop-ExpectedPaperclipRuntime
+    $serverStoppedForFence = Stop-ExpectedPaperclipServerForFence
+    if (-not $serverStoppedForFence) {
+      Write-SupervisorLog 'No expected Paperclip server process remained to fence; starting the server without restarting embedded PostgreSQL.'
+      Restore-PaperclipServerAfterAbortedFence
+      $supervisorState = Update-PaperclipSupervisorState -State $supervisorState -Healthy $true
+      Start-Sleep -Seconds $ProbeIntervalSec
+      continue
+    }
+    $fencedCustody = Get-ActiveRunCustody
+    $fencedAction = Get-PaperclipFencedRecoveryAction -CustodyKnown $fencedCustody.Known `
+      -ActiveRunCount $(if ($fencedCustody.Known) { $fencedCustody.Count } else { 0 })
+    if ($fencedAction -ne 'shutdown_database') {
+      Write-SupervisorLog "Database shutdown deferred after dispatch fence: $fencedAction. $($fencedCustody.Output)"
+      if ($serverStoppedForFence) {
+        Restore-PaperclipServerAfterAbortedFence
+        $supervisorState = Update-PaperclipSupervisorState -State $supervisorState -Healthy $true
+      }
+      Start-Sleep -Seconds $ProbeIntervalSec
+      continue
+    }
+
+    Stop-EmbeddedPostgresSafely
     $recovered = $false
     for ($startAttempt = 1; $startAttempt -le $MaxStartAttempts; $startAttempt++) {
       $childStamp = Get-Date -Format 'yyyyMMddTHHmmss'
@@ -244,8 +293,9 @@ try {
         break
       }
       Write-SupervisorLog "Paperclip recovery attempt $startAttempt did not become ready."
-      Stop-ExpectedPaperclipRuntime
-      Stop-StartedChildAfterDatabaseShutdown -Child $child
+      Stop-ExpectedPaperclipServerForFence
+      Stop-EmbeddedPostgresSafely
+      Stop-StartedPaperclipChildIfDatabaseIndependent -Child $child
       Start-Sleep -Seconds ([Math]::Min(10, 2 * $startAttempt))
     }
 

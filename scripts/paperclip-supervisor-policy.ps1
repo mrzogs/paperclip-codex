@@ -53,3 +53,14 @@ function Invoke-PaperclipSupervisorCycle {
     -ServerListenerPresent $ServerListenerPresent -DatabaseListenerPresent $DatabaseListenerPresent
   return [pscustomobject]@{ State = $nextState; Action = $action }
 }
+
+function Get-PaperclipFencedRecoveryAction {
+  param(
+    [bool]$CustodyKnown,
+    [int]$ActiveRunCount
+  )
+
+  if (-not $CustodyKnown) { return 'restore_server_defer_unknown_custody' }
+  if ($ActiveRunCount -gt 0) { return 'restore_server_defer_active_runs' }
+  return 'shutdown_database'
+}
