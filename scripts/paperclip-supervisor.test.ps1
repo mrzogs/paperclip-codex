@@ -33,21 +33,33 @@ Assert-Test ((Get-Action -Healthy $false -Failures 3 -CustodyKnown $false -Serve
 Assert-Test ((Get-Action -Healthy $false -Failures 3 -ActiveRuns 0) -eq 'restart') `
   'ZERO_ACTIVE_RUNS_DO_NOT_PERMIT_RECOVERY'
 
-# A successful restart returns to monitoring and subsequent transient failures
-# must again cross the full threshold. These are the same state transitions used
-# by the long-running watchdog.
+# The actual loop transition must observe exactly three consecutive failures.
 $state = New-PaperclipSupervisorState
-$state = Update-PaperclipSupervisorState -State $state -Healthy $false
-$state = Update-PaperclipSupervisorState -State $state -Healthy $false
-$state = Update-PaperclipSupervisorState -State $state -Healthy $false
-$action = Get-Action -Healthy $false -Failures $state.FailureCount -ActiveRuns 0
-Assert-Test ($action -eq 'restart') 'RESTART_ACTION_NOT_SELECTED'
+$cycle = Invoke-PaperclipSupervisorCycle -State $state -Healthy $false -FailureThreshold 3 `
+  -CustodyKnown $true -ActiveRunCount 0 -ServerListenerPresent $true -DatabaseListenerPresent $true
+$state = $cycle.State
+Assert-Test ($state.FailureCount -eq 1 -and $cycle.Action -eq 'observe') 'FIRST_LOOP_FAILURE_DID_NOT_OBSERVE'
+$cycle = Invoke-PaperclipSupervisorCycle -State $state -Healthy $false -FailureThreshold 3 `
+  -CustodyKnown $true -ActiveRunCount 0 -ServerListenerPresent $true -DatabaseListenerPresent $true
+$state = $cycle.State
+Assert-Test ($state.FailureCount -eq 2 -and $cycle.Action -eq 'observe') 'SECOND_LOOP_FAILURE_DID_NOT_OBSERVE'
+$cycle = Invoke-PaperclipSupervisorCycle -State $state -Healthy $false -FailureThreshold 3 `
+  -CustodyKnown $true -ActiveRunCount 0 -ServerListenerPresent $true -DatabaseListenerPresent $true
+$state = $cycle.State
+Assert-Test ($state.FailureCount -eq 3 -and $cycle.Action -eq 'restart') 'THIRD_LOOP_FAILURE_DID_NOT_SELECT_RESTART'
+
+# A successful restart returns to monitoring and subsequent transient failures
+# must again cross the full threshold.
 $state = Update-PaperclipSupervisorState -State $state -Healthy $true -RecoveryCompleted
 Assert-Test ($state.FailureCount -eq 0) 'SUCCESSFUL_RECOVERY_DOES_NOT_RESET_FAILURE_COUNT'
 Assert-Test ($state.SuccessfulRecoveryCount -eq 1) 'SUCCESSFUL_RECOVERY_IS_NOT_PERSISTED'
-Assert-Test ((Get-Action -Healthy $true -Failures $state.FailureCount) -eq 'monitor') 'POST_RESTART_HEALTH_DOES_NOT_PERSIST_MONITORING'
-$state = Update-PaperclipSupervisorState -State $state -Healthy $false
-Assert-Test ((Get-Action -Healthy $false -Failures $state.FailureCount) -eq 'observe') 'POST_RESTART_FAILURE_THRESHOLD_WAS_NOT_RESET'
+$cycle = Invoke-PaperclipSupervisorCycle -State $state -Healthy $true -FailureThreshold 3 `
+  -CustodyKnown $true -ActiveRunCount 0 -ServerListenerPresent $true -DatabaseListenerPresent $true
+$state = $cycle.State
+Assert-Test ($cycle.Action -eq 'monitor') 'POST_RESTART_HEALTH_DOES_NOT_PERSIST_MONITORING'
+$cycle = Invoke-PaperclipSupervisorCycle -State $state -Healthy $false -FailureThreshold 3 `
+  -CustodyKnown $true -ActiveRunCount 0 -ServerListenerPresent $true -DatabaseListenerPresent $true
+Assert-Test ($cycle.State.FailureCount -eq 1 -and $cycle.Action -eq 'observe') 'POST_RESTART_FAILURE_THRESHOLD_WAS_NOT_RESET'
 
 $supervisor = Get-Content -LiteralPath (Join-Path $scriptsRoot 'run-paperclip-supervised.ps1') -Raw
 $probe = Get-Content -LiteralPath (Join-Path $scriptsRoot 'paperclip-runtime-probe.mjs') -Raw

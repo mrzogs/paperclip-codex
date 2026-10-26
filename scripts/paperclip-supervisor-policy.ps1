@@ -36,3 +36,21 @@ function Update-PaperclipSupervisorState {
   }
 }
 
+function Invoke-PaperclipSupervisorCycle {
+  param(
+    [Parameter(Mandatory)]$State,
+    [bool]$Healthy,
+    [int]$FailureThreshold,
+    [bool]$CustodyKnown,
+    [int]$ActiveRunCount,
+    [bool]$ServerListenerPresent,
+    [bool]$DatabaseListenerPresent
+  )
+
+  $nextState = Update-PaperclipSupervisorState -State $State -Healthy $Healthy
+  $action = Get-PaperclipRecoveryAction -Healthy $Healthy -ConsecutiveFailures $nextState.FailureCount `
+    -FailureThreshold $FailureThreshold -CustodyKnown $CustodyKnown -ActiveRunCount $ActiveRunCount `
+    -ServerListenerPresent $ServerListenerPresent -DatabaseListenerPresent $DatabaseListenerPresent
+  return [pscustomobject]@{ State = $nextState; Action = $action }
+}
+

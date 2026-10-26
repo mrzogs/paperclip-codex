@@ -192,19 +192,18 @@ try {
   $supervisorState = New-PaperclipSupervisorState
   while ($true) {
     $probe = Invoke-RuntimeProbe
-    $supervisorState = Update-PaperclipSupervisorState -State $supervisorState -Healthy $probe.Ok
+    $cycle = Invoke-PaperclipSupervisorCycle -State $supervisorState -Healthy $probe.Ok `
+      -FailureThreshold $ConsecutiveFailuresBeforeRecovery -CustodyKnown $false -ActiveRunCount 0 `
+      -ServerListenerPresent (Test-PaperclipListener) -DatabaseListenerPresent (Test-EmbeddedPostgres)
+    $supervisorState = $cycle.State
     $failures = [int]$supervisorState.FailureCount
     if ($probe.Ok) {
       Start-Sleep -Seconds $ProbeIntervalSec
       continue
     }
 
-    $failures++
     Write-SupervisorLog "Runtime probe failed ($failures/$ConsecutiveFailuresBeforeRecovery): $($probe.Output)"
-    $initialAction = Get-PaperclipRecoveryAction -Healthy $false -ConsecutiveFailures $failures `
-      -FailureThreshold $ConsecutiveFailuresBeforeRecovery -CustodyKnown $false -ActiveRunCount 0 `
-      -ServerListenerPresent (Test-PaperclipListener) -DatabaseListenerPresent (Test-EmbeddedPostgres)
-    if ($initialAction -eq 'observe') {
+    if ($cycle.Action -eq 'observe') {
       Start-Sleep -Seconds $ProbeIntervalSec
       continue
     }
