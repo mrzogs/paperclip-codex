@@ -84,3 +84,49 @@ function Get-PaperclipServerStopDeadline {
   }
   return $deadline
 }
+
+function Get-PaperclipSupervisorControlToken {
+  param(
+    [Parameter(Mandatory)][string]$TokenPath,
+    [Parameter(Mandatory)][bool]$ServerPresent
+  )
+
+  Add-Type -AssemblyName System.Security
+  $entropy = [Text.Encoding]::UTF8.GetBytes('paperclip-supervisor-control-v1')
+  if (Test-Path -LiteralPath $TokenPath -PathType Leaf) {
+    $protectedBytes = [Convert]::FromBase64String((Get-Content -Raw -LiteralPath $TokenPath).Trim())
+    $clearBytes = [Security.Cryptography.ProtectedData]::Unprotect(
+      $protectedBytes,
+      $entropy,
+      [Security.Cryptography.DataProtectionScope]::CurrentUser
+    )
+    $token = [Text.Encoding]::UTF8.GetString($clearBytes)
+    if ([string]::IsNullOrWhiteSpace($token) -or $token.Length -lt 32) {
+      throw 'Protected Paperclip supervisor control token is invalid.'
+    }
+    return $token
+  }
+
+  if ($ServerPresent) {
+    throw 'Protected Paperclip supervisor control token is missing while a server is running; reattachment refused.'
+  }
+
+  $bytes = New-Object byte[] 32
+  $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+  try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+  $token = [Convert]::ToBase64String($bytes)
+  $clearBytes = [Text.Encoding]::UTF8.GetBytes($token)
+  $protectedBytes = [Security.Cryptography.ProtectedData]::Protect(
+    $clearBytes,
+    $entropy,
+    [Security.Cryptography.DataProtectionScope]::CurrentUser
+  )
+  $temporaryPath = "$TokenPath.$PID.$([guid]::NewGuid().ToString('N')).tmp"
+  try {
+    [IO.File]::WriteAllText($temporaryPath, [Convert]::ToBase64String($protectedBytes), [Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $temporaryPath -Destination $TokenPath -Force
+  } finally {
+    if (Test-Path -LiteralPath $temporaryPath) { Remove-Item -LiteralPath $temporaryPath -Force }
+  }
+  return $token
+}

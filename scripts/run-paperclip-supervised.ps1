@@ -15,10 +15,8 @@ $ConfigPath = Join-Path $PaperclipHome 'instances\default\config.json'
 $ProbeScript = Join-Path $PaperclipRoot 'scripts\paperclip-runtime-probe.mjs'
 $PolicyScript = Join-Path $PaperclipRoot 'scripts\paperclip-supervisor-policy.ps1'
 $LockPath = Join-Path $PaperclipHome 'paperclip-supervisor.lock'
-$supervisorTokenBytes = New-Object byte[] 32
-$supervisorTokenRng = [Security.Cryptography.RandomNumberGenerator]::Create()
-try { $supervisorTokenRng.GetBytes($supervisorTokenBytes) } finally { $supervisorTokenRng.Dispose() }
-$SupervisorControlToken = [Convert]::ToBase64String($supervisorTokenBytes)
+$SupervisorTokenPath = Join-Path $PaperclipHome 'supervisor-control-token.dpapi'
+$SupervisorControlToken = $null
 
 New-Item -ItemType Directory -Force -Path $PaperclipHome, $LogDir | Out-Null
 
@@ -35,6 +33,9 @@ try {
     Write-Output 'Paperclip supervisor already owns the single-instance lock.'
     exit 0
   }
+
+  $SupervisorControlToken = Get-PaperclipSupervisorControlToken -TokenPath $SupervisorTokenPath `
+    -ServerPresent ([bool](Get-NetTCPConnection -State Listen -LocalPort 3100 -ErrorAction SilentlyContinue))
 
   $stamp = Get-Date -Format 'yyyyMMddTHHmmss'
   $log = Join-Path $LogDir "paperclip-supervisor-$stamp.log"
