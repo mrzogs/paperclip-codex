@@ -15,6 +15,10 @@ $ConfigPath = Join-Path $PaperclipHome 'instances\default\config.json'
 $ProbeScript = Join-Path $PaperclipRoot 'scripts\paperclip-runtime-probe.mjs'
 $PolicyScript = Join-Path $PaperclipRoot 'scripts\paperclip-supervisor-policy.ps1'
 $LockPath = Join-Path $PaperclipHome 'paperclip-supervisor.lock'
+$supervisorTokenBytes = New-Object byte[] 32
+$supervisorTokenRng = [Security.Cryptography.RandomNumberGenerator]::Create()
+try { $supervisorTokenRng.GetBytes($supervisorTokenBytes) } finally { $supervisorTokenRng.Dispose() }
+$SupervisorControlToken = [Convert]::ToBase64String($supervisorTokenBytes)
 
 New-Item -ItemType Directory -Force -Path $PaperclipHome, $LogDir | Out-Null
 
@@ -129,17 +133,33 @@ try {
     })
   }
 
-  function Invoke-PaperclipDispatchFence([ValidateSet('enter', 'exit')][string]$Action) {
+  function New-PaperclipDispatchFenceLease {
+    $bytes = New-Object byte[] 32
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    return [Convert]::ToBase64String($bytes)
+  }
+
+  function Invoke-PaperclipDispatchFence(
+    [ValidateSet('enter', 'check', 'exit')][string]$Action,
+    [Parameter(Mandatory)][string]$LeaseToken
+  ) {
+    $headers = @{
+      'x-paperclip-supervisor-token' = $SupervisorControlToken
+      'x-paperclip-supervisor-lease' = $LeaseToken
+    }
     try {
       $response = Invoke-RestMethod -Method Post `
         -Uri "http://127.0.0.1:3100/api/health/supervisor-dispatch-fence/$Action" `
+        -Headers $headers `
         -TimeoutSec 15
     } catch {
       throw "Paperclip dispatch fence '$Action' was not acknowledged; recovery refused. $($_.Exception.Message)"
     }
-    $expectedFenced = $Action -eq 'enter'
+    $expectedFenced = $Action -ne 'exit'
     if ($response.status -ne 'ok' -or -not $response.acknowledged -or `
-        [bool]$response.fenced -ne $expectedFenced -or [int]$response.activeAdmissions -ne 0) {
+        [bool]$response.fenced -ne $expectedFenced -or [int]$response.activeAdmissions -ne 0 -or `
+        ($Action -eq 'check' -and -not $response.leaseValid)) {
       throw "Paperclip dispatch fence '$Action' returned an invalid acknowledgement; recovery refused."
     }
     return $response
@@ -177,10 +197,16 @@ try {
   }
 
   function Start-PaperclipRuntime([string]$ChildOutLog, [string]$ChildErrLog) {
-    return Start-Process -FilePath $CorepackCmd `
-      -ArgumentList @('pnpm','paperclipai','run','--data-dir',$PaperclipHome,'--bind','loopback') `
-      -WorkingDirectory $PaperclipRoot -WindowStyle Hidden -PassThru `
-      -RedirectStandardOutput $ChildOutLog -RedirectStandardError $ChildErrLog
+    $previousToken = [Environment]::GetEnvironmentVariable('PAPERCLIP_SUPERVISOR_CONTROL_TOKEN', 'Process')
+    [Environment]::SetEnvironmentVariable('PAPERCLIP_SUPERVISOR_CONTROL_TOKEN', $SupervisorControlToken, 'Process')
+    try {
+      return Start-Process -FilePath $CorepackCmd `
+        -ArgumentList @('pnpm','paperclipai','run','--data-dir',$PaperclipHome,'--bind','loopback') `
+        -WorkingDirectory $PaperclipRoot -WindowStyle Hidden -PassThru `
+        -RedirectStandardOutput $ChildOutLog -RedirectStandardError $ChildErrLog
+    } finally {
+      [Environment]::SetEnvironmentVariable('PAPERCLIP_SUPERVISOR_CONTROL_TOKEN', $previousToken, 'Process')
+    }
   }
 
   function Wait-RuntimeReady([Diagnostics.Process]$Child) {
@@ -259,21 +285,23 @@ try {
 
     $fenceHeld = $false
     $serverStoppedForFence = $false
+    $fenceLease = New-PaperclipDispatchFenceLease
     try {
-      $fenceAcknowledgement = Invoke-PaperclipDispatchFence -Action enter
       $fenceHeld = $true
+      $fenceAcknowledgement = Invoke-PaperclipDispatchFence -Action enter -LeaseToken $fenceLease
       Write-SupervisorLog "Paperclip dispatch fence acknowledged with $($fenceAcknowledgement.activeAdmissions) active admissions."
       $fencedCustody = Get-ActiveRunCustody
       $fencedAction = Get-PaperclipFencedRecoveryAction -CustodyKnown $fencedCustody.Known `
         -ActiveRunCount $(if ($fencedCustody.Known) { $fencedCustody.Count } else { 0 })
       if ($fencedAction -ne 'shutdown_database') {
         Write-SupervisorLog "Database shutdown deferred after dispatch fence: $fencedAction. $($fencedCustody.Output)"
-        Invoke-PaperclipDispatchFence -Action exit | Out-Null
+        Invoke-PaperclipDispatchFence -Action exit -LeaseToken $fenceLease | Out-Null
         $fenceHeld = $false
         Start-Sleep -Seconds $ProbeIntervalSec
         continue
       }
 
+      Invoke-PaperclipDispatchFence -Action check -LeaseToken $fenceLease | Out-Null
       $serverStoppedForFence = Stop-ExpectedPaperclipServerForFence
       if (-not $serverStoppedForFence) {
         throw 'Paperclip dispatch fence was acknowledged but no expected server process could be stopped; database shutdown refused.'
@@ -283,7 +311,7 @@ try {
     } catch {
       if ($fenceHeld -and -not $serverStoppedForFence -and (Test-PaperclipListener)) {
         try {
-          Invoke-PaperclipDispatchFence -Action exit | Out-Null
+          Invoke-PaperclipDispatchFence -Action exit -LeaseToken $fenceLease | Out-Null
           Write-SupervisorLog 'Released Paperclip dispatch fence after recovery aborted before server shutdown.'
         } catch {
           Write-SupervisorLog "Dispatch fence release also failed after recovery abort: $($_.Exception.Message)"
@@ -307,15 +335,17 @@ try {
       if ((Test-PaperclipListener) -or @(Get-ExpectedPaperclipServerProcesses).Count -gt 0) {
         $retryFenceHeld = $false
         $retryServerStopped = $false
+        $retryFenceLease = New-PaperclipDispatchFenceLease
         try {
-          Invoke-PaperclipDispatchFence -Action enter | Out-Null
           $retryFenceHeld = $true
+          Invoke-PaperclipDispatchFence -Action enter -LeaseToken $retryFenceLease | Out-Null
           $retryCustody = Get-ActiveRunCustody
           $retryFenceAction = Get-PaperclipFencedRecoveryAction -CustodyKnown $retryCustody.Known `
             -ActiveRunCount $(if ($retryCustody.Known) { $retryCustody.Count } else { 0 })
           if ($retryFenceAction -ne 'shutdown_database') {
             throw "Recovery retry refused after fenced custody check: $retryFenceAction."
           }
+          Invoke-PaperclipDispatchFence -Action check -LeaseToken $retryFenceLease | Out-Null
           $retryServerStopped = [bool](Stop-ExpectedPaperclipServerForFence)
           if (-not $retryServerStopped) {
             throw 'Recovery retry fence was acknowledged but no expected server process could be stopped.'
@@ -323,7 +353,7 @@ try {
           $retryFenceHeld = $false
         } catch {
           if ($retryFenceHeld -and -not $retryServerStopped -and (Test-PaperclipListener)) {
-            try { Invoke-PaperclipDispatchFence -Action exit | Out-Null } catch { }
+            try { Invoke-PaperclipDispatchFence -Action exit -LeaseToken $retryFenceLease | Out-Null } catch { }
           }
           throw
         }

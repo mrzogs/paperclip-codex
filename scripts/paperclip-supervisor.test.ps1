@@ -88,10 +88,12 @@ $serverFenceStart = $supervisor.IndexOf('function Stop-ExpectedPaperclipServerFo
 $serverFenceEnd = $supervisor.IndexOf('function Start-PaperclipRuntime', $serverFenceStart)
 $serverFence = $supervisor.Substring($serverFenceStart, $serverFenceEnd - $serverFenceStart)
 $recoveryLoopStart = $supervisor.IndexOf('$serverPresent = (Test-PaperclipListener)')
-$fenceAcknowledgement = $supervisor.IndexOf('$fenceAcknowledgement = Invoke-PaperclipDispatchFence -Action enter', $recoveryLoopStart)
+$fenceHeldBeforeEnter = $supervisor.IndexOf('$fenceHeld = $true', $recoveryLoopStart)
+$fenceAcknowledgement = $supervisor.IndexOf('$fenceAcknowledgement = Invoke-PaperclipDispatchFence -Action enter -LeaseToken $fenceLease', $recoveryLoopStart)
 $fencedCustodyCheck = $supervisor.IndexOf('$fencedCustody = Get-ActiveRunCustody', $fenceAcknowledgement)
 $fencedDecision = $supervisor.IndexOf('Get-PaperclipFencedRecoveryAction', $fencedCustodyCheck)
-$fenceCall = $supervisor.IndexOf('Stop-ExpectedPaperclipServerForFence', $fencedDecision)
+$leaseCheck = $supervisor.IndexOf('Invoke-PaperclipDispatchFence -Action check -LeaseToken $fenceLease', $fencedDecision)
+$fenceCall = $supervisor.IndexOf('Stop-ExpectedPaperclipServerForFence', $leaseCheck)
 $databaseStopAfterFence = $supervisor.IndexOf('Stop-EmbeddedPostgresSafely', $fencedDecision)
 
 Assert-Test ($supervisor.Contains('[IO.FileShare]::None')) 'SUPERVISOR_HAS_NO_SINGLE_INSTANCE_LOCK'
@@ -107,12 +109,15 @@ Assert-Test ($serverFence.Contains('dispatch fence established')) 'SERVER_STOP_H
 Assert-Test ($supervisor.Contains('Get-ExpectedPaperclipServerProcesses')) 'DISPATCH_FENCE_DEPENDS_ONLY_ON_THE_HTTP_LISTENER'
 Assert-Test ($supervisor.Contains('starting the server without restarting embedded PostgreSQL')) `
   'ABSENT_SERVER_PATH_RESTARTS_THE_DATABASE_UNNECESSARILY'
-Assert-Test ($fenceAcknowledgement -gt $recoveryLoopStart -and $fencedCustodyCheck -gt $fenceAcknowledgement -and `
-  $fencedDecision -gt $fencedCustodyCheck -and $fenceCall -gt $fencedDecision -and `
+Assert-Test ($fenceHeldBeforeEnter -gt $recoveryLoopStart -and $fenceAcknowledgement -gt $fenceHeldBeforeEnter -and `
+  $fencedCustodyCheck -gt $fenceAcknowledgement -and `
+  $fencedDecision -gt $fencedCustodyCheck -and $leaseCheck -gt $fencedDecision -and $fenceCall -gt $leaseCheck -and `
   $databaseStopAfterFence -gt $fenceCall) `
-  'RECOVERY_DOES_NOT_ACKNOWLEDGE_ADMISSION_FENCE_THEN_RECHECK_CUSTODY_BEFORE_SERVER_AND_DATABASE_SHUTDOWN'
-Assert-Test ($supervisor.Contains('Invoke-PaperclipDispatchFence -Action exit')) `
+  'RECOVERY_DOES_NOT_TRACK_AMBIGUOUS_ENTER_ACK_THEN_RECHECK_CUSTODY_VALIDATE_LEASE_AND_STOP_IN_ORDER'
+Assert-Test ($supervisor.Contains('Invoke-PaperclipDispatchFence -Action exit -LeaseToken')) `
   'DEFERRED_RECOVERY_DOES_NOT_RELEASE_THE_ADMISSION_FENCE'
+Assert-Test ($supervisor.Contains('PAPERCLIP_SUPERVISOR_CONTROL_TOKEN')) `
+  'SUPERVISOR_DOES_NOT_INJECT_A_PROTECTED_SERVER_CONTROL_CREDENTIAL'
 Assert-Test ($supervisor.Contains('Restore-PaperclipServerAfterAbortedFence')) 'ABORTED_FENCE_CANNOT_RESTORE_PAPERCLIP_WITH_DATABASE_LEFT_RUNNING'
 Assert-Test ($probe.Contains('/api/issues/')) 'PROBE_HAS_NO_ISSUE_DATA_CHECK'
 Assert-Test ($probe.Contains('<div id="root"></div>')) 'PROBE_ACCEPTS_ARBITRARY_HTML'

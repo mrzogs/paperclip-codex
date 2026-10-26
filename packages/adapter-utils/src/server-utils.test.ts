@@ -15,11 +15,29 @@ import {
   renderPaperclipWakePrompt,
   runningProcesses,
   runChildProcess,
+  sanitizeInheritedPaperclipEnv,
   sanitizeSshRemoteEnv,
   shapePaperclipWorkspaceEnvForExecution,
   rewriteWorkspaceCwdEnvVarsForExecution,
   stringifyPaperclipWakePayload,
 } from "./server-utils.js";
+
+describe("sanitizeInheritedPaperclipEnv", () => {
+  it("does not expose the supervisor control credential to agent processes", () => {
+    expect(sanitizeInheritedPaperclipEnv({
+      PAPERCLIP_SUPERVISOR_CONTROL_TOKEN: "server-only-secret",
+      PAPERCLIP_RUNTIME_API_URL: "http://127.0.0.1:3100",
+      PAPERCLIP_LISTEN_HOST: "127.0.0.1",
+      PAPERCLIP_LISTEN_PORT: "3100",
+      SAFE_VALUE: "visible",
+    })).toEqual({
+      PAPERCLIP_RUNTIME_API_URL: "http://127.0.0.1:3100",
+      PAPERCLIP_LISTEN_HOST: "127.0.0.1",
+      PAPERCLIP_LISTEN_PORT: "3100",
+      SAFE_VALUE: "visible",
+    });
+  });
+});
 
 function isPidAlive(pid: number) {
   try {

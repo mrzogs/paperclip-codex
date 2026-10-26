@@ -1,5 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
-import { Router } from "express";
+import { Router, type Request, type Response } from "express";
 import type { Db } from "@paperclipai/db";
 import { and, count, eq, gt, inArray, isNull, sql } from "drizzle-orm";
 import { heartbeatRuns, instanceUserRoles, invites } from "@paperclipai/db";
@@ -9,10 +9,22 @@ import { logger } from "../middleware/logger.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { serverVersion } from "../version.js";
 import { heartbeatDispatchFence } from "../services/heartbeat-dispatch-fence.js";
+import { heartbeatService } from "../services/heartbeat.js";
+
+const SUPERVISOR_FENCE_LEASE_TTL_MS = 60_000;
 
 function isLoopbackRequest(remoteAddress: string | undefined) {
   const normalized = (remoteAddress ?? "").replace(/^::ffff:/, "").toLowerCase();
   return normalized === "127.0.0.1" || normalized === "::1";
+}
+
+function hasSupervisorControlToken(providedToken: string | undefined) {
+  const expectedToken = process.env.PAPERCLIP_SUPERVISOR_CONTROL_TOKEN?.trim();
+  const token = providedToken?.trim();
+  if (!expectedToken || !token) return false;
+  const expected = Buffer.from(expectedToken);
+  const provided = Buffer.from(token);
+  return expected.length === provided.length && timingSafeEqual(expected, provided);
 }
 
 function shouldExposeFullHealthDetails(
@@ -50,30 +62,83 @@ export function healthRoutes(
 ) {
   const router = Router();
 
-  router.post("/supervisor-dispatch-fence/enter", async (req, res) => {
+  const requireSupervisorControl = (req: Request, res: Response) => {
     if (
       opts.deploymentMode !== "local_trusted" ||
       opts.deploymentExposure !== "private" ||
       !isLoopbackRequest(req.socket.remoteAddress)
     ) {
       res.status(403).json({ error: "local_supervisor_only" });
+      return false;
+    }
+    if (!process.env.PAPERCLIP_SUPERVISOR_CONTROL_TOKEN?.trim()) {
+      res.status(503).json({ error: "supervisor_control_unconfigured" });
+      return false;
+    }
+    if (!hasSupervisorControlToken(req.get("x-paperclip-supervisor-token"))) {
+      res.status(401).json({ error: "supervisor_control_unauthorized" });
+      return false;
+    }
+    return true;
+  };
+
+  const resumeQueuedRunsAfterFenceRelease = async (releaseReason: "explicit" | "expired") => {
+    if (!db) return false;
+    try {
+      await heartbeatService(db).resumeQueuedRuns();
+      return true;
+    } catch (error) {
+      logger.error({ err: error, releaseReason }, "Failed to resume queued runs after supervisor fence release");
+      return false;
+    }
+  };
+
+  router.post("/supervisor-dispatch-fence/enter", async (req, res) => {
+    if (!requireSupervisorControl(req, res)) return;
+    const leaseToken = req.get("x-paperclip-supervisor-lease")?.trim() ?? "";
+    if (leaseToken.length < 32) {
+      res.status(400).json({ error: "supervisor_fence_lease_required" });
       return;
     }
-    const state = await heartbeatDispatchFence.enter();
-    res.json({ status: "ok", acknowledged: true, ...state });
+    try {
+      const state = await heartbeatDispatchFence.enter(
+        leaseToken,
+        SUPERVISOR_FENCE_LEASE_TTL_MS,
+        async () => {
+          await resumeQueuedRunsAfterFenceRelease("expired");
+        },
+      );
+      if (!heartbeatDispatchFence.isLeaseValid(leaseToken) || !state.fenced || state.activeAdmissions !== 0) {
+        res.status(409).json({ error: "supervisor_fence_not_acknowledged", ...state });
+        return;
+      }
+      res.json({ status: "ok", acknowledged: true, ...state });
+    } catch {
+      res.status(409).json({ error: "supervisor_fence_already_held" });
+    }
   });
 
-  router.post("/supervisor-dispatch-fence/exit", (req, res) => {
-    if (
-      opts.deploymentMode !== "local_trusted" ||
-      opts.deploymentExposure !== "private" ||
-      !isLoopbackRequest(req.socket.remoteAddress)
-    ) {
-      res.status(403).json({ error: "local_supervisor_only" });
-      return;
+  router.post("/supervisor-dispatch-fence/exit", async (req, res) => {
+    if (!requireSupervisorControl(req, res)) return;
+    const leaseToken = req.get("x-paperclip-supervisor-lease")?.trim() ?? "";
+    try {
+      const state = heartbeatDispatchFence.exit(leaseToken);
+      const resumedQueuedRuns = await resumeQueuedRunsAfterFenceRelease("explicit");
+      res.json({ status: "ok", acknowledged: true, resumedQueuedRuns, ...state });
+    } catch {
+      res.status(409).json({ error: "supervisor_fence_lease_invalid" });
     }
-    const state = heartbeatDispatchFence.exit();
-    res.json({ status: "ok", acknowledged: true, ...state });
+  });
+
+  router.post("/supervisor-dispatch-fence/check", (req, res) => {
+    if (!requireSupervisorControl(req, res)) return;
+    const leaseToken = req.get("x-paperclip-supervisor-lease")?.trim() ?? "";
+    try {
+      const state = heartbeatDispatchFence.renew(leaseToken, SUPERVISOR_FENCE_LEASE_TTL_MS);
+      res.json({ status: "ok", acknowledged: true, leaseValid: true, ...state });
+    } catch {
+      res.status(409).json({ error: "supervisor_fence_lease_invalid", ...heartbeatDispatchFence.snapshot() });
+    }
   });
 
   router.post("/dev-server/restart", async (req, res) => {

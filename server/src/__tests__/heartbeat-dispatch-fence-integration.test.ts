@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import express from "express";
+import request from "supertest";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agents,
@@ -35,6 +37,10 @@ vi.mock("../adapters/index.ts", async () => {
 
 import { heartbeatService } from "../services/heartbeat.js";
 import { heartbeatDispatchFence } from "../services/heartbeat-dispatch-fence.js";
+import { healthRoutes } from "../routes/health.js";
+
+const supervisorControlToken = "integration-supervisor-control-token";
+const supervisorLeaseToken = "integration-supervisor-lease-token-long-enough";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -49,7 +55,10 @@ describeEmbeddedPostgres("heartbeat supervisor dispatch fence integration", () =
   }, 20_000);
 
   afterEach(async () => {
-    heartbeatDispatchFence.exit();
+    if (heartbeatDispatchFence.isLeaseValid(supervisorLeaseToken)) {
+      heartbeatDispatchFence.exit(supervisorLeaseToken);
+    }
+    delete process.env.PAPERCLIP_SUPERVISOR_CONTROL_TOKEN;
     mockAdapterExecute.mockClear();
   });
 
@@ -79,7 +88,20 @@ describeEmbeddedPostgres("heartbeat supervisor dispatch fence integration", () =
     });
 
     const heartbeat = heartbeatService(db);
-    await expect(heartbeatDispatchFence.enter()).resolves.toEqual({ fenced: true, activeAdmissions: 0 });
+    process.env.PAPERCLIP_SUPERVISOR_CONTROL_TOKEN = supervisorControlToken;
+    const app = express();
+    app.use("/api/health", healthRoutes(db, {
+      deploymentMode: "local_trusted",
+      deploymentExposure: "private",
+      authReady: true,
+      companyDeletionEnabled: true,
+    }));
+    const enter = await request(app)
+      .post("/api/health/supervisor-dispatch-fence/enter")
+      .set("x-paperclip-supervisor-token", supervisorControlToken)
+      .set("x-paperclip-supervisor-lease", supervisorLeaseToken)
+      .expect(200);
+    expect(enter.body).toMatchObject({ acknowledged: true, fenced: true, activeAdmissions: 0 });
 
     const queued = await heartbeat.wakeup(agentId, {
       source: "on_demand",
@@ -90,8 +112,12 @@ describeEmbeddedPostgres("heartbeat supervisor dispatch fence integration", () =
     expect(queued?.status).toBe("queued");
     expect(mockAdapterExecute).not.toHaveBeenCalled();
 
-    heartbeatDispatchFence.exit();
-    await heartbeat.resumeQueuedRuns();
+    const exit = await request(app)
+      .post("/api/health/supervisor-dispatch-fence/exit")
+      .set("x-paperclip-supervisor-token", supervisorControlToken)
+      .set("x-paperclip-supervisor-lease", supervisorLeaseToken)
+      .expect(200);
+    expect(exit.body).toMatchObject({ acknowledged: true, fenced: false, resumedQueuedRuns: true });
 
     const deadline = Date.now() + 3_000;
     let settled = await heartbeat.getRun(queued!.id);
