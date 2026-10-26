@@ -111,16 +111,60 @@ export async function queryActiveRunCount({ configPath, timeoutMs = DEFAULT_TIME
   try {
     await sql`select set_config('statement_timeout', ${String(timeoutMs)}, false)`;
     const rows = await sql`
-      select count(*)::int as count
+      select id, status, process_pid as "processPid"
       from heartbeat_runs
       where status in ('queued', 'running')
     `;
-    const count = Number(rows[0]?.count);
-    if (!Number.isInteger(count) || count < 0) throw new Error("active-run count was invalid");
-    return { activeRunCount: count, checkedAt: new Date().toISOString() };
+    return {
+      ...classifyActiveRunCustody(rows),
+      checkedAt: new Date().toISOString(),
+    };
   } finally {
     await sql.end({ timeout: 1 });
   }
+}
+
+function isLocalProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error && typeof error === "object" && error.code === "EPERM") return true;
+    return false;
+  }
+}
+
+export function classifyActiveRunCustody(rows, { processAlive = isLocalProcessAlive } = {}) {
+  let queuedRunCount = 0;
+  let liveRunningRunCount = 0;
+  let deadRunningRunCount = 0;
+  let unknownRunningRunCount = 0;
+
+  for (const row of rows) {
+    if (row?.status === "queued") {
+      queuedRunCount++;
+      continue;
+    }
+    if (row?.status !== "running") continue;
+    const pid = Number(row.processPid);
+    if (!Number.isInteger(pid) || pid <= 0) {
+      unknownRunningRunCount++;
+    } else if (processAlive(pid)) {
+      liveRunningRunCount++;
+    } else {
+      deadRunningRunCount++;
+    }
+  }
+
+  return {
+    activeRunCount: liveRunningRunCount,
+    custodyKnown: unknownRunningRunCount === 0,
+    queuedRunCount,
+    liveRunningRunCount,
+    deadRunningRunCount,
+    unknownRunningRunCount,
+    recoverableRunCount: queuedRunCount + deadRunningRunCount,
+  };
 }
 
 async function main(args) {
@@ -148,6 +192,7 @@ async function main(args) {
     } catch (error) {
       process.stdout.write(`${JSON.stringify({
         activeRunCount: null,
+        custodyKnown: false,
         checkedAt: new Date().toISOString(),
         error: error instanceof Error ? error.message : String(error),
       })}\n`);
