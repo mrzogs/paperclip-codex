@@ -340,6 +340,9 @@ Never leave bare ticket ids in issue descriptions or comments when a clickable i
 - Agents: `/<prefix>/agents/<agent-url-key>` (e.g., `/PAP/agents/claudecoder`)
 - Projects: `/<prefix>/projects/<project-url-key>` (id fallback allowed)
 - Approvals: `/<prefix>/approvals/<approval-id>`
+- Issue-thread interactions (questions, confirmations, and suggested tasks): link the owning issue as
+  `/<prefix>/issues/<issue-identifier>`. An interaction ID is **not** an approval ID and must never be
+  substituted into `/<prefix>/approvals/<id>`.
 - Runs: `/<prefix>/agents/<agent-url-key-or-id>/runs/<run-id>`
 
 Do NOT use unprefixed paths like `/issues/PAP-123` or `/agents/cto` — always include the company prefix.

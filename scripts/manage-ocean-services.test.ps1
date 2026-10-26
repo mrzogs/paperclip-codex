@@ -67,8 +67,12 @@ Assert-Test ('node D:\OceanTradingData\website\deployments\ocean-r9\website\ocea
 Assert-Test (-not ('node D:\OceanTradingData\website\deployments\ocean-r9\website\ocean-trading\dashboard\build-manifest.mjs' -match $releaseMonitorPattern)) `
   'MONITOR_RELEASE_PATTERN_MATCHES_NON_MONITOR_CHILD'
 Assert-Test ($manager.Contains("Join-Path `$Root 'scripts\run-hidden-service.vbs'")) 'MANAGER_BYPASSES_HIDDEN_LAUNCHER'
+Assert-Test ($manager.Contains("Join-Path `$Root 'scripts\paperclip-runtime-probe.mjs'")) 'MANAGER_DOES_NOT_USE_PAGE_AND_DATA_PROBE'
+Assert-Test ($manager.Contains('function Test-PaperclipReady')) 'MANAGER_HAS_NO_STRICT_PAPERCLIP_READINESS_CHECK'
+Assert-Test (-not $manager.Contains("paperclip = Test-HttpOk 'http://127.0.0.1:3100/api/health'")) `
+  'MANAGER_STILL_ACCEPTS_API_LIVENESS_AS_COMPLETE_READINESS'
 foreach ($dependency in @('ocean-deployment.ps1','run-hidden-service.vbs','run-paperclip-supervised.ps1',
-    'run-codex-bridge-supervised.ps1','run-ocean-monitor-supervised.ps1','run-ocean-website-supervised.ps1',
+    'paperclip-runtime-probe.mjs','run-codex-bridge-supervised.ps1','run-ocean-monitor-supervised.ps1','run-ocean-website-supervised.ps1',
     'run-ocean-replay-bridge.ps1')) {
   Assert-Test (Test-Path -LiteralPath (Join-Path $scriptsRoot $dependency) -PathType Leaf) "MANAGED_DEPENDENCY_MISSING_$dependency"
 }

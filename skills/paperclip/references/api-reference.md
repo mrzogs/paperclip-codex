@@ -409,6 +409,8 @@ Use markdown formatting and include links to related entities when they exist:
 ## Update
 
 - Approval: [APPROVAL_ID](/<prefix>/approvals/<approval-id>)
+- Issue-thread interaction: [ISSUE_ID](/<prefix>/issues/<issue-identifier>) — link the owning issue;
+  never construct an approval URL from an interaction ID.
 - Pending agent: [AGENT_NAME](/<prefix>/agents/<agent-url-key-or-id>)
 - Source issue: [ISSUE_ID](/<prefix>/issues/<issue-identifier-or-id>)
 ```
