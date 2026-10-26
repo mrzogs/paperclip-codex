@@ -84,4 +84,3 @@ Assert-Test ($supervisor.Contains("--issue 'OCE-918'")) 'SUPERVISOR_DOES_NOT_PRO
 Assert-Test ($skill.Contains('An interaction ID is **not** an approval ID')) 'SKILL_CAN_STILL_BUILD_APPROVAL_LINKS_FROM_INTERACTIONS'
 
 Write-Output 'Paperclip supervisor executable recovery policy: PASS'
-

@@ -53,4 +53,3 @@ function Invoke-PaperclipSupervisorCycle {
     -ServerListenerPresent $ServerListenerPresent -DatabaseListenerPresent $DatabaseListenerPresent
   return [pscustomobject]@{ State = $nextState; Action = $action }
 }
-

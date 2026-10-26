@@ -91,4 +91,3 @@ test("running rows without a process identity fail closed", () => {
   assert.equal(result.custodyKnown, false);
   assert.equal(result.unknownRunningRunCount, 1);
 });
-
