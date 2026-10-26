@@ -8,6 +8,12 @@ import { readPersistedDevServerStatus, toDevServerHealthStatus, writeDevServerRe
 import { logger } from "../middleware/logger.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { serverVersion } from "../version.js";
+import { heartbeatDispatchFence } from "../services/heartbeat-dispatch-fence.js";
+
+function isLoopbackRequest(remoteAddress: string | undefined) {
+  const normalized = (remoteAddress ?? "").replace(/^::ffff:/, "").toLowerCase();
+  return normalized === "127.0.0.1" || normalized === "::1";
+}
 
 function shouldExposeFullHealthDetails(
   actorType: "none" | "board" | "agent" | null | undefined,
@@ -43,6 +49,32 @@ export function healthRoutes(
   },
 ) {
   const router = Router();
+
+  router.post("/supervisor-dispatch-fence/enter", async (req, res) => {
+    if (
+      opts.deploymentMode !== "local_trusted" ||
+      opts.deploymentExposure !== "private" ||
+      !isLoopbackRequest(req.socket.remoteAddress)
+    ) {
+      res.status(403).json({ error: "local_supervisor_only" });
+      return;
+    }
+    const state = await heartbeatDispatchFence.enter();
+    res.json({ status: "ok", acknowledged: true, ...state });
+  });
+
+  router.post("/supervisor-dispatch-fence/exit", (req, res) => {
+    if (
+      opts.deploymentMode !== "local_trusted" ||
+      opts.deploymentExposure !== "private" ||
+      !isLoopbackRequest(req.socket.remoteAddress)
+    ) {
+      res.status(403).json({ error: "local_supervisor_only" });
+      return;
+    }
+    const state = heartbeatDispatchFence.exit();
+    res.json({ status: "ok", acknowledged: true, ...state });
+  });
 
   router.post("/dev-server/restart", async (req, res) => {
     const actorType = "actor" in req ? req.actor?.type : null;

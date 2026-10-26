@@ -79,19 +79,6 @@ try {
     }
   }
 
-  function Get-ProcessTree([int]$RootProcessId) {
-    $snapshot = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
-    $ids = [Collections.Generic.HashSet[int]]::new()
-    [void]$ids.Add($RootProcessId)
-    do {
-      $added = $false
-      foreach ($process in $snapshot) {
-        if ($ids.Contains([int]$process.ParentProcessId) -and $ids.Add([int]$process.ProcessId)) { $added = $true }
-      }
-    } while ($added)
-    return @($snapshot | Where-Object { $ids.Contains([int]$_.ProcessId) })
-  }
-
   function Get-PgCtlPath {
     $matches = @(Get-ChildItem -Path (Join-Path $PaperclipRoot `
       'node_modules\.pnpm\@embedded-postgres+windows-x64@*\node_modules\@embedded-postgres\windows-x64\native\bin\pg_ctl.exe') `
@@ -142,6 +129,22 @@ try {
     })
   }
 
+  function Invoke-PaperclipDispatchFence([ValidateSet('enter', 'exit')][string]$Action) {
+    try {
+      $response = Invoke-RestMethod -Method Post `
+        -Uri "http://127.0.0.1:3100/api/health/supervisor-dispatch-fence/$Action" `
+        -TimeoutSec 15
+    } catch {
+      throw "Paperclip dispatch fence '$Action' was not acknowledged; recovery refused. $($_.Exception.Message)"
+    }
+    $expectedFenced = $Action -eq 'enter'
+    if ($response.status -ne 'ok' -or -not $response.acknowledged -or `
+        [bool]$response.fenced -ne $expectedFenced -or [int]$response.activeAdmissions -ne 0) {
+      throw "Paperclip dispatch fence '$Action' returned an invalid acknowledgement; recovery refused."
+    }
+    return $response
+  }
+
   function Stop-ExpectedPaperclipServerForFence {
     $listeners = @(Get-NetTCPConnection -State Listen -LocalPort 3100 -ErrorAction SilentlyContinue)
     $expected = @(Get-ExpectedPaperclipServerProcesses)
@@ -173,18 +176,6 @@ try {
     return ($ownersById.Count -gt 0)
   }
 
-  function Stop-StartedPaperclipChildIfDatabaseIndependent([Diagnostics.Process]$Child) {
-    if (-not $Child -or $Child.HasExited) { return }
-    $tree = @(Get-ProcessTree -RootProcessId ([int]$Child.Id))
-    $postgresProcesses = @($tree | Where-Object { $_.Name -ieq 'postgres.exe' })
-    if ($postgresProcesses.Count) {
-      throw 'PostgreSQL is present in the failed child tree; force termination refused.'
-    }
-    foreach ($process in @($tree | Sort-Object ProcessId -Descending)) {
-      Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
-    }
-  }
-
   function Start-PaperclipRuntime([string]$ChildOutLog, [string]$ChildErrLog) {
     return Start-Process -FilePath $CorepackCmd `
       -ArgumentList @('pnpm','paperclipai','run','--data-dir',$PaperclipHome,'--bind','loopback') `
@@ -210,7 +201,6 @@ try {
     $child = Start-PaperclipRuntime -ChildOutLog $childOutLog -ChildErrLog $childErrLog
     Write-SupervisorLog "Restoring Paperclip server as PID $($child.Id) with embedded PostgreSQL left running."
     if (-not (Wait-RuntimeReady -Child $child)) {
-      Stop-StartedPaperclipChildIfDatabaseIndependent -Child $child
       throw 'Paperclip server did not recover after the fenced custody check deferred database shutdown.'
     }
     Write-SupervisorLog 'Paperclip server restored after the fenced custody check deferred database shutdown.'
@@ -258,28 +248,49 @@ try {
       Write-SupervisorLog "Safe restart will hand $($custody.RecoverableCount) queued or dead-process run(s) to Paperclip startup reconciliation."
     }
 
-    $serverStoppedForFence = Stop-ExpectedPaperclipServerForFence
-    if (-not $serverStoppedForFence) {
+    $serverPresent = (Test-PaperclipListener) -or @(Get-ExpectedPaperclipServerProcesses).Count -gt 0
+    if (-not $serverPresent) {
       Write-SupervisorLog 'No expected Paperclip server process remained to fence; starting the server without restarting embedded PostgreSQL.'
       Restore-PaperclipServerAfterAbortedFence
       $supervisorState = Update-PaperclipSupervisorState -State $supervisorState -Healthy $true
       Start-Sleep -Seconds $ProbeIntervalSec
       continue
     }
-    $fencedCustody = Get-ActiveRunCustody
-    $fencedAction = Get-PaperclipFencedRecoveryAction -CustodyKnown $fencedCustody.Known `
-      -ActiveRunCount $(if ($fencedCustody.Known) { $fencedCustody.Count } else { 0 })
-    if ($fencedAction -ne 'shutdown_database') {
-      Write-SupervisorLog "Database shutdown deferred after dispatch fence: $fencedAction. $($fencedCustody.Output)"
-      if ($serverStoppedForFence) {
-        Restore-PaperclipServerAfterAbortedFence
-        $supervisorState = Update-PaperclipSupervisorState -State $supervisorState -Healthy $true
-      }
-      Start-Sleep -Seconds $ProbeIntervalSec
-      continue
-    }
 
-    Stop-EmbeddedPostgresSafely
+    $fenceHeld = $false
+    $serverStoppedForFence = $false
+    try {
+      $fenceAcknowledgement = Invoke-PaperclipDispatchFence -Action enter
+      $fenceHeld = $true
+      Write-SupervisorLog "Paperclip dispatch fence acknowledged with $($fenceAcknowledgement.activeAdmissions) active admissions."
+      $fencedCustody = Get-ActiveRunCustody
+      $fencedAction = Get-PaperclipFencedRecoveryAction -CustodyKnown $fencedCustody.Known `
+        -ActiveRunCount $(if ($fencedCustody.Known) { $fencedCustody.Count } else { 0 })
+      if ($fencedAction -ne 'shutdown_database') {
+        Write-SupervisorLog "Database shutdown deferred after dispatch fence: $fencedAction. $($fencedCustody.Output)"
+        Invoke-PaperclipDispatchFence -Action exit | Out-Null
+        $fenceHeld = $false
+        Start-Sleep -Seconds $ProbeIntervalSec
+        continue
+      }
+
+      $serverStoppedForFence = Stop-ExpectedPaperclipServerForFence
+      if (-not $serverStoppedForFence) {
+        throw 'Paperclip dispatch fence was acknowledged but no expected server process could be stopped; database shutdown refused.'
+      }
+      $fenceHeld = $false
+      Stop-EmbeddedPostgresSafely
+    } catch {
+      if ($fenceHeld -and -not $serverStoppedForFence -and (Test-PaperclipListener)) {
+        try {
+          Invoke-PaperclipDispatchFence -Action exit | Out-Null
+          Write-SupervisorLog 'Released Paperclip dispatch fence after recovery aborted before server shutdown.'
+        } catch {
+          Write-SupervisorLog "Dispatch fence release also failed after recovery abort: $($_.Exception.Message)"
+        }
+      }
+      throw
+    }
     $recovered = $false
     for ($startAttempt = 1; $startAttempt -le $MaxStartAttempts; $startAttempt++) {
       $childStamp = Get-Date -Format 'yyyyMMddTHHmmss'
@@ -293,9 +304,30 @@ try {
         break
       }
       Write-SupervisorLog "Paperclip recovery attempt $startAttempt did not become ready."
-      Stop-ExpectedPaperclipServerForFence
-      Stop-EmbeddedPostgresSafely
-      Stop-StartedPaperclipChildIfDatabaseIndependent -Child $child
+      if ((Test-PaperclipListener) -or @(Get-ExpectedPaperclipServerProcesses).Count -gt 0) {
+        $retryFenceHeld = $false
+        $retryServerStopped = $false
+        try {
+          Invoke-PaperclipDispatchFence -Action enter | Out-Null
+          $retryFenceHeld = $true
+          $retryCustody = Get-ActiveRunCustody
+          $retryFenceAction = Get-PaperclipFencedRecoveryAction -CustodyKnown $retryCustody.Known `
+            -ActiveRunCount $(if ($retryCustody.Known) { $retryCustody.Count } else { 0 })
+          if ($retryFenceAction -ne 'shutdown_database') {
+            throw "Recovery retry refused after fenced custody check: $retryFenceAction."
+          }
+          $retryServerStopped = [bool](Stop-ExpectedPaperclipServerForFence)
+          if (-not $retryServerStopped) {
+            throw 'Recovery retry fence was acknowledged but no expected server process could be stopped.'
+          }
+          $retryFenceHeld = $false
+        } catch {
+          if ($retryFenceHeld -and -not $retryServerStopped -and (Test-PaperclipListener)) {
+            try { Invoke-PaperclipDispatchFence -Action exit | Out-Null } catch { }
+          }
+          throw
+        }
+      }
       Start-Sleep -Seconds ([Math]::Min(10, 2 * $startAttempt))
     }
 

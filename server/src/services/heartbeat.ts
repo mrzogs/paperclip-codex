@@ -191,6 +191,7 @@ import {
 } from "./low-trust-runtime-containment.js";
 import { resolveCoreTrustPreset, type TrustPresetResolution } from "./trust-preset-resolver.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
+import { heartbeatDispatchFence } from "./heartbeat-dispatch-fence.js";
 
 const MAX_LIVE_LOG_CHUNK_BYTES = 8 * 1024;
 const MAX_PERSISTED_LOG_CHUNK_CHARS = 64 * 1024;
@@ -7610,7 +7611,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   }
 
   async function startNextQueuedRunForAgent(agentId: string) {
-    return withAgentStartLock(agentId, async () => {
+    const admission = await heartbeatDispatchFence.run(() => withAgentStartLock(agentId, async () => {
       const agent = await getAgent(agentId);
       if (!agent) return [];
       const invokability = await getAgentInvokability(agent);
@@ -7684,7 +7685,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         });
       }
       return claimedRuns;
-    });
+    }));
+    return admission.admitted ? admission.value : [];
   }
 
   async function executeRun(runId: string) {
