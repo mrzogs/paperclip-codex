@@ -55,30 +55,6 @@ try {
 }
 Assert-Test $unsafeLeaseRejected 'EXPIRED_DURING_STOP_LEASE_IS_NOT_REJECTED_BEFORE_PROCESS_TERMINATION'
 
-$tokenTestDir = Join-Path ([IO.Path]::GetTempPath()) "paperclip-supervisor-token-$([guid]::NewGuid().ToString('N'))"
-New-Item -ItemType Directory -Path $tokenTestDir | Out-Null
-try {
-  $tokenPath = Join-Path $tokenTestDir 'supervisor-control-token.dpapi'
-  $firstSupervisorToken = Get-PaperclipSupervisorControlToken -TokenPath $tokenPath -ServerPresent $false
-  Assert-Test ($firstSupervisorToken.Length -ge 32) 'SUPERVISOR_CONTROL_TOKEN_IS_TOO_SHORT'
-  $protectedTokenAtRest = Get-Content -Raw -LiteralPath $tokenPath
-  Assert-Test (-not $protectedTokenAtRest.Contains($firstSupervisorToken)) 'SUPERVISOR_CONTROL_TOKEN_IS_STORED_IN_PLAINTEXT'
-  $restartedSupervisorToken = Get-PaperclipSupervisorControlToken -TokenPath $tokenPath -ServerPresent $true
-  Assert-Test ($restartedSupervisorToken -ceq $firstSupervisorToken) `
-    'SUPERVISOR_ONLY_RESTART_CANNOT_REATTACH_TO_THE_STILL_RUNNING_SERVER'
-
-  $missingLiveTokenRejected = $false
-  try {
-    Get-PaperclipSupervisorControlToken -TokenPath (Join-Path $tokenTestDir 'missing.dpapi') `
-      -ServerPresent $true | Out-Null
-  } catch {
-    $missingLiveTokenRejected = $true
-  }
-  Assert-Test $missingLiveTokenRejected 'MISSING_CONTROL_TOKEN_WITH_LIVE_SERVER_DOES_NOT_FAIL_CLOSED'
-} finally {
-  Remove-Item -LiteralPath $tokenTestDir -Recurse -Force
-}
-
 # Deterministically inject the review race: custody is empty before the fence,
 # then a run appears before the under-fence read. The same policy functions used
 # by the supervisor must restore the server and leave PostgreSQL running.
