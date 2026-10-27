@@ -18,6 +18,7 @@ try {
   $runtimePaths = @('server.mjs','monitor.mjs','workflow\backend.mjs',
     'workflow\operational-candidate-governance.mjs',
     'workflow\operational-candidate-evaluation.mjs','workflow\operational-candidate-dispatch.mjs',
+    'workflow\targeted-replay-behavior.mjs','workflow\contracts\cicd-vwap-targeted-replay-behavior-v1.json',
     'public\workflow\ui.js','public\index.html','public\app.js')
   $runtimePaths += @(Get-ChildItem -LiteralPath (Join-Path $dashboard 'quant-terminal') -Recurse -File |
     Where-Object { $_.FullName -notmatch '\\(?:data|node_modules)\\' } |
@@ -102,6 +103,19 @@ try {
   try { $null = Get-OceanDeployment -ConfigPath $missingGovernanceManifest } catch { $governanceFailure = $_.Exception.Message }
   Assert-Test ($governanceFailure -eq 'Ocean deployment runtime binding is missing or invalid: workflow\operational-candidate-governance.mjs') `
     'MISSING_CANDIDATE_GOVERNANCE_WAS_ACCEPTED'
+
+  foreach ($requiredTargetedReplayFile in @('workflow\targeted-replay-behavior.mjs',
+      'workflow\contracts\cicd-vwap-targeted-replay-behavior-v1.json')) {
+    $missingTargetedReplay = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
+    $missingTargetedReplay.files = @($missingTargetedReplay.files | Where-Object { $_.relative_path -cne $requiredTargetedReplayFile })
+    $missingTargetedReplay.file_map_sha256 = Get-OceanDeploymentFileMapHash -Entries $missingTargetedReplay.files
+    $missingTargetedReplayManifest = Join-Path $fixture 'deployment-missing-targeted-replay.json'
+    [IO.File]::WriteAllText($missingTargetedReplayManifest,($missingTargetedReplay | ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))
+    $targetedReplayFailure = $null
+    try { $null = Get-OceanDeployment -ConfigPath $missingTargetedReplayManifest } catch { $targetedReplayFailure = $_.Exception.Message }
+    Assert-Test ($targetedReplayFailure -eq "Ocean deployment runtime binding is missing or invalid: $requiredTargetedReplayFile") `
+      "MISSING_TARGETED_REPLAY_FILE_WAS_ACCEPTED: $requiredTargetedReplayFile"
+  }
 
   $missingOperator = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
   $missingOperator.support_files = @($missingOperator.support_files | Where-Object { $_.relative_path -cne 'scripts\ocean-workflow-operator.ps1' })

@@ -973,8 +973,13 @@ test('new operational planning is visible in existing read views but TEST servic
   const f=fixture();try {
     f.complete();const child=f.children()[0];
     const list=readWorkflowView(f.backend,f.human,'view/cases');
-    assert.equal(list.items.find(row=>row.case_id===child.id).planning.kind,'PROPOSAL_PLANNING');
+    const summary=list.items.find(row=>row.case_id===child.id);
+    assert.equal(summary.navigation_only,true);
+    assert.equal(summary.protected_actions_allowed,false);
+    assert.equal(summary.validation_state,'NOT_EVALUATED_IN_LIST');
+    assert.equal(summary.planning,undefined);
     const view=readWorkflowView(f.backend,f.human,`view/cases/${child.id}`);
+    assert.equal(view.planning.kind,'PROPOSAL_PLANNING');
     assert.equal(view.namespace,'OPERATIONAL');assert.equal(view.tasks.length,1);assert.match(view.next_action,/Owner brain/);
     const testActor={...f.actor,namespace:'TEST'};
     assert.throws(()=>f.backend.readCase(testActor,child.id),/TEST_PLANNING_CASE_ACCESS_REJECTED/);
@@ -1632,6 +1637,10 @@ test('candidate completion survives restart and registration requires an approve
     assert.match(html,/Candidate testing: DUE/);assert.match(html,/Historical validation/);
     assert.match(html,/Paper, Live and promotion remain disabled/);
     assert.match(html,/Candidate governance: REQUIRED/);assert.match(html,/Register candidate governance before planning/);
+    const pendingMemoryHtml=page({...readWorkflowView(f.backend,f.human,`view/cases/${child.id}`),candidate_evaluation:{
+      status:'COMPLETED',conclusion:'BENEFIT_NOT_ESTABLISHED',brain_writeback:'REQUIRED',
+      next_action:'Record the checked assessment in strategy memory.'}});
+    assert.match(pendingMemoryHtml,/Assessment recorded in Ocean; strategy memory writeback is still required/);
     assert.doesNotMatch(html,/Candidate testing: NOT_DUE|Planning only; no candidate development or test permission/);
     f.backend.db.exec('SAVEPOINT legacy_candidate_read_model');
     try {

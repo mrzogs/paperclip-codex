@@ -1,4 +1,5 @@
 import { digest, exactKeys, id, objectHash, requireThat } from './common.mjs';
+import { TARGETED_REPLAY_STRATEGY_ID } from './targeted-replay-behavior.mjs';
 
 export const CANDIDATE_GOVERNANCE_VERSION='ocean-operational-candidate-governance/v6';
 export const CANDIDATE_GOVERNANCE_ACTION='operational.candidate.governance.registered';
@@ -31,6 +32,10 @@ export class OperationalCandidateGovernance {
     if(!registered)return {schema_version:CANDIDATE_GOVERNANCE_VERSION,status:'NOT_DUE',governance_hash:null,
       artifact_id:null,reason:null,next_action:null,exposures:[]};
     const governance=this.governance(row.id),prospective=this.prospectivePlan(row.id),plan=dispatch?.validationPlan(row.id),exposures=this.exposures(row.id);
+    if(row.strategy_id===TARGETED_REPLAY_STRATEGY_ID && plan && !plan.targeted_replay)
+      return {schema_version:CANDIDATE_GOVERNANCE_VERSION,status:'LEGACY_INCOMPLETE',governance_hash:governance?.governance_hash || null,
+        artifact_id:governance?.artifact_id || null,reason:'Historical plan predates the targeted Replay behavior contract and is quarantined.',
+        next_action:'Start a fresh candidate attempt with a frozen targeted Replay plan. Preserve historical evidence; no new result or benefit conclusion can use this plan.',exposures};
     if(!governance){
       const legacy=Boolean(plan);
       return {schema_version:CANDIDATE_GOVERNANCE_VERSION,status:legacy?'LEGACY_INCOMPLETE':prospective?'PROSPECTIVE_RESERVED':'REQUIRED',governance_hash:null,

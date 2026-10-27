@@ -107,6 +107,39 @@ async function check(name, action) {
   });
 }
 
+await check('targeted local failure and pending Brain writeback cannot advance to Shadow through the real HTTP transition API',async()=>{
+  const a=await app();
+  try{
+    const initial=await a.newCase(),caseId=initial.case_id;
+    // Seed the separately registered operational strategy in this disposable
+    // store; the legacy shared profile schema accepts underscore IDs only.
+    const targeted='cicd-vwap-pull-back-strategy';
+    a.backend().db.prepare('INSERT INTO ow_strategies SELECT ?,profile_id,revision,baseline_hash,payload_json FROM ow_strategies WHERE id=?')
+      .run(targeted,STRATEGY);
+    a.backend().db.prepare('UPDATE ow_instances SET strategy_id=? WHERE id=?').run(targeted,INSTANCE);
+    for(const identity of a.config.identities){identity.strategy_ids.push(targeted);
+      a.backend().db.prepare('UPDATE ow_identities SET metadata_json=? WHERE id=?').run(JSON.stringify(identity),identity.identity_id);}
+    a.backend().db.prepare("UPDATE ow_cases SET stage='CANDIDATE_EVALUATION',strategy_id=? WHERE id=?").run(targeted,caseId);
+    for(const [kind,conclusion] of [['NO_BENEFIT','BENEFIT_NOT_ESTABLISHED'],['EVIDENCE','BENEFIT_NOT_ESTABLISHED'],['EVALUATION','BENEFIT_SUPPORTED']]){
+      const artifact=await a.artifact(caseId,kind,{payload:{schema_version:'ocean-operational-candidate-evaluator/v2',
+        pipeline_status:'LOCAL_ASSESSMENT_COMPLETE_BRAIN_WRITEBACK_REQUIRED',conclusion,benefit_conclusion:conclusion,
+        brain_record:null,brain_writeback:{status:'REQUIRED'}}});
+      const current=await a.getCase(caseId);
+      for(const role of ['HUMAN','BRAIN']){
+        const response=await a.fetchJson('transitions',{role,data:{case_id:caseId,expected_revision:current.revision,
+          action:'advance',to_stage:'SHADOW_REVIEW',artifact_id:artifact.manifest.artifact_id}});
+        assert.equal(response.status,409,`${kind} must not authorize Shadow`);
+      }
+      assert.equal((await a.getCase(caseId)).stage,'CANDIDATE_EVALUATION');
+    }
+    const actual=a.backend().operationalCandidateEvaluator.statusForCase;
+    a.backend().operationalCandidateEvaluator.statusForCase=()=>({status:'COMPLETED',brain_writeback:'REQUIRED',
+      next_action:'Brain integration owner must record this checked assessment.'});
+    try{assert.equal((await a.getCase(caseId)).next_action,'Brain integration owner must record this checked assessment.');}
+    finally{a.backend().operationalCandidateEvaluator.statusForCase=actual;}
+  }finally{await a.close();}
+});
+
 await check("GOV-01 CFG-02: authentication failures, role separation, browser CSRF/origin and no token responses", async () => {
   const a = await app();
   try {
