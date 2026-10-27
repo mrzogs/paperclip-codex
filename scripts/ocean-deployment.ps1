@@ -59,6 +59,8 @@ function Get-OceanDeployment {
     'workflow\operational-candidate-governance.mjs',
     'workflow\operational-candidate-evaluation.mjs',
     'workflow\operational-candidate-dispatch.mjs',
+    'workflow\targeted-replay-behavior.mjs',
+    'workflow\contracts\cicd-vwap-targeted-replay-behavior-v1.json',
     'public\workflow\ui.js',
     'public\index.html',
     'public\app.js',

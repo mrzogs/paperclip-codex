@@ -233,7 +233,9 @@ export class OperationalCandidateEvaluator {
       return {kind:item.kind,artifact_id:item.artifact_id,manifest_sha256:item.manifest_sha256,content_sha256:item.content_sha256,
         execution_bindings:content.execution_bindings,baseline_net_pnl:Number(metric('baseline','net_pnl')),
         candidate_net_pnl:Number(metric('candidate','net_pnl')),candidate_trade_count:Number(metric('candidate','trade_count')),
-        contradiction_count:content.contradictions.length,limitation_count:content.limitations.length};
+        contradiction_count:content.contradictions.length,limitation_count:content.limitations.length,
+        ...(content.targeted_behavior?.independent_verdict
+          ?{targeted_independent_verdict:content.targeted_behavior.independent_verdict}:{})};
     });
   }
   expectedBindings(request){
@@ -265,11 +267,34 @@ export class OperationalCandidateEvaluator {
     const positive=deltas.filter(value=>value>1e-6).length,negative=deltas.filter(value=>value< -1e-6).length;
     const cumulativeDelta=deltas.reduce((sum,value)=>sum+value,0);
     const candidateTrades=echoes.reduce((sum,item)=>sum+item.candidate_trade_count,0);
+    let targetedIndependent=null;
+    try{
+      const plan=JSON.parse(request.validation_plan.content_json);
+      if(plan.targeted_replay){
+        const independent=echoes.filter(item=>['WALK_FORWARD','OOS_HOLDOUT'].includes(item.kind));
+        requireThat(independent.length===2 && independent.every(item=>item.targeted_independent_verdict),
+          409,'TARGETED_REPLAY_INDEPENDENT_EVIDENCE_REQUIRED');
+        const candidateNetPnl=independent.reduce((sum,item)=>sum+item.candidate_net_pnl,0);
+        const passes=independent.every(item=>{
+          const verdict=item.targeted_independent_verdict;
+          return verdict.verdict==='PASS' && verdict.all_predeclared_windows_reported===true
+            && verdict.positive_net_after_costs===true && verdict.controlled_drawdown===true
+            && verdict.no_single_trade_dependence===true;
+        }) && candidateNetPnl>0;
+        targetedIndependent={tests_evaluated:independent.length,candidate_net_pnl:candidateNetPnl,
+          positive_net_after_costs:candidateNetPnl>0,all_tests_passed:passes};
+      }
+    }catch(error){
+      if(error?.code)throw error;
+      requireThat(false,409,'TARGETED_REPLAY_PLAN_INVALID');
+    }
     const thresholdsMet=positive>=policy.minimum_positive_tests && negative<=policy.maximum_negative_tests
       && cumulativeDelta>=policy.minimum_cumulative_net_pnl_delta && candidateTrades>=policy.minimum_candidate_trade_count;
     return {schema_version:'ocean-candidate-evaluation-policy-assessment/v1',tests_evaluated:echoes.length,
       positive_tests:positive,negative_tests:negative,neutral_tests:echoes.length-positive-negative,
-      cumulative_net_pnl_delta:cumulativeDelta,candidate_trade_count:candidateTrades,thresholds_met:thresholdsMet};
+      cumulative_net_pnl_delta:cumulativeDelta,candidate_trade_count:candidateTrades,
+      ...(targetedIndependent?{targeted_independent:targetedIndependent}:{}),
+      thresholds_met:thresholdsMet && (!targetedIndependent || targetedIndependent.all_tests_passed)};
   }
   verifyResponse(response,request){
     let content;try{content=JSON.parse(response?.content || '');}catch{}

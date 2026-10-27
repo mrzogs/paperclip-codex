@@ -1,0 +1,34 @@
+{
+  "schema_version": "cicd-vwap-targeted-replay-behavior-contract/v1",
+  "strategy_id": "cicd-vwap-pull-back-strategy",
+  "status": "ACTIVE_GOVERNANCE_NO_RUNTIME_AUTHORITY",
+  "objective": "Use bounded Replay Two episodes to verify whether one candidate changes the intended entry, stop, target, exit and resulting trade behavior under a predeclared market condition; require independent evidence of positive net profit after costs before Paper review.",
+  "stages": [
+    {
+      "name": "AS_BUILT_DIAGNOSTIC",
+      "allowed_source_roles": ["PAPER_SPENT_DIAGNOSTIC", "DISCOVERY"],
+      "allowed_claim": "As-built execution and telemetry parity only",
+      "prohibited_claims": ["rule_or_threshold_selection_from_paper", "candidate_ranking_from_paper", "independent_confirmation_from_a_seen_episode"]
+    },
+    {
+      "name": "DISCOVERY_BEHAVIOR_EXPERIMENT",
+      "allowed_source_roles": ["DISCOVERY"],
+      "selection": "Freeze a selector using only pre-event inputs, enumerate every matching qualified discovery episode and declared positive/negative controls, then compare the exact baseline and one-mechanism candidate in bounded Replay Two segments.",
+      "allowed_claim": "Mechanism development and candidate rejection or freeze, never independent confirmation"
+    },
+    {
+      "name": "INDEPENDENT_CONFIRMATION",
+      "allowed_source_roles": ["VALIDATION", "BACKWARD_REGRESSION", "PROTECTED_HOLDOUT", "FORWARD"],
+      "selection": "Use every predeclared eligible window and contract without narrowing after results are seen; preserve spent-role rules.",
+      "allowed_claim": "Governed verdict on the frozen candidate only; no redesign or threshold selection"
+    }
+  ],
+  "required_per_case": ["case_id", "dataset_role_and_immutable_source", "market_condition_pre_event_definition", "selector_version_and_all_match_count", "start_end_timezone_warmup", "baseline_and_candidate_code_binary_config_hashes", "expected_entry_stop_target_exit_behavior", "actual_orders_fills_stop_target_exit_trace", "fees_slippage_net_pnl", "avoided_losers_and_skipped_winners", "counterexamples", "run_receipt_and_evidence_hashes"],
+  "acceptance": {
+    "behavior": "The candidate must exhibit the declared behavior on the targeted cases without altering unrelated VWAP rules; report every matching case and counterexample.",
+    "profit": "The frozen candidate must show positive net profit after realistic costs with controlled drawdown and no single-trade dependence on independent predeclared evidence. A smaller loss does not pass.",
+    "scope": "Targeted episodes test the mechanism; they do not replace the independent profitability verdict or a human Paper decision. No arbitrary multi-month replay is required solely to reproduce a mechanism."
+  },
+  "execution_gates": ["qualified_causal_source_and_role", "physical_Replay_Two_host_attestation", "exact_source_binary_config_identity", "frozen_case_plan_and_all_matches", "separate_governed_run_authority"],
+  "safety": {"production_version": null, "automatic_approval": false, "brain_normal_ingestion": false, "live_real": "DISABLED", "real_order_routing": "PROHIBITED", "paper_requires_human_approval": true}
+}

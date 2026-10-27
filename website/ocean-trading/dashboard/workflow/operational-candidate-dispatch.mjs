@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { digest, exactKeys, id, noSecrets, objectHash, requireThat } from './common.mjs';
+import { TARGETED_REPLAY_STRATEGY_ID, validateTargetedReplayPlanBinding, validateTargetedReplayResultBinding } from './targeted-replay-behavior.mjs';
 
 export const CANDIDATE_DISPATCH_VERSION='ocean-operational-candidate-dispatch/v2';
 export const CANDIDATE_VALIDATION_VERSION='ocean-operational-candidate-validation/v4';
@@ -422,7 +423,9 @@ export class OperationalCandidateDispatch {
   }
 
   recordValidationPlan(actor,row,completed,registered,data){
-    exactKeys(data,['case_id','expected_revision','completion_hash','candidate_hash','baseline_hash','plan_artifact_id','tests','supersedes_plan_hash']);
+    const targetedReplayRequired=row.strategy_id===TARGETED_REPLAY_STRATEGY_ID;
+    exactKeys(data,['case_id','expected_revision','completion_hash','candidate_hash','baseline_hash','plan_artifact_id','tests','supersedes_plan_hash',
+      ...(targetedReplayRequired?['targeted_replay_plan']:[])]);
     this.b.expect(row,data.expected_revision);this.b.active(row);this.b.baseline(row);
     const existing=this.validationPlan(row.id);
     let tasks=[];
@@ -509,6 +512,9 @@ export class OperationalCandidateDispatch {
       return {...structuredClone(test),segments};
     });
     requireThat(tests.at(-1).segments.every(segment=>segment.dataset_role==='HOLDOUT'),422,'CANDIDATE_VALIDATION_HOLDOUT_REQUIRED');
+    const targetedReplay=targetedReplayRequired?validateTargetedReplayPlanBinding(data.targeted_replay_plan,tests):null;
+    if(existing && tasks.some(task=>task.status==='PASS'))
+      requireThat(objectHash(existing.targeted_replay || null)===objectHash(targetedReplay || null),409,'TARGETED_REPLAY_ACCEPTED_EVIDENCE_PLAN_CONFLICT');
     const governance=this.b.operationalCandidateGovernance.requirePlanReady(row,tests,{existing:Boolean(existing)});
     const now=new Date().toISOString();
     const createdAt=existing && Date.parse(now)<Date.parse(existing.created_at_utc)?existing.created_at_utc:now;
@@ -517,6 +523,7 @@ export class OperationalCandidateDispatch {
       completion_hash:completed.completion_hash,candidate_hash:registered.candidate_hash,baseline_hash:row.baseline_hash,
       decision_id:existing?.decision_id || approvedDecisionId(this.b.approved(row,'DEVELOPMENT')),
       owner_id:existing?.owner_id || actor.id,governance_hash:governance.governance_hash,tests,
+      ...(targetedReplay?{targeted_replay:targetedReplay}:{}),
       authority:{...authority,authorized_tests:REQUIRED_TESTS,execution_environment:'REPLAY'},created_at_utc:createdAt};
     const plan={...frozen,plan_hash:objectHash(frozen)};
     this.b.event(row.id,validationPlanAction,actor,plan);
@@ -568,7 +575,10 @@ export class OperationalCandidateDispatch {
   }
 
   validateResult(row,completed,registered,plan,test,result){
-    exactKeys(result,['status','segments','baseline','candidate','checks','comparison','contradictions','limitations','provenance']);
+    const targetedReplayRequired=row.strategy_id===TARGETED_REPLAY_STRATEGY_ID;
+    exactKeys(result,['status','segments','baseline','candidate','checks','comparison','contradictions','limitations','provenance',
+      ...(targetedReplayRequired?['targeted_behavior']:[])]);
+    requireThat(!targetedReplayRequired || plan.targeted_replay,409,'TARGETED_REPLAY_BINDING_REQUIRED');
     requireThat(['PASS','FAIL','BLOCKED'].includes(result.status),422,'CANDIDATE_VALIDATION_RESULT_STATUS_REQUIRED');
     requireThat(result.comparison && typeof result.comparison==='object' && !Array.isArray(result.comparison)
       && Array.isArray(result.contradictions) && Array.isArray(result.limitations)
@@ -772,6 +782,8 @@ export class OperationalCandidateDispatch {
     requireThat(Number.isFinite(result.comparison.reported_delta)
       && sameNumber(result.comparison.reported_delta,result.candidate.net_pnl-result.baseline.net_pnl)
       && Array.isArray(result.contradictions) && Array.isArray(result.limitations),409,'CANDIDATE_VALIDATION_COMPARISON_CONFLICT');
+    const targetedBehavior=targetedReplayRequired
+      ?validateTargetedReplayResultBinding(plan.targeted_replay,test,result.targeted_behavior,result):null;
     return {schema_version:CANDIDATE_VALIDATION_VERSION,case_id:row.id,plan_hash:plan.plan_hash,
       governance_hash:plan.governance_hash || null,
       plan_artifact_id:completed.plan_artifact_id,completion_hash:completed.completion_hash,candidate_hash:registered.candidate_hash,
@@ -779,6 +791,7 @@ export class OperationalCandidateDispatch {
         baseline:{logical_hash:row.baseline_hash,strategy_version:test.baseline_version,runs:bindingRuns.baseline},
         candidate:{logical_hash:registered.candidate_hash,strategy_version:candidateExecutionVersion(test,completed),runs:bindingRuns.candidate}},
       status:result.status,evidence_integrity_passed:integrity,...structuredClone(result),segments:measured,
+      ...(targetedBehavior?{targeted_behavior:targetedBehavior}:{}),
       recorded_at_utc:new Date().toISOString(),authority:{...authority,execution_environment:'REPLAY'}};
   }
 
