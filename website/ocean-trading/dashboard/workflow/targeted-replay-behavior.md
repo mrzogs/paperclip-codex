@@ -90,6 +90,12 @@ Independent failures become durable local `BENEFIT_NOT_ESTABLISHED` results,
 without creating a contradictory positive Brain record. A required, owned
 `CANDIDATE_BRAIN_WRITEBACK` task keeps the missing strategy-memory integration
 visible. These completed local assessments cannot enter a retry loop.
+Failed assessments use `NO_BENEFIT`; locally passing assessments awaiting
+receiver support use `EVIDENCE`. Neither artifact satisfies the evaluation
+artifact required to advance toward Paper. The Shadow transition additionally
+requires the evaluator's completed, matching `BENEFIT_SUPPORTED` job, successful
+independent assessment and stored Brain readback. The case's primary next action
+continues to show the required memory integration work.
 
 The deployed Brain receiver also requires a separate compatibility slice for
 the new targeted plan/trace evidence. Locally passing targeted assessments

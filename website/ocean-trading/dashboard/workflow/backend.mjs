@@ -25,6 +25,7 @@ import { CONTINUATION_ORIGIN } from './operational-continuation.mjs';
 import { PaperForwardPreparation } from './paper-forward-preparation.mjs';
 import { OperationalCandidateDispatch } from './operational-candidate-dispatch.mjs';
 import { OperationalCandidateGovernance } from './operational-candidate-governance.mjs';
+import { TARGETED_REPLAY_STRATEGY_ID } from './targeted-replay-behavior.mjs';
 import { CANDIDATE_EVALUATOR_VERSION, OperationalCandidateEvaluator } from './operational-candidate-evaluation.mjs';
 import {
   activateStrategyOnboarding,
@@ -722,6 +723,18 @@ export class WorkflowBackend {
       requireThat(rule && rule.roles.includes(actor.role), 409, "INVALID_OR_UNAUTHORIZED_TRANSITION");
       if (rule.artifact) {
         const artifact = this.artifactFor(row, data.artifact_id, rule.artifact);
+        if(row.strategy_id===TARGETED_REPLAY_STRATEGY_ID && row.stage==='CANDIDATE_EVALUATION' && rule.to==='SHADOW_REVIEW'){
+          const assessment=JSON.parse(Buffer.from(artifact.content).toString('utf8'));
+          const evaluation=this.operationalCandidateEvaluator.job(row.id);
+          requireThat(assessment.conclusion==='BENEFIT_SUPPORTED' && assessment.benefit_conclusion==='BENEFIT_SUPPORTED'
+            && assessment.pipeline_status==='PIPELINE_COMPLETED' && assessment.targeted_assessment?.verdict==='PASS'
+            && !assessment.brain_writeback && assessment.brain_record?.record_id
+            && evaluation?.state==='COMPLETED' && evaluation.conclusion==='BENEFIT_SUPPORTED'
+            && evaluation.result_artifact_id===artifact.id && evaluation.brain_readback_json
+            && evaluation.brain_record_id===assessment.brain_record.record_id
+            && evaluation.plan_hash===this.operationalCandidateDispatch.validationPlan(row.id)?.plan_hash,
+            409,'TARGETED_REPLAY_BENEFIT_REQUIRED_FOR_SHADOW');
+        }
         if (rule.artifact === "CANDIDATE") {
           const development = this.approved(row, "DEVELOPMENT");
           requireThat(JSON.parse(artifact.dependencies_json).includes(development.binding.artifact_id), 409, "CANDIDATE_RECOMMENDATION_DEPENDENCY_REQUIRED");
@@ -879,7 +892,7 @@ export class WorkflowBackend {
       || {status:'NOT_DUE',attempts:0,next_attempt_utc:null,lease_expires_utc:null,error:null,input_hash:null,
         brain_record_id:null,brain_content_hash:null,result_artifact_id:null,result_hash:null,conclusion:null,
         authority:{automatic_strategy_change:false,candidate_approved:false,paper_authorized:false,live_authorized:false,automatic_promotion:false}};
-    const evaluationAction={QUEUED:'Ocean is queueing the completed validation evidence for Obsidian Brain evaluation.',PENDING:'Ocean is preparing the immutable evaluation request.',RUNNING:'Obsidian Brain is evaluating the frozen cumulative evidence.',RETRY:'Candidate evaluation will retry automatically after a temporary service failure.',BLOCKED:'Candidate evaluation is blocked; inspect the recorded error and repair the named binding.',COMPLETED:'Candidate evaluation is complete; review its immutable conclusion before any further governed action.'}[candidateEvaluation.status];
+    const evaluationAction=candidateEvaluation.next_action || {QUEUED:'Ocean is queueing the completed validation evidence for Obsidian Brain evaluation.',PENDING:'Ocean is preparing the immutable evaluation request.',RUNNING:'Obsidian Brain is evaluating the frozen cumulative evidence.',RETRY:'Candidate evaluation will retry automatically after a temporary service failure.',BLOCKED:'Candidate evaluation is blocked; inspect the recorded error and repair the named binding.',COMPLETED:'Candidate evaluation is complete; review its immutable conclusion before any further governed action.'}[candidateEvaluation.status];
     const governanceBlocksCurrentAttempt=candidateDispatch?.status==='REGISTERED'
       && !['READY','NOT_DUE'].includes(candidateGovernance.status);
     const effectiveWaitingOn=governanceBlocksCurrentAttempt ? candidateGovernance.next_action : row.waiting_on;

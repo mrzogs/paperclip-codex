@@ -468,7 +468,7 @@ export class OperationalCandidateEvaluator {
       const content=canonical(result),hash=digest(content),artifactId=`test-candidate-assessment-${hash.slice(7,31)}`;
       const brainActor=this.b.operationalLearning.brainActor(row.strategy_id,row.instance_id);
       this.b.writeArtifact(brainActor,{artifact_id:artifactId,case_id:row.id,run_id:row.run_id,
-        recipient_id:completed.recipient_id,kind:'EVALUATION',media_type:'application/json',content,content_encoding:'utf8',
+        recipient_id:completed.recipient_id,kind:independentFailed?'NO_BENEFIT':'EVIDENCE',media_type:'application/json',content,content_encoding:'utf8',
         content_hash:hash,candidate_hash:row.candidate_hash,
         dependency_ids:[completed.plan_artifact_id,registered.candidate_artifact_id,...snapshot.validation_artifacts.map(item=>item.artifact_id)]});
       this.db.prepare(`INSERT OR IGNORE INTO ow_tasks(id,case_id,kind,status,artifact_id,required)
