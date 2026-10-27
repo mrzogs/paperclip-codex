@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { digest, exactKeys, id, noSecrets, objectHash, requireThat } from './common.mjs';
-import { TARGETED_REPLAY_STRATEGY_ID, validateTargetedReplayPlanBinding, validateTargetedReplayResultBinding } from './targeted-replay-behavior.mjs';
+import { TARGETED_REPLAY_STRATEGY_ID, validateTargetedReplayPlanBinding, validateTargetedReplayResultBinding, verifyTargetedReplayAuthority } from './targeted-replay-behavior.mjs';
 
 export const CANDIDATE_DISPATCH_VERSION='ocean-operational-candidate-dispatch/v2';
 export const CANDIDATE_VALIDATION_VERSION='ocean-operational-candidate-validation/v4';
@@ -128,6 +128,9 @@ export class OperationalCandidateDispatch {
         && report.completion_hash===completed?.completion_hash
         && report.candidate_hash===row.candidate_hash && report.baseline_hash===row.baseline_hash
         && report.status==='PASS' && report.evidence_integrity_passed===true
+        && (row.strategy_id!==TARGETED_REPLAY_STRATEGY_ID || (plan.targeted_replay
+          && report.targeted_behavior?.plan_hash===plan.targeted_replay.plan_hash
+          && Array.isArray(report.targeted_behavior.verified_candidate_trades)))
         && objectHash(report.test)===objectHash(test)
         && exactObjectKeys(report.comparison,['reported_delta'])
         && objectHash(report.authority)===objectHash({...authority,execution_environment:'REPLAY'})
@@ -142,6 +145,9 @@ export class OperationalCandidateDispatch {
     }catch{return false;}
   }
   reconcileValidationArtifacts(actor,row,plan,tasks,{completionEventId=null}={}){
+    if(row.strategy_id===TARGETED_REPLAY_STRATEGY_ID && !plan.targeted_replay)
+      return {case_id:row.id,status:'LEGACY_TARGETED_REPLAY_PLAN_QUARANTINED',
+        next_action:'Preserve historical evidence. Start a fresh governed candidate attempt with a frozen targeted Replay plan before new evidence or a benefit conclusion.'};
     const firstInvalid=REQUIRED_TESTS.findIndex(kind=>{
       const task=tasks.find(item=>item.kind===kind);
       return task?.status==='PASS' && !this.validationArtifactCompatible(row,plan,kind,task.artifact_id);
@@ -233,11 +239,13 @@ export class OperationalCandidateDispatch {
   }
   read(actor,caseId){
     const work=this.load(actor,caseId),lease=this.latest(caseId),completed=this.completion(caseId),registered=this.registration(caseId),now=Date.now();
+    const validation=this.validationPlan(caseId);
+    const quarantined=work.row.strategy_id===TARGETED_REPLAY_STRATEGY_ID && validation && !validation.targeted_replay;
     return {schema_version:CANDIDATE_DISPATCH_VERSION,case_id:caseId,revision:work.row.revision,
       status:registered?'REGISTERED':completed?'BUILT_PENDING_REVIEW':lease && lease.lease_until_ms>now?'IN_PROGRESS':'READY',
       lease:lease?{lease_id:lease.lease_id,owner_id:lease.owner_id,expires_at_utc:new Date(lease.lease_until_ms).toISOString()}:null,
       completion:completed?this.publicCompletion(completed):null,registration:registered || null,
-      dispatch:this.payload(work),next_action:registered?'Run the four approved Replay-only validation tests and attach their immutable results.':completed?'Wayne must review the exact Replay-only validation request in Ocean; no test or trading authority exists before approval.':'Claim this exact TEST-only engineering brief, build a separately hashed candidate, then use the governed candidate/version/run lifecycle. Claiming does not approve or execute a candidate.'};
+      dispatch:this.payload(work),next_action:quarantined?'Historical validation plan is quarantined. Start a fresh candidate attempt with the targeted Replay contract.':registered?'Run the four approved Replay-only validation tests and attach their immutable results.':completed?'Wayne must review the exact Replay-only validation request in Ocean; no test or trading authority exists before approval.':'Claim this exact TEST-only engineering brief, build a separately hashed candidate, then use the governed candidate/version/run lifecycle. Claiming does not approve or execute a candidate.'};
   }
   forCase(row){
     const payload=JSON.parse(row.payload_json);
@@ -250,7 +258,8 @@ export class OperationalCandidateDispatch {
       completion:completed?this.publicCompletion(completed):null,registration:registered || null,
       governance,validation:validation?{schema_version:validation.schema_version || CANDIDATE_VALIDATION_VERSION,plan_hash:validation.plan_hash,
         governance_hash:validation.governance_hash || null,
-        status:validationComplete?'COMPLETED':'PLANNED',tests:validation.tests.map(test=>({kind:test.kind,
+        status:row.strategy_id===TARGETED_REPLAY_STRATEGY_ID && !validation.targeted_replay
+          ?'LEGACY_TARGETED_REPLAY_PLAN_QUARANTINED':validationComplete?'COMPLETED':'PLANNED',tests:validation.tests.map(test=>({kind:test.kind,
           state:test.kind==='OOS_HOLDOUT' && !this.activeHoldoutRelease(row.id)?'SEALED':'RELEASED'}))}:null};
   }
   queue(actor){
@@ -512,8 +521,9 @@ export class OperationalCandidateDispatch {
       return {...structuredClone(test),segments};
     });
     requireThat(tests.at(-1).segments.every(segment=>segment.dataset_role==='HOLDOUT'),422,'CANDIDATE_VALIDATION_HOLDOUT_REQUIRED');
-    const targetedReplay=targetedReplayRequired?validateTargetedReplayPlanBinding(data.targeted_replay_plan,tests):null;
-    if(existing && tasks.some(task=>task.status==='PASS'))
+    const targetedReplay=targetedReplayRequired?validateTargetedReplayPlanBinding(data.targeted_replay_plan,tests,
+      {verifyAuthority:plan=>verifyTargetedReplayAuthority(this.b,row,plan)}):null;
+    if(existing && (tasks.some(task=>task.status==='PASS') || this.b.operationalCandidateGovernance.exposures(row.id).length>0))
       requireThat(objectHash(existing.targeted_replay || null)===objectHash(targetedReplay || null),409,'TARGETED_REPLAY_ACCEPTED_EVIDENCE_PLAN_CONFLICT');
     const governance=this.b.operationalCandidateGovernance.requirePlanReady(row,tests,{existing:Boolean(existing)});
     const now=new Date().toISOString();
@@ -579,6 +589,7 @@ export class OperationalCandidateDispatch {
     exactKeys(result,['status','segments','baseline','candidate','checks','comparison','contradictions','limitations','provenance',
       ...(targetedReplayRequired?['targeted_behavior']:[])]);
     requireThat(!targetedReplayRequired || plan.targeted_replay,409,'TARGETED_REPLAY_BINDING_REQUIRED');
+    const ledgerBySegment=new Map();
     requireThat(['PASS','FAIL','BLOCKED'].includes(result.status),422,'CANDIDATE_VALIDATION_RESULT_STATUS_REQUIRED');
     requireThat(result.comparison && typeof result.comparison==='object' && !Array.isArray(result.comparison)
       && Array.isArray(result.contradictions) && Array.isArray(result.limitations)
@@ -695,7 +706,7 @@ export class OperationalCandidateDispatch {
           && metricKeys.every(key=>sameNumber(Number(snapshot.metrics?.[key]),Number(value[key])))
           && objectHash(qualityFlags(snapshot.context?.data_quality_flags))===objectHash([...value.data_quality_flags].sort()),
         409,'CANDIDATE_VALIDATION_RUN_SNAPSHOT_CONFLICT');
-        let cost,feeContext;
+        let cost,feeContext,ledgerTrades;
         for(const file of sourceFiles.filter(item=>path.basename(item.path).toLowerCase()==='telemetry.sqlite')){
           try{
             const telemetry=new DatabaseSync(':memory:');
@@ -718,12 +729,19 @@ export class OperationalCandidateDispatch {
                 MIN(fee_source_type) AS min_source_type,MAX(fee_source_type) AS max_source_type
                   FROM trades WHERE run_id=? AND (? IS NULL OR trade_id<>?)`).get(row.strategy_id,value.run_id,value.run_id,
                    value.boundary_cleanup_trade_id,value.boundary_cleanup_trade_id);
+                if(targetedReplayRequired)ledgerTrades=telemetry.prepare(`SELECT trade_id,exit_datetime,gross_currency_value,total_commission,net_profit_loss
+                  FROM trades WHERE run_id=? AND (? IS NULL OR trade_id<>?)`).all(value.run_id,value.boundary_cleanup_trade_id,value.boundary_cleanup_trade_id);
               }
             }finally{telemetry.close();}
             if(cost && feeContext)break;
           }catch{}
         }
         requireThat(cost,409,'CANDIDATE_VALIDATION_TELEMETRY_DATABASE_INVALID');
+        if(targetedReplayRequired){
+          requireThat(Array.isArray(ledgerTrades),409,'TARGETED_REPLAY_TELEMETRY_TRADE_LEDGER_REQUIRED');
+          if(!ledgerBySegment.has(segment.segment_id))ledgerBySegment.set(segment.segment_id,{});
+          ledgerBySegment.get(segment.segment_id)[name]=ledgerTrades;
+        }
         requireThat(feeContext?.fee_model_version===test.cost_model.fee_model_version
           && feeContext?.fee_schedule_hash===test.cost_model.fee_schedule_hash,
         409,'CANDIDATE_VALIDATION_FEE_CONTEXT_CONFLICT');
@@ -783,7 +801,7 @@ export class OperationalCandidateDispatch {
       && sameNumber(result.comparison.reported_delta,result.candidate.net_pnl-result.baseline.net_pnl)
       && Array.isArray(result.contradictions) && Array.isArray(result.limitations),409,'CANDIDATE_VALIDATION_COMPARISON_CONFLICT');
     const targetedBehavior=targetedReplayRequired
-      ?validateTargetedReplayResultBinding(plan.targeted_replay,test,result.targeted_behavior,result):null;
+      ?validateTargetedReplayResultBinding(plan.targeted_replay,test,result.targeted_behavior,result,{ledgerBySegment}):null;
     return {schema_version:CANDIDATE_VALIDATION_VERSION,case_id:row.id,plan_hash:plan.plan_hash,
       governance_hash:plan.governance_hash || null,
       plan_artifact_id:completed.plan_artifact_id,completion_hash:completed.completion_hash,candidate_hash:registered.candidate_hash,

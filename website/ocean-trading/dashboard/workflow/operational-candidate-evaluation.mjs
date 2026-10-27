@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { canonical, digest, objectHash, requireThat } from './common.mjs';
+import { assessIndependentTrades } from './targeted-replay-behavior.mjs';
 
 export const CANDIDATE_EVALUATOR_VERSION='ocean-operational-candidate-evaluator/v2';
 export const CANDIDATE_EVALUATION_REQUEST_VERSION='ocean-candidate-evaluation-request/v2';
@@ -233,9 +234,7 @@ export class OperationalCandidateEvaluator {
       return {kind:item.kind,artifact_id:item.artifact_id,manifest_sha256:item.manifest_sha256,content_sha256:item.content_sha256,
         execution_bindings:content.execution_bindings,baseline_net_pnl:Number(metric('baseline','net_pnl')),
         candidate_net_pnl:Number(metric('candidate','net_pnl')),candidate_trade_count:Number(metric('candidate','trade_count')),
-        contradiction_count:content.contradictions.length,limitation_count:content.limitations.length,
-        ...(content.targeted_behavior?.independent_verdict
-          ?{targeted_independent_verdict:content.targeted_behavior.independent_verdict}:{})};
+        contradiction_count:content.contradictions.length,limitation_count:content.limitations.length};
     });
   }
   expectedBindings(request){
@@ -267,34 +266,26 @@ export class OperationalCandidateEvaluator {
     const positive=deltas.filter(value=>value>1e-6).length,negative=deltas.filter(value=>value< -1e-6).length;
     const cumulativeDelta=deltas.reduce((sum,value)=>sum+value,0);
     const candidateTrades=echoes.reduce((sum,item)=>sum+item.candidate_trade_count,0);
-    let targetedIndependent=null;
-    try{
-      const plan=JSON.parse(request.validation_plan.content_json);
-      if(plan.targeted_replay){
-        const independent=echoes.filter(item=>['WALK_FORWARD','OOS_HOLDOUT'].includes(item.kind));
-        requireThat(independent.length===2 && independent.every(item=>item.targeted_independent_verdict),
-          409,'TARGETED_REPLAY_INDEPENDENT_EVIDENCE_REQUIRED');
-        const candidateNetPnl=independent.reduce((sum,item)=>sum+item.candidate_net_pnl,0);
-        const passes=independent.every(item=>{
-          const verdict=item.targeted_independent_verdict;
-          return verdict.verdict==='PASS' && verdict.all_predeclared_windows_reported===true
-            && verdict.positive_net_after_costs===true && verdict.controlled_drawdown===true
-            && verdict.no_single_trade_dependence===true;
-        }) && candidateNetPnl>0;
-        targetedIndependent={tests_evaluated:independent.length,candidate_net_pnl:candidateNetPnl,
-          positive_net_after_costs:candidateNetPnl>0,all_tests_passed:passes};
-      }
-    }catch(error){
-      if(error?.code)throw error;
-      requireThat(false,409,'TARGETED_REPLAY_PLAN_INVALID');
-    }
     const thresholdsMet=positive>=policy.minimum_positive_tests && negative<=policy.maximum_negative_tests
       && cumulativeDelta>=policy.minimum_cumulative_net_pnl_delta && candidateTrades>=policy.minimum_candidate_trade_count;
     return {schema_version:'ocean-candidate-evaluation-policy-assessment/v1',tests_evaluated:echoes.length,
       positive_tests:positive,negative_tests:negative,neutral_tests:echoes.length-positive-negative,
-      cumulative_net_pnl_delta:cumulativeDelta,candidate_trade_count:candidateTrades,
-      ...(targetedIndependent?{targeted_independent:targetedIndependent}:{}),
-      thresholds_met:thresholdsMet && (!targetedIndependent || targetedIndependent.all_tests_passed)};
+      cumulative_net_pnl_delta:cumulativeDelta,candidate_trade_count:candidateTrades,thresholds_met:thresholdsMet};
+  }
+  effectiveConclusion(snapshot,response){
+    const plan=JSON.parse(snapshot.validation_plan.content_json);
+    if(!plan.targeted_replay)return {conclusion:response.conclusion_type,targeted_assessment:null};
+    const independent=snapshot.validation_artifacts.filter(item=>['WALK_FORWARD','OOS_HOLDOUT'].includes(item.kind))
+      .map(item=>JSON.parse(item.content_json));
+    requireThat(independent.length===2 && independent.every(item=>item.targeted_behavior?.independent_verdict
+      && Array.isArray(item.targeted_behavior.verified_candidate_trades)),409,'TARGETED_REPLAY_INDEPENDENT_EVIDENCE_REQUIRED');
+    const trades=independent.flatMap(item=>item.targeted_behavior.verified_candidate_trades);
+    const identities=trades.map(trade=>`${trade.run_id}:${trade.trade_id}`);
+    requireThat(new Set(identities).size===identities.length,409,'TARGETED_REPLAY_INDEPENDENT_TRADE_DUPLICATE');
+    const assessment=assessIndependentTrades(trades,plan.targeted_replay.plan.independent_acceptance);
+    const allPassed=independent.every(item=>item.targeted_behavior.independent_verdict.verdict==='PASS');
+    return {conclusion:response.conclusion_type==='BENEFIT_SUPPORTED' && (assessment.verdict!=='PASS' || !allPassed)
+      ?'BENEFIT_NOT_ESTABLISHED':response.conclusion_type,targeted_assessment:assessment};
   }
   verifyResponse(response,request){
     let content;try{content=JSON.parse(response?.content || '');}catch{}
@@ -408,13 +399,15 @@ export class OperationalCandidateEvaluator {
         && latestLifecycle?.action===completionAction && latestLifecycle.id===current.completion_event_id
         && latestPlan?.plan_hash===current.plan_hash,409,'CANDIDATE_EVALUATION_EVIDENCE_INVALIDATED');
       const completed=dispatch.completion(row.id),registered=dispatch.registration(row.id);
-      const kind=response.conclusion_type==='NO_BENEFIT'?'NO_BENEFIT':'EVALUATION';
+      const effective=this.effectiveConclusion(snapshot,response);
+      const kind=effective.conclusion==='NO_BENEFIT'?'NO_BENEFIT':'EVALUATION';
       requireThat(kind!=='NO_BENEFIT' || snapshot.evaluation_policy.status==='PREDECLARED',409,'CANDIDATE_EVALUATION_POLICY_REQUIRED');
       const brainContent=JSON.parse(response.content);
       const result={schema_version:CANDIDATE_EVALUATOR_VERSION,pipeline_status:'PIPELINE_COMPLETED',
-        benefit_conclusion:response.conclusion_type,case_id:row.id,job_id:job.id,plan_hash:current.plan_hash,
+        benefit_conclusion:effective.conclusion,case_id:row.id,job_id:job.id,plan_hash:current.plan_hash,
         candidate_hash:current.candidate_hash,governance_hash:snapshot.candidate_governance.parsed.governance_hash,
-        conclusion:response.conclusion_type,brain_record:{record_id:response.record_id,
+        conclusion:effective.conclusion,...(effective.targeted_assessment?{brain_conclusion:response.conclusion_type,
+          targeted_assessment:effective.targeted_assessment}:{}),brain_record:{record_id:response.record_id,
           relative_path:response.relative_path,content_hash:response.content_sha256},evaluation:{schema_version:brainContent.schema_version,
           bindings:response.bindings,evaluation_policy:response.evaluation_policy,conclusion:brainContent.conclusion,
           source_artifacts:response.source_artifacts.map(item=>({kind:item.kind,artifact_id:item.artifact_id,
@@ -428,9 +421,9 @@ export class OperationalCandidateEvaluator {
       const ended=new Date().toISOString();
       this.db.prepare(`UPDATE ow_candidate_evaluation_jobs SET state='COMPLETED',lease_id=NULL,lease_until_ms=NULL,last_error=NULL,
         conclusion=?,result_artifact_id=?,result_hash=?,completed_at_utc=? WHERE id=?`)
-        .run(response.conclusion_type,artifactId,contentHash,ended,current.id);
+        .run(effective.conclusion,artifactId,contentHash,ended,current.id);
       this.b.event(row.id,'operational.candidate.evaluation.completed',{id:'ocean-candidate-evaluator',role:'BRAIN'},
-        {job_id:job.id,plan_hash:current.plan_hash,candidate_hash:current.candidate_hash,conclusion:response.conclusion_type,
+        {job_id:job.id,plan_hash:current.plan_hash,candidate_hash:current.candidate_hash,conclusion:effective.conclusion,
           result_artifact_id:artifactId,result_hash:contentHash,brain_record_id:response.record_id,brain_content_hash:response.content_sha256,authority});
       return this.publicStatus(this.b.one('ow_candidate_evaluation_jobs',job.id));
     });

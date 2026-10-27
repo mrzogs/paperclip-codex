@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { digest, objectHash } from './common.mjs';
 import { OperationalCandidateEvaluator } from './operational-candidate-evaluation.mjs';
 import {
@@ -9,7 +12,10 @@ import {
   validateTargetedReplayBehaviorPlan,
   validateTargetedReplayPlanBinding,
   validateTargetedReplayResultBinding,
+  verifyTargetedReplayAuthority,
+  assessIndependentTrades,
 } from './targeted-replay-behavior.mjs';
+import { OperationalCandidateDispatch } from './operational-candidate-dispatch.mjs';
 
 const sequence=[
   'AS_BUILT_DIAGNOSTIC_FOR_EXACT_SEEN_EPISODES_PARITY_ONLY',
@@ -46,8 +52,13 @@ function readyPlan(){
     physical_replay_host_attested:true,physical_replay_host_attestation_sha256:hash('host-attestation'),
     separate_run_authority:true,run_authority_id:'authority-1',run_authority_sha256:hash('authority'),paper_or_live_authorized:false,
     cases:discovery,independent_windows:independent,
+    independent_acceptance:{source_reference:'human-approved-risk-policy',source_sha256:hash('risk-policy'),max_drawdown:5,max_largest_winner_share:0.5},
     frozen_case_plan_hash:objectHash({cases:discovery,independent_windows:independent})};
 }
+
+// Mock authority proves only the pure binding logic. The backend receipt tests
+// below exercise the distinct authenticated-human and approval-store boundary.
+const bind=(plan,tests)=>validateTargetedReplayPlanBinding(plan,tests,{verifyAuthority:value=>({verified:true,plan_hash:objectHash(value),mock_only:true})});
 
 function testsFor(plan){
   const entries=[plan.cases[0],plan.cases[1],plan.independent_windows[0],plan.independent_windows[1]];
@@ -78,10 +89,21 @@ test('blocked v0.6.235-class plans remain descriptive and fail closed when execu
 });
 
 test('ready plans bind every discovery match and independent window to the sealed Replay validation matrix',()=>{
-  const plan=readyPlan(),binding=validateTargetedReplayPlanBinding(plan,testsFor(plan));
+  const plan=readyPlan(),binding=bind(plan,testsFor(plan));
   assert.equal(binding.discovery_case_count,2);assert.equal(binding.independent_window_count,2);
   const missing=testsFor(plan);missing[0].segments=[];
-  assert.throws(()=>validateTargetedReplayPlanBinding(plan,missing),error=>error.code==='TARGETED_REPLAY_ALL_MATCHES_NOT_SCHEDULED');
+  assert.throws(()=>bind(plan,missing),error=>error.code==='TARGETED_REPLAY_ALL_MATCHES_NOT_SCHEDULED');
+});
+
+test('a frozen selector can enumerate multiple matches but cannot silently omit one',()=>{
+  const plan=readyPlan();
+  plan.cases[1].selector_version=plan.cases[0].selector_version;
+  plan.cases[1].pre_event_condition=plan.cases[0].pre_event_condition;
+  for(const item of plan.cases){item.all_match_count=2;item.match_ids=['backtest','robustness'];}
+  plan.frozen_case_plan_hash=objectHash({cases:plan.cases,independent_windows:plan.independent_windows});
+  assert.equal(bind(plan,testsFor(plan)).discovery_case_count,2);
+  plan.cases.pop();
+  assert.throws(()=>validateTargetedReplayBehaviorPlan(plan),error=>error.code==='TARGETED_REPLAY_SELECTOR_UNIVERSE_INCOMPLETE');
 });
 
 function targetedCase(item,segment){
@@ -108,31 +130,117 @@ function targetedCase(item,segment){
         evidence_sha256:hash('candidate-evidence')}}};
 }
 
-test('independent verdict rejects a smaller loss even when the generic evidence-integrity result is PASS',()=>{
-  const plan=readyPlan(),tests=testsFor(plan),binding=validateTargetedReplayPlanBinding(plan,tests),testPlan=tests[2],item=plan.independent_windows[0];
-  const segment={segment_id:item.window_id,baseline:{run_id:'baseline-run',fees:1,net_pnl:-10,completion_receipt_hash:hash('baseline-receipt')},
-    candidate:{run_id:'candidate-run',fees:1,net_pnl:-2,completion_receipt_hash:hash('candidate-receipt')}};
+function resultFixture(t){
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'ocean-targeted-trace-'));
+  t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+  const plan=readyPlan(),tests=testsFor(plan),binding=bind(plan,tests),testPlan=tests[2],item=plan.independent_windows[0];
+  const segment={segment_id:item.window_id,baseline:{run_id:'baseline-run',trade_count:1,fees:1,net_pnl:-10,completion_receipt_hash:hash('baseline-receipt')},
+    candidate:{run_id:'candidate-run',trade_count:1,fees:1,net_pnl:-2,completion_receipt_hash:hash('candidate-receipt')},source_files:[]};
+  const record=targetedCase(item,segment),ledger={};
+  for(const side of ['baseline','candidate']){
+    const value=segment[side],trade={trade_id:`${side}-trade`,run_id:value.run_id,
+      exit_utc:item.start_utc,exit_sierra_datetime:45700,gross_pnl:value.net_pnl+value.fees,fees:value.fees,slippage:0,net_pnl:value.net_pnl};
+    const event={event_id:`${side}-event`,trade_id:trade.trade_id,at_utc:trade.exit_utc,action:'observed'};
+    const trace={orders:[event],fills:[event],stops:[event],targets:[event],exits:[event]};
+    const evidence={schema_version:'cicd-vwap-targeted-replay-trace/v1',run_id:value.run_id,case_id:item.window_id,
+      config_sha256:item.config_sha256,trace,trades:[trade],zero_trade_case:false,expected_behavior:behavior,
+      behavior_checks:{entry:true,stop:true,target:true,exit:true,unrelated_rules_unchanged:true}};
+    const bytes=JSON.stringify(evidence),file=path.join(root,`${side}-trace.json`),sha256=hash(bytes);
+    fs.writeFileSync(file,bytes);segment.source_files.push({path:file,sha256});
+    record.actual_orders_fills_stop_target_exit_trace[side]=trace;
+    record.run_receipt_and_evidence_hashes[side].evidence_sha256=sha256;
+    ledger[side]=[{trade_id:trade.trade_id,exit_datetime:trade.exit_sierra_datetime,gross_currency_value:trade.gross_pnl,
+      total_commission:trade.fees,net_profit_loss:trade.net_pnl}];
+  }
   const targeted={schema_version:TARGETED_REPLAY_RESULT_VERSION,contract_sha256:TARGETED_REPLAY_CONTRACT_SHA256,
-    plan_hash:binding.plan_hash,cases:[targetedCase(item,segment)],independent_verdict:{all_predeclared_windows_reported:true,
+    plan_hash:binding.plan_hash,cases:[record],independent_verdict:{all_predeclared_windows_reported:true,
       positive_net_after_costs:true,controlled_drawdown:true,no_single_trade_dependence:true,candidate_net_pnl:-2,max_drawdown:2,
-      largest_winner_share:0.4,limits:{max_drawdown:5,max_largest_winner_share:0.5},verdict:'PASS'}};
+      largest_winner_share:0,limits:{max_drawdown:5,max_largest_winner_share:0.5},verdict:'PASS'}};
   const result={segments:[segment],candidate:{net_pnl:-2}};
-  assert.throws(()=>validateTargetedReplayResultBinding(binding,testPlan,targeted,result),
+  return {plan,binding,testPlan,targeted,result,options:{ledgerBySegment:new Map([[item.window_id,ledger]])}};
+}
+
+test('independent verdict rejects a smaller loss even when the generic evidence-integrity result is PASS',t=>{
+  const {binding,testPlan,targeted,result,options}=resultFixture(t);
+  assert.throws(()=>validateTargetedReplayResultBinding(binding,testPlan,targeted,result,options),
     error=>error.code==='TARGETED_REPLAY_INDEPENDENT_VERDICT_CONFLICT');
-  targeted.independent_verdict.positive_net_after_costs=false;targeted.independent_verdict.verdict='FAIL';
-  assert.equal(validateTargetedReplayResultBinding(binding,testPlan,targeted,result).independent_verdict.verdict,'FAIL');
+  targeted.independent_verdict.positive_net_after_costs=false;targeted.independent_verdict.no_single_trade_dependence=false;
+  targeted.independent_verdict.verdict='FAIL';
+  assert.equal(validateTargetedReplayResultBinding(binding,testPlan,targeted,result,options).independent_verdict.verdict,'FAIL');
 });
 
 test('candidate evaluation cannot call independently losing targeted evidence a benefit',()=>{
   const evaluator=new OperationalCandidateEvaluator({db:null,config:{},operationalLearning:{}});
-  const request={evaluation_policy:{status:'PREDECLARED',minimum_positive_tests:2,maximum_negative_tests:0,
-    minimum_cumulative_net_pnl_delta:1,minimum_candidate_trade_count:2},
-    validation_plan:{content_json:JSON.stringify({targeted_replay:{schema_version:'cicd-vwap-targeted-replay-binding/v1'}})}};
-  const echoes=['WALK_FORWARD','OOS_HOLDOUT'].map(kind=>({kind,baseline_net_pnl:-10,candidate_net_pnl:-2,candidate_trade_count:1,
-    targeted_independent_verdict:{verdict:'FAIL',all_predeclared_windows_reported:true,positive_net_after_costs:false,
-      controlled_drawdown:true,no_single_trade_dependence:true}}));
-  const assessment=evaluator.policyAssessment(request,echoes);
-  assert.equal(assessment.cumulative_net_pnl_delta,16);
-  assert.equal(assessment.targeted_independent.candidate_net_pnl,-4);
-  assert.equal(assessment.thresholds_met,false);
+  const snapshot={validation_plan:{content_json:JSON.stringify({targeted_replay:{plan:readyPlan()}})},
+    validation_artifacts:['WALK_FORWARD','OOS_HOLDOUT'].map((kind,index)=>({kind,content_json:JSON.stringify({targeted_behavior:{
+      independent_verdict:{verdict:'FAIL'},verified_candidate_trades:[{run_id:`run-${index}`,trade_id:'1',net_pnl:-2,
+        exit_sierra_datetime:45700+index,behavior_passed:true}]}})}))};
+  const effective=evaluator.effectiveConclusion(snapshot,{conclusion_type:'BENEFIT_SUPPORTED'});
+  assert.equal(effective.targeted_assessment.candidate_net_pnl,-4);
+  assert.equal(effective.conclusion,'BENEFIT_NOT_ESTABLISHED');
+});
+
+test('risk limits cannot be relaxed in the result after independent evidence is seen',t=>{
+  const {binding,testPlan,targeted,result,options}=resultFixture(t);
+  targeted.independent_verdict.limits.max_drawdown=1e12;
+  assert.throws(()=>validateTargetedReplayResultBinding(binding,testPlan,targeted,result,options),
+    error=>error.code==='TARGETED_REPLAY_PREDECLARED_RISK_LIMITS_CONFLICT');
+});
+
+test('nonzero trades cannot use empty trace arrays or an unretained evidence hash',t=>{
+  const f=resultFixture(t);
+  f.targeted.cases[0].actual_orders_fills_stop_target_exit_trace.candidate={orders:[],fills:[],stops:[],targets:[],exits:[]};
+  assert.throws(()=>validateTargetedReplayResultBinding(f.binding,f.testPlan,f.targeted,f.result,f.options),
+    error=>error.code==='TARGETED_REPLAY_TRACE_ARTIFACT_SCOPE_CONFLICT');
+  f.targeted.cases[0].run_receipt_and_evidence_hashes.candidate.evidence_sha256=hash('absent');
+  assert.throws(()=>validateTargetedReplayResultBinding(f.binding,f.testPlan,f.targeted,f.result,f.options),
+    error=>error.code==='TARGETED_REPLAY_TRACE_ARTIFACT_REQUIRED');
+});
+
+test('metadata flags and hash-shaped strings never prove physical or run authority',()=>{
+  const plan=readyPlan();
+  assert.equal(validateTargetedReplayBehaviorPlan(plan).authority_status,'UNPROVEN');
+  assert.throws(()=>validateTargetedReplayPlanBinding(plan,testsFor(plan)),error=>error.code==='TARGETED_REPLAY_AUTHORITY_UNPROVEN');
+  const backend={config:{browser:{subject_id:'wayne-ocean-ui'}},artifactFor:()=>({producer_id:'strategy',content:Buffer.from('{}')})};
+  assert.throws(()=>verifyTargetedReplayAuthority(backend,{strategy_id:plan.strategy_id},plan),
+    error=>error.code==='TARGETED_REPLAY_TRUSTED_ATTESTATION_REQUIRED');
+});
+
+test('authority requires three current human artifacts and the exact stored approval binding',()=>{
+  const plan=readyPlan(),row={strategy_id:plan.strategy_id,instance_id:'replay-two',candidate_hash:hash('registered-candidate')};
+  const common={strategy_id:row.strategy_id,instance_id:row.instance_id,candidate_hash:row.candidate_hash,
+    frozen_case_plan_hash:plan.frozen_case_plan_hash,acceptance_policy_hash:objectHash(plan.independent_acceptance),status:'VERIFIED',
+    verified_at_utc:new Date(Date.now()-1000).toISOString(),expires_at_utc:new Date(Date.now()+60_000).toISOString()};
+  const approval={decision:{id:plan.run_authority_id},binding:{candidate_hash:row.candidate_hash}};
+  const contents={host:{...common,schema_version:'cicd-vwap-physical-replay-host-attestation/v1',gate_issue_id:'OCEA-55'},
+    universe:{...common,schema_version:'cicd-vwap-source-universe-attestation/v1',gate_issue_id:'OCEA-89',qualified_causal_source:true,
+      selector_uses_pre_event_inputs_only:true,all_matches_verified:true,all_independent_windows_verified:true,
+      case_ids:plan.cases.map(item=>item.case_id),independent_window_ids:plan.independent_windows.map(item=>item.window_id)},
+    run:{...common,schema_version:'cicd-vwap-targeted-replay-run-authority/v1',decision_id:approval.decision.id,
+      scope:'BOUNDED_REPLAY_TESTS_ONLY',paper_or_live_authorized:false,approval_binding_sha256:objectHash(approval.binding)}};
+  plan.physical_replay_host_attestation_artifact_id='host';plan.physical_replay_host_attestation_sha256=hash(JSON.stringify(contents.host));
+  plan.source_universe_attestation_artifact_id='universe';plan.source_universe_attestation_sha256=hash(JSON.stringify(contents.universe));
+  plan.run_authority_artifact_id='run';plan.run_authority_sha256=hash(JSON.stringify(contents.run));
+  const backend={config:{browser:{subject_id:'wayne-ocean-ui'}},
+    artifactFor:(_row,id)=>({producer_id:'wayne-ocean-ui',content:Buffer.from(JSON.stringify(contents[id]))}),approved:()=>approval};
+  assert.equal(verifyTargetedReplayAuthority(backend,row,plan).verified,true);
+  contents.run.scope='ANY_RUNTIME';plan.run_authority_sha256=hash(JSON.stringify(contents.run));
+  assert.throws(()=>verifyTargetedReplayAuthority(backend,row,plan),error=>error.code==='TARGETED_REPLAY_RUN_AUTHORITY_UNPROVEN');
+  contents.run.scope='BOUNDED_REPLAY_TESTS_ONLY';plan.run_authority_sha256=hash(JSON.stringify(contents.run));
+  plan.independent_acceptance.max_drawdown=999;
+  assert.throws(()=>verifyTargetedReplayAuthority(backend,row,plan),error=>error.code==='TARGETED_REPLAY_ATTESTATION_SCOPE_CONFLICT');
+});
+
+test('risk metrics use the complete ordered trade series and reject one-trade dependence',()=>{
+  const limits={max_drawdown:5,max_largest_winner_share:0.6};
+  const trades=[4,-2,4].map((net_pnl,index)=>({net_pnl,exit_sierra_datetime:45700+index,run_id:'r',trade_id:String(index),behavior_passed:true}));
+  assert.deepEqual(assessIndependentTrades(trades,limits),{candidate_net_pnl:6,max_drawdown:2,largest_winner_share:0.5,
+    positive_net_after_costs:true,controlled_drawdown:true,no_single_trade_dependence:true,behavior_passed:true,verdict:'PASS'});
+  assert.equal(assessIndependentTrades(trades.slice(0,1),limits).verdict,'FAIL');
+});
+
+test('legacy CICD VWAP evidence is quarantined without changing tasks or reinterpreting its approval',()=>{
+  const dispatch=Object.create(OperationalCandidateDispatch.prototype);
+  const result=dispatch.reconcileValidationArtifacts(null,{id:'legacy',strategy_id:'cicd-vwap-pull-back-strategy'},{},[]);
+  assert.equal(result.status,'LEGACY_TARGETED_REPLAY_PLAN_QUARANTINED');
 });
