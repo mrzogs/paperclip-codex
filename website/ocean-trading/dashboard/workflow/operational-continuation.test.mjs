@@ -973,8 +973,13 @@ test('new operational planning is visible in existing read views but TEST servic
   const f=fixture();try {
     f.complete();const child=f.children()[0];
     const list=readWorkflowView(f.backend,f.human,'view/cases');
-    assert.equal(list.items.find(row=>row.case_id===child.id).planning.kind,'PROPOSAL_PLANNING');
+    const summary=list.items.find(row=>row.case_id===child.id);
+    assert.equal(summary.navigation_only,true);
+    assert.equal(summary.protected_actions_allowed,false);
+    assert.equal(summary.validation_state,'NOT_EVALUATED_IN_LIST');
+    assert.equal(summary.planning,undefined);
     const view=readWorkflowView(f.backend,f.human,`view/cases/${child.id}`);
+    assert.equal(view.planning.kind,'PROPOSAL_PLANNING');
     assert.equal(view.namespace,'OPERATIONAL');assert.equal(view.tasks.length,1);assert.match(view.next_action,/Owner brain/);
     const testActor={...f.actor,namespace:'TEST'};
     assert.throws(()=>f.backend.readCase(testActor,child.id),/TEST_PLANNING_CASE_ACCESS_REJECTED/);
