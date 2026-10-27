@@ -1637,6 +1637,10 @@ test('candidate completion survives restart and registration requires an approve
     assert.match(html,/Candidate testing: DUE/);assert.match(html,/Historical validation/);
     assert.match(html,/Paper, Live and promotion remain disabled/);
     assert.match(html,/Candidate governance: REQUIRED/);assert.match(html,/Register candidate governance before planning/);
+    const pendingMemoryHtml=page({...readWorkflowView(f.backend,f.human,`view/cases/${child.id}`),candidate_evaluation:{
+      status:'COMPLETED',conclusion:'BENEFIT_NOT_ESTABLISHED',brain_writeback:'REQUIRED',
+      next_action:'Record the checked assessment in strategy memory.'}});
+    assert.match(pendingMemoryHtml,/Assessment recorded in Ocean; strategy memory writeback is still required/);
     assert.doesNotMatch(html,/Candidate testing: NOT_DUE|Planning only; no candidate development or test permission/);
     f.backend.db.exec('SAVEPOINT legacy_candidate_read_model');
     try {

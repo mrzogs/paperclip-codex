@@ -785,6 +785,10 @@ function casePage(data) {
        ['Evidence evaluation',badge(candidateEvaluation.status)],
        ['Evaluation conclusion',candidateEvaluation.conclusion?esc(human(candidateEvaluation.conclusion)):'Pending'],
        ['Obsidian Brain record',candidateEvaluation.brain_record_id?esc(candidateEvaluation.brain_record_id):'Not recorded'],
+       ...(candidateEvaluation.brain_writeback==='REQUIRED'?[
+         ['Strategy learning record','Assessment recorded in Ocean; strategy memory writeback is still required.'],
+         ['Learning next action',esc(candidateEvaluation.next_action)],
+       ]:[]),
        ['Evaluation artifact',candidateEvaluation.result_artifact_id?link('artifacts',candidateEvaluation.result_artifact_id):'Not recorded'],
        ['Evaluation authority','Evidence assessment only; no Paper, Live, strategy change or promotion authority'],
        ...(candidateEvaluation.error?[['Evaluation recovery',esc(human(candidateEvaluation.error))]]:[]),

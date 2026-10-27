@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { digest, objectHash } from './common.mjs';
 import { OperationalCandidateEvaluator } from './operational-candidate-evaluation.mjs';
 import {
@@ -178,6 +179,67 @@ test('candidate evaluation cannot call independently losing targeted evidence a 
   const effective=evaluator.effectiveConclusion(snapshot,{conclusion_type:'BENEFIT_SUPPORTED'});
   assert.equal(effective.targeted_assessment.candidate_net_pnl,-4);
   assert.equal(effective.conclusion,'BENEFIT_NOT_ESTABLISHED');
+});
+
+test('losing independent evidence persists a visible terminal rejection across restart with zero Brain calls',async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'ocean-targeted-rejection-')),file=path.join(root,'workflow.sqlite');
+  let db=new DatabaseSync(file);
+  t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});
+  db.exec(`CREATE TABLE ow_cases(id TEXT,stage TEXT,revision INTEGER,owner_id TEXT,waiting_on TEXT,
+    strategy_id TEXT,instance_id TEXT,run_id TEXT,candidate_hash TEXT,baseline_hash TEXT);
+    CREATE TABLE ow_events(id INTEGER PRIMARY KEY,entity_id TEXT,action TEXT,payload_json TEXT);
+    CREATE TABLE ow_candidate_evaluation_jobs(id TEXT,case_id TEXT,state TEXT,attempts INTEGER,next_attempt_ms INTEGER,
+    lease_id TEXT,lease_until_ms INTEGER,completion_event_id INTEGER,plan_hash TEXT,candidate_hash TEXT,
+    brain_record_id TEXT,conclusion TEXT,result_artifact_id TEXT,result_hash TEXT,last_error TEXT,completed_at_utc TEXT);
+    CREATE TABLE ow_artifacts(id TEXT PRIMARY KEY,content TEXT);
+    CREATE TABLE ow_tasks(id TEXT PRIMARY KEY,case_id TEXT,kind TEXT,status TEXT,artifact_id TEXT,required INTEGER,UNIQUE(case_id,kind));`);
+  db.prepare('INSERT INTO ow_cases VALUES(?,?,?,?,?,?,?,?,?,?)').run('case','CANDIDATE_EVALUATION',1,'strategy','evaluate',
+    'cicd-vwap-pull-back-strategy','replay-two','run',hash('candidate'),hash('baseline'));
+  db.prepare('INSERT INTO ow_events VALUES(?,?,?,?)').run(1,'case','operational.candidate.validation.completed','{}');
+  db.prepare('INSERT INTO ow_candidate_evaluation_jobs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+    .run('job','case','RUNNING',1,0,'lease',Date.now()+60_000,1,hash('plan'),hash('candidate'),null,null,null,null,null,null);
+  let brainCalls=0;
+  const backend={config:{},get db(){return db;},store:{transaction:fn=>{db.exec('BEGIN');try{const value=fn();db.exec('COMMIT');return value;}catch(error){db.exec('ROLLBACK');throw error;}}},
+    one:(table,id)=>db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id),
+    writeArtifact:(_actor,data)=>{assert.equal(hash(data.content),data.content_hash);db.prepare('INSERT INTO ow_artifacts VALUES(?,?)').run(data.artifact_id,data.content);},
+    event:(id,action,_actor,payload)=>db.prepare('INSERT INTO ow_events(entity_id,action,payload_json) VALUES(?,?,?)').run(id,action,JSON.stringify(payload)),
+    operationalLearning:{enabled:true,token:()=>{brainCalls++;throw new Error('No token may be obtained');},
+      brainActor:()=>({id:'brain-owner',role:'BRAIN'})},
+    operationalCandidateDispatch:{validationPlan:()=>({plan_hash:hash('plan')}),completion:()=>({recipient_id:'strategy',plan_artifact_id:'plan-artifact'}),
+      registration:()=>({candidate_artifact_id:'candidate-artifact'})}};
+  const evaluator=new OperationalCandidateEvaluator(backend),job=backend.one('ow_candidate_evaluation_jobs','job');
+  const snapshot={candidate_governance:{parsed:{governance_hash:hash('governance')}},
+    validation_plan:{content_json:JSON.stringify({targeted_replay:{plan:readyPlan()}})},
+    validation_artifacts:['WALK_FORWARD','OOS_HOLDOUT'].map((kind,index)=>({kind,artifact_id:`source-${index}`,
+      manifest_sha256:hash(`manifest-${index}`),content_sha256:hash(`source-${index}`),
+      content_json:JSON.stringify({targeted_behavior:{independent_verdict:{verdict:'FAIL'},
+        verified_candidate_trades:[{run_id:`run-${index}`,trade_id:'1',net_pnl:-2,exit_sierra_datetime:45700+index,behavior_passed:true}]}})}))};
+  const response=await evaluator.recordInBrain(job,snapshot);
+  assert.equal(brainCalls,0);assert.equal(response.local_gate_rejection.conclusion,'BENEFIT_NOT_ESTABLISHED');
+  const status=evaluator.completeTargetedAssessment(job,snapshot,response.local_gate_rejection);
+  assert.equal(status.status,'COMPLETED');assert.equal(status.benefit_conclusion,'BENEFIT_NOT_ESTABLISHED');
+  assert.equal(status.pipeline_status,'LOCAL_ASSESSMENT_COMPLETE_BRAIN_WRITEBACK_REQUIRED');
+  const artifact=JSON.parse(db.prepare('SELECT content FROM ow_artifacts').get().content);
+  assert.equal(artifact.targeted_assessment.candidate_net_pnl,-4);
+  assert.equal(artifact.brain_record,null);assert.equal(artifact.sources.length,2);
+  assert.equal(artifact.brain_writeback.normal_ingestion_authorized,false);
+  assert.match(artifact.next_action,/Brain integration owner/);
+  db.close();db=new DatabaseSync(file);evaluator.db=db;
+  assert.equal(evaluator.claim(),null,'terminal rejection cannot re-enter the retry loop after restart');
+  const task=db.prepare('SELECT * FROM ow_tasks').get();
+  assert.equal(task.kind,'CANDIDATE_BRAIN_WRITEBACK');assert.equal(task.status,'BLOCKED');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM ow_artifacts').get().n,1);assert.equal(brainCalls,0);
+});
+
+test('locally passing evidence retains a visible receiver-compatibility dependency without calling the incompatible Brain v2 route',async()=>{
+  const evaluator=new OperationalCandidateEvaluator({config:{},db:null,operationalLearning:{token:()=>{throw new Error('No runtime token use');}}});
+  const snapshot={validation_plan:{content_json:JSON.stringify({targeted_replay:{plan:readyPlan()}})},
+    validation_artifacts:['WALK_FORWARD','OOS_HOLDOUT'].map((kind,index)=>({kind,content_json:JSON.stringify({targeted_behavior:{
+      independent_verdict:{verdict:'PASS'},verified_candidate_trades:[4,-2,4].map((net_pnl,i)=>({run_id:`r-${index}`,trade_id:String(i),
+        net_pnl,exit_sierra_datetime:45700+index*10+i,behavior_passed:true}))}})}))};
+  const response=await evaluator.recordInBrain({},snapshot);
+  assert.equal(response.local_gate_rejection.targeted_assessment.verdict,'PASS');
+  assert.equal(response.local_gate_rejection.brain_writeback_reason,'TARGETED_REPLAY_BRAIN_RECEIVER_COMPATIBILITY_REQUIRED');
 });
 
 test('risk limits cannot be relaxed in the result after independent evidence is seen',t=>{

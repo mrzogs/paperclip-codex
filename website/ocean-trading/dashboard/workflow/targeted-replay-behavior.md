@@ -84,10 +84,22 @@ in read views and result/completion handling. Their artifacts and tasks remain
 unchanged. A fresh governed attempt is required before new evidence can support
 a benefit conclusion. Other strategies retain the existing payload shape.
 
-The Brain v2 request/response wire contract is unchanged. Ocean records its
-additional profitability assessment locally, preserves the actual Brain
-conclusion, and downgrades the effective conclusion when independent evidence
-does not satisfy the contract.
+The Brain v2 request/response wire contract is unchanged. Targeted assessments
+are computed before obtaining a Brain token or making any Brain request.
+Independent failures become durable local `BENEFIT_NOT_ESTABLISHED` results,
+without creating a contradictory positive Brain record. A required, owned
+`CANDIDATE_BRAIN_WRITEBACK` task keeps the missing strategy-memory integration
+visible. These completed local assessments cannot enter a retry loop.
+
+The deployed Brain receiver also requires a separate compatibility slice for
+the new targeted plan/trace evidence. Locally passing targeted assessments
+therefore retain the same explicit writeback task instead of sending an
+unsupported request. Source identities remain frozen for that integration;
+the current PR does not complete autonomous learning. It does not borrow a
+development PROJECT credential, call generic reasoning with a TRADING token,
+or turn on normal ingestion to work around the missing scoped learning path.
+The local completion downgrade remains a further check on any future Brain
+response, preserving the actual response rather than silently rewriting it.
 
 The deployment resolver requires both the validator and original contract.
 Run the targeted behavior, candidate evaluator and continuation tests plus the

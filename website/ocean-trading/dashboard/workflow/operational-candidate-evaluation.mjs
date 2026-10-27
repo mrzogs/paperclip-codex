@@ -36,6 +36,7 @@ export class OperationalCandidateEvaluator {
     WHERE jobs.case_id=? AND cases.stage='CANDIDATE_EVALUATION' ORDER BY jobs.rowid DESC LIMIT 1`).get(caseId) || null;}
   publicStatus(job){
     if(!job)return null;
+    const localRejection=job.state==='COMPLETED' && job.result_artifact_id && !job.brain_record_id;
     const phase=job.result_artifact_id?'RESULT_RECORDED':job.brain_readback_json?'BRAIN_READBACK_VERIFIED':
       job.brain_response_json?'BRAIN_RESPONSE_RECORDED':job.brain_request_json?'BRAIN_REQUEST_RECORDED':
       job.input_json?'INPUT_CAPTURED':job.state==='RUNNING'?'CLAIMED':'QUEUED';
@@ -43,7 +44,9 @@ export class OperationalCandidateEvaluator {
       lease_expires_utc:job.state==='RUNNING' && job.lease_until_ms?new Date(job.lease_until_ms).toISOString():null,
       error:job.last_error || null,input_hash:job.input_hash || null,brain_record_id:job.brain_record_id || null,
       brain_content_hash:job.brain_content_hash || null,result_artifact_id:job.result_artifact_id || null,
-      result_hash:job.result_hash || null,phase,pipeline_status:job.state==='COMPLETED'?'PIPELINE_COMPLETED':job.state,
+      result_hash:job.result_hash || null,phase:localRejection?'LOCAL_ASSESSMENT_RECORDED':phase,
+      pipeline_status:localRejection?'LOCAL_ASSESSMENT_COMPLETE_BRAIN_WRITEBACK_REQUIRED':job.state==='COMPLETED'?'PIPELINE_COMPLETED':job.state,
+      ...(localRejection?{brain_writeback:'REQUIRED',next_action:'Record this candidate assessment in strategy memory through an authorized learning path before closing the learning cycle.'}:{}),
       benefit_conclusion:job.conclusion || null,conclusion:job.conclusion || null,authority};
   }
   statusForCase(caseId){
@@ -345,6 +348,12 @@ export class OperationalCandidateEvaluator {
     return response;
   }
   async recordInBrain(job,snapshot){
+    // The v2 Brain receiver evaluates its existing policy. Reject independently
+    // failing evidence before it can create a contradictory positive record.
+    const effective=this.effectiveConclusion(snapshot,{conclusion_type:'BENEFIT_SUPPORTED'});
+    if(effective.targeted_assessment)return {local_gate_rejection:{...effective,
+      brain_writeback_reason:effective.conclusion!=='BENEFIT_SUPPORTED'
+        ?'AUTHORIZED_SCOPED_REJECTION_LEARNING_PATH_REQUIRED':'TARGETED_REPLAY_BRAIN_RECEIVER_COMPATIBILITY_REQUIRED'}};
     const learner=this.b.operationalLearning,token=learner.token();
     this.renew(job);await learner.verifyIdentity(token);this.renew(job);
     const registry=await learner.registry(token);this.renew(job);
@@ -428,6 +437,53 @@ export class OperationalCandidateEvaluator {
       return this.publicStatus(this.b.one('ow_candidate_evaluation_jobs',job.id));
     });
   }
+  completeTargetedAssessment(job,snapshot,effective){
+    this.renew(job);
+    return this.b.store.transaction(()=>{
+      const current=this.b.one('ow_candidate_evaluation_jobs',job.id);
+      requireThat(current.state==='RUNNING' && current.lease_id===job.lease_id && current.lease_until_ms>Date.now(),
+        409,'CANDIDATE_EVALUATION_LEASE_EXPIRED');
+      const row=this.b.one('ow_cases',current.case_id),dispatch=this.b.operationalCandidateDispatch;
+      const event=this.completionEvent(row.id),latest=this.db.prepare(`SELECT id,action FROM ow_events
+        WHERE entity_id=? AND action IN (?,?) ORDER BY id DESC LIMIT 1`)
+        .get(row.id,completionAction,'operational.candidate.validation.revalidation_required');
+      requireThat(row.stage==='CANDIDATE_EVALUATION' && event?.id===current.completion_event_id
+        && latest?.action===completionAction && latest.id===current.completion_event_id
+        && dispatch.validationPlan(row.id)?.plan_hash===current.plan_hash,409,'CANDIDATE_EVALUATION_EVIDENCE_INVALIDATED');
+      const completed=dispatch.completion(row.id),registered=dispatch.registration(row.id);
+      const independentFailed=effective.targeted_assessment.verdict!=='PASS';
+      const nextAction=independentFailed
+        ?'Keep this candidate unapproved. Brain integration owner: record its rejection through an authorized strategy learning path before closing the learning cycle. Further design requires a fresh frozen discovery attempt.'
+        :'Keep this candidate unapproved. Brain integration owner: verify receiver compatibility for targeted plans and traces, then evaluate these exact frozen artifacts through an authorized strategy learning path.';
+      const result={schema_version:CANDIDATE_EVALUATOR_VERSION,pipeline_status:'LOCAL_ASSESSMENT_COMPLETE_BRAIN_WRITEBACK_REQUIRED',
+        case_id:row.id,job_id:job.id,plan_hash:current.plan_hash,candidate_hash:current.candidate_hash,
+        baseline_hash:row.baseline_hash,governance_hash:snapshot.candidate_governance.parsed.governance_hash,
+        conclusion:'BENEFIT_NOT_ESTABLISHED',benefit_conclusion:'BENEFIT_NOT_ESTABLISHED',
+        targeted_assessment:effective.targeted_assessment,brain_record:null,
+        brain_writeback:{status:'REQUIRED',reason:effective.brain_writeback_reason || 'AUTHORIZED_SCOPED_REJECTION_LEARNING_PATH_REQUIRED',
+          previous_record_id:current.brain_record_id || null,normal_ingestion_authorized:false},
+        sources:snapshot.validation_artifacts.map(item=>({kind:item.kind,artifact_id:item.artifact_id,
+          manifest_sha256:item.manifest_sha256,content_sha256:item.content_sha256})),
+        next_action:nextAction,authority};
+      const content=canonical(result),hash=digest(content),artifactId=`test-candidate-assessment-${hash.slice(7,31)}`;
+      const brainActor=this.b.operationalLearning.brainActor(row.strategy_id,row.instance_id);
+      this.b.writeArtifact(brainActor,{artifact_id:artifactId,case_id:row.id,run_id:row.run_id,
+        recipient_id:completed.recipient_id,kind:'EVALUATION',media_type:'application/json',content,content_encoding:'utf8',
+        content_hash:hash,candidate_hash:row.candidate_hash,
+        dependency_ids:[completed.plan_artifact_id,registered.candidate_artifact_id,...snapshot.validation_artifacts.map(item=>item.artifact_id)]});
+      this.db.prepare(`INSERT OR IGNORE INTO ow_tasks(id,case_id,kind,status,artifact_id,required)
+        VALUES(?,?,'CANDIDATE_BRAIN_WRITEBACK','BLOCKED',?,1)`).run(`brain-writeback-${hash.slice(7,31)}`,row.id,artifactId);
+      this.db.prepare('UPDATE ow_cases SET revision=revision+1,owner_id=?,waiting_on=? WHERE id=?')
+        .run(brainActor.id,nextAction,row.id);
+      this.db.prepare(`UPDATE ow_candidate_evaluation_jobs SET state='COMPLETED',lease_id=NULL,lease_until_ms=NULL,
+        last_error=NULL,conclusion='BENEFIT_NOT_ESTABLISHED',result_artifact_id=?,result_hash=?,completed_at_utc=? WHERE id=?`)
+        .run(artifactId,hash,new Date().toISOString(),current.id);
+      this.b.event(row.id,'operational.candidate.evaluation.completed',brainActor,{job_id:job.id,plan_hash:current.plan_hash,
+        candidate_hash:row.candidate_hash,conclusion:'BENEFIT_NOT_ESTABLISHED',result_artifact_id:artifactId,
+        result_hash:hash,brain_writeback_required:true,next_action:nextAction,authority});
+      return this.publicStatus(this.b.one('ow_candidate_evaluation_jobs',job.id));
+    });
+  }
   fail(job,error){
     const message=safeError(error),leaseLoss=/CANDIDATE_EVALUATION_LEASE_(?:EXPIRED|LOST)/.test(message),blocked=!leaseLoss && ((error?.status>=400 && error?.status<500)
       || /HTTP_(400|401|403|404|409|410|422)|TAMPER|CONFLICT|MISMATCH|INVALID/.test(message));
@@ -441,7 +497,9 @@ export class OperationalCandidateEvaluator {
     try{
       this.reconcile();let job;
       while(!this.stopped && (job=this.claim())){
-        try{const snapshot=this.capture(job),response=await this.recordInBrain(job,snapshot);if(this.stopped)return;this.complete(job,snapshot,response);}
+        try{const snapshot=this.capture(job),response=await this.recordInBrain(job,snapshot);if(this.stopped)return;
+          if(response.local_gate_rejection)this.completeTargetedAssessment(job,snapshot,response.local_gate_rejection);
+          else this.complete(job,snapshot,response);}
         catch(error){if(!this.stopped)this.fail(job,error);}
       }
       this.lastError=null;
