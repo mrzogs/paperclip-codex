@@ -8,6 +8,7 @@ import { getEventListeners } from 'node:events';
 import test from 'node:test';
 import { createMonitorStatusReader, readMonitorStatusFile, MonitorStatusReadError } from './monitor-status.mjs';
 import { shouldWebsiteScheduleManifestRebuild } from './manifest-refresh-policy.mjs';
+import { SYNC_OP } from './sync-stall-catalogue.mjs';
 import { handleVwapImprovementRequest } from './workflow/vwap-improvement-status.mjs';
 
 const source = fs.readFileSync(new URL('./server.mjs', import.meta.url), 'utf8');
@@ -86,6 +87,7 @@ test('actual freshness poll retains rebuild inputs/decisions, never overlaps and
   let tick, timerCount = 0, reads = 0, resolveRead, rejectRead, exists = true, changed = false;
   const inputs = [], logs = [], scheduled = [];
   const context = { manifestFreshnessTimer: null, websiteClosing: false, MANIFEST_FILE: 'FIXTURE_MANIFEST', VWAP_PROJECT_PAPER_SQLITE_FILE: 'FIXTURE_PROJECT',
+    markSync:(_id,work)=>work(),SYNC_OP,
     process: { env: {} }, fs: { existsSync: () => exists }, fileMtimeMs: file => file === 'FIXTURE_MANIFEST' ? 100 : changed ? 102 : 100,
     sqliteInputFiles: file => [file], monitorStatusReader: { read: () => { reads++; return new Promise((resolve, reject) => { resolveRead = resolve; rejectRead = reject; }); } },
     shouldWebsiteScheduleManifestRebuild: values => { inputs.push(JSON.parse(JSON.stringify(values))); return shouldWebsiteScheduleManifestRebuild(values); },

@@ -16,7 +16,10 @@ import { reconcileOperationalReplayRunSettings } from "./workflow/operational-ru
 import { initializeAvailableWorkflow } from "./workflow/startup-availability.mjs";
 import { readVwapContinuousImprovementState } from "./workflow/vwap-continuous-improvement-monitor.mjs";
 import { handleVwapImprovementRequest } from "./workflow/vwap-improvement-status.mjs";
-import { handleQuantTerminalRequest, initializeQuantTerminal, stopQuantTerminal } from "./quant-terminal/server.js";
+import { handleQuantTerminalRequest, initializeQuantTerminal, stopQuantTerminal, setQuantSyncObserver } from "./quant-terminal/server.js";
+import {initializeSyncStallCapture,stopSyncStallCapture} from './sync-stall-capture.mjs';
+import {markSync} from './sync-stall-markers.mjs';
+import {SYNC_OP} from './sync-stall-catalogue.mjs';
 import { createMonitorStatusReader, MonitorStatusReadError } from './monitor-status.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -157,6 +160,7 @@ let lastPaperclipSyncAt = 0;
 let cachedManifestPayload = null;
 let cachedManifestSignature = null;
 const hmmStatusOnlySuppressionCache = new Set();
+void initializeSyncStallCapture(process.env,{setQuantObserver:setQuantSyncObserver});
 
 function resolvePaperclipWebBaseUrl() {
   const configured = process.env.PAPERCLIP_WEB_BASE_URL || process.env.PAPERCLIP_UI_URL || process.env.PAPERCLIP_BASE_URL;
@@ -190,7 +194,7 @@ function companyIssuesPath({ limit = 100, projectId = "" } = {}) {
 
 function fileMtimeMs(filePath) {
   try {
-    return fs.statSync(filePath).mtimeMs;
+    return markSync(SYNC_OP.FILE_STAT,()=>fs.statSync(filePath).mtimeMs);
   } catch {
     return 0;
   }
@@ -377,10 +381,10 @@ function startManifestFreshnessPoll() {
     if (inFlight || websiteClosing) return;
     inFlight = true;
     try {
-      const manifestMtime = fileMtimeMs(manifestPath);
+      const manifestMtime = markSync(SYNC_OP.POLL_MANIFEST,()=>fileMtimeMs(manifestPath));
       const projectTelemetryChanged = sqliteInputFiles(VWAP_PROJECT_PAPER_SQLITE_FILE)
-        .some((file) => fileMtimeMs(file) > manifestMtime + 1);
-      const manifestExists = fs.existsSync(manifestPath);
+        .some((file) => markSync(SYNC_OP.POLL_INPUT,()=>fileMtimeMs(file)) > manifestMtime + 1);
+      const manifestExists = markSync(SYNC_OP.POLL_EXISTS,()=>fs.existsSync(manifestPath));
       const monitor = await monitorStatusReader.read();
       if (websiteClosing) return;
       if (shouldWebsiteScheduleManifestRebuild({
@@ -817,9 +821,9 @@ function markovRegimeInfo(extra = {}) {
 }
 
 function readJsonFile(filePath, fallback = null) {
-  if (!fs.existsSync(filePath)) return fallback;
+  if (!markSync(SYNC_OP.JSON_EXISTS,()=>fs.existsSync(filePath))) return fallback;
   try {
-    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+    return markSync(SYNC_OP.JSON_READ,()=>JSON.parse(fs.readFileSync(filePath, "utf8")));
   } catch {
     return fallback;
   }
@@ -2798,7 +2802,7 @@ function staticPath(urlPath) {
 }
 
 function sendFile(res, filePath) {
-  if (!fs.existsSync(filePath)) {
+  if (!markSync(SYNC_OP.STATIC_EXISTS,()=>fs.existsSync(filePath))) {
     res.statusCode = 404;
     res.end("not found");
     return;
@@ -2816,7 +2820,7 @@ function sendFile(res, filePath) {
     Pragma: "no-cache",
     Expires: "0",
   });
-  res.end(fs.readFileSync(filePath));
+  res.end(markSync(SYNC_OP.STATIC_READ,()=>fs.readFileSync(filePath)));
 }
 
 function readJsonBody(req) {
@@ -4012,6 +4016,7 @@ const server = http.createServer((req, res) => websiteTiming.request(req,res,()=
 }));
 
 server.on("close", () => {
+  stopSyncStallCapture();
   websiteClosing = true;
   monitorStatusReader.close();
   websiteTiming.stop();

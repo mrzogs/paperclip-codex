@@ -4,6 +4,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {observeSync,QUANT_SYNC} from './sync-observer.js';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const DATA_DIR = process.env.QT_DATA_DIR || path.join(root, "data");
@@ -12,7 +13,7 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 export function read(name, fallback) {
   try {
     return JSON.parse(
-      fs.readFileSync(path.join(DATA_DIR, `${name}.json`), "utf8"),
+      observeSync(QUANT_SYNC.READ,()=>fs.readFileSync(path.join(DATA_DIR, `${name}.json`), "utf8")),
     );
   } catch {
     return fallback;
@@ -22,15 +23,15 @@ export function read(name, fallback) {
 export function write(name, value) {
   const file = path.join(DATA_DIR, `${name}.json`);
   const tmp = `${file}.${process.pid}.tmp`;
-  const text = JSON.stringify(value, null, 2);
-  fs.writeFileSync(tmp, text);
+  const text = observeSync(QUANT_SYNC.SERIALIZE,()=>JSON.stringify(value, null, 2));
+  observeSync(QUANT_SYNC.WRITE,()=>fs.writeFileSync(tmp, text));
   try {
-    fs.renameSync(tmp, file);
+    observeSync(QUANT_SYNC.RENAME,()=>fs.renameSync(tmp, file));
   } catch (e) {
     // Windows refuses to rename over a file that antivirus or the indexer has open.
     // Fall back to writing in place rather than losing the save.
     if (!["EPERM", "EBUSY", "EACCES"].includes(e.code)) throw e;
-    fs.writeFileSync(file, text);
-    fs.rmSync(tmp, { force: true });
+    observeSync(QUANT_SYNC.FALLBACK_WRITE,()=>fs.writeFileSync(file, text));
+    observeSync(QUANT_SYNC.CLEANUP,()=>fs.rmSync(tmp, { force: true }));
   }
 }

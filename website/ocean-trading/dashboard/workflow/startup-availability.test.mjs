@@ -14,6 +14,7 @@ import { chromium, expect } from '@playwright/test';
 import { makeVwapStatusSoftwareFixture } from './vwap-improvement-status.fixtures.mjs';
 import { handleVwapImprovementRequest } from './vwap-improvement-status.mjs';
 import { loadStrategyOnboarding, readOnboardingStrategyId } from './strategy-onboarding.mjs';
+import {createSyncMarkers,installSyncMarkers,stallViews,CONTROL,readStallSnapshot} from '../sync-stall-markers.mjs';
 
 const code = 'OPERATIONAL_TELEMETRY_MODULE_HASH_CONFLICT';
 const examples = JSON.parse(fs.readFileSync(new URL('./contracts/2.1.0/shared-contracts/examples/positive-examples.json', import.meta.url)));
@@ -173,6 +174,18 @@ test('every mutation family and unapproved GET is blocked before executing; auth
   assert.equal((await f.request('profiles', { method: 'POST', data: {}, anonymous: true })).status, 401);
   assert.equal((await f.request('profiles', { method: 'POST', data: {}, csrf: 'bad-csrf' })).status, 403);
   const unsafe = await f.request('session?path=private'); assert.equal(unsafe.status, 400); assert.equal(unsafe.value.error.code, 'UNSAFE_ROUTE_OR_QUERY');
+});
+
+test('active numeric diagnostics preserve real browser payload/authentication and the read-only mutation guard',async t=>{
+  const f=await fixture(t),before=await f.request('session');
+  const shared=new SharedArrayBuffer(8192),view=stallViews(shared);Atomics.store(view.control,CONTROL.ARMED,1);
+  const markers=createSyncMarkers(shared);installSyncMarkers(markers);t.after(()=>installSyncMarkers(null));markers.heartbeat();
+  assert.deepEqual(await f.request('session'),before);
+  assert.equal((await f.request('session',{anonymous:true})).status,401);
+  const blocked=await f.request('run-manager/prepare',{method:'POST',data:{}});
+  assert.equal(blocked.status,503);assert.equal(blocked.value.error.code,code);
+  const snapshot=readStallSnapshot(shared);assert.equal(snapshot.frames.length,0);assert.ok(snapshot.recent.length>0);
+  for(const value of Object.values(f.environment))if(typeof value==='string'&&value.length>16)assert.ok(!JSON.stringify(snapshot).includes(value));
 });
 
 test('normal READY startup keeps the original handler and real validated mutation behavior', async t => {
