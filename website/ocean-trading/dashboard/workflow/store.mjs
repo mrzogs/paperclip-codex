@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { requireThat } from "./common.mjs";
+import {markSync} from '../sync-stall-markers.mjs';
+import {SYNC_OP} from '../sync-stall-catalogue.mjs';
 
 const IMMUTABLE = ["ow_profiles", "ow_artifacts", "ow_decisions", "ow_events", "ow_decision_revocations", "ow_setup_receipts"];
 const RUN_IMMUTABLE = ["ow_run_versions", "ow_run_settings", "ow_dataset_permissions", "ow_run_plans", "ow_run_progress", "ow_coverage_receipts", "ow_evidence_revisions", "ow_run_presets"];
@@ -94,15 +96,15 @@ export class WorkflowStore {
     else this.db.prepare("INSERT INTO ow_identities VALUES(?,?,?)").run(identity.identity_id, identity.role, JSON.stringify(identity));
   }
   identityCurrent(identity) {
-    return this.db.prepare("SELECT metadata_json FROM ow_identities WHERE id=?").get(identity.identity_id)?.metadata_json === JSON.stringify(identity);
+    return markSync(SYNC_OP.AUTH_IDENTITY,()=>this.db.prepare("SELECT metadata_json FROM ow_identities WHERE id=?").get(identity.identity_id)?.metadata_json === JSON.stringify(identity));
   }
   saveSession(hash, csrf, subject, expiry) {
     this.db.prepare("DELETE FROM ow_sessions WHERE expires_ms<=?").run(Date.now());
     requireThat(this.db.prepare("SELECT COUNT(*) AS n FROM ow_sessions").get().n < 100, 429, "SESSION_CAPACITY");
     this.db.prepare("INSERT INTO ow_sessions VALUES(?,?,?,?)").run(hash, csrf, subject, expiry);
   }
-  getSession(hash) { return this.db.prepare("SELECT * FROM ow_sessions WHERE session_hash=?").get(hash); }
-  browserCurrent(hash) { return this.db.prepare("SELECT credential_hash FROM ow_auth_state WHERE id='browser'").get()?.credential_hash === hash; }
+  getSession(hash) { return markSync(SYNC_OP.AUTH_SESSION,()=>this.db.prepare("SELECT * FROM ow_sessions WHERE session_hash=?").get(hash)); }
+  browserCurrent(hash) { return markSync(SYNC_OP.AUTH_BROWSER,()=>this.db.prepare("SELECT credential_hash FROM ow_auth_state WHERE id='browser'").get()?.credential_hash === hash); }
   bindBrowser(hash, managed = false) {
     const current = this.db.prepare("SELECT credential_hash FROM ow_auth_state WHERE id='browser'").get();
     if (!current && !managed) this.db.prepare("INSERT INTO ow_auth_state VALUES('browser',?)").run(hash);

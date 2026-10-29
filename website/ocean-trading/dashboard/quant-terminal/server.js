@@ -19,6 +19,8 @@ import * as info from "./lib/market-info.js";
 import { registerIndicator } from "./public/lib/indicators.js";
 import { conditionFn } from "./public/lib/backtest.js";
 import { relaunchForProxy, proxyNote } from "./lib/proxy.js";
+import {observeSync,QUANT_SYNC} from './lib/sync-observer.js';
+export {setSyncObserver as setQuantSyncObserver} from './lib/sync-observer.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(ROOT, "public");
@@ -146,7 +148,7 @@ function listCustom() {
       if (error.code !== "EEXIST") throw error;
     }
   }
-  return fs
+  return observeSync(QUANT_SYNC.CUSTOM_LIST,()=>fs
     .readdirSync(CUSTOM)
     .filter((f) => f.endsWith(".js"))
     .map((f) => ({
@@ -154,7 +156,7 @@ function listCustom() {
       id: `custom:${f.replace(/\.js$/, "")}`,
       mtime: fs.statSync(path.join(CUSTOM, f)).mtimeMs,
       error: customErrors[f] || null,
-    }));
+    })));
 }
 
 async function loadCustom(file) {

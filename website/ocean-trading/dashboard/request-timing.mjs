@@ -1,5 +1,6 @@
 import {AsyncLocalStorage} from 'node:async_hooks';
 import {performance} from 'node:perf_hooks';
+import {markTimingSync} from './sync-stall-markers.mjs';
 
 // Diagnostics only: bounded metadata, never query strings, headers, bodies,
 // credentials, IDs, SQL, filesystem arguments or response content.
@@ -61,9 +62,9 @@ export function createRequestTiming({clock=()=>performance.now(),utc=()=>new Dat
       return context.run(value,work);
     },
     sync(label,work){
-      if(!timer)return work();
+      if(!timer)return markTimingSync(label,work);
       const start=clock();
-      try{return work();}finally{
+      try{return markTimingSync(label,work);}finally{
         const elapsed=clock()-start,owner=context.getStore();
         add(spans,label,elapsed);if(owner)add(owner.spans,label,elapsed);
         if(elapsed>=thresholdMs)emit('sync',{label,duration_ms:Math.round(elapsed),request_id:owner?.id||null,route:owner?.route||null});

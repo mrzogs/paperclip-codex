@@ -9,6 +9,7 @@ import crypto from "node:crypto";
 import { getCandles } from "./providers.js";
 import { conditionFn } from "../public/lib/backtest.js";
 import * as store from "./store.js";
+import {observeSync,QUANT_SYNC} from './sync-observer.js';
 
 let alerts = store.read("alerts", []);
 let log = store.read("alert-log", []);
@@ -157,7 +158,7 @@ async function fire(a, bar, price) {
 // One evaluation at a time: the timer and a manual "check now" must not both fire a "once" alert.
 let running = null;
 export function evaluate() {
-  running ||= evaluateOnce().finally(() => {
+  running ||= observeSync(QUANT_SYNC.ALERT_START,()=>evaluateOnce()).finally(() => {
     running = null;
   });
   return running;
@@ -182,14 +183,14 @@ async function evaluateOnce() {
     if (bars.length < 3) continue;
     for (const a of group) {
       try {
-        const make = conditionFn(bars, a.indicators);
+        const make = observeSync(QUANT_SYNC.CONDITION,()=>conditionFn(bars, a.indicators));
         const tests = conditionsOf(a).map((c) => make(c));
         const test = (k) => (a.match === "any" ? tests.some((t) => t(k)) : tests.every((t) => t(k)));
         const i =
           a.trigger === "oncePerBarClose" ? bars.length - 2 : bars.length - 1;
         const bar = bars[i];
         if (a.trigger !== "once" && a.lastBar === bar.time) continue;
-        if (test(i)) {
+        if (observeSync(QUANT_SYNC.CONDITION,()=>test(i))) {
           a.lastBar = bar.time;
           await fire(a, bar, bar.close);
         }

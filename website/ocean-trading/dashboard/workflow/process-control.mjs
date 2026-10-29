@@ -1,19 +1,21 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
+import {markSync} from '../sync-stall-markers.mjs';
+import {SYNC_OP} from '../sync-stall-catalogue.mjs';
 
 const SAFE_REQUEST_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
 function restoreClaimedRequest(stop, claim) {
-  if (!fs.existsSync(claim) || fs.existsSync(stop)) return;
-  try { fs.renameSync(claim, stop); } catch { /* Preserve the claim if another request won the shared path. */ }
+  if (!markSync(SYNC_OP.CONTROL_EXISTS,()=>fs.existsSync(claim)) || markSync(SYNC_OP.CONTROL_EXISTS,()=>fs.existsSync(stop))) return;
+  try { markSync(SYNC_OP.CONTROL_RENAME,()=>fs.renameSync(claim, stop)); } catch { /* Preserve the claim if another request won the shared path. */ }
 }
 
 export function consumeWebsiteStopRequest(root, processId, nonce, afterClaim = () => {}) {
   const stop = path.join(root, 'website-stop.json');
   const claim = path.join(root, `website-stop-claimed.${processId}.${randomUUID()}.json`);
   try {
-    fs.renameSync(stop, claim);
+    markSync(SYNC_OP.CONTROL_RENAME,()=>fs.renameSync(stop, claim));
   } catch (error) {
     if (error?.code === 'ENOENT' || error?.code === 'EACCES' || error?.code === 'EPERM') return null;
     throw error;
@@ -21,7 +23,7 @@ export function consumeWebsiteStopRequest(root, processId, nonce, afterClaim = (
 
   try {
     afterClaim({ stop, claim });
-    const request = JSON.parse(fs.readFileSync(claim, 'utf8'));
+    const request = markSync(SYNC_OP.CONTROL_READ,()=>JSON.parse(fs.readFileSync(claim, 'utf8')));
     if (request.pid !== processId || request.nonce !== nonce) {
       restoreClaimedRequest(stop, claim);
       return null;
@@ -39,8 +41,8 @@ export function consumeWebsiteStopRequest(root, processId, nonce, afterClaim = (
       acknowledged_at_utc: new Date().toISOString(),
     };
     const acknowledgementPath = path.join(root, `website-stop-ack.${requestId}.json`);
-    fs.writeFileSync(acknowledgementPath, JSON.stringify(acknowledgement), { flag: 'wx' });
-    fs.unlinkSync(claim);
+    markSync(SYNC_OP.CONTROL_WRITE,()=>fs.writeFileSync(acknowledgementPath, JSON.stringify(acknowledgement), { flag: 'wx' }));
+    markSync(SYNC_OP.CONTROL_UNLINK,()=>fs.unlinkSync(claim));
     return { acknowledgement, acknowledgementPath };
   } catch (error) {
     restoreClaimedRequest(stop, claim);
@@ -57,7 +59,7 @@ export function installWebsiteControl(server, dashboard, workflowReady, exitProc
   const source = fs.readFileSync(path.join(dashboard, 'server.mjs'));
   const readWorkflowReady = () => Boolean(typeof workflowReady === 'function' ? workflowReady() : workflowReady);
   const state = { pid: process.pid, nonce, dashboard, started_at_utc: new Date().toISOString(), server_sha256: createHash('sha256').update(source).digest('hex'), workflow_ready: readWorkflowReady() };
-  const writeState = () => fs.writeFileSync(receipt, JSON.stringify(state));
+  const writeState = () => markSync(SYNC_OP.CONTROL_RECEIPT,()=>fs.writeFileSync(receipt, JSON.stringify(state)));
   server.once('listening', writeState);
   let stopping = false;
   function shutdown() {
@@ -70,7 +72,7 @@ export function installWebsiteControl(server, dashboard, workflowReady, exitProc
   }
   const timer = setInterval(() => {
     try {
-      if (consumeWebsiteStopRequest(root, process.pid, nonce)) shutdown();
+      if (markSync(SYNC_OP.CONTROL_POLL,()=>consumeWebsiteStopRequest(root, process.pid, nonce))) shutdown();
     } catch { /* No matching protected stop request. */ }
     const ready = readWorkflowReady();
     if (state.workflow_ready !== ready) {
