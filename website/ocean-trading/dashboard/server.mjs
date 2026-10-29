@@ -2673,10 +2673,12 @@ function isProcessAlive(pid) {
   }
 }
 
-function monitorState() {
-  const state = readJsonFile(MONITOR_STATE_FILE, { running: false, status: "stopped" });
+function monitorState(diagnosticTiming = false) {
+  const read = () => readJsonFile(MONITOR_STATE_FILE, { running: false, status: "stopped" });
+  const state = diagnosticTiming ? timedSync('workflow.companion.monitor-read', read) : read();
   const running = monitorProcess && !monitorProcess.killed && monitorProcess.exitCode === null;
-  const externalRunning = isProcessAlive(state.pid);
+  const observe = () => isProcessAlive(state.pid);
+  const externalRunning = diagnosticTiming ? timedSync('workflow.companion.monitor-process', observe) : observe();
   const isRunning = Boolean(running || externalRunning);
   return {
     ...state,
@@ -3805,8 +3807,8 @@ const server = http.createServer((req, res) => websiteTiming.request(req,res,()=
 
   if (requestUrl.pathname === "/api/vwap-improvement-monitor/status") {
     void handleVwapImprovementRequest(req, res, requestUrl, {
-      legacyState: readVwapContinuousImprovementState(VWAP_IMPROVEMENT_STATE_FILE),
-      websiteMonitor: monitorState(),
+      legacyState: timedSync('workflow.companion.legacy-state',()=>readVwapContinuousImprovementState(VWAP_IMPROVEMENT_STATE_FILE)),
+      websiteMonitor: monitorState(true),
     }).catch(() => {
       if (!res.headersSent) res.writeHead(503, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
       res.end(JSON.stringify({ error: { code: "REPORT_STATUS_UNAVAILABLE" } }));

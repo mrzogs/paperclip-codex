@@ -1,4 +1,5 @@
 import { loadVwapPhysicalComparatorApprovalDispatchConfig } from './vwap-physical-comparator-approval-dispatch.mjs';
+import { timedSync } from '../request-timing.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const APPROVAL_STATUSES = new Set(['pending', 'revision_requested', 'approved', 'rejected', 'cancelled']);
@@ -104,7 +105,7 @@ export async function enrichStrategyApprovalStatuses(view, options = {}) {
   // use its cached decisions as authority for this request.
   let companyId = null;
   let dispatchConfig = null;
-  try { dispatchConfig = loadVwapPhysicalComparatorApprovalDispatchConfig(options.dispatchConfigPath); companyId = dispatchConfig.paperclip.company_id; } catch {}
+  try { dispatchConfig = timedSync('workflow.companion.approval-config',()=>loadVwapPhysicalComparatorApprovalDispatchConfig(options.dispatchConfigPath)); companyId = dispatchConfig.paperclip.company_id; } catch {}
   const scoped = reference => ({...reference, expected_company_id:companyId,
     company_prefix:dispatchConfig?.paperclip?.issue_identifier?.split('-')[0]});
   const comparatorScoped = reference => ({...scoped(reference), expected_payload:{

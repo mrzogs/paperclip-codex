@@ -446,15 +446,18 @@ export function probeReplayTwoRuntime({ executable, chartbook_path: chartbookPat
   return structuredClone(value);
 }
 
-export const cachedReplayTwoRuntime = createRuntimeProbeCache({
-  unavailable:({executable,chartbook_path:chartbookPath,chart_id:chartId,account_alias:accountAlias},state)=>replayRuntimeUnavailable({executable,chartbookPath,chartId,accountAlias},state),
-  observe:input=>new Promise((resolve,reject)=>{
-    execFile(process.execPath,[fileURLToPath(new URL('./strategy-runtime-probe.mjs',import.meta.url)),JSON.stringify(input)],
+export function observeReplayRuntime(input, launch = execFile) {
+  return new Promise((resolve,reject)=>{
+    timedSync('workflow.companion.runtime-launch',()=>launch(process.execPath,[fileURLToPath(new URL('./strategy-runtime-probe.mjs',import.meta.url)),JSON.stringify(input)],
       {encoding:'utf8',windowsHide:true,timeout:6000,maxBuffer:128*1024},(error,stdout)=>{
         if(error)return reject(error);
-        try{resolve(JSON.parse(stdout));}catch(error){reject(error);}
-      });
-  }),
+        try{resolve(timedSync('workflow.companion.runtime-json',()=>JSON.parse(stdout)));}catch(error){reject(error);}
+      }));
+  });
+}
+export const cachedReplayTwoRuntime = createRuntimeProbeCache({
+  unavailable:({executable,chartbook_path:chartbookPath,chart_id:chartId,account_alias:accountAlias},state)=>replayRuntimeUnavailable({executable,chartbookPath,chartId,accountAlias},state),
+  observe:observeReplayRuntime,
 });
 
 export function loadStrategyOnboarding({ root = DEFAULT_ONBOARDING_ROOT, events = [], brainOutbox = [], registration = null, activationEvents = [], runtimeProbe = cachedReplayTwoRuntime, campaignStatePath = DEFAULT_REPLAY_CAMPAIGN_STATE, improvementMonitorStatePath = DEFAULT_VWAP_IMPROVEMENT_MONITOR_STATE, physicalComparatorPath = DEFAULT_VWAP_PHYSICAL_COMPARATOR_CONTRACT, approvalDispatchStatePath = DEFAULT_VWAP_APPROVAL_DISPATCH_STATE } = {}) {

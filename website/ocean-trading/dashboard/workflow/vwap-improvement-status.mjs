@@ -1,6 +1,7 @@
 import { verifiedVwapReportContext } from './vwap-improvement-reports.mjs';
 import { loadConfiguredVwapImprovementReports } from './vwap-improvement-reader.mjs';
 import { createVwapBoundedArtifactReader } from './vwap-bounded-artifacts.mjs';
+import { timedSync } from '../request-timing.mjs';
 
 export const VWAP_IMPROVEMENT_STATUS_VERSION='ocean-vwap-improvement-status/v1';
 export const VWAP_IMPROVEMENT_PROJECT='cicd-vwap-pull-back-strategy';
@@ -17,6 +18,7 @@ const date=value=>typeof value==='string' && Number.isFinite(Date.parse(value))?
 const day=value=>typeof value==='string' && /^\d{4}-\d{2}-\d{2}$/.test(value)
   && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0,10)===value?value:null;
 const readConfigured=loadConfiguredVwapImprovementReports;
+const readStatusConfigured=options=>loadConfiguredVwapImprovementReports({...options,diagnosticTiming:true});
 
 function safeBlocker(item){
   if(!item || typeof item!=='object')return null;
@@ -66,7 +68,7 @@ export function projectVwapImprovementStatus(loaded,{now=Date.now(),verifiedChai
       href:`/api/workflow/vwap-improvement-monitor/reports/${report.kind}?publication_sha256=${publication}`})):[]};
 }
 
-export async function readVwapImprovementStatus({legacyState={},websiteMonitor=null,loadConfigured=readConfigured,
+export async function readVwapImprovementStatus({legacyState={},websiteMonitor=null,loadConfigured=readStatusConfigured,
   verifyImprovementChain,now=Date.now()}={}){
   let loaded;
   try{loaded=await loadConfigured({now});}catch{loaded={ingestion:{status:'UNAVAILABLE',blockers:[{code:'REPORT_READER_UNAVAILABLE'}]},reports:{}};}
@@ -74,7 +76,7 @@ export async function readVwapImprovementStatus({legacyState={},websiteMonitor=n
   if(typeof verifyImprovementChain==='function'){
     try{verifiedChain=await verifyImprovementChain({loaded,now});}catch{/* No authority on verifier failure. */}
   }
-  return {...legacyState,website_monitor:websiteMonitor,...projectVwapImprovementStatus(loaded,{now,verifiedChain})};
+  return {...legacyState,website_monitor:websiteMonitor,...timedSync('workflow.companion.status-project',()=>projectVwapImprovementStatus(loaded,{now,verifiedChain}))};
 }
 
 /** Controlled kind + current publication pin only. Re-read the entire publication
@@ -97,10 +99,11 @@ export async function readVwapImprovementReport(kind,publicationHash,{loadConfig
 }
 
 export async function handleVwapImprovementRequest(req,res,url,options={}){
-  const json=(status,payload)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(payload));};
+  const json=(status,payload,diagnosticTiming=false)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});
+    res.end(diagnosticTiming?timedSync('workflow.companion.status-serialize',()=>JSON.stringify(payload)):JSON.stringify(payload));};
   if(req.method!=='GET'){json(405,{error:{code:'METHOD_NOT_ALLOWED'}});return;}
   if(url.pathname==='/api/vwap-improvement-monitor/status'){
-    json(200,await readVwapImprovementStatus(options));return;
+    json(200,await readVwapImprovementStatus(options),true);return;
   }
   const match=url.pathname.match(/^\/api\/workflow\/vwap-improvement-monitor\/reports\/([a-z_]+)$/);
   if(!match || [...url.searchParams.keys()].some(key=>key!=='publication_sha256')

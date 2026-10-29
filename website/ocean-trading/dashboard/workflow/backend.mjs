@@ -1138,7 +1138,8 @@ export class WorkflowBackend {
               configPath:this.environment.OCEAN_PAPERCLIP_INTERACTION_CONFIG,
             });
           }
-          response.end(JSON.stringify(result));
+          const companionView = route === 'view/dashboard' || /^view\/strategies(?:\/|$)/.test(route);
+          response.end(companionView ? timedSync('workflow.companion.view-serialize',()=>JSON.stringify(result)) : JSON.stringify(result));
         }
         else if (route === "status") response.end(JSON.stringify({ api_version: API_VERSION, contract_release: RELEASE, namespace: "TEST", brain_submission: "OFF", live_real: "DISABLED", dispatch_worker: "OFF", auth: "REQUIRED", schema_version: 14, identity: { id: actor.id, role: actor.role, scopes: actor.scopes, strategy_ids: actor.strategyIds, instance_ids: actor.instanceIds }, ...this.auth.readiness(), test_communication:this.testCommunication.readiness(actor), onboarding_brain_sync:this.onboardingBrain.status(), operational_learning:this.operationalLearning.status(), candidate_evaluator:{version:CANDIDATE_EVALUATOR_VERSION,state:this.operationalCandidateEvaluator.running?'RUNNING':'READY'}, maintenance:this.maintenanceHealth || {state:'NOT_INSTALLED_ISOLATED'} }));
         else if (route === 'setup-receipts') {
