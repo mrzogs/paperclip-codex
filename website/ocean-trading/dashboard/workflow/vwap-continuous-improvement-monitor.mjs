@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { detectRecurringVwapFailures, VWAP_STRATEGY_ID } from './vwap-continuous-improvement.mjs';
 import { verifiedVwapDiscoveryRows } from './vwap-discovery-admission.mjs';
 import { loadConfiguredVwapDiscoveryAdmission } from './vwap-improvement-reader.mjs';
+import { readOnboardingFileSync } from './onboarding-file-read.mjs';
 
 export const VWAP_MONITOR_SCHEMA = 'ocean-vwap-continuous-improvement-monitor-state/v1';
 const REQUIRED_CAUSAL_FIELDS = ['setup_id','session_name','side','regime_label','vwap_reclaim_state'];
@@ -19,7 +20,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve,ms));
 const digest = value => 'sha256:' + crypto.createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex');
 
 function readJson(filePath, fallback = null) {
-  try { return JSON.parse(fs.readFileSync(filePath,'utf8').replace(/^\uFEFF/,'')); } catch { return fallback; }
+  try { return JSON.parse(readOnboardingFileSync(filePath,'utf8').replace(/^\uFEFF/,'')); } catch { return fallback; }
 }
 function writeJson(filePath, value) {
   fs.mkdirSync(path.dirname(filePath),{recursive:true});

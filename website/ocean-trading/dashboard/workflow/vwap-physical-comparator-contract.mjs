@@ -3,6 +3,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { exactKeys, objectHash, requireThat, sealedHash } from './common.mjs';
+import { readOnboardingFileSync } from './onboarding-file-read.mjs';
 
 export const DEFAULT_VWAP_PHYSICAL_COMPARATOR_CONTRACT = process.env.OCEAN_VWAP_PHYSICAL_COMPARATOR_CONTRACT
   || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'config', 'cicd-vwap-v238-physical-comparator.json');
@@ -120,7 +121,7 @@ function validateContract(value) {
 
 export function readVwapPhysicalComparatorContract(contractPath = DEFAULT_VWAP_PHYSICAL_COMPARATOR_CONTRACT, strategyId = 'cicd-vwap-pull-back-strategy') {
   try {
-    const content = fs.readFileSync(contractPath);
+    const content = readOnboardingFileSync(contractPath);
     const value = JSON.parse(content.toString('utf8'));
     validateContract(value);
     requireThat(value.strategy_id === strategyId, 422, 'PHYSICAL_COMPARATOR_STRATEGY_MISMATCH');

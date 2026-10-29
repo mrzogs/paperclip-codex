@@ -47,17 +47,21 @@ function errorText(error) {
   const messages = { WAYNE_LOCAL_ENROLLMENT_REQUIRED: 'Local workflow access is not set up yet. Open the local access recovery instructions below.', WORKFLOW_DISABLED: 'Workflow setup is pending. The trading dashboard is available.', WORKFLOW_CONFIG_BLOCKED: 'Workflow configuration needs attention.', WORKFLOW_DATABASE_BUSY: 'Workflow data is briefly busy. Ocean will retry automatically.', WORKFLOW_REQUEST_TIMEOUT: 'The workflow response timed out. Refresh and try again; no action was confirmed.', SESSION_EXPIRED_OR_INVALID: 'The local browser session could not be restored.', AUTHENTICATION_REQUIRED: 'Local browser access could not be established.', REVISION_CONFLICT: 'This record changed. Refresh and review the latest version.', APPROVAL_REQUEST_STALE_OR_MISMATCH: 'This approval has changed or expired. Open the latest review.', BLOCKED_RECONCILIATION: 'The registered version changed. This case needs reconciliation.', OPERATIONAL_FACTUAL_BINDING_CHANGED: 'Ocean detected a changed operational source binding. Protected actions remain blocked until it is verified; no action was recorded.', CSRF_REJECTED: 'The browser session changed. Ocean restored local access; review the page before submitting again.', RECIPIENT_ACCEPTANCE_REQUIRED: 'Recipient acknowledgement must come from the recipient account.', ACTIVE_ARTIFACT_CONTENT_REJECTED: 'This file contains active content or private filesystem references.', UNSAFE_IMAGE_REJECTED: 'Use a single PNG up to 128 KiB and 2048 pixels per side, without embedded metadata.', ENTITY_NOT_FOUND: 'This record is unavailable.', UNKNOWN_VIEW: 'This page is unavailable.', ARTIFACT_STAGE_PREREQUISITE_REQUIRED: 'This result does not belong to the current case stage.', ONBOARDING_SOURCE_CHANGED: 'The onboarding source changed. Refresh before recording this answer.', ONBOARDING_SOURCE_INCOMPLETE: 'The onboarding source set is incomplete. Resolve the source status first.', PRIOR_QUESTIONNAIRE_REQUIRED: 'Complete the preceding onboarding question first.', SOURCE_BASELINE_INCOMPLETE: 'The source baseline is incomplete.', ONBOARDING_REQUIRED_FIELD: 'Complete every required onboarding field.', ONBOARDING_CONFIRMATION_REQUIRED: 'Confirm every required onboarding statement.', ONBOARDING_NUMBER_INVALID: 'One of the numeric answers is outside its permitted range.', ONBOARDING_TEXT_INVALID: 'One of the text answers is incomplete or invalid.', ONBOARDING_OPTION_INVALID: 'Select one of the permitted options.', ONBOARDING_REGISTRATION_NOT_READY: 'Registration is available after every questionnaire has been confirmed in the Obsidian Brain.', ONBOARDING_PROFILE_BASELINE_CONFLICT: 'The existing Ocean profile belongs to a different strategy version or source hash. Registration was not changed.', ONBOARDING_STRATEGY_BASELINE_CONFLICT: 'The existing Ocean strategy record does not match the reviewed onboarding source. Registration was not changed.', ONBOARDING_INSTANCE_BINDING_CONFLICT: 'The existing Sierra binding does not match the reviewed Replay instance. Registration was not changed.', ONBOARDING_REGISTRATION_BRAIN_SYNC_REQUIRED: 'Activation is available after the registration receipt is confirmed in the Obsidian Brain.', ONBOARDING_ACTIVATION_PREFLIGHT_REQUIRED: 'Complete every activation preflight reference.', ONBOARDING_CAPABILITY_NOT_APPROVED: 'This environment was not approved during onboarding.', LIVE_ACTIVATION_REQUIRES_PRODUCTION_PROMOTION: 'Live requires a separate production promotion and cannot be activated here.', ONBOARDING_BRAIN_RETRY_NOT_REQUIRED: 'This Brain record is already current or is retrying automatically.' };
   return messages[error.code] || `${human(error.code || 'CONNECTION_FAILED')}. The action was not confirmed.`;
 }
-async function request(path, options = {}) {
-  const controller = options.signal ? null : new AbortController();
-  const timer = controller ? setTimeout(() => controller.abort(), 12000) : null;
+export const workflowReadTimeoutMs = path => /^view\/strategies(?:\/page\/\d+|\/[A-Za-z0-9_.:-]+)?$/.test(path) ? 25000 : 12000;
+export async function request(path, options = {}) {
+  const controller = new AbortController();
+  const cancelled = () => controller.abort();
+  if (options.signal?.aborted) controller.abort();
+  else options.signal?.addEventListener('abort', cancelled, { once:true });
+  const timer = setTimeout(() => controller.abort(), workflowReadTimeoutMs(path));
   try {
-    const response = await fetch(`/api/workflow/${path}`, { credentials: 'same-origin', cache: 'no-store', ...options, signal: options.signal || controller.signal });
+    const response = await fetch(`/api/workflow/${path}`, { credentials: 'same-origin', cache: 'no-store', ...options, signal: controller.signal });
     if (!response.ok) { const payload = await response.json().catch(() => ({})); throw Object.assign(new Error(payload.error?.code || 'REQUEST_FAILED'), { code: payload.error?.code || 'REQUEST_FAILED', status: response.status }); }
     return options.binary ? response : await response.json();
   } catch (error) {
     if (error?.name === 'AbortError') throw Object.assign(new Error('WORKFLOW_REQUEST_TIMEOUT'), { code:'WORKFLOW_REQUEST_TIMEOUT', retryable:true });
     throw error;
-  } finally { clearTimeout(timer); }
+  } finally { clearTimeout(timer); options.signal?.removeEventListener('abort', cancelled); }
 }
 async function post(path, data, message = newId('message')) {
   return request(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf || '' }, body: JSON.stringify({ message_id: message, data }) });
@@ -866,14 +870,14 @@ async function refresh(force = false) {
   if (state.controller) state.controller.abort();
   const generation = ++state.generation;
   const controller = new AbortController(); state.controller = controller;
-  const timeout = setTimeout(() => controller.abort(), 12000);
+  content.setAttribute('aria-busy','true');
+  const current = route();
   try {
     let session;
     try { session = await request('session', { signal:controller.signal }); }
     catch (error) { if (error.status !== 401) throw error; session = await establishLocalSession(); }
     if (!state.csrf) session = await establishLocalSession();
     state.signedIn = true;
-    const current = route();
     const endpoint = current.view === 'artifacts' ? `artifacts/${current.key}${current.fullResearchReport?'/research-report':''}` : `view/${current.view}${current.key ? `/${current.key}` : current.view === 'dashboard' ? '' : `/page/${state.offset}`}`;
     const [viewResult, summaryResult, improvementResult] = await Promise.allSettled([current.view === 'onboarding-guide' ? Promise.resolve({}) : request(endpoint, { signal:controller.signal }), current.view === 'dashboard' ? Promise.resolve(null) : request('view/dashboard', { signal:controller.signal }),
       current.view==='strategies' && current.key==='cicd-vwap-pull-back-strategy'?fetchVwapImprovementStatus({signal:controller.signal}):Promise.resolve(null)]);
@@ -928,7 +932,7 @@ async function refresh(force = false) {
       if (!state.data) content.innerHTML = heading('Continuous Improvement') + empty(errorText(error)) + '<a class="button" href="/">Trading dashboard</a>';
       content.setAttribute('aria-busy','false');
     }
-  } finally { clearTimeout(timeout); if (state.controller === controller) state.controller = null; schedule(); }
+  } finally { if (state.controller === controller) state.controller = null; schedule(); }
 }
 function schedule() {
   clearTimeout(state.timer);clearTimeout(state.executionTimer);if(!state.signedIn)return;

@@ -13,6 +13,7 @@ import { reconcileOperationalReplayRunSettings } from './operational-run-readine
 import { chromium, expect } from '@playwright/test';
 import { makeVwapStatusSoftwareFixture } from './vwap-improvement-status.fixtures.mjs';
 import { handleVwapImprovementRequest } from './vwap-improvement-status.mjs';
+import { loadStrategyOnboarding, readOnboardingStrategyId } from './strategy-onboarding.mjs';
 
 const code = 'OPERATIONAL_TELEMETRY_MODULE_HASH_CONFLICT';
 const examples = JSON.parse(fs.readFileSync(new URL('./contracts/2.1.0/shared-contracts/examples/positive-examples.json', import.meta.url)));
@@ -186,6 +187,32 @@ test('normal READY startup keeps the original handler and real validated mutatio
   assert.ok(f.backend.db.prepare('SELECT id FROM ow_profiles WHERE id=?').get(`${profile.profile_id}:${profile.profile_version}`));
 });
 
+test('real HTTP source-projection failures retain the old sanitized 500 and public WorkflowError contracts', async t => {
+  const f = await fixture(t, { degraded: false }), sourceRoot = f.backend.config.strategy_onboarding_root;
+  fs.writeFileSync(path.join(sourceRoot, 'unresolved-items.json'), JSON.stringify({ strategy_id: 'cicd-vwap-pull-back-strategy',
+    items: {}, private: `DO_NOT_PROJECT ${sourceRoot}` }));
+  // Run the existing pure reader directly under the real handler as the old
+  // synchronous HTTP path did, then compare the fixed-worker transport path.
+  f.backend.onboardingProjectionReader = { async read(kind, options) {
+    if (kind === 'identity') return readOnboardingStrategyId(options.root);
+    return { projection: loadStrategyOnboarding({ ...options, runtimeProbe: f.backend.config.strategy_onboarding_runtime_probe }) };
+  }, close() {} };
+  const originalError = console.error; console.error = () => {};
+  try {
+    const previous = await f.request('view/strategies/page/0');
+    f.backend.onboardingProjectionReader = undefined;
+    const current = await f.request('view/strategies/page/0');
+    assert.equal(previous.status, 500); assert.deepEqual(current, previous);
+    assert.deepEqual(current.value.error, { code: 'WORKFLOW_INTERNAL_ERROR', message: 'Workflow operation failed', retryable: false });
+    assert.ok(!JSON.stringify(current).includes(sourceRoot)); assert.ok(!JSON.stringify(current).includes('DO_NOT_PROJECT'));
+    fs.writeFileSync(path.join(sourceRoot, 'unresolved-items.json'), JSON.stringify({ strategy_id: 'cicd-vwap-pull-back-strategy', items: [] }));
+    f.backend.config.strategy_onboarding_runtime_probe = () => { throw new WorkflowError(409, 'ONBOARDING_SOURCE_CHANGED', 'Source changed before projection finished'); };
+    const publicError = await f.request('view/strategies/page/0');
+    assert.equal(publicError.status, 409); assert.deepEqual(publicError.value.error, {
+      code: 'ONBOARDING_SOURCE_CHANGED', message: 'Source changed before projection finished', retryable: false });
+  } finally { console.error = originalError; }
+});
+
 test('disposable browser displays the exact blocker and preserves authenticated report downloads', { timeout: 30000 }, async t => {
   const f = await fixture(t), browser = await chromium.launch({ ...(process.env.OCEAN_BROWSER_TEST_EXECUTABLE
     ? { executablePath: process.env.OCEAN_BROWSER_TEST_EXECUTABLE } : { channel: 'chrome' }), headless: true });
@@ -195,6 +222,36 @@ test('disposable browser displays the exact blocker and preserves authenticated 
   await expect(page.getByRole('heading', { name: 'Workflow is read only', exact: true })).toBeVisible();
   await expect(page.getByRole('status').filter({ hasText: code })).toBeVisible();
   await expect(page.locator('#content')).toContainText('Starts, dispatch, adoption and workflow changes are blocked');
+  assert.deepEqual(await page.evaluate(async () => {
+    const { workflowReadTimeoutMs } = await import(document.querySelector('script[type="module"]').src);
+    return ['view/strategies/page/0', 'view/strategies/cicd-vwap-pull-back-strategy', 'view/dashboard', 'session', 'readiness']
+      .map(path => workflowReadTimeoutMs(path));
+  }), [25000, 25000, 12000, 12000, 12000]);
+  const deadlines = await page.evaluate(async () => {
+    const { request } = await import(document.querySelector('script[type="module"]').src);
+    const { fetchVwapImprovementStatus } = await import('/workflow/vwap-improvement-view.js');
+    const oldFetch = window.fetch, oldSetTimeout = window.setTimeout, scheduled = [], observed = [];
+    window.setTimeout = (callback, delay, ...args) => {
+      if ([12000, 25000].includes(delay)) { scheduled.push(delay); return oldSetTimeout(callback, 15, ...args); }
+      return oldSetTimeout(callback, delay, ...args);
+    };
+    window.fetch = (_url, options) => new Promise((_resolve, reject) => {
+      observed.push(options.signal);
+      const rejectAbort = () => reject(new DOMException('Software deadline fixture', 'AbortError'));
+      if (options.signal.aborted) rejectAbort(); else options.signal.addEventListener('abort', rejectAbort, { once: true });
+    });
+    const navigation = new AbortController(), failures = [];
+    try {
+      for (const path of ['session', 'view/dashboard', 'view/strategies/page/0']) {
+        try { await request(path, { signal: navigation.signal }); } catch (error) { failures.push(error.code); }
+      }
+      try { await fetchVwapImprovementStatus({ signal: navigation.signal }); } catch (error) { failures.push(error.name); }
+      return { scheduled, failures, allInnerAborted: observed.every(signal => signal.aborted && signal !== navigation.signal), navigationAborted: navigation.signal.aborted };
+    } finally { window.fetch = oldFetch; window.setTimeout = oldSetTimeout; }
+  });
+  assert.deepEqual(deadlines, { scheduled: [12000, 12000, 25000, 12000],
+    failures: ['WORKFLOW_REQUEST_TIMEOUT', 'WORKFLOW_REQUEST_TIMEOUT', 'WORKFLOW_REQUEST_TIMEOUT', 'AbortError'],
+    allInnerAborted: true, navigationAborted: false });
   assert.equal(await page.locator('#content [data-action]:not([disabled]):not([data-action^="download-"]):not([data-action^="copy-"])').count(), 0);
   const route = `/api/workflow/vwap-improvement-monitor/reports/cohort?publication_sha256=${f.reports.config.publication_sha256}`;
   const download = await page.request.get(f.base + route); assert.equal(download.status(), 200);

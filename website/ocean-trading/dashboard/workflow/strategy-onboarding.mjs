@@ -10,6 +10,7 @@ import { DEFAULT_VWAP_PHYSICAL_COMPARATOR_CONTRACT, readVwapPhysicalComparatorCo
 import { DEFAULT_VWAP_APPROVAL_DISPATCH_STATE, readVwapPhysicalComparatorApprovalDispatchState } from './vwap-physical-comparator-approval-dispatch.mjs';
 import { createRuntimeProbeCache } from './runtime-probe-cache.mjs';
 import { timedSync } from '../request-timing.mjs';
+import { readOnboardingFileSync } from './onboarding-file-read.mjs';
 
 export const ONBOARDING_STRATEGY_ID = 'cicd-vwap-pull-back-strategy';
 export const DEFAULT_ONBOARDING_ROOT = process.env.OCEAN_STRATEGY_ONBOARDING_ROOT
@@ -134,7 +135,7 @@ function paperQualificationGate(value) {
 
 export function readOnboardingStrategyId(root = DEFAULT_ONBOARDING_ROOT) {
   try {
-    const value = JSON.parse(fs.readFileSync(path.join(root, 'strategy-registry.json'), 'utf8'));
+    const value = JSON.parse(readOnboardingFileSync(path.join(root, 'strategy-registry.json'), 'utf8'));
     id(value.strategy_id);
     return value.strategy_id;
   } catch {
@@ -145,7 +146,7 @@ export function readOnboardingStrategyId(root = DEFAULT_ONBOARDING_ROOT) {
 function readSource(root, key, filename, strategyId) {
   const sourcePath = path.join(root, filename);
   try {
-    const content = fs.readFileSync(sourcePath);
+    const content = readOnboardingFileSync(sourcePath);
     const value = JSON.parse(content.toString('utf8'));
     if (value.strategy_id !== strategyId) return { key, filename, state: 'REJECTED', reason: 'STRATEGY_ID_MISMATCH', value: null };
     return { key, filename, state: 'AVAILABLE', reason: null, sha256: fileDigest(content), modified_at_utc: fs.statSync(sourcePath).mtime.toISOString(), value };
@@ -159,7 +160,7 @@ function sourceFingerprint(sources) { return fileDigest(Buffer.from(sources.map(
 
 export function readReplayCampaign(statePath = DEFAULT_REPLAY_CAMPAIGN_STATE, strategyId = ONBOARDING_STRATEGY_ID) {
   try {
-    const content = fs.readFileSync(statePath);
+    const content = readOnboardingFileSync(statePath);
     const value = JSON.parse(content.toString('utf8'));
     requireThat(value.schema_version === 'cicd-vwap-replay-campaign-state/v1', 422, 'REPLAY_CAMPAIGN_SCHEMA_INVALID');
     requireThat(value.strategy_id === strategyId, 422, 'REPLAY_CAMPAIGN_STRATEGY_MISMATCH');
@@ -192,7 +193,7 @@ export function readReplayCampaign(statePath = DEFAULT_REPLAY_CAMPAIGN_STATE, st
 export function readPriorityProgram(root = DEFAULT_ONBOARDING_ROOT, strategyId = ONBOARDING_STRATEGY_ID) {
   const programPath = path.join(root, 'priority-completion-program.json');
   try {
-    const content = fs.readFileSync(programPath);
+    const content = readOnboardingFileSync(programPath);
     const value = JSON.parse(content.toString('utf8'));
     requireThat(value.schema_version === 'cicd-vwap-priority-completion-program/v1', 422, 'PRIORITY_PROGRAM_SCHEMA_INVALID');
     requireThat(value.strategy_id === strategyId, 422, 'PRIORITY_PROGRAM_STRATEGY_MISMATCH');
@@ -249,7 +250,7 @@ export function readPriorityProgram(root = DEFAULT_ONBOARDING_ROOT, strategyId =
 export function readAutonomousImprovementProgram(root = DEFAULT_ONBOARDING_ROOT, strategyId = ONBOARDING_STRATEGY_ID) {
   const programPath = path.join(root, 'autonomous-continuous-improvement-program.json');
   try {
-    const content = fs.readFileSync(programPath);
+    const content = readOnboardingFileSync(programPath);
     const value = JSON.parse(content.toString('utf8'));
     requireThat(value.schema_version === 'cicd-vwap-autonomous-continuous-improvement-program/v1', 422, 'AUTONOMOUS_PROGRAM_SCHEMA_INVALID');
     requireThat(value.strategy_id === strategyId, 422, 'AUTONOMOUS_PROGRAM_STRATEGY_MISMATCH');
@@ -545,7 +546,7 @@ export function loadStrategyOnboarding({ root = DEFAULT_ONBOARDING_ROOT, events 
   const approvalDispatch = timedSync('workflow.onboarding.aux.dispatch',()=>readVwapPhysicalComparatorApprovalDispatchState(approvalDispatchStatePath, strategyId));
   physicalComparator.approval_dispatch = approvalDispatch;
 
-  return {
+  return applyOnboardingRuntime({
     strategy_id: strategyId, strategy_name: registry?.strategy_name || profile?.strategy_name || setup?.strategy_name || 'Strategy onboarding',
     onboarding_status: replayReady ? 'COMPLETE' : registrationComplete ? 'READY_FOR_REPLAY' : setupConfirmed ? 'PREPARING' : 'SETUP_REQUIRED',
     activation_status: latestActive ? `ACTIVATED_${latestActive.environment}_NOT_STARTED` : registration ? 'REGISTERED_NOT_ACTIVATED' : setupConfirmed ? (questionnaireBrainComplete ? 'READY_FOR_REGISTRATION' : 'PREPARING') : (registry?.activation_status || profile?.onboarding_status || 'DATA_UNAVAILABLE'),
@@ -561,13 +562,18 @@ export function loadStrategyOnboarding({ root = DEFAULT_ONBOARDING_ROOT, events 
       items: brainOutbox,
     },
     registration: { state: registration ? (registrationComplete ? 'REGISTERED' : 'BRAIN_SYNC_PENDING') : questionnaireBrainComplete ? 'READY' : 'NOT_READY', can_register: questionnaireBrainComplete && !registration, receipt: registration ? { id: registration.id, package_hash: registration.package_hash, created_at_utc: registration.created_at_utc, brain_sync: registrationBrain } : null },
-    activation: { state: latestActive ? latestActive.state : 'INACTIVE', environments: activationEnvironments, actual_source_started: replayRuntime.chart_replay.started === true, automated_ordering: false, live_real: false },
-    replay_runtime: replayRuntime,
+    activation: { state: latestActive ? latestActive.state : 'INACTIVE', environments: activationEnvironments, actual_source_started: false, automated_ordering: false, live_real: false },
+    replay_runtime: null,
     continuous_delivery: { priority_program: priorityProgram, autonomous_improvement: autonomousImprovement, physical_comparator: physicalComparator, replay_campaign: replayCampaign, event_monitor: eventMonitor },
     source: { status: sourceStatus, label: 'Ocean strategy and Sierra source records', fingerprint, last_verified_at_utc: setup?.last_verified_at || remediation?.verified_through || null, files: sources.map(({ filename, state, reason, sha256, modified_at_utc }) => ({ filename, state, reason, sha256, modified_at_utc })) },
     read_only: false, source_read_only: true, workflow_writable: true,
     safety: { affects_trading_controls: false, execution_authority: false, registration_automatic: false, activation_does_not_start_source: true },
-  };
+  }, replayRuntime);
+}
+
+export function applyOnboardingRuntime(projection, runtime) {
+  return { ...projection, activation: { ...projection.activation, actual_source_started: runtime.chart_replay.started === true },
+    replay_runtime: runtime };
 }
 
 function normalizeAnswers(questionnaire, input, submit) {

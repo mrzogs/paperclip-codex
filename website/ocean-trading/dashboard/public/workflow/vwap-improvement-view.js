@@ -13,11 +13,16 @@ export function unavailableVwapImprovementStatus(){
 }
 
 export async function fetchVwapImprovementStatus({signal}={}){
-  const response=await fetch('/api/vwap-improvement-monitor/status',{credentials:'same-origin',cache:'no-store',signal});
-  if(!response.ok)throw new Error('VWAP_EVIDENCE_STATUS_UNAVAILABLE');
-  const value=await response.json();
-  if(value.strategy_id!==strategy || !value.evidence_ingestion || !value.strategy_improvement)throw new Error('VWAP_EVIDENCE_STATUS_INVALID');
-  return value;
+  const controller=new AbortController(),cancelled=()=>controller.abort();
+  if(signal?.aborted)controller.abort();else signal?.addEventListener('abort',cancelled,{once:true});
+  const timer=setTimeout(()=>controller.abort(),12000);
+  try{
+    const response=await fetch('/api/vwap-improvement-monitor/status',{credentials:'same-origin',cache:'no-store',signal:controller.signal});
+    if(!response.ok)throw new Error('VWAP_EVIDENCE_STATUS_UNAVAILABLE');
+    const value=await response.json();
+    if(value.strategy_id!==strategy || !value.evidence_ingestion || !value.strategy_improvement)throw new Error('VWAP_EVIDENCE_STATUS_INVALID');
+    return value;
+  }finally{clearTimeout(timer);signal?.removeEventListener('abort',cancelled);}
 }
 
 export function renderVwapImprovementPanel(value){

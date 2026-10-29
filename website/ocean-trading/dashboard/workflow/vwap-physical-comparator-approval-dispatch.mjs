@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import { readOnboardingFileSync } from './onboarding-file-read.mjs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readVwapPhysicalComparatorContract, DEFAULT_VWAP_PHYSICAL_COMPARATOR_CONTRACT } from './vwap-physical-comparator-contract.mjs';
@@ -26,7 +27,7 @@ const digest = value => crypto.createHash('sha256').update(String(value)).digest
 const bufferDigest = value => crypto.createHash('sha256').update(value).digest('hex');
 
 function readJson(filePath, fallback = null) {
-  try { return JSON.parse(fs.readFileSync(filePath, 'utf8').replace(/^\uFEFF/, '')); } catch { return fallback; }
+  try { return JSON.parse(readOnboardingFileSync(filePath, 'utf8').replace(/^\uFEFF/, '')); } catch { return fallback; }
 }
 function writeJson(filePath, value) {
   fs.mkdirSync(path.dirname(filePath), { recursive:true });
