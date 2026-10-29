@@ -95,7 +95,7 @@ export async function readWorkflowViewAsync(backend, actor, route, { signal } = 
   requireThat(result.projection.strategy_id === strategyId, 409, 'ONBOARDING_SOURCE_CHANGED');
   const runtime = (backend.config.strategy_onboarding_runtime_probe || cachedReplayTwoRuntime)(result.runtimeSpec);
   const projection = applyOnboardingRuntime(result.projection, runtime);
-  return readWorkflowViewObserved(backend, actor, route, projection);
+  return timedSync('workflow.companion.strategy-assembly',()=>readWorkflowViewObserved(backend, actor, route, projection));
 }
 function readWorkflowViewObserved(backend, actor, route, preparedOnboarding = null) {
   requireThat(actor.role === 'HUMAN', 403, 'WAYNE_BROWSER_ONLY');

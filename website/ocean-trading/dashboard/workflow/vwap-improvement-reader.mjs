@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { timedSync } from '../request-timing.mjs';
 import path from 'node:path';
 import { loadVwapImprovementReports } from './vwap-improvement-reports.mjs';
 import { validateVwapDiscoveryAdmission } from './vwap-discovery-admission.mjs';
@@ -59,17 +60,20 @@ export function readVwapImprovementReaderConfig(file) {
 export async function loadConfiguredVwapImprovementReports({
   configFile = process.env.OCEAN_VWAP_IMPROVEMENT_REPORT_CONFIG,
   now = Date.now(), loadReports = loadVwapImprovementReports,
+  diagnosticTiming = false,
 } = {}) {
   if (!configFile) return {ingestion:{status:'NOT_CONFIGURED',authority:'NONE',blockers:[{code:'REPORT_READER_NOT_CONFIGURED'}]},reports:{},proof_links:[]};
   try {
-    const config = readVwapImprovementReaderConfig(configFile);
+    const config = diagnosticTiming ? timedSync('workflow.companion.reader-config',()=>readVwapImprovementReaderConfig(configFile))
+      : readVwapImprovementReaderConfig(configFile);
     // No publication callback is inferred from an unsigned report or a JSON
     // boolean. These reports are diagnostic until independent custody verifies.
-    const loaded = await loadReports({root:config.evidence_root,project:config.project_id,
+    const readReports = () => loadReports({root:config.evidence_root,project:config.project_id,
       domain:config.domain,projectRoot:config.project_root,manifestPath:config.manifest_path,
       expectedPublicationHash:config.publication_sha256,publicationSchema:config.publication_schema,
       reportSchemas:config.report_schemas,requiredKinds:config.required_kinds,
       maxAgeMs:config.max_age_ms,maxBytes:config.max_bytes,maxTotalBytes:config.max_total_bytes,now});
+    const loaded = await (diagnosticTiming ? timedSync('workflow.companion.report-loader.sync', readReports) : readReports());
     return {...loaded,config};
   } catch (error) { return blocked(error.code || error.message || 'REPORT_READER_FAILED'); }
 }
