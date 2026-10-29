@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { canonical, digest, objectHash, requireThat } from './common.mjs';
 import { assessIndependentTrades } from './targeted-replay-behavior.mjs';
+import { adaptVwapTestResult } from './vwap-test-result-adapter.mjs';
+import { VWAP_TARGETED_BRAIN_RESULT } from './vwap-targeted-brain-client.mjs';
 
 export const CANDIDATE_EVALUATOR_VERSION='ocean-operational-candidate-evaluator/v2';
 export const CANDIDATE_EVALUATION_REQUEST_VERSION='ocean-candidate-evaluation-request/v2';
@@ -285,10 +287,39 @@ export class OperationalCandidateEvaluator {
     const trades=independent.flatMap(item=>item.targeted_behavior.verified_candidate_trades);
     const identities=trades.map(trade=>`${trade.run_id}:${trade.trade_id}`);
     requireThat(new Set(identities).size===identities.length,409,'TARGETED_REPLAY_INDEPENDENT_TRADE_DUPLICATE');
-    const assessment=assessIndependentTrades(trades,plan.targeted_replay.plan.independent_acceptance);
-    const allPassed=independent.every(item=>item.targeted_behavior.independent_verdict.verdict==='PASS');
-    return {conclusion:response.conclusion_type==='BENEFIT_SUPPORTED' && (assessment.verdict!=='PASS' || !allPassed)
-      ?'BENEFIT_NOT_ESTABLISHED':response.conclusion_type,targeted_assessment:assessment};
+    let assessment=assessIndependentTrades(trades,plan.targeted_replay.plan.independent_acceptance);
+    let allPassed=independent.every(item=>item.targeted_behavior.independent_verdict.verdict==='PASS');
+    const physical={verified:false,label:'UNVERIFIED_LOCAL_DIAGNOSTIC',blockers:[],adapter_bindings:[]};
+    try{
+      requireThat(this.b.targetedReplayVerification&&snapshot.case?.strategy_id==='cicd-vwap-pull-back-strategy'
+        &&validHash(snapshot.case.candidate_hash)&&digest(snapshot.validation_plan.content_json)===snapshot.validation_plan.content_sha256,
+      409,'TARGETED_REPLAY_CURRENT_PHYSICAL_VERIFICATION_REQUIRED');
+      requireThat(Array.isArray(plan.tests)&&requiredKinds.every(kind=>plan.tests.filter(test=>test.kind===kind).length===1)
+        &&snapshot.validation_artifacts.length===requiredKinds.length,409,'TARGETED_REPLAY_PHYSICAL_TEST_COVERAGE_REQUIRED');
+      const admitted=[];
+      for(const kind of requiredKinds){
+        const artifacts=snapshot.validation_artifacts.filter(item=>item.kind===kind);
+        requireThat(artifacts.length===1&&digest(artifacts[0].content_json)===artifacts[0].content_sha256,409,'TARGETED_REPLAY_PHYSICAL_ARTIFACT_HASH_CONFLICT');
+        const result=JSON.parse(artifacts[0].content_json),evidence=result.targeted_physical_evidence;
+        requireThat(evidence?.schema_version==='ocean-vwap-targeted-physical-evidence/v1'
+          &&Object.keys(evidence).every(key=>['schema_version','protocol_ref','case_evidence_ref','physical_runs'].includes(key)),
+        409,'TARGETED_REPLAY_PHYSICAL_ENVELOPE_REQUIRED');
+        const output=adaptVwapTestResult({project_id:snapshot.case.strategy_id,candidate_hash:snapshot.case.candidate_hash,
+          planBinding:plan.targeted_replay,test:plan.tests.find(test=>test.kind===kind),result,
+          protocol_ref:evidence.protocol_ref,case_evidence_ref:evidence.case_evidence_ref,physical_runs:evidence.physical_runs},
+        this.b.targetedReplayVerification);
+        physical.adapter_bindings.push(output.adapter_binding);
+        if(['WALK_FORWARD','OOS_HOLDOUT'].includes(kind))admitted.push(output.targeted_behavior);
+      }
+      const verifiedTrades=admitted.flatMap(result=>result.verified_candidate_trades);
+      requireThat(new Set(verifiedTrades.map(trade=>`${trade.run_id}:${trade.trade_id}`)).size===verifiedTrades.length,409,'TARGETED_REPLAY_INDEPENDENT_TRADE_DUPLICATE');
+      assessment=assessIndependentTrades(verifiedTrades,plan.targeted_replay.plan.independent_acceptance);
+      allPassed=admitted.every(result=>result.independent_verdict.verdict==='PASS');
+      physical.verified=true;physical.label='CURRENT_AUTHENTICATED_PHYSICAL_EVIDENCE';
+    }catch(error){physical.blockers.push({code:safeError(error)});physical.adapter_bindings=[];}
+    const positiveUnsupported=response.conclusion_type==='BENEFIT_SUPPORTED'&&(assessment.verdict!=='PASS'||!allPassed||!physical.verified);
+    return {conclusion:positiveUnsupported?'BENEFIT_NOT_ESTABLISHED':response.conclusion_type,
+      targeted_assessment:assessment,targeted_physical_evidence:physical};
   }
   verifyResponse(response,request){
     let content;try{content=JSON.parse(response?.content || '');}catch{}
@@ -351,9 +382,13 @@ export class OperationalCandidateEvaluator {
     // The v2 Brain receiver evaluates its existing policy. Reject independently
     // failing evidence before it can create a contradictory positive record.
     const effective=this.effectiveConclusion(snapshot,{conclusion_type:'BENEFIT_SUPPORTED'});
-    if(effective.targeted_assessment)return {local_gate_rejection:{...effective,
-      brain_writeback_reason:effective.conclusion!=='BENEFIT_SUPPORTED'
+    if(effective.targeted_assessment){
+      if(effective.conclusion==='BENEFIT_SUPPORTED'&&effective.targeted_physical_evidence?.verified&&this.b.targetedBrainClient)
+        return this.recordTargetedInBrain(job,snapshot,effective);
+      return {local_gate_rejection:{...effective,
+      brain_writeback_reason:!effective.targeted_physical_evidence?.verified?'TARGETED_REPLAY_CURRENT_PHYSICAL_VERIFICATION_REQUIRED':effective.conclusion!=='BENEFIT_SUPPORTED'
         ?'AUTHORIZED_SCOPED_REJECTION_LEARNING_PATH_REQUIRED':'TARGETED_REPLAY_BRAIN_RECEIVER_COMPATIBILITY_REQUIRED'}};
+    }
     const learner=this.b.operationalLearning,token=learner.token();
     this.renew(job);await learner.verifyIdentity(token);this.renew(job);
     const registry=await learner.registry(token);this.renew(job);
@@ -394,6 +429,62 @@ export class OperationalCandidateEvaluator {
     requireThat(objectHash(readback)===objectHash(response),503,'CANDIDATE_EVALUATION_BRAIN_READBACK_CONFLICT');
     return response;
   }
+  async recordTargetedInBrain(job,snapshot,effective){
+    const client=this.b.targetedBrainClient,context={job:{id:job.id},snapshot,effective};
+    this.assertTargetedDeliveryCurrent(job,snapshot);
+    let request;
+    try{request=await client.prepare(context);}catch(error){return {local_gate_rejection:{...effective,brain_writeback_reason:safeError(error)}};}
+    this.renew(job);
+    let current=this.b.one('ow_candidate_evaluation_jobs',job.id);
+    const requestContent=canonical(request),requestHash=digest(requestContent);
+    if(current.brain_request_json)requireThat(digest(current.brain_request_json)===current.brain_request_hash&&current.brain_request_hash===requestHash,
+      409,'CANDIDATE_EVALUATION_REQUEST_HASH_CONFLICT');
+    else{
+      const update=this.db.prepare(`UPDATE ow_candidate_evaluation_jobs SET brain_request_json=?,brain_request_hash=?
+        WHERE id=? AND state='RUNNING' AND lease_id=? AND brain_request_json IS NULL`).run(requestContent,requestHash,job.id,job.lease_id);
+      requireThat(update.changes===1,409,'CANDIDATE_EVALUATION_REQUEST_CONFLICT');
+    }
+    const compatibility=await client.compatibility();
+    current=this.b.one('ow_candidate_evaluation_jobs',job.id);let response;
+    if(current.brain_response_json){
+      requireThat(digest(current.brain_response_json)===current.brain_response_hash,409,'CANDIDATE_EVALUATION_RESPONSE_HASH_CONFLICT');
+      response=client.verifyResponse(JSON.parse(current.brain_response_json),request,compatibility.trust_policy_sha256);
+    }else{
+      this.assertTargetedDeliveryCurrent(job,snapshot);response=await client.exchange(request,context);this.renew(job);
+      const content=canonical(response),hash=digest(content);
+      const update=this.db.prepare(`UPDATE ow_candidate_evaluation_jobs SET brain_response_json=?,brain_response_hash=?,brain_record_id=?,brain_relative_path=?,brain_content_hash=?
+        WHERE id=? AND state='RUNNING' AND lease_id=? AND brain_response_json IS NULL`).run(content,hash,response.record_id,response.relative_path,
+          'sha256:'+response.content_sha256.toLowerCase(),job.id,job.lease_id);
+      requireThat(update.changes===1,409,'CANDIDATE_EVALUATION_RESPONSE_CONFLICT');
+    }
+    current=this.b.one('ow_candidate_evaluation_jobs',job.id);let readback;
+    if(current.brain_readback_json){
+      requireThat(digest(current.brain_readback_json)===current.brain_readback_hash,409,'CANDIDATE_EVALUATION_READBACK_HASH_CONFLICT');
+      readback=client.verifyResponse(JSON.parse(current.brain_readback_json),request,compatibility.trust_policy_sha256);
+    }else{
+      this.assertTargetedDeliveryCurrent(job,snapshot);readback=await client.exchange(request,context);this.renew(job);
+      requireThat(objectHash(readback)===objectHash(response),503,'CANDIDATE_EVALUATION_BRAIN_READBACK_CONFLICT');
+      const content=canonical(readback),hash=digest(content);
+      const update=this.db.prepare(`UPDATE ow_candidate_evaluation_jobs SET brain_readback_json=?,brain_readback_hash=?
+        WHERE id=? AND state='RUNNING' AND lease_id=? AND brain_readback_json IS NULL`).run(content,hash,job.id,job.lease_id);
+      requireThat(update.changes===1,409,'CANDIDATE_EVALUATION_READBACK_CONFLICT');
+    }
+    requireThat(objectHash(readback)===objectHash(response),503,'CANDIDATE_EVALUATION_BRAIN_READBACK_CONFLICT');
+    return response;
+  }
+  assertTargetedDeliveryCurrent(job,snapshot){
+    this.renew(job);
+    const current=this.b.one('ow_candidate_evaluation_jobs',job.id),row=this.b.one('ow_cases',current.case_id);
+    const latest=this.db.prepare(`SELECT id,action FROM ow_events WHERE entity_id=? AND action IN (?,?) ORDER BY id DESC LIMIT 1`)
+      .get(row.id,completionAction,'operational.candidate.validation.revalidation_required');
+    requireThat(current.state==='RUNNING'&&current.lease_id===job.lease_id&&current.lease_until_ms>Date.now()
+      &&current.case_id===snapshot.case.case_id&&current.candidate_hash===snapshot.case.candidate_hash
+      &&current.plan_hash===snapshot.validation_plan.plan_hash&&row.stage==='CANDIDATE_EVALUATION'
+      &&row.candidate_hash===snapshot.case.candidate_hash&&row.baseline_hash===snapshot.case.baseline_hash
+      &&latest?.action===completionAction&&latest.id===current.completion_event_id
+      &&this.b.operationalCandidateDispatch.validationPlan(row.id)?.plan_hash===current.plan_hash,
+    409,'CANDIDATE_EVALUATION_EVIDENCE_INVALIDATED');
+  }
   complete(job,snapshot,response){
     this.renew(job);
     return this.b.store.transaction(()=>{
@@ -411,13 +502,17 @@ export class OperationalCandidateEvaluator {
       const effective=this.effectiveConclusion(snapshot,response);
       const kind=effective.conclusion==='NO_BENEFIT'?'NO_BENEFIT':'EVALUATION';
       requireThat(kind!=='NO_BENEFIT' || snapshot.evaluation_policy.status==='PREDECLARED',409,'CANDIDATE_EVALUATION_POLICY_REQUIRED');
-      const brainContent=JSON.parse(response.content);
+      const targetedResponse=response.schema_version===VWAP_TARGETED_BRAIN_RESULT;
+      const brainContent=JSON.parse(targetedResponse?response.content_json:response.content);
       const result={schema_version:CANDIDATE_EVALUATOR_VERSION,pipeline_status:'PIPELINE_COMPLETED',
         benefit_conclusion:effective.conclusion,case_id:row.id,job_id:job.id,plan_hash:current.plan_hash,
         candidate_hash:current.candidate_hash,governance_hash:snapshot.candidate_governance.parsed.governance_hash,
         conclusion:effective.conclusion,...(effective.targeted_assessment?{brain_conclusion:response.conclusion_type,
           targeted_assessment:effective.targeted_assessment}:{}),brain_record:{record_id:response.record_id,
-          relative_path:response.relative_path,content_hash:response.content_sha256},evaluation:{schema_version:brainContent.schema_version,
+          relative_path:response.relative_path,content_hash:targetedResponse?'sha256:'+response.content_sha256.toLowerCase():response.content_sha256},evaluation:targetedResponse?{
+          schema_version:brainContent.schema_version,admission:response.admission,targeted_physical_evidence:effective.targeted_physical_evidence,
+          source_artifacts:snapshot.validation_artifacts.map(item=>({kind:item.kind,artifact_id:item.artifact_id,manifest_sha256:item.manifest_sha256,content_sha256:item.content_sha256})),
+          authority:response.authority,human_governance_required:true}:{schema_version:brainContent.schema_version,
           bindings:response.bindings,evaluation_policy:response.evaluation_policy,conclusion:brainContent.conclusion,
           source_artifacts:response.source_artifacts.map(item=>({kind:item.kind,artifact_id:item.artifact_id,
             manifest_sha256:item.manifest_sha256,content_sha256:item.content_sha256})),
@@ -433,7 +528,8 @@ export class OperationalCandidateEvaluator {
         .run(effective.conclusion,artifactId,contentHash,ended,current.id);
       this.b.event(row.id,'operational.candidate.evaluation.completed',{id:'ocean-candidate-evaluator',role:'BRAIN'},
         {job_id:job.id,plan_hash:current.plan_hash,candidate_hash:current.candidate_hash,conclusion:effective.conclusion,
-          result_artifact_id:artifactId,result_hash:contentHash,brain_record_id:response.record_id,brain_content_hash:response.content_sha256,authority});
+          result_artifact_id:artifactId,result_hash:contentHash,brain_record_id:response.record_id,
+          brain_content_hash:targetedResponse?'sha256:'+response.content_sha256.toLowerCase():response.content_sha256,authority});
       return this.publicStatus(this.b.one('ow_candidate_evaluation_jobs',job.id));
     });
   }
@@ -452,14 +548,16 @@ export class OperationalCandidateEvaluator {
         && dispatch.validationPlan(row.id)?.plan_hash===current.plan_hash,409,'CANDIDATE_EVALUATION_EVIDENCE_INVALIDATED');
       const completed=dispatch.completion(row.id),registered=dispatch.registration(row.id);
       const independentFailed=effective.targeted_assessment.verdict!=='PASS';
-      const nextAction=independentFailed
+      const nextAction=!effective.targeted_physical_evidence?.verified
+        ?'Keep this candidate unapproved. Supply current authenticated original protocol, host/run authority and both arms of every frozen TEST window. This retained assessment is an unverified local diagnostic.'
+        :independentFailed
         ?'Keep this candidate unapproved. Brain integration owner: record its rejection through an authorized strategy learning path before closing the learning cycle. Further design requires a fresh frozen discovery attempt.'
         :'Keep this candidate unapproved. Brain integration owner: verify receiver compatibility for targeted plans and traces, then evaluate these exact frozen artifacts through an authorized strategy learning path.';
       const result={schema_version:CANDIDATE_EVALUATOR_VERSION,pipeline_status:'LOCAL_ASSESSMENT_COMPLETE_BRAIN_WRITEBACK_REQUIRED',
         case_id:row.id,job_id:job.id,plan_hash:current.plan_hash,candidate_hash:current.candidate_hash,
         baseline_hash:row.baseline_hash,governance_hash:snapshot.candidate_governance.parsed.governance_hash,
         conclusion:'BENEFIT_NOT_ESTABLISHED',benefit_conclusion:'BENEFIT_NOT_ESTABLISHED',
-        targeted_assessment:effective.targeted_assessment,brain_record:null,
+        targeted_assessment:effective.targeted_assessment,targeted_physical_evidence:effective.targeted_physical_evidence||{verified:false,label:'UNVERIFIED_LOCAL_DIAGNOSTIC'},brain_record:null,
         brain_writeback:{status:'REQUIRED',reason:effective.brain_writeback_reason || 'AUTHORIZED_SCOPED_REJECTION_LEARNING_PATH_REQUIRED',
           previous_record_id:current.brain_record_id || null,normal_ingestion_authorized:false},
         sources:snapshot.validation_artifacts.map(item=>({kind:item.kind,artifact_id:item.artifact_id,

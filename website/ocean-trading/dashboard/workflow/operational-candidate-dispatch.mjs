@@ -4,6 +4,8 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { digest, exactKeys, id, noSecrets, objectHash, requireThat } from './common.mjs';
 import { TARGETED_REPLAY_STRATEGY_ID, validateTargetedReplayPlanBinding, validateTargetedReplayResultBinding, verifyTargetedReplayAuthority } from './targeted-replay-behavior.mjs';
+import { adaptVwapTestResult } from './vwap-test-result-adapter.mjs';
+import { createVwapBoundedArtifactReader } from './vwap-bounded-artifacts.mjs';
 
 export const CANDIDATE_DISPATCH_VERSION='ocean-operational-candidate-dispatch/v2';
 export const CANDIDATE_VALIDATION_VERSION='ocean-operational-candidate-validation/v4';
@@ -587,8 +589,23 @@ export class OperationalCandidateDispatch {
   validateResult(row,completed,registered,plan,test,result){
     const targetedReplayRequired=row.strategy_id===TARGETED_REPLAY_STRATEGY_ID;
     exactKeys(result,['status','segments','baseline','candidate','checks','comparison','contradictions','limitations','provenance',
-      ...(targetedReplayRequired?['targeted_behavior']:[])]);
+      ...(targetedReplayRequired?['targeted_behavior']:[]),
+      ...(targetedReplayRequired && Object.hasOwn(result,'targeted_physical_evidence')?['targeted_physical_evidence']:[])]);
     requireThat(!targetedReplayRequired || plan.targeted_replay,409,'TARGETED_REPLAY_BINDING_REQUIRED');
+    const physicalEnvelope=targetedReplayRequired ? result.targeted_physical_evidence : undefined;
+    let physicalReader=null;
+    if(physicalEnvelope!==undefined){
+      exactKeys(physicalEnvelope,['schema_version','protocol_ref','case_evidence_ref','physical_runs']);
+      requireThat(physicalEnvelope.schema_version==='ocean-vwap-targeted-physical-evidence/v1'
+        && this.b.targetedReplayVerification,409,'TARGETED_REPLAY_CURRENT_PHYSICAL_VERIFIER_REQUIRED');
+      const verification=this.b.targetedReplayVerification;
+      requireThat(typeof verification.evidenceRoot==='string' && path.isAbsolute(verification.evidenceRoot),
+        409,'TARGETED_REPLAY_EVIDENCE_ROOT_REQUIRED');
+      physicalReader=createVwapBoundedArtifactReader({root:verification.evidenceRoot,
+        maxArtifactBytes:verification.maxArtifactBytes ?? 16*1024*1024,
+        maxTotalArtifactBytes:verification.maxTotalArtifactBytes ?? 64*1024*1024,
+        codePrefix:'VWAP_DISPATCH_ARTIFACT_'});
+    }
     const ledgerBySegment=new Map();
     requireThat(['PASS','FAIL','BLOCKED'].includes(result.status),422,'CANDIDATE_VALIDATION_RESULT_STATUS_REQUIRED');
     requireThat(result.comparison && typeof result.comparison==='object' && !Array.isArray(result.comparison)
@@ -603,7 +620,8 @@ export class OperationalCandidateDispatch {
       requireThat(Array.isArray(segmentResult.source_files) && segmentResult.source_files.length>0,422,'CANDIDATE_VALIDATION_SOURCE_FILES_REQUIRED');
       const sourceFiles=segmentResult.source_files.map(file=>{
         exactKeys(file,['path','sha256']);requireThat(path.isAbsolute(file.path) && validHash(file.sha256),422,'CANDIDATE_VALIDATION_SOURCE_FILE_REQUIRED');
-        let bytes;try{requireThat(fs.statSync(file.path).isFile(),409,'CANDIDATE_VALIDATION_SOURCE_FILE_MISSING');bytes=fs.readFileSync(file.path);}
+        let bytes;try{if(physicalReader)bytes=physicalReader.read(file).bytes;
+          else{requireThat(fs.statSync(file.path).isFile(),409,'CANDIDATE_VALIDATION_SOURCE_FILE_MISSING');bytes=fs.readFileSync(file.path);}}
         catch(error){if(error?.code==='CANDIDATE_VALIDATION_SOURCE_FILE_MISSING')throw error;requireThat(false,409,'CANDIDATE_VALIDATION_SOURCE_FILE_MISSING');}
         requireThat(digest(bytes)===file.sha256,409,'CANDIDATE_VALIDATION_SOURCE_FILE_HASH_CONFLICT');return {...file,bytes};
       });
@@ -654,7 +672,9 @@ export class OperationalCandidateDispatch {
         if(cleanupApplied){
           const immutable=boundaryClose?.immutable_proof,proofPath=String(immutable?.path || '');
           let proofBytes=null;
-          if(path.isAbsolute(proofPath) && fs.existsSync(proofPath) && fs.statSync(proofPath).isFile()){
+          if(physicalReader && path.isAbsolute(proofPath)){
+            proofBytes=physicalReader.read({path:proofPath,sha256:immutable?.sha256,byte_length:Number(immutable?.bytes)}).bytes;
+          }else if(!physicalReader && path.isAbsolute(proofPath) && fs.existsSync(proofPath) && fs.statSync(proofPath).isFile()){
             proofBytes=fs.readFileSync(proofPath);
           }
           boundaryProofValid=boundaryProofValid && receipt.runner_boundary_proof?.scored_boundary_open_trade_excluded===true
@@ -773,7 +793,7 @@ export class OperationalCandidateDispatch {
         evidence[name]=structuredClone(metricEvidence);
       }
       return {segment_id:segment.segment_id,...evidence,source_files:segmentResult.source_files
-        .map(file=>({file_name:path.basename(file.path),sha256:file.sha256}))};
+        .map(file=>physicalReader?{path:file.path,sha256:file.sha256}:{file_name:path.basename(file.path),sha256:file.sha256})};
     });
     for(const name of ['baseline','candidate']){
       const aggregate=result[name];
@@ -800,8 +820,21 @@ export class OperationalCandidateDispatch {
     requireThat(Number.isFinite(result.comparison.reported_delta)
       && sameNumber(result.comparison.reported_delta,result.candidate.net_pnl-result.baseline.net_pnl)
       && Array.isArray(result.contradictions) && Array.isArray(result.limitations),409,'CANDIDATE_VALIDATION_COMPARISON_CONFLICT');
-    const targetedBehavior=targetedReplayRequired
-      ?validateTargetedReplayResultBinding(plan.targeted_replay,test,result.targeted_behavior,result,{ledgerBySegment}):null;
+    let targetedBehavior=null;
+    if(targetedReplayRequired){
+      const envelope=result.targeted_physical_evidence;
+      if(envelope!==undefined){
+        exactKeys(envelope,['schema_version','protocol_ref','case_evidence_ref','physical_runs']);
+        requireThat(envelope.schema_version==='ocean-vwap-targeted-physical-evidence/v1'
+          && this.b.targetedReplayVerification,409,'TARGETED_REPLAY_CURRENT_PHYSICAL_VERIFIER_REQUIRED');
+        targetedBehavior=adaptVwapTestResult({project_id:row.strategy_id,candidate_hash:registered.candidate_hash,
+          planBinding:plan.targeted_replay,test,result,protocol_ref:envelope.protocol_ref,
+          case_evidence_ref:envelope.case_evidence_ref,physical_runs:envelope.physical_runs},
+        {...this.b.targetedReplayVerification,artifactReader:physicalReader}).targeted_behavior;
+      }else{
+        targetedBehavior=validateTargetedReplayResultBinding(plan.targeted_replay,test,result.targeted_behavior,result,{ledgerBySegment});
+      }
+    }
     return {schema_version:CANDIDATE_VALIDATION_VERSION,case_id:row.id,plan_hash:plan.plan_hash,
       governance_hash:plan.governance_hash || null,
       plan_artifact_id:completed.plan_artifact_id,completion_hash:completed.completion_hash,candidate_hash:registered.candidate_hash,

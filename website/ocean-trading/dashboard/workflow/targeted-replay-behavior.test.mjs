@@ -140,7 +140,7 @@ function resultFixture(t){
   const record=targetedCase(item,segment),ledger={};
   for(const side of ['baseline','candidate']){
     const value=segment[side],trade={trade_id:`${side}-trade`,run_id:value.run_id,
-      exit_utc:item.start_utc,exit_sierra_datetime:45700,gross_pnl:value.net_pnl+value.fees,fees:value.fees,slippage:0,net_pnl:value.net_pnl};
+      exit_utc:item.start_utc,exit_sierra_datetime:Date.parse(item.start_utc)/86400000+25569,native_exit_sequence:1,gross_pnl:value.net_pnl+value.fees,fees:value.fees,slippage:0,net_pnl:value.net_pnl};
     const event={event_id:`${side}-event`,trade_id:trade.trade_id,at_utc:trade.exit_utc,action:'observed'};
     const trace={orders:[event],fills:[event],stops:[event],targets:[event],exits:[event]};
     const evidence={schema_version:'cicd-vwap-targeted-replay-trace/v1',run_id:value.run_id,case_id:item.window_id,
@@ -150,7 +150,7 @@ function resultFixture(t){
     fs.writeFileSync(file,bytes);segment.source_files.push({path:file,sha256});
     record.actual_orders_fills_stop_target_exit_trace[side]=trace;
     record.run_receipt_and_evidence_hashes[side].evidence_sha256=sha256;
-    ledger[side]=[{trade_id:trade.trade_id,exit_datetime:trade.exit_sierra_datetime,gross_currency_value:trade.gross_pnl,
+    ledger[side]=[{trade_id:trade.trade_id,exit_datetime:trade.exit_sierra_datetime,exit_utc:trade.exit_utc,native_exit_sequence:trade.native_exit_sequence,gross_currency_value:trade.gross_pnl,
       total_commission:trade.fees,net_profit_loss:trade.net_pnl}];
   }
   const targeted={schema_version:TARGETED_REPLAY_RESULT_VERSION,contract_sha256:TARGETED_REPLAY_CONTRACT_SHA256,
@@ -170,12 +170,37 @@ test('independent verdict rejects a smaller loss even when the generic evidence-
   assert.equal(validateTargetedReplayResultBinding(binding,testPlan,targeted,result,options).independent_verdict.verdict,'FAIL');
 });
 
+test('legacy trace reader bounds per-file and aggregate bytes before parsing or verdict math',t=>{
+  const f=resultFixture(t),call=extra=>validateTargetedReplayResultBinding(f.binding,f.testPlan,f.targeted,f.result,{...f.options,...extra});
+  assert.throws(()=>call({maxArtifactBytes:16}),{code:'TARGETED_REPLAY_ARTIFACT_BYTE_LIMIT'});
+  const baseline=f.result.segments[0].source_files[0];
+  assert.throws(()=>call({maxTotalArtifactBytes:fs.statSync(baseline.path).size}),{code:'TARGETED_REPLAY_ARTIFACT_AGGREGATE_BYTE_LIMIT'});
+  assert.throws(()=>call({artifactRoot:path.dirname(path.dirname(baseline.path))+'-unrelated'}));
+});
+
+test('legacy trace reader rejects nonregular files and directory aliases',t=>{
+  const f=resultFixture(t),file=f.result.segments[0].source_files[0],original=file.path;
+  const directory=path.join(path.dirname(original),'not-a-file');fs.mkdirSync(directory);file.path=directory;
+  assert.throws(()=>validateTargetedReplayResultBinding(f.binding,f.testPlan,f.targeted,f.result,f.options),{code:'TARGETED_REPLAY_ARTIFACT_NOT_REGULAR'});
+  const alias=path.join(path.dirname(original),'alias');fs.symlinkSync(path.dirname(original),alias,'junction');
+  file.path=path.join(alias,path.basename(original));
+  assert.throws(()=>validateTargetedReplayResultBinding(f.binding,f.testPlan,f.targeted,f.result,f.options),{code:'TARGETED_REPLAY_ARTIFACT_ALIAS_PATH_REJECTED'});
+});
+
+test('legacy trace reader rejects a file that grows during its bounded descriptor read',t=>{
+  const f=resultFixture(t),file=f.result.segments[0].source_files[0],originalStat=fs.fstatSync;let grew=false;
+  fs.fstatSync=function(fd,...args){const stat=originalStat.call(this,fd,...args);
+    if(!grew){grew=true;fs.appendFileSync(file.path,' ');}return stat;};
+  try{assert.throws(()=>validateTargetedReplayResultBinding(f.binding,f.testPlan,f.targeted,f.result,f.options),{code:'TARGETED_REPLAY_ARTIFACT_CHANGED_DURING_READ'});}
+  finally{fs.fstatSync=originalStat;}
+});
+
 test('candidate evaluation cannot call independently losing targeted evidence a benefit',()=>{
   const evaluator=new OperationalCandidateEvaluator({db:null,config:{},operationalLearning:{}});
   const snapshot={validation_plan:{content_json:JSON.stringify({targeted_replay:{plan:readyPlan()}})},
     validation_artifacts:['WALK_FORWARD','OOS_HOLDOUT'].map((kind,index)=>({kind,content_json:JSON.stringify({targeted_behavior:{
       independent_verdict:{verdict:'FAIL'},verified_candidate_trades:[{run_id:`run-${index}`,trade_id:'1',net_pnl:-2,
-        exit_sierra_datetime:45700+index,behavior_passed:true}]}})}))};
+        exit_utc:`2025-01-0${index+1}T00:00:00Z`,native_exit_sequence:1,exit_sierra_datetime:Date.parse(`2025-01-0${index+1}T00:00:00Z`)/86400000+25569,behavior_passed:true}]}})}))};
   const effective=evaluator.effectiveConclusion(snapshot,{conclusion_type:'BENEFIT_SUPPORTED'});
   assert.equal(effective.targeted_assessment.candidate_net_pnl,-4);
   assert.equal(effective.conclusion,'BENEFIT_NOT_ESTABLISHED');
@@ -213,7 +238,7 @@ test('losing independent evidence persists a visible terminal rejection across r
     validation_artifacts:['WALK_FORWARD','OOS_HOLDOUT'].map((kind,index)=>({kind,artifact_id:`source-${index}`,
       manifest_sha256:hash(`manifest-${index}`),content_sha256:hash(`source-${index}`),
       content_json:JSON.stringify({targeted_behavior:{independent_verdict:{verdict:'FAIL'},
-        verified_candidate_trades:[{run_id:`run-${index}`,trade_id:'1',net_pnl:-2,exit_sierra_datetime:45700+index,behavior_passed:true}]}})}))};
+        verified_candidate_trades:[{run_id:`run-${index}`,trade_id:'1',net_pnl:-2,exit_utc:`2025-01-0${index+1}T00:00:00Z`,native_exit_sequence:1,exit_sierra_datetime:Date.parse(`2025-01-0${index+1}T00:00:00Z`)/86400000+25569,behavior_passed:true}]}})}))};
   const response=await evaluator.recordInBrain(job,snapshot);
   assert.equal(brainCalls,0);assert.equal(response.local_gate_rejection.conclusion,'BENEFIT_NOT_ESTABLISHED');
   const status=evaluator.completeTargetedAssessment(job,snapshot,response.local_gate_rejection);
@@ -223,7 +248,7 @@ test('losing independent evidence persists a visible terminal rejection across r
   assert.equal(artifact.targeted_assessment.candidate_net_pnl,-4);
   assert.equal(artifact.brain_record,null);assert.equal(artifact.sources.length,2);
   assert.equal(artifact.brain_writeback.normal_ingestion_authorized,false);
-  assert.match(artifact.next_action,/Brain integration owner/);
+  assert.match(artifact.next_action,/unverified local diagnostic/);
   db.close();db=new DatabaseSync(file);evaluator.db=db;
   assert.equal(evaluator.claim(),null,'terminal rejection cannot re-enter the retry loop after restart');
   const task=db.prepare('SELECT * FROM ow_tasks').get();
@@ -236,10 +261,11 @@ test('locally passing evidence retains a visible receiver-compatibility dependen
   const snapshot={validation_plan:{content_json:JSON.stringify({targeted_replay:{plan:readyPlan()}})},
     validation_artifacts:['WALK_FORWARD','OOS_HOLDOUT'].map((kind,index)=>({kind,content_json:JSON.stringify({targeted_behavior:{
       independent_verdict:{verdict:'PASS'},verified_candidate_trades:[4,-2,4].map((net_pnl,i)=>({run_id:`r-${index}`,trade_id:String(i),
-        net_pnl,exit_sierra_datetime:45700+index*10+i,behavior_passed:true}))}})}))};
+        net_pnl,exit_utc:`2025-0${index+1}-0${i+1}T00:00:00Z`,native_exit_sequence:i+1,exit_sierra_datetime:Date.parse(`2025-0${index+1}-0${i+1}T00:00:00Z`)/86400000+25569,behavior_passed:true}))}})}))};
   const response=await evaluator.recordInBrain({},snapshot);
   assert.equal(response.local_gate_rejection.targeted_assessment.verdict,'PASS');
-  assert.equal(response.local_gate_rejection.brain_writeback_reason,'TARGETED_REPLAY_BRAIN_RECEIVER_COMPATIBILITY_REQUIRED');
+  assert.equal(response.local_gate_rejection.brain_writeback_reason,'TARGETED_REPLAY_CURRENT_PHYSICAL_VERIFICATION_REQUIRED');
+  assert.equal(response.local_gate_rejection.targeted_physical_evidence.verified,false);
 });
 
 test('risk limits cannot be relaxed in the result after independent evidence is seen',t=>{
@@ -295,10 +321,33 @@ test('authority requires three current human artifacts and the exact stored appr
 
 test('risk metrics use the complete ordered trade series and reject one-trade dependence',()=>{
   const limits={max_drawdown:5,max_largest_winner_share:0.6};
-  const trades=[4,-2,4].map((net_pnl,index)=>({net_pnl,exit_sierra_datetime:45700+index,run_id:'r',trade_id:String(index),behavior_passed:true}));
+  const trades=[4,-2,4].map((net_pnl,index)=>({net_pnl,exit_utc:`2025-01-0${index+1}T00:00:00Z`,native_exit_sequence:index+1,exit_sierra_datetime:Date.parse(`2025-01-0${index+1}T00:00:00Z`)/86400000+25569,run_id:'r',trade_id:String(index),behavior_passed:true}));
   assert.deepEqual(assessIndependentTrades(trades,limits),{candidate_net_pnl:6,max_drawdown:2,largest_winner_share:0.5,
-    positive_net_after_costs:true,controlled_drawdown:true,no_single_trade_dependence:true,behavior_passed:true,verdict:'PASS'});
+    positive_net_after_costs:true,controlled_drawdown:true,no_single_trade_dependence:true,behavior_passed:true,ordering_proved:true,ordering_blocker:null,verdict:'PASS'});
   assert.equal(assessIndependentTrades(trades.slice(0,1),limits).verdict,'FAIL');
+});
+
+test('the shared evaluator fails closed on missing UTC and ambiguous native ordering',()=>{
+  const limits={max_drawdown:5,max_largest_winner_share:0.5};
+  const rows=[4,-2,4].map((net_pnl,index)=>({net_pnl,run_id:'run',trade_id:String(index),exit_utc:'2025-01-01T00:00:00Z',native_exit_sequence:index+1,behavior_passed:true}));
+  assert.equal(assessIndependentTrades([...rows].reverse(),limits).verdict,'PASS');
+  const missing=rows.map(({exit_utc,...row})=>row);
+  assert.equal(assessIndependentTrades(missing,limits).ordering_blocker,'EXIT_UTC_UNPROVED');
+  assert.equal(assessIndependentTrades(missing,limits).max_drawdown,null);
+  assert.equal(assessIndependentTrades(missing,limits).verdict,'FAIL');
+  for(const altered of [rows.map(({native_exit_sequence,...row})=>row),rows.map((row,index)=>({...row,native_exit_sequence:index===2?1:row.native_exit_sequence})),rows.map((row,index)=>({...row,run_id:index?'other':'run'}))]){
+    assert.equal(assessIndependentTrades(altered,limits).ordering_blocker,'EXIT_UTC_TIE_UNRESOLVED');
+    assert.equal(assessIndependentTrades(altered,limits).verdict,'FAIL');
+  }
+});
+
+test('legacy validation requires the ledger UTC and sequence instead of a trace-only timestamp assertion',t=>{
+  const f=resultFixture(t),ledger=f.options.ledgerBySegment.values().next().value;
+  const originalUtc=ledger.candidate[0].exit_utc;
+  delete ledger.candidate[0].exit_utc;
+  assert.throws(()=>validateTargetedReplayResultBinding(f.binding,f.testPlan,f.targeted,f.result,f.options),{code:'TARGETED_REPLAY_TRACE_EXIT_UTC_UNPROVED'});
+  ledger.candidate[0].exit_utc=originalUtc;ledger.candidate[0].native_exit_sequence=999;
+  assert.throws(()=>validateTargetedReplayResultBinding(f.binding,f.testPlan,f.targeted,f.result,f.options),{code:'TARGETED_REPLAY_TRACE_EXIT_SEQUENCE_UNPROVED'});
 });
 
 test('legacy CICD VWAP evidence is quarantined without changing tasks or reinterpreting its approval',()=>{

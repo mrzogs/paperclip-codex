@@ -3,9 +3,35 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
+import test, { after } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { dispatchVwapImprovementEvent, loadVwapContinuousImprovementConfig, scanVwapContinuousImprovement } from './vwap-continuous-improvement-monitor.mjs';
+import { dispatchVwapImprovementEvent, loadVwapContinuousImprovementConfig, readVwapLearningRows,
+  scanVwapContinuousImprovement as scanCore } from './vwap-continuous-improvement-monitor.mjs';
+import { discoveryFixture, FIXTURE_NOW } from './fixtures/vwap-discovery-fixture.mjs';
+
+const cleanups=[];
+after(()=>{for(const cleanup of cleanups.reverse())cleanup();});
+const fixtureContext={after:cleanup=>cleanups.push(cleanup)};
+const admissionCache=new WeakMap();
+// Explicit SOFTWARE-ONLY custody fixtures preserve the existing transport and
+// retry tests. Production scanning has no such fallback and is tested via core.
+const softwareRows=config=>config.sources.flatMap(source=>readVwapLearningRows(source,config))
+    .filter(row=>!row.foreign_account && row.environment==='REPLAY' && row.dataset_role==='DISCOVERY'
+      && row.identity_verified && row.telemetry_complete)
+    .map(row=>({...row,research_eligible:true,learning_context_complete:true}));
+async function softwareAdmission({config,now}){
+  const rows=softwareRows(config);
+  if(!rows.length)return {admitted:false,admission:null,rows:[],blockers:[{code:'SOFTWARE_FIXTURE_NO_QUALIFIED_ROWS'}]};
+  const key=JSON.stringify(rows);let cached=admissionCache.get(config);
+  if(!cached || cached.key!==key){
+    const fixture=await discoveryFixture(fixtureContext,rows,{now});
+    assert.equal(fixture.result.admitted,true,'only a real private admission brand can support this software transport fixture');
+    cached={key,fixture};admissionCache.set(config,cached);
+  }
+  return {...cached.fixture.result,rows:cached.fixture.loaded.reports.learning_rows.document.records,
+    publication_sha256:cached.fixture.loaded.publication_sha256};
+}
+const scanVwapContinuousImprovement=options=>scanCore({clock:()=>FIXTURE_NOW,readAdmission:softwareAdmission,...options});
 
 const PROJECT_ID='11111111-1111-4111-8111-111111111111';
 const WORKSPACE_ID='22222222-2222-4222-8222-222222222222';
@@ -13,9 +39,10 @@ const WORKSPACE_ID='22222222-2222-4222-8222-222222222222';
 function fixture() {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'ocean-vwap-monitor-')),dbFile=path.join(root,'telemetry.sqlite'),stateFile=path.join(root,'state.json');
   const db=new DatabaseSync(dbFile);
+  cleanups.push(()=>fs.rmSync(root,{recursive:true,force:true}));
   db.exec("CREATE TABLE ocean_trade_causal_v1 (trade_id INTEGER PRIMARY KEY, instance_id TEXT, instance_name TEXT, instance_role TEXT, environment TEXT, trade_account TEXT, is_simulated INTEGER, symbol TEXT, run_id TEXT, strategy_id TEXT, strategy_name TEXT, strategy_version TEXT, direction TEXT, status TEXT, entry_datetime TEXT, exit_datetime TEXT, net_profit_loss REAL, max_favourable_excursion REAL, max_adverse_excursion REAL, context_status TEXT, setup_id TEXT, session_name TEXT, side TEXT, regime_label TEXT, volatility_label TEXT, vwap_reclaim_state TEXT, dataset_role TEXT, mfe_points REAL, mae_points REAL, quality_flags TEXT, updated_utc TEXT)");
   db.close();
-  const config={schema_version:'ocean-vwap-continuous-improvement-monitor/v1',enabled:true,strategy_id:'cicd-vwap-pull-back-strategy',strategy_name:'VWAP Pullback',baseline_existing_trades_on_first_run:true,
+  const config={schema_version:'ocean-vwap-continuous-improvement-monitor/v1',enabled:true,strategy_id:'cicd-vwap-pull-back-strategy',strategy_name:'VWAP Pullback',baseline_existing_trades_on_first_run:true,discovery_report_reader_config:'',
     brain_identity:{domain:'trading-strategy',project:'cicd-vwap-pull-back-strategy',strategy:'cicd-vwap-pull-back-strategy'},
     routing:{mode:'BLOCK_UNTIL_EXACT_PROJECT_ROUTE',required_project_root:'C:\\CICD-VWAP',brain_credential_ref:'D:\\secrets\\cicd-vwap.token',
       required_agent_model:'gpt-6.1-sol',paperclip_project_id:PROJECT_ID,paperclip_project_workspace_id:WORKSPACE_ID},
@@ -87,14 +114,14 @@ test('Paper Sim1 monitoring excludes closed Sim4 rows from counts and detector e
   const db=new DatabaseSync(f.dbFile);
   db.prepare("UPDATE ocean_trade_causal_v1 SET trade_account='Sim4' WHERE trade_id=2").run();
   db.close();
-  let calls=0;
+  let calls=0;const kinds=[];
   const first=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async()=>{calls++;return {triggered:true};}});
   assert.equal(first.status,'HEALTHY');
   assert.equal(first.observed_trade_count,1);
   assert.equal(first.sources[0].observed_trade_count,1);
   assert.equal(first.foreign_account_trade_count,1);
   assert.equal(first.sources[0].foreign_account_trade_count,1);
-  assert.equal(first.eligible_trade_count,1);
+  assert.equal(first.eligible_trade_count,0,'Paper identity flags are descriptive and supply no Discovery admission');
   assert.equal(first.detector.sufficiency.eligible_paper_trade_count,1);
   assert.equal(first.paper_provenance_issue_count,0);
   assert.deepEqual(first.observed_trade_ids,['fixture-paper:1']);
@@ -104,17 +131,17 @@ test('Paper Sim1 monitoring excludes closed Sim4 rows from counts and detector e
   const nextDb=new DatabaseSync(f.dbFile);
   nextDb.prepare("UPDATE ocean_trade_causal_v1 SET trade_account='Sim4' WHERE trade_id=3").run();
   nextDb.close();
-  const second=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async()=>{calls++;return {triggered:true};}});
+  const second=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async(_config,event)=>{calls++;kinds.push(event.kind);return {triggered:true};}});
   assert.equal(second.new_trade_count,0);
   assert.equal(second.observed_trade_count,1);
   assert.equal(second.foreign_account_trade_count,2);
-  assert.equal(calls,0);
+  assert.equal(calls,1);assert.deepEqual(kinds,['EVIDENCE_BLOCKED'],'missing admission can request evidence recovery, never a strategy investigation');
 });
 test('raw and managed identity conflict fails closed even if context status claims complete',async()=>{
   const f=fixture();insertRows(f.dbFile,1,60,{role:'DISCOVERY',quality:'raw_managed_context_conflict|strategy_version_mismatch'});
   const state=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async()=>({triggered:false})});
-  assert.equal(state.detector.sufficiency.discovery_trade_count,60);
-  assert.equal(state.detector.sufficiency.blockers[0].code,'TELEMETRY_OR_IDENTITY_GAPS');
+  assert.equal(state.detector.sufficiency.discovery_trade_count,0);
+  assert.ok(state.detector.sufficiency.blockers.some(item=>item.code==='DISCOVERY_ADMISSION_REQUIRED'));
   assert.equal(state.eligible_trade_count,0);
 });
 test('new discovery evidence triggers once and unchanged scans stay local',async()=>{
@@ -128,10 +155,97 @@ test('new discovery evidence triggers once and unchanged scans stay local',async
   const fourth=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:false,dispatch:async()=>{calls++;}});
   assert.equal(fourth.skipped_unchanged,true);assert.equal(calls,1);
 });
-test('existing trade IDs trigger once when a frozen run assignment makes them newly eligible',async()=>{
+test('production default missing admission leaves even complete raw Discovery rows unqualified',async()=>{
+  const f=fixture();insertRows(f.dbFile,1,60,{role:'DISCOVERY'});
+  const state=await scanCore({config:f.config,stateFile:f.stateFile,force:true,clock:()=>FIXTURE_NOW,dispatch:async()=>({triggered:false})});
+  assert.equal(state.observed_trade_count,60);assert.equal(state.eligible_trade_count,0);
+  assert.equal(state.sources[0].declared_identity_complete_trade_count,60);
+  assert.equal(state.detector.sufficiency.discovery_trade_count,0);assert.equal(state.disposition,'INSUFFICIENT_EVIDENCE');
+  assert.equal(state.discovery_admission.authority,'UNPROVED');
+});
+
+test('same SQLite IDs with changed authenticated context/publication trigger one new investigation',async t=>{
+  const f=fixture();insertRows(f.dbFile,1,60,{role:'DISCOVERY'});
+  const rows=softwareRows(f.config),first=await discoveryFixture(t,rows);
+  let active=first,calls=0;const events=[];
+  const readAdmission=async()=>({...active.result,rows:active.loaded.reports.learning_rows.document.records,
+    publication_sha256:active.loaded.publication_sha256});
+  const scan=force=>scanCore({config:f.config,stateFile:f.stateFile,force,clock:()=>FIXTURE_NOW,readAdmission,
+    dispatch:async(_config,event)=>{calls++;events.push(event);return {triggered:true,dispatch_committed:true};}});
+  const baseline=await scan(true);assert.equal(baseline.eligible_trade_count,60);
+  const changedRows=rows.map(row=>({...row,setup_id:'new-authenticated-context'}));
+  active=await discoveryFixture(t,changedRows,{mutateReport:report=>{report.software_revision='second-publication';}});
+  const changed=await scan(false);
+  assert.equal(changed.new_trade_count,0);assert.equal(changed.newly_eligible_trade_count,0);
+  assert.equal(changed.database_signature,baseline.database_signature);assert.equal(changed.disposition,'INVESTIGATE');
+  assert.equal(calls,1);assert.equal(events[0].trigger_reason,'ELIGIBLE_EVIDENCE_CHANGED');
+  assert.notEqual(changed.discovery_admission_signature,baseline.discovery_admission_signature);
+  await scan(false);assert.equal(calls,1);
+});
+
+test('admission expiry or tamper with unchanged SQLite revokes eligibility and never retries the old investigation',async t=>{
+  for(const mode of ['expiry','tamper']){
+    const f=fixture();insertRows(f.dbFile,1,60,{role:'DISCOVERY'});
+    const admitted=await discoveryFixture(t,softwareRows(f.config));let currentNow=FIXTURE_NOW,deny=false;
+    const kinds=[];
+    const readAdmission=async()=>deny?{admitted:false,admission:null,rows:[],publication_sha256:admitted.loaded.publication_sha256,
+      blockers:[{code:mode==='expiry'?'DISCOVERY_ADMISSION_EXPIRED':'REPORT_HASH_OR_LENGTH_MISMATCH'}]}:
+      {...admitted.result,rows:admitted.loaded.reports.learning_rows.document.records,publication_sha256:admitted.loaded.publication_sha256};
+    const scan=force=>scanCore({config:f.config,stateFile:f.stateFile,force,clock:()=>currentNow,readAdmission,
+      dispatch:async(_config,event)=>{kinds.push(event.kind);return {triggered:false,dispatch_committed:false,reason:'MOCK_BLOCKED_ROUTE'};}});
+    const baseline=await scan(true);
+    // Start a pending investigation using a changed, still-authenticated context.
+    insertRows(f.dbFile,61,1,{role:'DISCOVERY'});
+    const pending=await scan(true);assert.equal(pending.pending_dispatch.event.kind,'INVESTIGATE');
+    const before=kinds.length;deny=true;if(mode==='expiry')currentNow+=11*60*1000;
+    const revoked=await scan(false);
+    assert.equal(revoked.eligible_trade_count,0);assert.equal(revoked.disposition,'INSUFFICIENT_EVIDENCE');
+    assert.equal(revoked.discovery_admission.authority,'UNPROVED');
+    assert.ok(kinds.slice(before).every(kind=>kind==='EVIDENCE_BLOCKED'));
+    assert.equal(revoked.pending_dispatch.event.kind,'EVIDENCE_BLOCKED');
+    const retry=await scan(false);assert.equal(retry.eligible_trade_count,0);
+    assert.ok(kinds.slice(before).every(kind=>kind==='EVIDENCE_BLOCKED'));
+    assert.notEqual(revoked.discovery_admission_signature,baseline.discovery_admission_signature);
+  }
+});
+
+test('null P&L and excursions remain unknown and cannot enter authenticated rows as zero',async t=>{
+  const f=fixture();insertRows(f.dbFile,1,1,{role:'DISCOVERY'});const db=new DatabaseSync(f.dbFile);
+  db.exec('UPDATE ocean_trade_causal_v1 SET net_profit_loss=NULL,mfe_points=NULL,mae_points=NULL,max_favourable_excursion=NULL,max_adverse_excursion=NULL');db.close();
+  const rows=readVwapLearningRows(f.config.sources[0],f.config);
+  assert.equal(rows[0].net_pnl,null);assert.equal(rows[0].mfe,null);assert.equal(rows[0].mae,null);
+  const fixtureAdmission=await discoveryFixture(t,rows);
+  assert.equal(fixtureAdmission.result.admitted,false);
+  assert.equal(fixtureAdmission.result.blockers[0].code,'DISCOVERY_ROW_ECONOMICS_INVALID');
+});
+
+test('cached private admission expiry and row mutation are checked before unchanged-database skipping',async t=>{
+  for(const mode of ['expiry','row-mutation']){
+    const f=fixture();insertRows(f.dbFile,1,60,{role:'DISCOVERY'});
+    const admitted=await discoveryFixture(t,softwareRows(f.config));let now=FIXTURE_NOW;
+    let rows=admitted.loaded.reports.learning_rows.document.records;
+    const readAdmission=async()=>({...admitted.result,rows,publication_sha256:admitted.loaded.publication_sha256});
+    const scan=force=>scanCore({config:f.config,stateFile:f.stateFile,force,clock:()=>now,readAdmission,
+      dispatch:async()=>({triggered:true,dispatch_committed:true})});
+    const baseline=await scan(true);assert.equal(baseline.eligible_trade_count,60);
+    if(mode==='expiry')now+=11*60*1000;
+    else rows=rows.map((row,index)=>index===0?{...row,setup_id:'unbound-context'}:row);
+    const revoked=await scan(false);
+    assert.equal(revoked.skipped_unchanged,false);assert.equal(revoked.database_signature,baseline.database_signature);
+    assert.equal(revoked.eligible_trade_count,0);assert.equal(revoked.disposition,'INSUFFICIENT_EVIDENCE');
+    assert.ok(revoked.discovery_admission.blockers.some(item=>item.code===(mode==='expiry'
+      ?'DISCOVERY_ADMISSION_EXPIRED':'DISCOVERY_ADMISSION_ROW_SET_MISMATCH')));
+  }
+});
+test('frozen assignment alone stays unqualified; authenticated evidence makes existing IDs eligible once',async()=>{
   const f=fixture();delete f.config.sources[0].run_assignments;insertRows(f.dbFile,1,60,{role:null,runId:'prospective-run'});let calls=0,event=null;
   await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:true,dispatch:async()=>({triggered:false})});
   f.config.sources[0].run_assignments={'prospective-run':'DISCOVERY'};
+  const assignmentOnly=await scanCore({config:f.config,stateFile:f.stateFile,force:false,clock:()=>FIXTURE_NOW,
+    dispatch:async()=>{calls++;return {triggered:true,dispatch_committed:true};}});
+  assert.equal(assignmentOnly.eligible_trade_count,0);assert.equal(assignmentOnly.detector.sufficiency.discovery_trade_count,0);
+  assert.equal(assignmentOnly.disposition,'INSUFFICIENT_EVIDENCE');
+  calls=0;
   const second=await scanVwapContinuousImprovement({config:f.config,stateFile:f.stateFile,force:false,dispatch:async(_config,value)=>{calls++;event=value;return {triggered:true,dispatch_committed:true};}});
   assert.equal(second.new_trade_count,0);assert.equal(second.newly_eligible_trade_count,60);assert.equal(second.disposition,'INVESTIGATE');
   assert.equal(calls,1);assert.equal(event.trigger_reason,'EXISTING_TRADES_BECAME_ELIGIBLE');assert.equal(event.newly_eligible_trade_ids.length,60);

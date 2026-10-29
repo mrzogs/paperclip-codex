@@ -38,6 +38,8 @@ import {
 import { OnboardingBrainSync, retryOnboardingBrain } from './onboarding-brain-sync.mjs';
 import { enrichStrategyApprovalStatuses } from './paperclip-approval-status.mjs';
 import { ReplayTwoBookingRegistry } from './replay-two-booking-registry.mjs';
+import { handleVwapImprovementRequest } from './vwap-improvement-status.mjs';
+import { loadConfiguredVwapImprovementReports } from './vwap-improvement-reader.mjs';
 
 export const TABLE = JSON.parse(fs.readFileSync(new URL("./workflow-transition-table.json", import.meta.url), "utf8"));
 const candidateRouteImplementationHash=digest(fs.readFileSync(new URL('./backend.mjs',import.meta.url)));
@@ -64,9 +66,13 @@ for (const action of ["version","settings","permission","preview","prepare","pre
 }
 
 export class WorkflowBackend {
-  constructor(config, environment = process.env) {
+  constructor(config, environment = process.env, dependencies = {}) {
     this.config = config;
     this.environment = environment;
+    // Trusted source wiring only. Report/config JSON cannot provide verifiers or
+    // turn on the separately governed targeted Brain transport.
+    this.targetedReplayVerification = dependencies.targetedReplayVerification || null;
+    this.targetedBrainClient = dependencies.targetedBrainClient || null;
     requireThat(config.test_only === true && config.contract_release === RELEASE, 503, "S20_TEST_CONTRACT_REQUIRED");
     if (config.operator_managed) requireThat(config.brain_submission === 'OFF' && config.dispatch_worker === 'OFF' && config.live_real === 'DISABLED', 503, 'S231_EXECUTION_DISABLED_REQUIRED');
     const releaseRoot = fileURLToPath(new URL("./contracts/2.1.0/", import.meta.url));
@@ -964,7 +970,12 @@ export class WorkflowBackend {
     response.setHeader("Content-Type", "application/json; charset=utf-8"); response.setHeader("Cache-Control", "no-store"); response.setHeader("X-Content-Type-Options", "nosniff");
     try {
       const bookingCurrentQuery=request.method==='GET' && pathname===`/api/workflow/${OPERATIONAL_PREFIX}/replay-two-bookings/current`;
-      requireThat((!requestUrl.search || bookingCurrentQuery) && !/%(?:2f|5c)|\.\./i.test(pathname), 400, "UNSAFE_ROUTE_OR_QUERY");
+      const reportDownloadQuery=request.method==='GET'
+        && /^\/api\/workflow\/vwap-improvement-monitor\/reports\/[a-z_]+$/.test(pathname)
+        && [...requestUrl.searchParams.keys()].length===1
+        && requestUrl.searchParams.getAll('publication_sha256').length===1
+        && /^[a-f0-9]{64}$/i.test(requestUrl.searchParams.get('publication_sha256') || '');
+      requireThat((!requestUrl.search || bookingCurrentQuery || reportDownloadQuery) && !/%(?:2f|5c)|\.\./i.test(pathname), 400, "UNSAFE_ROUTE_OR_QUERY");
       const route = pathname.slice("/api/workflow/".length);
       if (route === 'readiness' && request.method === 'GET') {
         this.auth.browserOrigin(request);
@@ -979,6 +990,13 @@ export class WorkflowBackend {
       const mutation = request.method !== "GET";
       const actor = this.auth.authenticate(request, mutation);
       requireThat(actor.namespace!=='OPERATIONAL' || route.startsWith(`${OPERATIONAL_PREFIX}/`),403,'OPERATIONAL_IDENTITY_ON_TEST_ROUTE');
+      if(route.startsWith('vwap-improvement-monitor/reports/')){
+        requireThat(actor.role==='HUMAN',403,'WAYNE_BROWSER_ONLY');
+        await handleVwapImprovementRequest(request,response,requestUrl,{
+          loadConfigured:options=>loadConfiguredVwapImprovementReports({...options,
+            configFile:this.environment.OCEAN_VWAP_IMPROVEMENT_REPORT_CONFIG || null}),
+        });return true;
+      }
       if(route==='identity/v1' && request.method==='GET') {
         response.end(JSON.stringify(identityReadback(this.config,actor,'TEST')));return true;
       }

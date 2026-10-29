@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { digest, objectHash } from './common.mjs';
+import { targetedEvaluationFixture } from './fixtures/vwap-targeted-evaluation-fixture.mjs';
 import {
   CANDIDATE_EVALUATION_RESULT_VERSION,
   OperationalCandidateEvaluator,
@@ -18,6 +19,38 @@ const brainAuthority = Object.freeze({
   paper_authorized: false,
   live_authorized: false,
   runtime_trade_decision_dependency: false,
+});
+
+test('targeted benefit requires fresh W6 verification of all four frozen tests',t=>{
+  const f=targetedEvaluationFixture(t);
+  const denied=new OperationalCandidateEvaluator({config:{},db:null,operationalLearning:{}}).effectiveConclusion(f.snapshot,{conclusion_type:'BENEFIT_SUPPORTED'});
+  assert.equal(denied.conclusion,'BENEFIT_NOT_ESTABLISHED');assert.equal(denied.targeted_physical_evidence.verified,false);
+  const evaluator=new OperationalCandidateEvaluator({config:{},db:null,operationalLearning:{},targetedReplayVerification:f.verification});
+  const accepted=evaluator.effectiveConclusion(f.snapshot,{conclusion_type:'BENEFIT_SUPPORTED'});
+  assert.equal(accepted.conclusion,'BENEFIT_SUPPORTED');assert.equal(accepted.targeted_physical_evidence.adapter_bindings.length,4);
+  f.snapshot.validation_artifacts[0].content_json+=' ';
+  assert.equal(evaluator.effectiveConclusion(f.snapshot,{conclusion_type:'BENEFIT_SUPPORTED'}).conclusion,'BENEFIT_NOT_ESTABLISHED');
+});
+
+test('serialized physical booleans, cross-project snapshots and stale receipts cannot support targeted benefit',t=>{
+  const f=targetedEvaluationFixture(t),evaluator=new OperationalCandidateEvaluator({config:{},db:null,operationalLearning:{},targetedReplayVerification:f.verification});
+  const forged=structuredClone(f.snapshot);forged.case.strategy_id='other-project';
+  assert.equal(evaluator.effectiveConclusion(forged,{conclusion_type:'BENEFIT_SUPPORTED'}).conclusion,'BENEFIT_NOT_ESTABLISHED');
+  const stale=new OperationalCandidateEvaluator({config:{},db:null,operationalLearning:{},targetedReplayVerification:{...f.verification,now:f.verification.now+2*86400000}});
+  assert.equal(stale.effectiveConclusion(f.snapshot,{conclusion_type:'BENEFIT_SUPPORTED'}).targeted_physical_evidence.verified,false);
+  delete f.snapshot.validation_artifacts[0].content_sha256;
+  assert.equal(evaluator.effectiveConclusion(f.snapshot,{conclusion_type:'BENEFIT_SUPPORTED'}).conclusion,'BENEFIT_NOT_ESTABLISHED');
+});
+
+test('persisted targeted results retain exact trace refs; missing paths or tampered hashes fail current verification',t=>{
+  const f=targetedEvaluationFixture(t),evaluator=new OperationalCandidateEvaluator({config:{},db:null,operationalLearning:{},targetedReplayVerification:f.verification});
+  for(const mutate of [result=>{delete result.segments[0].source_files[0].path;},result=>{result.segments[0].source_files[0].sha256=digest('different-trace');}]){
+    const snapshot=structuredClone(f.snapshot),artifact=snapshot.validation_artifacts[0],result=JSON.parse(artifact.content_json);
+    mutate(result);artifact.content_json=JSON.stringify(result);artifact.content_sha256=digest(artifact.content_json);
+    const assessment=evaluator.effectiveConclusion(snapshot,{conclusion_type:'BENEFIT_SUPPORTED'});
+    assert.equal(assessment.conclusion,'BENEFIT_NOT_ESTABLISHED');assert.equal(assessment.targeted_physical_evidence.verified,false);
+    assert.ok(assessment.targeted_physical_evidence.blockers[0].code.includes('TRACE_ARTIFACT_REQUIRED'));
+  }
 });
 
 function exchange(conclusion, policyStatus = 'NOT_PREDECLARED', policyOverride = {}) {

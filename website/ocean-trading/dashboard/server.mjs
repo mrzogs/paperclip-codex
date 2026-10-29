@@ -14,6 +14,7 @@ import { workflowFromEnvironment } from "./workflow/backend.mjs";
 import { installWebsiteControl } from "./workflow/process-control.mjs";
 import { reconcileOperationalReplayRunSettings } from "./workflow/operational-run-readiness.mjs";
 import { readVwapContinuousImprovementState } from "./workflow/vwap-continuous-improvement-monitor.mjs";
+import { handleVwapImprovementRequest } from "./workflow/vwap-improvement-status.mjs";
 import { handleQuantTerminalRequest, initializeQuantTerminal, stopQuantTerminal } from "./quant-terminal/server.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -3807,12 +3808,14 @@ const server = http.createServer((req, res) => websiteTiming.request(req,res,()=
     return;
   }
 
-  if (req.url === "/api/vwap-improvement-monitor/status") {
-    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({
-      ...readVwapContinuousImprovementState(VWAP_IMPROVEMENT_STATE_FILE),
-      website_monitor: monitorState(),
-    }));
+  if (requestUrl.pathname === "/api/vwap-improvement-monitor/status") {
+    void handleVwapImprovementRequest(req, res, requestUrl, {
+      legacyState: readVwapContinuousImprovementState(VWAP_IMPROVEMENT_STATE_FILE),
+      websiteMonitor: monitorState(),
+    }).catch(() => {
+      if (!res.headersSent) res.writeHead(503, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(JSON.stringify({ error: { code: "REPORT_STATUS_UNAVAILABLE" } }));
+    });
     return;
   }
 

@@ -4,6 +4,8 @@ import path from 'node:path';
 import { execFile, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { detectRecurringVwapFailures, VWAP_STRATEGY_ID } from './vwap-continuous-improvement.mjs';
+import { verifiedVwapDiscoveryRows } from './vwap-discovery-admission.mjs';
+import { loadConfiguredVwapDiscoveryAdmission } from './vwap-improvement-reader.mjs';
 
 export const VWAP_MONITOR_SCHEMA = 'ocean-vwap-continuous-improvement-monitor-state/v1';
 const REQUIRED_CAUSAL_FIELDS = ['setup_id','session_name','side','regime_label','vwap_reclaim_state'];
@@ -83,7 +85,7 @@ function normalize(row,source,config) {
     session_id:entry?source.id+':'+entry.slice(0,10):null,trading_day:entry?.slice(0,10)||null,
     setup_id:row.setup_id||null,session_name:row.session_name||null,side:row.side||row.direction||null,
     regime_label:row.regime_label||null,volatility_label:row.volatility_label||null,vwap_reclaim_state:row.vwap_reclaim_state||null,
-    net_pnl:Number(row.net_profit_loss??row.profit_loss??0),mfe:row.mfe_points??row.max_favourable_excursion??null,mae:row.mae_points??row.max_adverse_excursion??null,
+    net_pnl:row.net_profit_loss??row.profit_loss??null,mfe:row.mfe_points??row.max_favourable_excursion??null,mae:row.mae_points??row.max_adverse_excursion??null,
     telemetry_complete:telemetryComplete,identity_verified:identityVerified,foreign_account:foreignAccount,run_contract_state:contractState.state,
     quality_flags:[...observedFlags].sort(),
     quality_blockers:[...critical,...missing.map(field=>field+'_missing'),...(contractState.verified?[]:['run_contract_'+contractState.state.toLowerCase()])].sort(),entry_time_utc:entry,exit_time_utc:utc(row.exit_datetime),updated_utc:row.updated_utc||null};
@@ -320,16 +322,30 @@ export async function dispatchVwapImprovementEvent(config,event) {
     delivery_proven:true,downstream_investigation_complete:false};
 }
 
-export async function scanVwapContinuousImprovement({config,stateFile,reason='periodic_scan',force=false,dispatch=dispatchVwapImprovementEvent,readSource=readVwapLearningRowsAsync}={}) {
+export async function scanVwapContinuousImprovement({config,stateFile,reason='periodic_scan',force=false,dispatch=dispatchVwapImprovementEvent,
+  readSource=readVwapLearningRowsAsync,readAdmission=loadConfiguredVwapDiscoveryAdmission,clock=Date.now}={}) {
   if(!config?.enabled)return {enabled:false,skipped:true,reason:'disabled'};
-  const previous=readJson(stateFile,{})||{},checkedAt=nowUtc();
+  const previous=readJson(stateFile,{})||{},checkedAt=new Date(clock()).toISOString();
   const publication=runContractPublication(config);
+  // Revalidate publication/receipt freshness even when no SQLite row changed.
+  // A persisted "eligible" counter is not a transferable admission capability.
+  let admissionState;
+  try { admissionState=await readAdmission({configFile:config.discovery_report_reader_config,now:Date.parse(checkedAt),config}); }
+  catch { admissionState={admitted:false,admission:null,rows:[],blockers:[{code:'DISCOVERY_ADMISSION_READER_FAILED'}]}; }
+  const admissionRows=Array.isArray(admissionState?.rows)?admissionState.rows:[];
+  const currentAdmission=verifiedVwapDiscoveryRows(admissionState?.admission,admissionRows,
+    {strategyId:config.strategy_id,now:Date.parse(checkedAt)});
+  const admissionValid=admissionState?.admitted===true && currentAdmission.blockers.length===0;
+  const admissionSignature=digest({publication:admissionState?.publication_sha256||null,
+    admitted:admissionValid,report:admissionState?.admission?.report_sha256||null,
+    blockers:[...(admissionState?.blockers||[]),...currentAdmission.blockers]});
   const signatures=config.sources.flatMap(source=>sqliteSignatures(source.database_path));
   const signature=digest({normalization_version:'frozen-replay-role-map-account-scope/v2',signatures,
     sources:config.sources.map(source=>({id:source.id,environment:source.environment,account:source.account,
       run_assignments:source.run_assignments||null,require_explicit_dataset_role:source.require_explicit_dataset_role===true,
       run_contracts:source.run_contracts||null,default_dataset_role:source.default_dataset_role||null})),critical_quality_flags:config.critical_quality_flags||[]});
-  if(!force&&previous.status==='HEALTHY'&&previous.database_signature===signature&&!previous.pending_dispatch){
+  if(!force&&previous.status==='HEALTHY'&&previous.database_signature===signature
+    &&previous.discovery_admission_signature===admissionSignature&&!previous.pending_dispatch){
     const unchanged={...previous,last_checked_at_utc:checkedAt,last_check_reason:reason,skipped_unchanged:true};
     writeJson(stateFile,unchanged);return unchanged;
   }
@@ -344,17 +360,23 @@ export async function scanVwapContinuousImprovement({config,stateFile,reason='pe
     // Keep their presence visible, but never count or dispatch them as this source.
     const foreignAccountRows=sources.flatMap(item=>item.rows.filter(row=>row.foreign_account));
     const rows=sources.flatMap(item=>item.rows.filter(row=>!row.foreign_account));
-    const eligible=row=>row.telemetry_complete&&row.identity_verified&&LEARNING_ROLES.has(row.dataset_role);
+    const declaredComplete=row=>row.telemetry_complete&&row.identity_verified&&LEARNING_ROLES.has(row.dataset_role);
+    const researchRows=admissionValid?admissionRows:rows;
+    const verifiedRows=admissionValid?currentAdmission.rows:[];
     const ids=new Set(rows.map(row=>row.trade_id)),prior=new Set(previous.observed_trade_ids||[]),newIds=[...ids].filter(id=>!prior.has(id)).sort();
-    const eligibleRows=rows.filter(eligible).sort((left,right)=>left.trade_id.localeCompare(right.trade_id));
+    const eligibleRows=verifiedRows.filter(row=>row.research_eligible===true)
+      .sort((left,right)=>left.trade_id.localeCompare(right.trade_id));
     const eligibleIds=eligibleRows.map(row=>row.trade_id),priorEligible=new Set(previous.eligible_trade_ids||[]);
     const newlyEligibleIds=eligibleIds.filter(id=>!priorEligible.has(id));
-    const eligibleFingerprint=digest(eligibleRows.map(row=>({trade_id:row.trade_id,run_id:row.run_id,dataset_role:row.dataset_role,
+    const eligibleFingerprint=digest({admission_report_sha256:admissionState?.admission?.report_sha256||null,
+      rows:eligibleRows.map(row=>({trade_id:row.trade_id,run_id:row.run_id,dataset_role:row.dataset_role,
       setup_id:row.setup_id,session_name:row.session_name,side:row.side,regime_label:row.regime_label,
       volatility_label:row.volatility_label,vwap_reclaim_state:row.vwap_reclaim_state,net_pnl:row.net_pnl,mfe:row.mfe,mae:row.mae,
-      entry_time_utc:row.entry_time_utc,exit_time_utc:row.exit_time_utc,updated_utc:row.updated_utc})));
+      research_eligible:row.research_eligible,learning_context_complete:row.learning_context_complete,quality_flags:row.quality_flags,
+      entry_time_utc:row.entry_time_utc,exit_time_utc:row.exit_time_utc,updated_utc:row.updated_utc}))});
     const first=!previous.initialized_at_utc,baseline=first&&config.baseline_existing_trades_on_first_run!==false;
-    const detector=publicDetector(detectRecurringVwapFailures(rows,{strategyId:config.strategy_id}));
+    const detector=publicDetector(detectRecurringVwapFailures(researchRows,{strategyId:config.strategy_id,
+      admission:admissionValid?admissionState.admission:null,now:Date.parse(checkedAt)}));
     let receipt=null,lastHash=previous.last_triggered_analysis_hash||null,pendingDispatch=previous.pending_dispatch||null;
     const evidenceChanged=previous.eligible_evidence_fingerprint&&previous.eligible_evidence_fingerprint!==eligibleFingerprint;
     const triggerReason=newIds.length?'NEW_TRADE_IDS':newlyEligibleIds.length?'EXISTING_TRADES_BECAME_ELIGIBLE':evidenceChanged?'ELIGIBLE_EVIDENCE_CHANGED':pendingDispatch?'RETRY_UNCOMMITTED_DISPATCH':null;
@@ -367,7 +389,8 @@ export async function scanVwapContinuousImprovement({config,stateFile,reason='pe
       if(committed){lastHash=detector.analysis_hash;pendingDispatch=null;}
       else pendingDispatch={event,attempted_at_utc:checkedAt,reason:receipt?.reason||'DISPATCH_NOT_COMMITTED',receipt};
     }
-    const hasQualityBlocker=detector.sufficiency.blockers.some(item=>item.code==='TELEMETRY_OR_IDENTITY_GAPS'||item.code==='STRATEGY_ID_MISMATCH');
+    const hasQualityBlocker=detector.sufficiency.blockers.some(item=>['TELEMETRY_OR_IDENTITY_GAPS','STRATEGY_ID_MISMATCH',
+      'DISCOVERY_ADMISSION_REQUIRED','DISCOVERY_ADMISSION_EXPIRED','DISCOVERY_ADMISSION_ROW_SET_MISMATCH'].includes(item.code));
     const hasRoleIssue=rows.some(isRunRoleIssue);
     const hasPaperIssue=rows.some(row=>row.environment==='PAPER'&&(!LEARNING_ROLES.has(row.dataset_role)||!row.telemetry_complete||!row.identity_verified));
     let lastEvidenceBlockerHash=previous.last_triggered_evidence_blocker_hash||null;
@@ -393,13 +416,21 @@ export async function scanVwapContinuousImprovement({config,stateFile,reason='pe
       initialized_at_utc:previous.initialized_at_utc||checkedAt,last_checked_at_utc:checkedAt,last_database_interrogation_at_utc:checkedAt,last_check_reason:reason,
       skipped_unchanged:false,database_query_count:Number(previous.database_query_count||0)+1,database_signature:signature,
       sources:sources.map(item=>({id:item.source.id,environment:item.source.environment,account:item.source.account,database_path:item.source.database_path,
-        observed_trade_count:item.rows.filter(row=>!row.foreign_account).length,eligible_trade_count:item.rows.filter(eligible).length,
+        observed_trade_count:item.rows.filter(row=>!row.foreign_account).length,
+        eligible_trade_count:eligibleRows.filter(row=>item.rows.some(observed=>!observed.foreign_account
+          &&observed.run_id===row.run_id&&(observed.source_trade_id===row.trade_id||observed.trade_id===row.trade_id))).length,
+        declared_identity_complete_trade_count:item.rows.filter(declaredComplete).length,
         foreign_account_trade_count:item.rows.filter(row=>row.foreign_account).length,
         role_issue_count:item.rows.filter(row=>!row.foreign_account&&isRunRoleIssue(row)).length,
         latest_trade_id:item.rows.filter(row=>!row.foreign_account).at(-1)?.trade_id||null})),
       observed_trade_count:rows.length,foreign_account_trade_count:foreignAccountRows.length,eligible_trade_count:eligibleRows.length,new_trade_count:baseline?0:newIds.length,last_observed_new_trade_ids:baseline?[]:newIds,
       newly_eligible_trade_count:baseline?0:newlyEligibleIds.length,last_newly_eligible_trade_ids:baseline?[]:newlyEligibleIds,
       observed_trade_ids:[...ids].sort(),eligible_trade_ids:eligibleIds,eligible_evidence_fingerprint:eligibleFingerprint,
+      discovery_admission_signature:admissionSignature,
+      discovery_admission:{admitted:verifiedRows.length>0,publication_sha256:admissionState?.publication_sha256||null,
+        report_sha256:admissionState?.admission?.report_sha256||null,
+        blockers:[...(admissionState?.blockers||[]),...currentAdmission.blockers],
+        authority:verifiedRows.length?'AUTHENTICATED_DISCOVERY_ORIGINALS':'UNPROVED'},
       run_contract_publication:publication,
       detector,disposition:detector.disposition,next_action:nextAction,
       account_scope_anomaly_action:foreignAccountRows.length?'FOREIGN_ACCOUNT_ROWS_EXCLUDED: verify the telemetry producer and account binding; do not import these rows into this account evidence.':null,
