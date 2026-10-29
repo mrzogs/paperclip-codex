@@ -1,17 +1,43 @@
 param(
   [Parameter(Mandatory=$true)][ValidatePattern('^[a-f0-9]{40}$')][string]$Commit,
   [Parameter(Mandatory=$true)][ValidatePattern('^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$')][string]$ReleaseId,
-  [Parameter(Mandatory=$true)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$ExpectedDeploymentSha256
+  [Parameter(Mandatory=$true)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$ExpectedDeploymentSha256,
+  [AllowNull()][object]$VwapImprovementReportConfig,
+  [AllowNull()][object]$VwapDiscoverySemanticConfig,
+  [AllowNull()][object]$VwapDiscoverySemanticConfigSha256
 )
 
 # Build only. The protected service manager remains the sole restart mechanism.
 $ErrorActionPreference = 'Stop'
 $repository = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'ocean-deployment.ps1')
+# Reject an invalid explicit operator path before reading active state or making
+# release directories. Explicit null clears this optional candidate setting.
+$explicitVwapReportConfig = $PSBoundParameters.ContainsKey('VwapImprovementReportConfig')
+if ($explicitVwapReportConfig) {
+  $selectedVwapReportConfig = Resolve-OceanVwapImprovementReportConfig -Value $VwapImprovementReportConfig
+}
+# The descriptor and its independently supplied pin are one optional operator
+# binding. Supplying BOTH explicit null values clears the candidate pair.
+$explicitSemanticConfig = $PSBoundParameters.ContainsKey('VwapDiscoverySemanticConfig') -or
+  $PSBoundParameters.ContainsKey('VwapDiscoverySemanticConfigSha256')
+if ($explicitSemanticConfig) {
+  if (-not $PSBoundParameters.ContainsKey('VwapDiscoverySemanticConfig') -or
+      -not $PSBoundParameters.ContainsKey('VwapDiscoverySemanticConfigSha256')) {
+    throw 'Ocean VWAP discovery semantic builder parameters must be supplied together.'
+  }
+  $selectedSemanticConfig = Resolve-OceanVwapDiscoverySemanticConfig -Config $VwapDiscoverySemanticConfig -Sha256 $VwapDiscoverySemanticConfigSha256
+}
 $runtime = 'D:\OceanTradingData\website\ocean-runtime'
 $activePath = Join-Path $runtime 'deployment.json'
 $observedHash = (Get-FileHash -LiteralPath $activePath -Algorithm SHA256).Hash
 if ($observedHash -ine $ExpectedDeploymentSha256) { throw 'Concurrent Ocean deployment changed; release build refused.' }
-$active = Get-Content -LiteralPath $activePath -Raw | ConvertFrom-Json
+$validatedActive = Get-OceanDeployment -ConfigPath $activePath
+if ($validatedActive.ManifestSha256 -ine $observedHash) { throw 'Concurrent Ocean deployment changed during validation; release build refused.' }
+if (-not $explicitVwapReportConfig) { $selectedVwapReportConfig = $validatedActive.VwapImprovementReportConfig }
+if (-not $explicitSemanticConfig) {
+  $selectedSemanticConfig = Resolve-OceanVwapDiscoverySemanticConfig -Config $validatedActive.VwapDiscoverySemanticConfig -Sha256 $validatedActive.VwapDiscoverySemanticConfigSha256
+}
 $release = Join-Path 'D:\OceanTradingData\website\deployments' $ReleaseId
 if (Test-Path -LiteralPath $release) { throw "Release directory already exists: $release" }
 $commitExists = & git -C $repository cat-file -t $Commit
@@ -29,11 +55,11 @@ $dashboard = Join-Path $source 'website\ocean-trading\dashboard'
 # Keep the mutable data directory attached to its existing publisher. A
 # website-only restart must not strand the monitor on the previous release's
 # data path while the new website reads a copied, frozen snapshot.
-$null = New-OceanReleaseMutableDataLink -PreviousDashboard $active.dashboard -CandidateDashboard $dashboard
+$null = New-OceanReleaseMutableDataLink -PreviousDashboard $validatedActive.Dashboard -CandidateDashboard $dashboard
 
 # Carry operational uploads forward, never replace committed code/config with
 # an old working tree. Persistent database and physical-binding paths remain.
-$oldUploads = Join-Path $active.dashboard 'uploads'
+$oldUploads = Join-Path $validatedActive.Dashboard 'uploads'
 if (Test-Path -LiteralPath $oldUploads) {
   $newUploads = Join-Path $dashboard 'uploads'
   New-Item -ItemType Directory -Force -Path $newUploads | Out-Null
@@ -41,9 +67,9 @@ if (Test-Path -LiteralPath $oldUploads) {
     Copy-Item -LiteralPath $item.FullName -Destination $newUploads -Recurse -Force
   }
 }
-$oldManifest = Join-Path $active.dashboard 'dashboard-data.json'
+$oldManifest = Join-Path $validatedActive.Dashboard 'dashboard-data.json'
 if (Test-Path -LiteralPath $oldManifest) { Copy-Item -LiteralPath $oldManifest -Destination (Join-Path $dashboard 'dashboard-data.json') }
-$oldConfig = Join-Path $active.dashboard 'config'
+$oldConfig = Join-Path $validatedActive.Dashboard 'config'
 if (Test-Path -LiteralPath $oldConfig) {
   foreach ($file in @(Get-ChildItem -LiteralPath $oldConfig -Recurse -File)) {
     $destination = Join-Path (Join-Path $dashboard 'config') $file.FullName.Substring($oldConfig.Length + 1)
@@ -69,11 +95,19 @@ $support = @($tracked | Where-Object { $_.StartsWith('scripts/') } | ForEach-Obj
 $candidate = [ordered]@{
   schema_version='ocean-website-deployment/v1'; release_id=$ReleaseId
   source_commit=$Commit; source_root=$source; dashboard=$dashboard
-  physical_binding_file=$active.physical_binding_file
-  physical_binding_sha256=$active.physical_binding_sha256
+  physical_binding_file=$validatedActive.PhysicalBindingFile
+  physical_binding_sha256=$validatedActive.PhysicalBindingSha256
   file_map_sha256=(Get-OceanDeploymentFileMapHash -Entries $files); files=$files
   support_file_map_sha256=(Get-OceanDeploymentFileMapHash -Entries $support); support_files=$support
   previous_deployment_sha256=$observedHash.ToLowerInvariant()
+}
+if ($null -ne $selectedVwapReportConfig) {
+  $candidate['vwap_improvement_report_config'] = Resolve-OceanVwapImprovementReportConfig -Value $selectedVwapReportConfig
+}
+if ($null -ne $selectedSemanticConfig.Path) {
+  $checkedSemanticConfig = Resolve-OceanVwapDiscoverySemanticConfig -Config $selectedSemanticConfig.Path -Sha256 $selectedSemanticConfig.Sha256
+  $candidate['vwap_discovery_semantic_config'] = $checkedSemanticConfig.Path
+  $candidate['vwap_discovery_semantic_config_sha256'] = $checkedSemanticConfig.Sha256
 }
 $candidatePath = Join-Path $release 'deployment.json'
 [IO.File]::WriteAllText($candidatePath,($candidate | ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))

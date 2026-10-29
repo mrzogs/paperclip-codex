@@ -523,6 +523,38 @@ function Stop-UnreadyStartedChild([Diagnostics.Process]$Process) {
   Stop-ExactWebsiteProcessTree $Process
 }
 
+function Get-WebsiteVwapImprovementReportConfig {
+  param($ResolvedDeployment)
+  # Get-OceanDeployment validates this operator-owned location. Never obtain it
+  # from an HTTP request, report, ambient user setting or another component.
+  if ($null -eq $ResolvedDeployment) { return $null }
+  $property = $ResolvedDeployment.PSObject.Properties['VwapImprovementReportConfig']
+  if ($null -eq $property -or $null -eq $property.Value) { return $null }
+  return [string]$property.Value
+}
+
+function Set-WebsiteVwapImprovementReportEnvironment {
+  param($ResolvedDeployment)
+  $env:OCEAN_VWAP_IMPROVEMENT_REPORT_CONFIG = Get-WebsiteVwapImprovementReportConfig $ResolvedDeployment
+}
+
+function Set-WebsiteVwapDiscoverySemanticEnvironment {
+  param($ResolvedDeployment)
+  # A separate Website-owned descriptor pins executable/code/policy. Neither
+  # the diagnostic publisher nor a submitted report selects this location.
+  $env:OCEAN_VWAP_DISCOVERY_SEMANTIC_CONFIG = $null
+  $env:OCEAN_VWAP_DISCOVERY_SEMANTIC_CONFIG_SHA256 = $null
+  if ($null -eq $ResolvedDeployment) { return }
+  $location = $ResolvedDeployment.PSObject.Properties['VwapDiscoverySemanticConfig']
+  $pin = $ResolvedDeployment.PSObject.Properties['VwapDiscoverySemanticConfigSha256']
+  if (($null -eq $location -or $null -eq $location.Value) -and ($null -eq $pin -or $null -eq $pin.Value)) { return }
+  if ($null -eq $location -or $null -eq $location.Value -or $null -eq $pin -or [string]$pin.Value -notmatch '^[a-fA-F0-9]{64}$') {
+    throw 'Validated Website semantic descriptor binding is incomplete.'
+  }
+  $env:OCEAN_VWAP_DISCOVERY_SEMANTIC_CONFIG = [string]$location.Value
+  $env:OCEAN_VWAP_DISCOVERY_SEMANTIC_CONFIG_SHA256 = [string]$pin.Value
+}
+
 function Initialize-WebsiteEnvironment {
   New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
   Set-PrivateDirectoryAcl $Runtime
@@ -541,6 +573,10 @@ function Initialize-WebsiteEnvironment {
   $env:OCEAN_TRADING_MONITOR_DEFAULT_ON = '0'
   $env:OCEAN_WORKFLOW_ENABLED = if ($disabled) { '0' } else { '1' }
   $env:OCEAN_WORKFLOW_CONFIG = Join-Path $WorkflowRoot 'operator-state.dpapi'
+  # Process environment belongs to this Website supervisor and its child only.
+  # An absent manifest binding clears inherited state and remains unconfigured.
+  Set-WebsiteVwapImprovementReportEnvironment $Deployment
+  Set-WebsiteVwapDiscoverySemanticEnvironment $Deployment
   $env:OCEAN_OPERATIONAL_LEARNING_ENABLED = '1'
   $env:OCEAN_OPERATIONAL_LEARNING_BRAIN_API = 'http://127.0.0.1:4001'
   $env:OCEAN_OPERATIONAL_LEARNING_BRAIN_PATH = '/trading/learning/operational'

@@ -132,6 +132,18 @@ function Get-TaskSpec([string]$Name) {
 
 function Register-OceanTask([string]$Name) {
   $spec = Get-TaskSpec $Name
+  if ($Name -ceq 'Website') {
+    # Task identity remains independent of deployment validation so Stop and
+    # Uninstall still work when a release manifest is unavailable or invalid.
+    $deployment = Get-ValidatedOceanDeployment
+    $relativeScript = 'scripts\run-ocean-website-supervised.ps1'
+    $binding = @($deployment.SupportFiles | Where-Object { [string]$_.relative_path -ceq $relativeScript })
+    if ($binding.Count -ne 1 -or [string]$binding[0].sha256 -cnotmatch '^[a-f0-9]{64}$') {
+      throw "Ocean Website supervisor support binding is missing or invalid: $relativeScript"
+    }
+    # Get-OceanDeployment has already verified the exact support-file bytes.
+    $spec.Script = Join-Path $deployment.SourceRoot $relativeScript
+  }
   if (-not (Test-Path -LiteralPath $spec.Script)) { throw "Task script missing for ${Name}: $($spec.Script)" }
   if (-not (Test-Path -LiteralPath $HiddenLauncher)) { throw "Hidden service launcher missing: $HiddenLauncher" }
   $arguments = "//B //Nologo `"$HiddenLauncher`" `"$Powershell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$($spec.Script)`""
@@ -287,7 +299,15 @@ function Get-MonitorOwnedProcessTree {
 }
 
 function Get-WebsiteSupervisorCommandPattern {
-  return [regex]::Escape((Join-Path $Root 'scripts\run-ocean-website-supervised.ps1'))
+  $canonical = [regex]::Escape((Join-Path $Root 'scripts\run-ocean-website-supervised.ps1'))
+  $releaseRoot = [IO.Path]::GetFullPath('D:\OceanTradingData\website\deployments').TrimEnd('\') + '\'
+  $release = [regex]::Escape($releaseRoot) +
+    'ocean-[A-Za-z0-9][A-Za-z0-9._-]*\\(?:paperclip-source\\)?scripts\\run-ocean-website-supervised\.ps1'
+  $scriptPath = '(?:' + $canonical + '|' + $release + ')'
+  # Match a script invocation, not a basename, backup suffix or a path mentioned
+  # inside a different PowerShell command. No manifest is needed for retirement.
+  return '(?i)^(?!.*(?:^|\s)-(?:Command|EncodedCommand|c|enc)\b).*?(?:^|\s)-File\s+(?:"' +
+    $scriptPath + '"(?=\s|$)|' + $scriptPath + '(?=\s|$))'
 }
 
 function Stop-WebsiteSupervisorProcesses {

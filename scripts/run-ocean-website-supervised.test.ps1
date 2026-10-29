@@ -8,6 +8,47 @@ function Assert-Test([bool]$Condition, [string]$Message) {
   if (-not $Condition) { throw $Message }
 }
 
+$savedReaderConfig = $env:OCEAN_VWAP_IMPROVEMENT_REPORT_CONFIG
+$savedSemanticConfig = $env:OCEAN_VWAP_DISCOVERY_SEMANTIC_CONFIG
+$savedSemanticPin = $env:OCEAN_VWAP_DISCOVERY_SEMANTIC_CONFIG_SHA256
+$savedWorkflowEnabled = $env:OCEAN_WORKFLOW_ENABLED
+$savedQuantData = $env:QT_DATA_DIR
+try {
+  $env:OCEAN_VWAP_IMPROVEMENT_REPORT_CONFIG = 'C:\untrusted-ambient\reader.json'
+  Set-WebsiteVwapImprovementReportEnvironment $null
+  Assert-Test ([string]::IsNullOrEmpty($env:OCEAN_VWAP_IMPROVEMENT_REPORT_CONFIG)) 'UNBOUND_WEBSITE_INHERITED_AN_AMBIENT_READER'
+  $operatorLocation = 'D:\operator-owned\reader-config.json'
+  Set-WebsiteVwapImprovementReportEnvironment ([pscustomobject]@{VwapImprovementReportConfig=$operatorLocation})
+  Assert-Test ($env:OCEAN_VWAP_IMPROVEMENT_REPORT_CONFIG -ceq $operatorLocation) 'WEBSITE_IGNORED_VALIDATED_MANIFEST_READER'
+  Assert-Test ([Environment]::GetEnvironmentVariable('OCEAN_VWAP_IMPROVEMENT_REPORT_CONFIG','Process') -ceq $operatorLocation) 'READER_LOCATION_NOT_IN_CHILD_PROCESS_ENVIRONMENT'
+  Assert-Test ($env:OCEAN_WORKFLOW_ENABLED -ceq $savedWorkflowEnabled) 'READER_BINDING_CHANGED_WORKFLOW_ENABLEMENT'
+  Assert-Test ($env:QT_DATA_DIR -ceq $savedQuantData) 'READER_BINDING_CHANGED_QUANT_STATE'
+  Set-WebsiteVwapImprovementReportEnvironment ([pscustomobject]@{VwapImprovementReportConfig=$null})
+  Assert-Test ([string]::IsNullOrEmpty($env:OCEAN_VWAP_IMPROVEMENT_REPORT_CONFIG)) 'OLD_MANIFEST_RETAINED_A_PREVIOUS_READER_BINDING'
+  & {
+    Set-StrictMode -Version Latest
+    Set-WebsiteVwapImprovementReportEnvironment ([pscustomobject]@{})
+    Assert-Test ([string]::IsNullOrEmpty($env:OCEAN_VWAP_IMPROVEMENT_REPORT_CONFIG)) 'LEGACY_RESOLVED_MANIFEST_IS_NOT_UNSET_UNDER_STRICT_MODE'
+  }
+  $env:OCEAN_VWAP_DISCOVERY_SEMANTIC_CONFIG = 'C:\untrusted-ambient\semantic.json'
+  $env:OCEAN_VWAP_DISCOVERY_SEMANTIC_CONFIG_SHA256 = 'f' * 64
+  & {
+    Set-StrictMode -Version Latest
+    Set-WebsiteVwapDiscoverySemanticEnvironment ([pscustomobject]@{})
+    Assert-Test ([string]::IsNullOrEmpty($env:OCEAN_VWAP_DISCOVERY_SEMANTIC_CONFIG) -and [string]::IsNullOrEmpty($env:OCEAN_VWAP_DISCOVERY_SEMANTIC_CONFIG_SHA256)) 'OLD_MANIFEST_INHERITED_SEMANTIC_AUTHORITY'
+  }
+  Set-WebsiteVwapDiscoverySemanticEnvironment ([pscustomobject]@{VwapDiscoverySemanticConfig='D:\operator-owned\semantic.json';VwapDiscoverySemanticConfigSha256=('a' * 64)})
+  Assert-Test ($env:OCEAN_VWAP_DISCOVERY_SEMANTIC_CONFIG -ceq 'D:\operator-owned\semantic.json' -and $env:OCEAN_VWAP_DISCOVERY_SEMANTIC_CONFIG_SHA256 -ceq ('a' * 64)) 'SEMANTIC_CHILD_BINDING_MISMATCH'
+  $partialRejected = $false
+  try { Set-WebsiteVwapDiscoverySemanticEnvironment ([pscustomobject]@{VwapDiscoverySemanticConfig='D:\operator-owned\semantic.json'}) } catch { $partialRejected = $true }
+  Assert-Test ($partialRejected -and [string]::IsNullOrEmpty($env:OCEAN_VWAP_DISCOVERY_SEMANTIC_CONFIG) -and [string]::IsNullOrEmpty($env:OCEAN_VWAP_DISCOVERY_SEMANTIC_CONFIG_SHA256)) 'PARTIAL_SEMANTIC_BINDING_RETAINED_AUTHORITY'
+  Assert-Test ($env:OCEAN_WORKFLOW_ENABLED -ceq $savedWorkflowEnabled -and $env:QT_DATA_DIR -ceq $savedQuantData) 'SEMANTIC_BINDING_CHANGED_OTHER_COMPONENT_SETTINGS'
+} finally {
+  $env:OCEAN_VWAP_IMPROVEMENT_REPORT_CONFIG = $savedReaderConfig
+  $env:OCEAN_VWAP_DISCOVERY_SEMANTIC_CONFIG = $savedSemanticConfig
+  $env:OCEAN_VWAP_DISCOVERY_SEMANTIC_CONFIG_SHA256 = $savedSemanticPin
+}
+
 function Start-HttpFixture([ValidateSet('healthy','empty','hang','headers_hang')][string]$Mode) {
   $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
   $listener.Start()
