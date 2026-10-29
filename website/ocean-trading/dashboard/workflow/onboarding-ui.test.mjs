@@ -10,6 +10,7 @@ import { WorkflowBackend } from './backend.mjs';
 import { sealedHash } from './common.mjs';
 import { loadVwapPhysicalComparatorApprovalDispatchConfig } from './vwap-physical-comparator-approval-dispatch.mjs';
 import { DEFAULT_VWAP_PHYSICAL_COMPARATOR_CONTRACT } from './vwap-physical-comparator-contract.mjs';
+import { handleVwapImprovementRequest } from './vwap-improvement-status.mjs';
 
 const dispatchConfig = loadVwapPhysicalComparatorApprovalDispatchConfig();
 const TEST_COMPANY_ID = dispatchConfig.paperclip.company_id;
@@ -103,6 +104,10 @@ test('complete onboarding is actionable in the browser without touching producti
   let approvalMode = 'approved';
   const server = http.createServer((request, response) => {
     const url = new URL(request.url, `http://${request.headers.host}`);
+    if (url.pathname === '/api/vwap-improvement-monitor/status') {
+      void handleVwapImprovementRequest(request,response,url,{loadConfigured:async()=>({ingestion:{status:'NOT_CONFIGURED'},reports:{}})});
+      return;
+    }
     if (url.pathname === `/api/approvals/${TEST_APPROVAL_ID}`) {
       response.setHeader('Content-Type','application/json');
       response.end(JSON.stringify({ id:TEST_APPROVAL_ID, companyId:TEST_COMPANY_ID, type:'hire_agent', status:'approved', payload:{ name:'CICD VWAP Recovery Coordinator' }, createdAt:'2026-10-19T15:46:53.575Z', decidedAt:'2026-10-20T09:51:07.457Z' }));
@@ -128,7 +133,7 @@ test('complete onboarding is actionable in the browser without touching producti
     if (url.pathname === '/replay-monitor.html') { response.setHeader('Content-Type','text/html'); response.end('<!doctype html><main><h1>Replay Monitor</h1></main>'); return; }
     if (url.pathname === '/assets/ocean-trading-icon.png') { response.setHeader('Content-Type','image/png'); response.end(fs.readFileSync(path.join(publicRoot, '../assets/ocean-trading-icon.png'))); return; }
     const file = url.pathname.startsWith('/workflow/') ? url.pathname.slice('/workflow/'.length) : 'index.html';
-    if (!['index.html','ui.js','ui.css','icons.js','reprocess-identity.js','run-wizard.js','onboarding-help.js'].includes(file)) { response.writeHead(404).end(); return; }
+    if (!['index.html','ui.js','ui.css','icons.js','reprocess-identity.js','run-wizard.js','onboarding-help.js','vwap-improvement-view.js'].includes(file)) { response.writeHead(404).end(); return; }
     response.setHeader('Cache-Control','no-store');
     response.setHeader('Content-Type', file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html');
     response.end(fs.readFileSync(path.join(publicRoot, file)));
@@ -158,10 +163,16 @@ test('complete onboarding is actionable in the browser without touching producti
   try {
     assert.equal((await page.request.get(`${base}/api/workflow/session`)).status(),401,'direct API access must still require a protected session');
     await page.goto(`${base}/improvement/strategies/${TEST_STRATEGY_ID}`);
-    assert.match(await page.locator('script[type="module"]').getAttribute('src'),/automatic-local-access-20261021-r1/,'the deployed page must request the automatic local-access workflow module');
+    assert.match(await page.locator('script[type="module"]').getAttribute('src'),/vwap-proof-separated-20261029-r1/,'the deployed page must request the current workflow module with automatic local access');
     await expect(page.locator('#login')).toHaveCount(0);
     await expect(page.locator('#logout')).toHaveCount(0);
     await expect(page.getByRole('heading',{ name:'E2E Disposable Test Strategy', exact:true })).toBeVisible();
+    const evidencePanel=page.locator('#vwap-improvement-evidence-panel');
+    await expect(evidencePanel.getByRole('heading',{name:'Strategy improvement loop',exact:true})).toBeVisible();
+    await expect(evidencePanel).toContainText('stalled');
+    assert.equal(await evidencePanel.evaluate(element=>Boolean(element.compareDocumentPosition(
+      [...document.querySelectorAll('h2')].find(heading=>heading.textContent==='CI/CD continuous run')) & Node.DOCUMENT_POSITION_FOLLOWING)),true,
+    'current proof status must precede the historical foundation/campaign section');
     assert.equal((await page.request.get(`${base}/api/workflow/session`)).status(),200,'the landing page must establish the protected local session automatically');
     await page.getByRole('link',{ name:'Help', exact:true }).click();
     await expect(page.getByRole('heading',{ name:'Onboarding help', exact:true })).toBeVisible();

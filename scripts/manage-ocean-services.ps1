@@ -72,10 +72,25 @@ function Get-OceanWorkflowReadiness([int]$TimeoutSec = 5) {
 function Test-OceanWorkflowReady {
   try {
     $deployment = Get-ValidatedOceanDeployment
-  } catch {
-    return $false
-  }
-  $readiness = Get-OceanWorkflowReadiness
+    $readiness = Get-OceanWorkflowReadiness
+    if (-not $readiness -or -not $readiness.workflow) { return $false }
+    # Legacy READY responses omit these fields. Explicit degraded/read-only
+    # assertions must never be overridden by a contradictory workflow.state.
+    $topState = $readiness.PSObject.Properties['state']
+    $execution = $readiness.PSObject.Properties['execution']
+    $readOnly = $readiness.workflow.PSObject.Properties['read_only']
+    $mutations = $readiness.workflow.PSObject.Properties['mutations_enabled']
+    $physical = $readiness.workflow.PSObject.Properties['physical_readiness']
+    if (($topState -and $topState.Value -cne 'READY') -or
+        ($execution -and $execution.Value -ceq 'READ_ONLY') -or
+        ($readOnly -and $readOnly.Value -eq $true) -or
+        ($mutations -and $mutations.Value -eq $false)) { return $false }
+    if ($physical -and $physical.Value) {
+      $physicalState = $physical.Value.PSObject.Properties['state']
+      $latched = $physical.Value.PSObject.Properties['latched']
+      if (($physicalState -and $physicalState.Value -ceq 'BLOCKED') -or
+          ($latched -and $latched.Value -eq $true)) { return $false }
+    }
   return [bool]($readiness -and
     $readiness.workflow.state -ceq 'READY' -and
     [int]$readiness.workflow.schema_version -eq 14 -and
@@ -88,6 +103,28 @@ function Test-OceanWorkflowReady {
     $readiness.workflow.candidate_evaluator.version -ceq 'ocean-operational-candidate-evaluator/v2' -and
     $readiness.workflow.candidate_evaluator.state -in @('READY','RUNNING') -and
     -not $readiness.workflow.candidate_evaluator.last_error)
+  } catch { return $false }
+}
+
+function Test-OceanWebsiteAvailable {
+  try {
+    if (Test-OceanWorkflowReady) { return $true }
+    $deployment = Get-ValidatedOceanDeployment
+    $readiness = Get-OceanWorkflowReadiness
+    # Availability is separate from operational readiness. Accept only the
+    # reviewed, latched Replay DLL mismatch in this exact deployed generation.
+    return [bool]($readiness -and
+      $readiness.state -ceq 'DEGRADED_READ_ONLY' -and $readiness.execution -ceq 'READ_ONLY' -and
+      $readiness.workflow.state -ceq 'DEGRADED_READ_ONLY' -and
+      [int]$readiness.workflow.schema_version -eq 14 -and
+      $readiness.workflow.deployment.release_id -ceq $deployment.ReleaseId -and
+      $readiness.workflow.deployment.source_commit -ceq $deployment.SourceCommit -and
+      $readiness.workflow.deployment.manifest_sha256 -ceq $deployment.ManifestSha256 -and
+      $readiness.workflow.read_only -eq $true -and $readiness.workflow.mutations_enabled -eq $false -and
+      $readiness.workflow.physical_readiness.state -ceq 'BLOCKED' -and
+      $readiness.workflow.physical_readiness.latched -eq $true -and
+      $readiness.workflow.physical_readiness.blocker.code -ceq 'OPERATIONAL_TELEMETRY_MODULE_HASH_CONFLICT')
+  } catch { return $false }
 }
 
 function Get-TaskSpec([string]$Name) {
@@ -132,6 +169,18 @@ function Get-TaskSpec([string]$Name) {
 
 function Register-OceanTask([string]$Name) {
   $spec = Get-TaskSpec $Name
+  if ($Name -ceq 'Website') {
+    # Task identity remains independent of deployment validation so Stop and
+    # Uninstall still work when a release manifest is unavailable or invalid.
+    $deployment = Get-ValidatedOceanDeployment
+    $relativeScript = 'scripts\run-ocean-website-supervised.ps1'
+    $binding = @($deployment.SupportFiles | Where-Object { [string]$_.relative_path -ceq $relativeScript })
+    if ($binding.Count -ne 1 -or [string]$binding[0].sha256 -cnotmatch '^[a-f0-9]{64}$') {
+      throw "Ocean Website supervisor support binding is missing or invalid: $relativeScript"
+    }
+    # Get-OceanDeployment has already verified the exact support-file bytes.
+    $spec.Script = Join-Path $deployment.SourceRoot $relativeScript
+  }
   if (-not (Test-Path -LiteralPath $spec.Script)) { throw "Task script missing for ${Name}: $($spec.Script)" }
   if (-not (Test-Path -LiteralPath $HiddenLauncher)) { throw "Hidden service launcher missing: $HiddenLauncher" }
   $arguments = "//B //Nologo `"$HiddenLauncher`" `"$Powershell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$($spec.Script)`""
@@ -287,7 +336,15 @@ function Get-MonitorOwnedProcessTree {
 }
 
 function Get-WebsiteSupervisorCommandPattern {
-  return [regex]::Escape((Join-Path $Root 'scripts\run-ocean-website-supervised.ps1'))
+  $canonical = [regex]::Escape((Join-Path $Root 'scripts\run-ocean-website-supervised.ps1'))
+  $releaseRoot = [IO.Path]::GetFullPath('D:\OceanTradingData\website\deployments').TrimEnd('\') + '\'
+  $release = [regex]::Escape($releaseRoot) +
+    'ocean-[A-Za-z0-9][A-Za-z0-9._-]*\\(?:paperclip-source\\)?scripts\\run-ocean-website-supervised\.ps1'
+  $scriptPath = '(?:' + $canonical + '|' + $release + ')'
+  # Match a script invocation, not a basename, backup suffix or a path mentioned
+  # inside a different PowerShell command. No manifest is needed for retirement.
+  return '(?i)^(?!.*(?:^|\s)-(?:Command|EncodedCommand|c|enc)\b).*?(?:^|\s)-File\s+(?:"' +
+    $scriptPath + '"(?=\s|$)|' + $scriptPath + '(?=\s|$))'
 }
 
 function Stop-WebsiteSupervisorProcesses {
@@ -443,7 +500,7 @@ function Wait-ComponentHealthy([string]$Name) {
       # the accepted supervisor generation is still within its own contract.
       $deadline = (Get-Date).AddSeconds(210)
       do {
-        $ok = Test-OceanWorkflowReady
+        $ok = Test-OceanWebsiteAvailable
         if (-not $ok) { Start-Sleep -Seconds 1 }
       } while (-not $ok -and (Get-Date) -lt $deadline)
       if (-not $ok) { throw 'Ocean website did not become healthy.' }
@@ -541,7 +598,7 @@ switch ($Action) {
     foreach ($name in $selected) {
       $alreadyHealthy = switch ($name) {
         'Paperclip' { (Test-HttpOk 'http://127.0.0.1:3100/api/health') -and ((Get-PostgresPort) -and (Test-PortListening (Get-PostgresPort))) }
-        'Website' { Test-OceanWorkflowReady }
+        'Website' { Test-OceanWebsiteAvailable }
         'Monitor' { [bool]@(Get-MonitorProcesses).Count }
         'ReplayBridge' {
           $state = Join-Path $Runtime 'replay-bridge-status.json'

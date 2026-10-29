@@ -2,6 +2,7 @@ import { renderIcons } from './icons.js';
 import { openRunWizard } from './run-wizard.js?v=contract-aware-history-20261001-1';
 import { ONBOARDING_HELP } from './onboarding-help.js?v=simple-onboarding-20260930-1';
 import { buildReprocessRunId } from './reprocess-identity.js?v=repeat-safe-20261006-1';
+import { fetchVwapImprovementStatus, renderVwapImprovementPanel, unavailableVwapImprovementStatus } from './vwap-improvement-view.js?v=proof-separated-20261029-1';
 
 const content = document.querySelector('#content');
 const modal = document.querySelector('#modal');
@@ -181,11 +182,12 @@ function overview(data) {
   return heading('Overview', 'Reviews, case progress and integration health') + `<div class='stats'>${[['Action required', count.action_required], ['Active cases', count.active_cases], ['Blocked / failed', count.blocked_cases], ['Active runs', count.active_runs], ['Pending sync', count.pending_sync]].map(([name, value], index) => `<div class='stat ${index === 0 || index === 2 ? 'attention' : ''}'><span>${esc(name)}</span><strong>${value}</strong></div>`).join('')}</div>${operationsPanel}${paperclipInteractionSection(data)}${data.operational_releases?.length?section('Operational dataset release',operationalReleaseTable(data.operational_releases),'<a data-route href="/improvement/approvals">All approvals</a>'):''}<div class='columns'><div>${section('Awaiting decisions', approvalTable(data.pending), `<span class='muted'>${count.pending_gates} pending gates / ${count.urgent_reviews} urgent reviews</span>`)}${section('Current cases', caseTable(data.cases), '<a data-route href="/improvement/cases">All cases</a>')}</div><div>${section('Integration health', data.health.length ? data.health.map(row => `<div class='list-row'><div class='row-head'><strong>${esc(row.provider_id)}</strong>${badge(row.stale ? 'STALE' : row.status)}</div><p>${esc(row.instance_id)}</p><p>${esc(row.next_action)}</p><p class='muted'>${esc(row.next_owner)} / ${esc(date(row.observed_at_utc))}</p></div>`).join('') : empty('No provider observations recorded.'))}<p class='muted'>Local access ready. Dispatch and normal ingestion remain off.</p>${section('Recent history', timeline(data.history), '<a data-route href="/improvement/history">All history</a>')}</div></div>`;
 }
 function strategyPage(data) {
-  if (data.onboarding) return strategyOnboardingPage(data);
+  const evidencePanel=data.strategy_id==='cicd-vwap-pull-back-strategy'?renderVwapImprovementPanel(data.vwap_improvement_status):'';
+  if (data.onboarding) return strategyOnboardingPage(data,evidencePanel);
   return heading(data.strategy_name, data.strategy_id, badge(data.activation_status) + button('prepare-run','Start New Run','', 'plus')) + facts([
     ['Onboarding', esc(human(data.activation_status))], ['Paper baseline', esc(data.baseline_version)], ['Production version', data.production_version ? esc(data.production_version) : 'None registered'],
     ['Profile', `${esc(data.profile.profile_id)} / ${esc(data.profile.profile_version)}`], ['Code hash', hash(data.baseline_hash)], ['Configuration hash', hash(data.profile.strategy_config_hash)],
-  ]) + section('Execution instances', table(['Instance', 'Account', 'Capabilities', 'Version', 'Status'], data.instances.map(row => [esc(row.execution_instance_id), esc(row.account_alias), esc(row.capabilities.join(', ')), esc(row.version_binding), badge(row.status)]))) + section('Cases', caseTable(data.cases), `<span class='muted'>${data.cases_total} registered; each case has its own stage</span>`) + section('Runs and coverage', runTable(data.runs), `<span class='muted'>${data.runs_total} registered</span>`);
+  ]) + evidencePanel + section('Execution instances', table(['Instance', 'Account', 'Capabilities', 'Version', 'Status'], data.instances.map(row => [esc(row.execution_instance_id), esc(row.account_alias), esc(row.capabilities.join(', ')), esc(row.version_binding), badge(row.status)]))) + section('Cases', caseTable(data.cases), `<span class='muted'>${data.cases_total} registered; each case has its own stage</span>`) + section('Runs and coverage', runTable(data.runs), `<span class='muted'>${data.runs_total} registered</span>`);
 }
 function onboardingField(questionnaire, field) {
   const localDraft = state.onboardingFormDrafts[questionnaire.id];
@@ -275,7 +277,7 @@ function onboardingWorkspace(data) {
     + `<div class='onboarding-form-actions'>${onboardingStatusLink()}${button('review-onboarding-submission', complete ? 'Update setup' : 'Confirm setup', `class='primary' ${questionnaire.locked ? 'disabled' : ''}`, 'check')}</div>`
     + `</main></div>`;
 }
-function strategyOnboardingPage(data) {
+function strategyOnboardingPage(data,evidencePanel='') {
   const onboarding = data.onboarding;
   if (state.onboardingMode) return onboardingWorkspace(data);
   const instance = onboarding.instance;
@@ -617,6 +619,7 @@ function strategyOnboardingPage(data) {
       ['Account', esc(instance.account_alias)],
       [paperRuntimeActive ? 'Paper contract' : 'Replay contract', esc((paperRuntimeActive ? program.current_runtime_contracts?.paper : program.current_runtime_contracts?.replay) || instance.symbol)],
     ].map(([label,value]) => `<div><span>${esc(label)}</span><strong>${value}</strong></div>`).join('')}</div>`
+    + evidencePanel
     + nextAction
     + continuitySummary
     + comparatorApprovalSection
@@ -872,10 +875,13 @@ async function refresh(force = false) {
     state.signedIn = true;
     const current = route();
     const endpoint = current.view === 'artifacts' ? `artifacts/${current.key}${current.fullResearchReport?'/research-report':''}` : `view/${current.view}${current.key ? `/${current.key}` : current.view === 'dashboard' ? '' : `/page/${state.offset}`}`;
-    const [viewResult, summaryResult] = await Promise.allSettled([current.view === 'onboarding-guide' ? Promise.resolve({}) : request(endpoint, { signal:controller.signal }), current.view === 'dashboard' ? Promise.resolve(null) : request('view/dashboard', { signal:controller.signal })]);
+    const [viewResult, summaryResult, improvementResult] = await Promise.allSettled([current.view === 'onboarding-guide' ? Promise.resolve({}) : request(endpoint, { signal:controller.signal }), current.view === 'dashboard' ? Promise.resolve(null) : request('view/dashboard', { signal:controller.signal }),
+      current.view==='strategies' && current.key==='cicd-vwap-pull-back-strategy'?fetchVwapImprovementStatus({signal:controller.signal}):Promise.resolve(null)]);
     if (viewResult.status === 'rejected') throw viewResult.reason;
     if (summaryResult.status === 'rejected' && (summaryResult.reason.status === 401 || ['WAYNE_LOCAL_ENROLLMENT_REQUIRED','WORKFLOW_CONFIG_BLOCKED','WORKFLOW_DISABLED'].includes(summaryResult.reason.code))) throw summaryResult.reason;
     const data = viewResult.value;
+    if(current.view==='strategies' && current.key==='cicd-vwap-pull-back-strategy')data.vwap_improvement_status=
+      improvementResult.status==='fulfilled'?improvementResult.value:unavailableVwapImprovementStatus();
     const dashboard = summaryResult.status === 'fulfilled' ? summaryResult.value : null;
     const summaryError = summaryResult.status === 'rejected' ? summaryResult.reason : null;
     if (generation !== state.generation) return;
@@ -896,7 +902,14 @@ async function refresh(force = false) {
       for (const url of state.imageUrls) URL.revokeObjectURL(url); state.imageUrls = [];
       const html = current.view === 'onboarding-guide' ? onboardingHelpPage() : current.view === 'dashboard' ? overview(data) : current.view === 'artifacts' ? await renderArtifact(data,generation) : !current.key ? collectionPage(current.view,data) : ({ strategies:strategyPage, cases:casePage, runs:runPage, approvals:approvalPage })[current.view]?.(data);
       if (generation !== state.generation || html === undefined) return;
-      content.innerHTML = html; renderIcons(); state.fingerprint = fingerprint;
+      const availability = data.workflow_availability;
+      const readOnly = availability?.state === 'DEGRADED_READ_ONLY' && availability.read_only === true;
+      const availabilityBanner = readOnly ? `<section role='status' class='notice'><h2>Workflow is read only</h2><p>${esc(availability.physical_readiness?.blocker?.code)}. Physical readiness needs operator review. Starts, dispatch, adoption and workflow changes are blocked.</p></section>` : '';
+      content.innerHTML = availabilityBanner + html;
+      if (readOnly) content.querySelectorAll('[data-action]').forEach(element => {
+        if (!/^(?:download-|copy-)/.test(element.dataset.action || '')) { element.disabled = true; element.setAttribute('aria-disabled', 'true'); }
+      });
+      renderIcons(); state.fingerprint = fingerprint;
       if (location.hash) requestAnimationFrame(() => document.getElementById(decodeURIComponent(location.hash.slice(1)))?.scrollIntoView({ block:'start' }));
       if (focused && document.getElementById(focused)) { document.getElementById(focused).focus(); if (selection !== null) document.getElementById(focused).setSelectionRange?.(selection,selection); }
       document.title = `${content.querySelector('h1')?.textContent || 'Continuous Improvement'} | Ocean Trading`;

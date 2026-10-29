@@ -13,7 +13,9 @@ import { shouldWebsiteScheduleManifestRebuild } from "./manifest-refresh-policy.
 import { workflowFromEnvironment } from "./workflow/backend.mjs";
 import { installWebsiteControl } from "./workflow/process-control.mjs";
 import { reconcileOperationalReplayRunSettings } from "./workflow/operational-run-readiness.mjs";
+import { initializeAvailableWorkflow } from "./workflow/startup-availability.mjs";
 import { readVwapContinuousImprovementState } from "./workflow/vwap-continuous-improvement-monitor.mjs";
+import { handleVwapImprovementRequest } from "./workflow/vwap-improvement-status.mjs";
 import { handleQuantTerminalRequest, initializeQuantTerminal, stopQuantTerminal } from "./quant-terminal/server.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -111,21 +113,15 @@ function initializeWorkflowBackend() {
       OCEAN_PAPERCLIP_INTERACTION_CONFIG: process.env.OCEAN_PAPERCLIP_INTERACTION_CONFIG
         || path.join(__dirname, 'config', 'paperclip-interaction-projection.json'),
     };
-    const candidate = workflowFromEnvironment(workflowEnvironment, PYTHON_EXE);
-    if (candidate && process.env.OCEAN_OPERATIONAL_LEARNING_PHYSICAL_BINDING_FILE) {
-      try {
-        const reconciliation = reconcileOperationalReplayRunSettings(candidate, process.env.OCEAN_OPERATIONAL_LEARNING_PHYSICAL_BINDING_FILE);
-        console.log(`Ocean operational Replay settings ${reconciliation.idempotent ? "verified" : "registered"}.`);
-      } catch (error) {
-        candidate.close();
-        throw error;
-      }
-    }
+    const candidate = initializeAvailableWorkflow({ environment: workflowEnvironment, python: PYTHON_EXE,
+      createBackend: workflowFromEnvironment, reconcile: reconcileOperationalReplayRunSettings });
     workflowBackend = candidate;
     workflowStartupFailed = false;
     workflowEnrollmentRequired = false;
     workflowRetryAttempt = 0;
-    if (workflowBackend) console.log("Ocean workflow backend ready.");
+    if (workflowBackend) console.log(workflowBackend.workflowAvailability
+      ? `Ocean workflow backend DEGRADED_READ_ONLY: ${workflowBackend.workflowAvailability.physical_readiness.blocker.code}`
+      : "Ocean workflow backend ready.");
   } catch (error) {
     workflowStartupFailed = true;
     workflowEnrollmentRequired = error.code === "WAYNE_LOCAL_ENROLLMENT_REQUIRED";
@@ -3807,12 +3803,14 @@ const server = http.createServer((req, res) => websiteTiming.request(req,res,()=
     return;
   }
 
-  if (req.url === "/api/vwap-improvement-monitor/status") {
-    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({
-      ...readVwapContinuousImprovementState(VWAP_IMPROVEMENT_STATE_FILE),
-      website_monitor: monitorState(),
-    }));
+  if (requestUrl.pathname === "/api/vwap-improvement-monitor/status") {
+    void handleVwapImprovementRequest(req, res, requestUrl, {
+      legacyState: readVwapContinuousImprovementState(VWAP_IMPROVEMENT_STATE_FILE),
+      websiteMonitor: monitorState(),
+    }).catch(() => {
+      if (!res.headersSent) res.writeHead(503, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(JSON.stringify({ error: { code: "REPORT_STATUS_UNAVAILABLE" } }));
+    });
     return;
   }
 

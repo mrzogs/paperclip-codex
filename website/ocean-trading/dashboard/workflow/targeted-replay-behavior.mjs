@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { digest, exactKeys, objectHash, requireThat } from './common.mjs';
+import { createVwapBoundedArtifactReader } from './vwap-bounded-artifacts.mjs';
 
 export const TARGETED_REPLAY_STRATEGY_ID='cicd-vwap-pull-back-strategy';
 export const TARGETED_REPLAY_CONTRACT_VERSION='cicd-vwap-targeted-replay-behavior-contract/v1';
@@ -235,7 +236,7 @@ function validateTrace(value,trades){
     409,'TARGETED_REPLAY_NONZERO_TRADE_TRACE_REQUIRED');
 }
 
-function validateCaseResult(record,item,segmentResult,ledger){
+function validateCaseResult(record,item,segmentResult,ledger,readTraceArtifact){
   fields(record,REQUIRED_CASE_FIELDS);
   requireThat(record.case_id===(item.case_id || item.window_id),409,'TARGETED_REPLAY_RESULT_CASE_BINDING_CONFLICT');
   const source=record.dataset_role_and_immutable_source;
@@ -289,8 +290,9 @@ function validateCaseResult(record,item,segmentResult,ledger){
       && hashesEqual(receipts[side].run_receipt_sha256,segmentResult[side].completion_receipt_hash)
       && validHash(receipts[side].evidence_sha256),409,'TARGETED_REPLAY_RESULT_RECEIPT_CONFLICT');
     const file=segmentResult.source_files?.find(file=>hashesEqual(file.sha256,receipts[side].evidence_sha256));
-    requireThat(file && path.isAbsolute(file.path) && fs.statSync(file.path).isFile(),409,'TARGETED_REPLAY_TRACE_ARTIFACT_REQUIRED');
-    const bytes=fs.readFileSync(file.path);
+    requireThat(file && path.isAbsolute(file.path),409,'TARGETED_REPLAY_TRACE_ARTIFACT_REQUIRED');
+    const bytes=readTraceArtifact(file);
+    requireThat(Buffer.isBuffer(bytes)&&bytes.length<=32*1024*1024,409,'TARGETED_REPLAY_ARTIFACT_BYTE_LIMIT');
     requireThat(hashesEqual(digest(bytes),receipts[side].evidence_sha256),409,'TARGETED_REPLAY_TRACE_ARTIFACT_HASH_CONFLICT');
     const evidence=JSON.parse(bytes.toString('utf8'));
     requireThat(evidence.schema_version==='cicd-vwap-targeted-replay-trace/v1'
@@ -314,6 +316,12 @@ function validateCaseResult(record,item,segmentResult,ledger){
         && sameNumber(trade.gross_pnl,observed.gross_currency_value) && sameNumber(trade.fees,observed.total_commission)
         && sameNumber(trade.net_pnl,observed.net_profit_loss),
         409,'TARGETED_REPLAY_TRACE_TRADE_INVALID');
+      requireThat(typeof observed.exit_utc==='string'&&/(?:Z|[+-]\d\d:\d\d)$/.test(observed.exit_utc)
+        &&Number.isFinite(Date.parse(observed.exit_utc))&&Date.parse(observed.exit_utc)===Date.parse(trade.exit_utc),
+      409,'TARGETED_REPLAY_TRACE_EXIT_UTC_UNPROVED');
+      if(trade.native_exit_sequence!==undefined&&trade.native_exit_sequence!==null)
+        requireThat(Number.isSafeInteger(trade.native_exit_sequence)&&trade.native_exit_sequence>=0
+          &&observed.native_exit_sequence===trade.native_exit_sequence,409,'TARGETED_REPLAY_TRACE_EXIT_SEQUENCE_UNPROVED');
       tradeIds.add(trade.trade_id);
     }
     validateTrace(evidence.trace,evidence.trades);
@@ -328,20 +336,37 @@ function validateCaseResult(record,item,segmentResult,ledger){
 }
 
 export function assessIndependentTrades(trades,limits){
-  const sorted=[...trades].sort((a,b)=>a.exit_sierra_datetime-b.exit_sierra_datetime||a.run_id.localeCompare(b.run_id)||a.trade_id.localeCompare(b.trade_id));
+  const utc=trade=>typeof trade.exit_utc==='string'&&/(?:Z|[+-]\d\d:\d\d)$/.test(trade.exit_utc)?Date.parse(trade.exit_utc):NaN;
+  const sorted=[...trades].sort((a,b)=>utc(a)-utc(b)||(Number.isSafeInteger(a.native_exit_sequence)&&Number.isSafeInteger(b.native_exit_sequence)?a.native_exit_sequence-b.native_exit_sequence:0));
+  let orderingBlocker=sorted.some(trade=>!Number.isFinite(utc(trade)))?'EXIT_UTC_UNPROVED':null;
+  for(let index=1;index<sorted.length&&!orderingBlocker;index++){
+    const left=sorted[index-1],right=sorted[index];
+    if(utc(left)===utc(right)&&(!nonempty(left.run_id)||left.run_id!==right.run_id
+      ||!Number.isSafeInteger(left.native_exit_sequence)||left.native_exit_sequence<0
+      ||!Number.isSafeInteger(right.native_exit_sequence)||right.native_exit_sequence<0
+      ||left.native_exit_sequence===right.native_exit_sequence))orderingBlocker='EXIT_UTC_TIE_UNRESOLVED';
+  }
+  if(!orderingBlocker)sorted.sort((a,b)=>utc(a)-utc(b)||(a.native_exit_sequence-b.native_exit_sequence));
   let equity=0,peak=0,maxDrawdown=0,grossWinners=0,largestWinner=0;
   for(const trade of sorted){equity+=trade.net_pnl;peak=Math.max(peak,equity);maxDrawdown=Math.max(maxDrawdown,peak-equity);
     if(trade.net_pnl>0){grossWinners+=trade.net_pnl;largestWinner=Math.max(largestWinner,trade.net_pnl);}}
   const share=grossWinners>0?largestWinner/grossWinners:0;
-  const positive=equity>0,drawdown=maxDrawdown<=limits.max_drawdown,
+  const positive=equity>0,drawdown=!orderingBlocker&&maxDrawdown<=limits.max_drawdown,
     dependence=share<=limits.max_largest_winner_share && equity-largestWinner>0;
   const behaviorPassed=sorted.every(trade=>trade.behavior_passed===true);
-  return {candidate_net_pnl:equity,max_drawdown:maxDrawdown,largest_winner_share:share,
+  return {candidate_net_pnl:equity,max_drawdown:orderingBlocker?null:maxDrawdown,largest_winner_share:share,
     positive_net_after_costs:positive,controlled_drawdown:drawdown,no_single_trade_dependence:dependence,
-    behavior_passed:behaviorPassed,verdict:positive && drawdown && dependence && behaviorPassed?'PASS':'FAIL'};
+    behavior_passed:behaviorPassed,ordering_proved:!orderingBlocker,ordering_blocker:orderingBlocker,
+    verdict:positive && drawdown && dependence && behaviorPassed?'PASS':'FAIL'};
 }
 
-export function validateTargetedReplayResultBinding(planBinding,test,targeted,result,{ledgerBySegment}={}){
+export function validateTargetedReplayResultBinding(planBinding,test,targeted,result,{ledgerBySegment,readTraceArtifact,
+  artifactRoot,maxArtifactBytes=32*1024*1024,maxTotalArtifactBytes=64*1024*1024}={}){
+  if(readTraceArtifact===undefined){
+    const reader=createVwapBoundedArtifactReader({root:artifactRoot,maxArtifactBytes,maxTotalArtifactBytes});
+    readTraceArtifact=file=>reader.read({path:file.path}).bytes;
+  }
+  requireThat(typeof readTraceArtifact==='function',409,'TARGETED_REPLAY_TRACE_READER_REQUIRED');
   requireThat(planBinding?.schema_version==='cicd-vwap-targeted-replay-binding/v1',409,'TARGETED_REPLAY_BINDING_REQUIRED');
   exactKeys(targeted,['schema_version','contract_sha256','plan_hash','cases','independent_verdict']);
   requireThat(targeted.schema_version===TARGETED_REPLAY_RESULT_VERSION
@@ -357,7 +382,7 @@ export function validateTargetedReplayResultBinding(planBinding,test,targeted,re
   for(let index=0;index<test.segments.length;index++){
     const item=sourceItems.get(test.segments[index].segment_id);
     requireThat(item,409,'TARGETED_REPLAY_RESULT_CASE_BINDING_CONFLICT');
-    candidateTrades.push(...validateCaseResult(targeted.cases[index],item,result.segments[index],ledgerBySegment?.get(test.segments[index].segment_id)).candidate);
+    candidateTrades.push(...validateCaseResult(targeted.cases[index],item,result.segments[index],ledgerBySegment?.get(test.segments[index].segment_id),readTraceArtifact).candidate);
   }
   if(TEST_ROLE[test.kind]==='DISCOVERY')requireThat(targeted.independent_verdict===null,409,'TARGETED_REPLAY_DISCOVERY_VERDICT_PROHIBITED');
   else{
@@ -376,6 +401,7 @@ export function validateTargetedReplayResultBinding(planBinding,test,targeted,re
       && verdict.limits.max_largest_winner_share===limits.max_largest_winner_share,
       409,'TARGETED_REPLAY_PREDECLARED_RISK_LIMITS_CONFLICT');
     const actual=assessIndependentTrades(candidateTrades,limits);
+    requireThat(actual.ordering_proved,409,'TARGETED_REPLAY_EXIT_CHRONOLOGY_UNRESOLVED');
     requireThat(['candidate_net_pnl','max_drawdown','largest_winner_share'].every(key=>sameNumber(verdict[key],actual[key]))
       && ['positive_net_after_costs','controlled_drawdown','no_single_trade_dependence'].every(key=>verdict[key]===actual[key])
       && verdict.verdict===(verdict.all_predeclared_windows_reported===true?actual.verdict:'FAIL'),

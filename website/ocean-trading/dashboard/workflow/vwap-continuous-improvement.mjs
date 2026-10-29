@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { verifiedVwapDiscoveryRows } from './vwap-discovery-admission.mjs';
 
 export const VWAP_STRATEGY_ID = 'cicd-vwap-pull-back-strategy';
 export const DEFAULT_VWAP_LEARNING_POLICY = Object.freeze({
@@ -19,6 +20,7 @@ const stable = value => value === null || value === undefined || value === '' ? 
 const digest = value => `sha256:${crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex')}`;
 
 function numeric(value) {
+  if ((typeof value !== 'number' && typeof value !== 'string') || (typeof value === 'string' && !value.trim())) throw new TypeError('TRADE_NUMERIC_FIELD_INVALID');
   const result = Number(value);
   if (!Number.isFinite(result)) throw new TypeError('TRADE_NUMERIC_FIELD_INVALID');
   return result;
@@ -57,21 +59,30 @@ export function classifyVwapLearningRows(rows, { strategyId = VWAP_STRATEGY_ID }
   return { accepted, excluded, blockers };
 }
 
-export function evaluateVwapEvidenceSufficiency(rows, { policy = DEFAULT_VWAP_LEARNING_POLICY, strategyId = VWAP_STRATEGY_ID } = {}) {
+export function evaluateVwapEvidenceSufficiency(rows, { policy = DEFAULT_VWAP_LEARNING_POLICY, strategyId = VWAP_STRATEGY_ID, admission, now = Date.now() } = {}) {
   const classified = classifyVwapLearningRows(rows, { strategyId });
-  const discovery = classified.accepted.filter(row => DISCOVERY_ROLES.has(row.dataset_role));
-  const sessions = new Set(discovery.map(row => stable(row.session_id || row.trading_day || row.entry_date)).filter(value => value !== 'UNKNOWN'));
-  const missingQuality = discovery.filter(row => row.telemetry_complete !== true || row.identity_verified !== true);
-  const blockers = [...classified.blockers];
+  const observedDiscovery = classified.accepted.filter(row => DISCOVERY_ROLES.has(row.dataset_role));
+  const verified = verifiedVwapDiscoveryRows(admission, observedDiscovery, {strategyId,now});
+  // Preserve the authenticated closed ledger, but research only opportunities
+  // whose pre-event readiness was established by the original audit. A missing
+  // flag is unknown, not an implicit permission to infer from its outcome.
+  const discovery = verified.rows.filter(row => row.research_eligible === true);
+  const sessions = new Set(discovery.map(row => stable(row.session_id)).filter(value => value !== 'UNKNOWN'));
+  const contextGaps = discovery.filter(row => row.learning_context_complete === false || [...keyFields,'session_id'].some(field => stable(row[field]) === 'UNKNOWN'));
+  const blockers = [...classified.blockers,...verified.blockers];
   if (discovery.length < policy.minimum_comparable_trades) blockers.push({ code:'INSUFFICIENT_DISCOVERY_TRADES', observed:discovery.length, required:policy.minimum_comparable_trades });
   if (sessions.size < policy.minimum_sessions) blockers.push({ code:'INSUFFICIENT_DISCOVERY_SESSIONS', observed:sessions.size, required:policy.minimum_sessions });
-  if (missingQuality.length) blockers.push({ code:'TELEMETRY_OR_IDENTITY_GAPS', count:missingQuality.length, trade_ids:missingQuality.map(row => row.trade_id).sort() });
+  if (contextGaps.length) blockers.push({ code:'DISCOVERY_LEARNING_CONTEXT_GAPS', count:contextGaps.length, trade_ids:contextGaps.map(row=>row.trade_id).sort() });
   return {
     sufficient:blockers.length === 0,
     policy_version:policy.policy_version,
     threshold_source:policy.threshold_source,
     discovery_trade_count:discovery.length,
-    eligible_paper_trade_count:classified.accepted.length - discovery.length,
+    authenticated_closed_discovery_trade_count:verified.rows.length,
+    non_research_discovery_trade_count:verified.rows.length-discovery.length,
+    unqualified_discovery_trade_count:observedDiscovery.length - discovery.length,
+    discovery_admission_report_sha256:verified.report_sha256 || null,
+    eligible_paper_trade_count:classified.accepted.filter(row => PAPER_ROLES.has(row.dataset_role)).length,
     discovery_session_count:sessions.size,
     excluded_count:classified.excluded.length,
     excluded:classified.excluded,
@@ -90,7 +101,7 @@ export function detectRecurringVwapFailures(rows, options = {}) {
   const groups = new Map();
   for (const row of sufficiency.discovery_rows) {
     const context = Object.fromEntries(keyFields.map(field => [field, stable(row[field])]));
-    const contextKey = keyFields.map(field => context[field]).join('|');
+    const contextKey = JSON.stringify(keyFields.map(field => context[field]));
     const current = groups.get(contextKey) || { context, trade_ids:[], pnls:[], mfe:[], mae:[] };
     current.trade_ids.push(row.trade_id);
     current.pnls.push(numeric(row.net_pnl));
