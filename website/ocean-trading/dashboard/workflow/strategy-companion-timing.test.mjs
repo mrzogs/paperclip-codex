@@ -89,7 +89,7 @@ test('monitor status source function has identical read/process behavior and err
   // Compile only the actual pure monitor function with software doubles. Importing
   // server.mjs would initialize real services and is deliberately avoided.
   const source = fs.readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
-  const start = source.indexOf('function monitorState('), end = source.indexOf('\nfunction startMonitor(', start);
+  const start = source.indexOf('function monitorState('), end = source.indexOf('\nfunction withAsyncMonitorRequest(', start);
   assert.ok(start >= 0 && end > start);
   let failure = null; const calls = [];
   const monitor = vm.runInNewContext(`(${source.slice(start, end)})`, {
@@ -108,7 +108,7 @@ test('monitor status source function has identical read/process behavior and err
   }
   assert.ok(!JSON.stringify(result.events).includes('PRIVATE_')); assert.ok(!JSON.stringify(result.events).includes('123'));
   const branch = source.slice(source.indexOf('if (requestUrl.pathname === "/api/vwap-improvement-monitor/status")'), source.indexOf('if (req.url === "/api/monitor/start"'));
-  assert.match(branch, /timedSync\('workflow\.companion\.legacy-state'/); assert.match(branch, /websiteMonitor: monitorState\(true\)/);
+  assert.match(branch, /timedSync\('workflow\.companion\.legacy-state'/); assert.match(branch, /websiteMonitor: await monitorStatusReader\.read/);
 });
 
 test('post-worker approval config and main strategy assembly keep authority, output and error semantics', async t => {

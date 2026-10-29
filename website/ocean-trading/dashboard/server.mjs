@@ -17,6 +17,7 @@ import { initializeAvailableWorkflow } from "./workflow/startup-availability.mjs
 import { readVwapContinuousImprovementState } from "./workflow/vwap-continuous-improvement-monitor.mjs";
 import { handleVwapImprovementRequest } from "./workflow/vwap-improvement-status.mjs";
 import { handleQuantTerminalRequest, initializeQuantTerminal, stopQuantTerminal } from "./quant-terminal/server.js";
+import { createMonitorStatusReader, MonitorStatusReadError } from './monitor-status.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -150,6 +151,8 @@ const BACKTESTER_AGENT_ID = process.env.STRATEGY_BUILDER_AGENT_ID || "f8f58820-0
 const CEO_AGENT_ID = process.env.CEO_AGENT_ID || "957251c9-a5ff-4337-9c45-2ccc833ed9b4";
 const CEO_CHAT_TITLE = "Ocean Trading CEO Chat Terminal v2";
 let monitorProcess = null;
+let websiteClosing = false;
+const monitorStatusReader = createMonitorStatusReader({ file: MONITOR_STATE_FILE, getManagedProcess: () => monitorProcess, isProcessAlive });
 let lastPaperclipSyncAt = 0;
 let cachedManifestPayload = null;
 let cachedManifestSignature = null;
@@ -369,19 +372,25 @@ function startManifestFreshnessPoll() {
   if (manifestFreshnessTimer) return;
   const manifestPath = MANIFEST_FILE;
   const pollMs = Math.max(1000, Number(process.env.OCEAN_MANIFEST_FRESHNESS_POLL_MS) || 5000);
-  const poll = () => {
+  let inFlight = false;
+  const poll = async () => {
+    if (inFlight || websiteClosing) return;
+    inFlight = true;
     try {
       const manifestMtime = fileMtimeMs(manifestPath);
       const projectTelemetryChanged = sqliteInputFiles(VWAP_PROJECT_PAPER_SQLITE_FILE)
         .some((file) => fileMtimeMs(file) > manifestMtime + 1);
+      const manifestExists = fs.existsSync(manifestPath);
+      const monitor = await monitorStatusReader.read();
+      if (websiteClosing) return;
       if (shouldWebsiteScheduleManifestRebuild({
-        manifestExists: fs.existsSync(manifestPath),
+        manifestExists,
         inputChanged: projectTelemetryChanged,
-        monitorRunning: monitorState().running,
+        monitorRunning: monitor.running,
       })) void scheduleManifestRebuild();
     } catch (error) {
-      console.error(`Manifest freshness check failed: ${error?.message || error}`);
-    }
+      if (!websiteClosing) console.error(`Manifest freshness check failed: ${error?.message || error}`);
+    } finally { inFlight = false; }
   };
   poll();
   manifestFreshnessTimer = setInterval(poll, pollMs);
@@ -468,7 +477,7 @@ function databaseInfo() {
   };
 }
 
-function dashboardCalendarFreshnessInfo(mode = "paper") {
+async function dashboardCalendarFreshnessInfo(mode = "paper", readOptions = {}) {
   const normalizedMode = mode === "live" ? "live" : "paper";
   const manifest = JSON.parse(buildManifest({ skipRebuildCheck: true, preferFile: true }));
   const tradingMode = manifest?.tradingModes?.[normalizedMode] || {};
@@ -525,7 +534,7 @@ function dashboardCalendarFreshnessInfo(mode = "paper") {
       ? new Date(Math.max(latestSourceMtimeMs, latestTelemetryMtimeMs)).toISOString()
       : null,
     latestAccountSnapshot: latestSnapshot,
-    monitor: monitorState(),
+    monitor: await monitorStatusReader.read(readOptions),
     signature,
   };
 }
@@ -2688,6 +2697,19 @@ function monitorState(diagnosticTiming = false) {
   };
 }
 
+function withAsyncMonitorRequest(req, res, work, onFailure = null) {
+  const controller = new AbortController();
+  const disconnected = () => { if (!res.writableEnded) controller.abort(); };
+  res.once('close', disconnected);
+  void Promise.resolve().then(() => work({ signal: controller.signal })).catch(failure => {
+    if (res.writableEnded || res.destroyed) return;
+    if (!(failure instanceof MonitorStatusReadError) && onFailure) { onFailure(failure); return; }
+    const status = failure instanceof MonitorStatusReadError ? 503 : 500;
+    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify({ error: { code: failure instanceof MonitorStatusReadError ? failure.code : 'MONITOR_STATUS_UNAVAILABLE' } }));
+  }).finally(() => res.removeListener('close', disconnected));
+}
+
 function startMonitor() {
   if (monitorProcess && !monitorProcess.killed && monitorProcess.exitCode === null) return monitorState();
   const currentState = monitorState();
@@ -2729,7 +2751,7 @@ function monitorStartsByDefault() {
   return vwapConfig.enabled === true && vwapConfig.websiteMonitorAutostart !== false;
 }
 
-function openTradesPayload() {
+async function openTradesPayload(readOptions = {}) {
   const manifest = JSON.parse(buildManifest({ skipRebuildCheck: true, preferFile: true }));
   const live = manifest.tradingModes?.live || {};
   const paper = manifest.tradingModes?.paper || {};
@@ -2744,7 +2766,7 @@ function openTradesPayload() {
   const isTodayTrade = (trade) => String(trade.exitAtUtc || trade.tradeDateUtc || "").slice(0, 10) === today;
   return {
     generatedAtUtc: manifest.generatedAtUtc,
-    monitor: monitorState(),
+    monitor: await monitorStatusReader.read(readOptions),
     propFirms: manifest.propFirms || {},
     live: {
       openPositions: live.openPositions || [],
@@ -3627,18 +3649,18 @@ const server = http.createServer((req, res) => websiteTiming.request(req,res,()=
 
   const calendarFreshnessMatch = req.url.match(/^\/api\/(paper|live)-calendar-freshness$/);
   if (calendarFreshnessMatch) {
-    try {
-      const payload = dashboardCalendarFreshnessInfo(calendarFreshnessMatch[1]);
+    withAsyncMonitorRequest(req, res, async readOptions => {
+      const payload = await dashboardCalendarFreshnessInfo(calendarFreshnessMatch[1], readOptions);
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
       res.end(JSON.stringify(payload));
-    } catch (error) {
+    }, error => {
       if (!res.headersSent && !res.writableEnded) {
         res.writeHead(500, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
         res.end(JSON.stringify({ ok: false, error: String(error?.message || error) }));
       } else if (!res.writableEnded) {
         res.end();
       }
-    }
+    });
     return;
   }
 
@@ -3800,19 +3822,23 @@ const server = http.createServer((req, res) => websiteTiming.request(req,res,()=
   }
 
   if (req.url === "/api/monitor/status") {
-    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify(monitorState()));
+    withAsyncMonitorRequest(req, res, async readOptions => {
+      const state = await monitorStatusReader.read(readOptions);
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify(state));
+    });
     return;
   }
 
   if (requestUrl.pathname === "/api/vwap-improvement-monitor/status") {
-    void handleVwapImprovementRequest(req, res, requestUrl, {
-      legacyState: timedSync('workflow.companion.legacy-state',()=>readVwapContinuousImprovementState(VWAP_IMPROVEMENT_STATE_FILE)),
-      websiteMonitor: monitorState(true),
+    const legacyState = timedSync('workflow.companion.legacy-state',()=>readVwapContinuousImprovementState(VWAP_IMPROVEMENT_STATE_FILE));
+    withAsyncMonitorRequest(req, res, async readOptions => handleVwapImprovementRequest(req, res, requestUrl, {
+      legacyState,
+      websiteMonitor: await monitorStatusReader.read({ ...readOptions, diagnosticTiming: true }),
     }).catch(() => {
       if (!res.headersSent) res.writeHead(503, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
       res.end(JSON.stringify({ error: { code: "REPORT_STATUS_UNAVAILABLE" } }));
-    });
+    }));
     return;
   }
 
@@ -3854,18 +3880,18 @@ const server = http.createServer((req, res) => websiteTiming.request(req,res,()=
   }
 
   if (req.url === "/api/open-trades") {
-    try {
-      const payload = JSON.stringify(openTradesPayload());
+    withAsyncMonitorRequest(req, res, async readOptions => {
+      const payload = JSON.stringify(await openTradesPayload(readOptions));
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       res.end(payload);
-    } catch (error) {
+    }, error => {
       if (!res.headersSent && !res.writableEnded) {
         res.writeHead(500, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
         res.end(JSON.stringify({ ok: false, error: String(error?.message || error) }));
       } else if (!res.writableEnded) {
         res.end();
       }
-    }
+    });
     return;
   }
 
@@ -3986,6 +4012,8 @@ const server = http.createServer((req, res) => websiteTiming.request(req,res,()=
 }));
 
 server.on("close", () => {
+  websiteClosing = true;
+  monitorStatusReader.close();
   websiteTiming.stop();
   if (manifestFreshnessTimer) clearInterval(manifestFreshnessTimer);
   manifestFreshnessTimer = null;
