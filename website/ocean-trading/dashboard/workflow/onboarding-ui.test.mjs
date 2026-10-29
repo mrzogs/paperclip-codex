@@ -279,13 +279,16 @@ test('complete onboarding is actionable in the browser without touching producti
     await expect(page.getByText('Read only preflight only',{ exact:true })).toBeVisible();
     await expect(page.getByText('Not authorized',{ exact:true }).first()).toBeVisible();
     await expect(page.getByText('Prohibited',{ exact:true }).last()).toBeVisible();
-    await expect(page.getByText(/The approved coordinator record is not the separate Paper manifest and qualification approval/)).toBeVisible();
+    await expect(page.getByText(/The approved coordinator record does not establish current Paper manifest or qualification approval/)).toBeVisible();
     await expect(page.getByRole('heading',{ name:'Separate Paper qualification gate', exact:true })).toBeVisible();
     await expect(page.getByText('Code merged not deployed',{ exact:true })).toBeVisible();
-    await expect(page.getByText(/Implementation status: v0\.5\.53 code merged and verified/)).toBeVisible();
+    await expect(page.getByText(/Historical implementation snapshot \(2026-10-20\): v0\.5\.53 code merged and verified/)).toBeVisible();
     await expect(page.getByRole('link',{ name:'Telemetry PR', exact:true })).toHaveAttribute('href','https://github.com/mrzogs/sierra-trade-telemetry-logger/pull/21');
-    await expect(page.getByText('No Paper approval record has been created or granted.',{ exact:true })).toBeVisible();
-    await expect(page.getByText(/Existing Paper rows remain ineligible for learning or promotion/)).toBeVisible();
+    await expect(page.getByText(/Current Paper deployment, qualification and approval are unknown from this snapshot/)).toBeVisible();
+    await expect(page.getByText('Historical snapshot · current status unverified',{exact:true})).toBeVisible();
+    await expect(page.getByText('Historical repair status',{exact:true})).toBeVisible();
+    await expect(page.getByText(/No Paper approval record has been created or granted|Existing Paper rows remain ineligible/)).toHaveCount(0);
+    await expect(page.getByText(/Verify current exact-bound approval, lineage and run identity before using Paper evidence/)).toBeVisible();
     await expect(page.getByText(`Continue after approval ${TEST_APPROVAL_ID} and exact route verification.`,{ exact:true }).first()).toBeVisible();
     await expect(page.getByText('Autonomous improvement implementation',{ exact:true })).toBeVisible();
     await expect(page.getByText('MNQZ26_FUT_CME',{ exact:true })).toBeVisible();
@@ -293,6 +296,31 @@ test('complete onboarding is actionable in the browser without touching producti
     await expect(page.getByRole('cell',{ name:'Causal telemetry enrichment', exact:true })).toBeVisible();
     await expect(page.getByText('v0.2.0-cicd-vwap',{ exact:true })).toBeVisible();
     await expect(page.getByRole('heading',{ name:'Known blockers and resolutions', exact:true })).toBeVisible();
+    // Exercise the generic approved-human fallback, outside the current program
+    // and comparator branches, using only this disposable browser response.
+    const strategyRoute=`**/api/workflow/view/strategies/${TEST_STRATEGY_ID}`;
+    let includeHistoricalRepair=true;
+    await page.route(strategyRoute,async route=>{
+      const response=await route.fetch(),data=await response.json();
+      data.onboarding.continuous_delivery.autonomous_improvement.next_action='';
+      if(!includeHistoricalRepair)data.onboarding.continuous_delivery.autonomous_improvement.paper_qualification_gate.telemetry_repair=null;
+      data.onboarding.continuous_delivery.physical_comparator={state:'NOT_CONFIGURED',required_human_approvals:[]};
+      await route.fulfill({response,json:data});
+    });
+    await page.locator('#refresh').click();
+    await expect(page.getByRole('heading',{name:'Human approval recorded',exact:true})).toBeVisible();
+    await expect(page.locator('#content')).toHaveAttribute('aria-busy','false');
+    await expect(page.locator('.strategy-next-action')).toContainText('historical 2026-10-20 snapshot recorded Telemetry v0.5.53');
+    await expect(page.locator('.strategy-next-action')).toContainText('their current state is not established by this snapshot');
+    await expect(page.locator('.strategy-next-action')).not.toContainText('It is not deployed to Paper');
+    await expect(page.locator('.strategy-next-action')).not.toContainText('has not been granted');
+    includeHistoricalRepair=false;
+    await page.locator('#refresh').click();
+    await expect(page.locator('.strategy-next-action')).toContainText('historical Paper snapshot does not establish current Paper approval or qualification');
+    await expect(page.locator('#content')).toHaveAttribute('aria-busy','false');
+    await expect(page.getByRole('link',{name:'Telemetry PR',exact:true})).toHaveCount(0);
+    await expect(page.locator('.strategy-next-action')).not.toContainText('has not been granted');
+    await page.unroute(strategyRoute);
     sources['priority-completion-program.json'].current_acceptance_assessment.pending = [];
     sources['priority-completion-program.json'].status = 'CICD_GATES_PROVEN_READY_FOR_GOVERNED_CANDIDATE_DECISION';
     fs.writeFileSync(path.join(sourceRoot,'priority-completion-program.json'),JSON.stringify(sources['priority-completion-program.json']));

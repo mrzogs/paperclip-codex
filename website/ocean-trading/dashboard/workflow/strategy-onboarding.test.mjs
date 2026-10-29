@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import { DatabaseSync } from 'node:sqlite';
 import { activateStrategyOnboarding, deactivateStrategyOnboarding, loadStrategyOnboarding, ONBOARDING_STRATEGY_ID, pauseStrategyOnboarding, probeReplayTwoRuntime, readAutonomousImprovementProgram, readOnboardingActivationEvents, readOnboardingRegistration, readReplayCampaign, readStrategyOnboardingEvents, recordStrategyOnboarding, registerStrategyOnboarding } from './strategy-onboarding.mjs';
 import { ROUTES, WorkflowBackend } from './backend.mjs';
@@ -120,6 +122,7 @@ test('projects explicit and legacy current-action Paperclip approval references 
       board_approval_id:approvalId,
       board_approval_status:'APPROVED_READ_BACK',
       prospective_paper_provenance_diagnosis:{
+        source:'OQL_TELEMETRY_LOGGER_DLL_CHAT_SOURCE_AND_DATABASE_DIAGNOSIS_2026-10-20',
         required_remedy:'APPROVE_GENUINE_PAPER_RUN_AND_DATASET_MANIFEST;_BIND_SIX_SOURCE_INPUTS;_FIX_PROSPECTIVE_TELEMETRY_RUN_ID_PROPAGATION',
         telemetry_run_id_repair:{
           status:'CODE_MERGED_NOT_DEPLOYED', version:'v0.5.53',
@@ -137,11 +140,13 @@ test('projects explicit and legacy current-action Paperclip approval references 
     assert.equal(overlay.required_human_approvals[0].approval_id, approvalId);
     assert.equal(overlay.required_human_approvals[0].source, 'latest_verified_overlay_20261020');
     assert.deepEqual(overlay.paper_qualification_gate, {
-      status:'APPROVAL_REQUIRED',
+      status:'CURRENT_STATUS_UNKNOWN',
       title:'Paper manifest and qualification approval',
-      detail:'v0.5.53 contains the merged STTL2 Paper run identity repair, but the DLL is not deployed to Paper and is not Paper-qualified. Approve an exact Paper run and dataset manifest, bind the six producer lineage inputs, then verify a new simulated trade before Paper rows can become eligible evidence.',
+      detail:'The historical 2026-10-20 snapshot recorded v0.5.53 STTL2 Paper run identity repair code as merged and verified, not deployed to Paper or Paper-qualified at that time. This snapshot does not establish current deployment, qualification or approval. Verify current exact-bound Paper approval, the six producer lineage inputs and prospective run identity before using Paper rows as eligible evidence.',
       approval_id:null,
       source:'latest_verified_overlay_20261020',
+      historical_snapshot:{date:'2026-10-20',source:'OQL_TELEMETRY_LOGGER_DLL_CHAT_SOURCE_AND_DATABASE_DIAGNOSIS_2026-10-20'},
+      current_status:{deployment:'UNKNOWN',qualification:'UNKNOWN',approval:'UNKNOWN'},
       telemetry_repair:{
         status:'CODE_MERGED_NOT_DEPLOYED', version:'v0.5.53',
         pull_request:'https://github.com/mrzogs/sierra-trade-telemetry-logger/pull/21',
@@ -157,11 +162,31 @@ test('projects explicit and legacy current-action Paperclip approval references 
     const unsafeRepair = readAutonomousImprovementProgram(root);
     assert.equal(unsafeRepair.state, 'ATTENTION_REQUIRED');
     assert.match(unsafeRepair.reason, /PAPER_TELEMETRY_REPAIR_BOUNDARY_INVALID/);
+
+    // A newer snapshot date/source is derived, not a pinned runtime version or
+    // evidence of approval absence. Missing repair evidence stays explicit.
+    value.latest_verified_overlay_20261029b={prospective_paper_provenance_diagnosis:{
+      required_remedy:'APPROVE_GENUINE_PAPER_RUN_AND_DATASET_MANIFEST',source:'SOFTWARE_SOURCE_2026-10-29',
+    }};
+    fs.writeFileSync(programPath,JSON.stringify(value));
+    const later=readAutonomousImprovementProgram(root).paper_qualification_gate;
+    assert.deepEqual(later.historical_snapshot,{date:'2026-10-29',source:'SOFTWARE_SOURCE_2026-10-29'});
+    assert.deepEqual(later.current_status,{deployment:'UNKNOWN',qualification:'UNKNOWN',approval:'UNKNOWN'});
+    assert.equal(later.telemetry_repair,null);assert.equal(later.approval_id,null);
+    assert.match(later.detail,/historical 2026-10-29 snapshot/);
+    assert.doesNotMatch(later.detail,/not been granted|not deployed|v0\.5\.56/);
+    delete value.latest_verified_overlay_20261029b;
+    value.latest_verified_overlay_20261020.prospective_paper_provenance_diagnosis.telemetry_run_id_repair.deployed_to_paper=false;
+    delete value.latest_verified_overlay_20261020.prospective_paper_provenance_diagnosis.source;
+    fs.writeFileSync(programPath,JSON.stringify(value));
+    assert.equal(readAutonomousImprovementProgram(root).paper_qualification_gate.historical_snapshot.source,'latest_verified_overlay_20261020');
   } finally { fs.rmSync(root, { recursive:true, force:true }); }
 });
 
-test('prefers the deployed patrading controller status over legacy connector status', () => {
+test('prefers the deployed patrading controller status over legacy connector status', t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ocean-replay-status-'));
+  const nativeProbe=t.mock.method(childProcess,'spawnSync',()=>({status:0,stdout:'[]'}));
+  syncBuiltinESMExports();
   try {
     const preferred = path.join(root, 'connector-control', 'patrading-tp');
     const legacy = path.join(root, 'connector-control');
@@ -172,7 +197,14 @@ test('prefers the deployed patrading controller status over legacy connector sta
     assert.equal(result.chart_replay.state, 'NOT_RUNNING_VERIFIED');
     assert.equal(result.chart_replay.started, false);
     assert.equal(result.chart_replay.source, path.join(preferred, 'replay-status.json'));
-  } finally { fs.rmSync(root, { recursive:true, force:true }); }
+    assert.equal(nativeProbe.mock.callCount(),process.platform==='win32'?1:0);
+    for(const call of nativeProbe.mock.calls){
+      const [command,args,options]=call.arguments;
+      assert.equal(command,'powershell.exe');assert.deepEqual(args.slice(0,3),['-NoProfile','-NonInteractive','-Command']);
+      assert.equal(args.length,4);assert.match(args[3],/Get-CimInstance Win32_Process/);
+      assert.deepEqual(options,{encoding:'utf8',windowsHide:true,timeout:3000,maxBuffer:128*1024});
+    }
+  } finally { nativeProbe.mock.restore();syncBuiltinESMExports();fs.rmSync(root, { recursive:true, force:true }); }
 });
 
 test('projects the current onboarding state from read-only source files', () => {

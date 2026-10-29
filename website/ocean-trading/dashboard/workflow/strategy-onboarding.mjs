@@ -100,6 +100,9 @@ function paperQualificationGate(value) {
   const diagnosis = overlayEntry?.[1]?.prospective_paper_provenance_diagnosis;
   const requiredRemedy = String(diagnosis?.required_remedy || '');
   if (!/APPROVE_GENUINE_PAPER_RUN_AND_DATASET_MANIFEST/i.test(requiredRemedy)) return null;
+  const dateParts = overlayEntry[0].match(/_(\d{4})(\d{2})(\d{2})/);
+  const dateText = dateParts ? `${dateParts[1]}-${dateParts[2]}-${dateParts[3]}` : null;
+  const snapshotDate = dateText && Number.isFinite(Date.parse(dateText)) && new Date(dateText).toISOString().slice(0,10) === dateText ? dateText : null;
   const repair = diagnosis?.telemetry_run_id_repair;
   let telemetryRepair = null;
   if (repair !== undefined) {
@@ -122,13 +125,15 @@ function paperQualificationGate(value) {
     };
   }
   return {
-    status:'APPROVAL_REQUIRED',
+    status:'CURRENT_STATUS_UNKNOWN',
     title:'Paper manifest and qualification approval',
     detail:telemetryRepair
-      ? `${telemetryRepair.version} contains the merged STTL2 Paper run identity repair, but the DLL is not deployed to Paper and is not Paper-qualified. Approve an exact Paper run and dataset manifest, bind the six producer lineage inputs, then verify a new simulated trade before Paper rows can become eligible evidence.`
-      : 'Approve a genuine Paper run and dataset manifest, bind the six producer lineage inputs, and verify prospective run identity before Paper rows can become eligible evidence.',
+      ? `The historical ${snapshotDate || 'undated'} snapshot recorded ${telemetryRepair.version} STTL2 Paper run identity repair code as merged and verified, not deployed to Paper or Paper-qualified at that time. This snapshot does not establish current deployment, qualification or approval. Verify current exact-bound Paper approval, the six producer lineage inputs and prospective run identity before using Paper rows as eligible evidence.`
+      : `The historical ${snapshotDate || 'undated'} snapshot called for a genuine Paper run and dataset manifest, the six producer lineage inputs and verified prospective run identity. It does not establish current deployment, qualification or approval. Verify current exact-bound evidence before using Paper rows as eligible evidence.`,
     approval_id:null,
     source:overlayEntry[0],
+    historical_snapshot:{ date:snapshotDate, source:String(diagnosis.source || overlayEntry[0]) },
+    current_status:{ deployment:'UNKNOWN', qualification:'UNKNOWN', approval:'UNKNOWN' },
     telemetry_repair:telemetryRepair,
   };
 }
