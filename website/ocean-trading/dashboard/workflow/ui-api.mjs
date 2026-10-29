@@ -2,9 +2,13 @@ import { requireThat, id } from './common.mjs';
 import { orderedSetup, setupTaskCapacity } from './setup-operator.mjs';
 import { OperationalPreparation } from './operational-preparation.mjs';
 import { MAX_SERVICE_IDENTITIES } from './provider-lifecycle.mjs';
-import { loadStrategyOnboarding, onboardingStrategyRow, readOnboardingActivationEvents, readOnboardingRegistration, readOnboardingStrategyId, readStrategyOnboardingEvents } from './strategy-onboarding.mjs';
+import { loadStrategyOnboarding, onboardingStrategyRow, readOnboardingActivationEvents, readOnboardingRegistration, readOnboardingStrategyId, readStrategyOnboardingEvents, cachedReplayTwoRuntime, applyOnboardingRuntime, DEFAULT_ONBOARDING_ROOT, DEFAULT_REPLAY_CAMPAIGN_STATE, DEFAULT_VWAP_IMPROVEMENT_MONITOR_STATE } from './strategy-onboarding.mjs';
 import { readOnboardingBrainOutbox } from './onboarding-brain-sync.mjs';
 import {timedSync,routeFamily} from '../request-timing.mjs';
+import { performance } from 'node:perf_hooks';
+import { createOnboardingProjectionReader, ONBOARDING_PROJECTION_DEADLINE_MS } from './onboarding-projection-reader.mjs';
+import { DEFAULT_VWAP_PHYSICAL_COMPARATOR_CONTRACT } from './vwap-physical-comparator-contract.mjs';
+import { DEFAULT_VWAP_APPROVAL_DISPATCH_STATE } from './vwap-physical-comparator-approval-dispatch.mjs';
 
 export const UI_API_VERSION = 'ocean-workflow-ui/v1';
 const PAGE_SIZE = 50;
@@ -64,7 +68,36 @@ export function operationalView(backend) {
 export function readWorkflowView(backend, actor, route) {
   return timedSync(`workflow.${routeFamily(`/api/workflow/${route}`)}`,()=>readWorkflowViewObserved(backend,actor,route));
 }
-function readWorkflowViewObserved(backend, actor, route) {
+const configuredReaderPath = (value, fallback) => value === undefined ? fallback : value;
+function onboardingInputs(backend, strategyId) {
+  const db = backend.db;
+  return {
+    root: configuredReaderPath(backend.config.strategy_onboarding_root, DEFAULT_ONBOARDING_ROOT),
+    events: timedSync('workflow.onboarding.db.events',()=>readStrategyOnboardingEvents(db, strategyId)),
+    brainOutbox: timedSync('workflow.onboarding.db.brain-outbox',()=>readOnboardingBrainOutbox(db).filter(row => row.strategy_id === strategyId)),
+    registration: timedSync('workflow.onboarding.db.registration',()=>readOnboardingRegistration(db, strategyId)),
+    activationEvents: timedSync('workflow.onboarding.db.activation',()=>readOnboardingActivationEvents(db, strategyId)),
+    campaignStatePath: DEFAULT_REPLAY_CAMPAIGN_STATE,
+    improvementMonitorStatePath: configuredReaderPath(backend.config.strategy_improvement_monitor_state, DEFAULT_VWAP_IMPROVEMENT_MONITOR_STATE),
+    physicalComparatorPath: configuredReaderPath(backend.config.strategy_physical_comparator_contract, DEFAULT_VWAP_PHYSICAL_COMPARATOR_CONTRACT),
+    approvalDispatchStatePath: configuredReaderPath(backend.config.strategy_approval_dispatch_state, DEFAULT_VWAP_APPROVAL_DISPATCH_STATE),
+  };
+}
+export async function readWorkflowViewAsync(backend, actor, route, { signal } = {}) {
+  requireThat(actor.role === 'HUMAN', 403, 'WAYNE_BROWSER_ONLY');
+  if (!/^view\/strategies(?:\/page\/\d+|\/[A-Za-z0-9_.:-]+)?$/.test(route)) return readWorkflowView(backend, actor, route);
+  const reader = backend.onboardingProjectionReader ||= createOnboardingProjectionReader();
+  const control = { signal, deadline: performance.now() + ONBOARDING_PROJECTION_DEADLINE_MS };
+  const strategyId = await reader.read('identity', { root: configuredReaderPath(backend.config.strategy_onboarding_root, DEFAULT_ONBOARDING_ROOT) }, control);
+  const result = await reader.read('projection', onboardingInputs(backend, strategyId), control);
+  requireThat(!signal?.aborted, 503, 'ONBOARDING_READ_CANCELLED');
+  requireThat(performance.now() <= control.deadline, 503, 'ONBOARDING_READ_TIMEOUT');
+  requireThat(result.projection.strategy_id === strategyId, 409, 'ONBOARDING_SOURCE_CHANGED');
+  const runtime = (backend.config.strategy_onboarding_runtime_probe || cachedReplayTwoRuntime)(result.runtimeSpec);
+  const projection = applyOnboardingRuntime(result.projection, runtime);
+  return readWorkflowViewObserved(backend, actor, route, projection);
+}
+function readWorkflowViewObserved(backend, actor, route, preparedOnboarding = null) {
   requireThat(actor.role === 'HUMAN', 403, 'WAYNE_BROWSER_ONLY');
   const db = backend.db;
   const parts = route.split('/');
@@ -102,19 +135,9 @@ function readWorkflowViewObserved(backend, actor, route) {
     const profile = parse(backend.one('ow_profiles', value.profile_id));
     return { strategy_id: value.id, strategy_name: registry.strategy_name, registry_revision: value.revision, activation_status: registry.activation_status, activation_decision_id: registry.activation_decision_id, baseline_version: registry.baseline_version, baseline_hash: value.baseline_hash, production_version: registry.production_version, profile: { profile_id: profile.profile_id, profile_version: profile.profile_version, profile_hash: profile.profile_hash, strategy_code_hash: profile.strategy_code_hash, strategy_config_hash: profile.strategy_config_hash }, cases: strategyCaseSummaries(db,value.id,registry.strategy_name), cases_total: db.prepare('SELECT COUNT(*) AS n FROM ow_cases WHERE strategy_id=?').get(value.id).n };
   };
-  const onboarding = () => timedSync('workflow.onboarding',()=>{
+  const onboarding = () => preparedOnboarding || timedSync('workflow.onboarding',()=>{
     const strategyId = timedSync('workflow.onboarding.source.identity',()=>readOnboardingStrategyId(backend.config.strategy_onboarding_root));
-    return loadStrategyOnboarding({
-      root: backend.config.strategy_onboarding_root,
-      events: timedSync('workflow.onboarding.db.events',()=>readStrategyOnboardingEvents(db, strategyId)),
-      brainOutbox: timedSync('workflow.onboarding.db.brain-outbox',()=>readOnboardingBrainOutbox(db).filter(row => row.strategy_id === strategyId)),
-      registration: timedSync('workflow.onboarding.db.registration',()=>readOnboardingRegistration(db, strategyId)),
-      activationEvents: timedSync('workflow.onboarding.db.activation',()=>readOnboardingActivationEvents(db, strategyId)),
-      runtimeProbe: backend.config.strategy_onboarding_runtime_probe,
-      improvementMonitorStatePath: backend.config.strategy_improvement_monitor_state,
-      physicalComparatorPath: backend.config.strategy_physical_comparator_contract,
-      approvalDispatchStatePath: backend.config.strategy_approval_dispatch_state,
-    });
+    return loadStrategyOnboarding({ ...onboardingInputs(backend, strategyId), runtimeProbe: backend.config.strategy_onboarding_runtime_probe });
   });
   const mergeOnboarding = (row, value) => row && value.strategy_id === row.strategy_id ? { ...value, onboarding: row } : value;
   if (collection === 'dashboard' && parts.length === 2) {

@@ -7,7 +7,7 @@ import {timedSync} from '../request-timing.mjs';
 import { API_VERSION, RELEASE, MAX_BODY_BYTES, WorkflowError, canonical, digest, exactKeys, future, id, noSecrets, objectHash, requireThat, sealedHash, strategyId } from "./common.mjs";
 import { OceanAuth } from "./auth.mjs";
 import { WorkflowStore } from "./store.mjs";
-import { readWorkflowView, recordManualAcknowledgement } from "./ui-api.mjs";
+import { readWorkflowView, readWorkflowViewAsync, recordManualAcknowledgement } from "./ui-api.mjs";
 import { enrichPaperclipPendingInteractions } from "./paperclip-interaction-status.mjs";
 import { RunManager } from "./run-manager.mjs";
 import { attachMaintenance, protectedOperatorHost, protectedOperatorTimeoutMs } from './maintenance.mjs';
@@ -107,7 +107,7 @@ export class WorkflowBackend {
     this.authFailureTotals = { 401: 0, 403: 0 };
     this.authFailureBuckets = new Map();
   }
-  close() { this.stopMaintenance?.(); this.operationalCandidateEvaluator?.stop(); this.operationalResearch?.stop(); this.operationalLearning?.stop(); this.onboardingBrain?.stop(); this.store.close(); }
+  close() { this.onboardingProjectionReader?.close(); this.stopMaintenance?.(); this.operationalCandidateEvaluator?.stop(); this.operationalResearch?.stop(); this.operationalLearning?.stop(); this.onboardingBrain?.stop(); this.store.close(); }
   recordAuthFailure(status, code) {
     if (![401,403].includes(status)) return;
     const now=Date.now();const key=`${status}:${code}`;
@@ -1117,7 +1117,12 @@ export class WorkflowBackend {
         if (route === "run-manager/options") response.end(JSON.stringify(this.runs.options(actor)));
         else if (/^run-manager\/context\/[A-Za-z0-9_.:-]+$/.test(route)) response.end(JSON.stringify(this.runs.read(actor,route.split('/')[2])));
         else if (route.startsWith("view/")) {
-          const view=readWorkflowView(this,actor,route);
+          const controller = new AbortController();
+          const disconnected = () => { if (!response.writableEnded) controller.abort(); };
+          response.once('close', disconnected);
+          let view;
+          try { view = await readWorkflowViewAsync(this,actor,route,{signal:controller.signal}); }
+          finally { response.removeListener('close', disconnected); }
           let result=/^view\/strategies\/[A-Za-z0-9_.:-]+$/.test(route)
             ? await enrichStrategyApprovalStatuses(view,{
               apiBase:this.environment.PAPERCLIP_API || 'http://127.0.0.1:3100/api',

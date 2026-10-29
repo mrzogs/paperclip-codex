@@ -297,6 +297,7 @@ test('complete onboarding is actionable in the browser without touching producti
     sources['priority-completion-program.json'].status = 'CICD_GATES_PROVEN_READY_FOR_GOVERNED_CANDIDATE_DECISION';
     fs.writeFileSync(path.join(sourceRoot,'priority-completion-program.json'),JSON.stringify(sources['priority-completion-program.json']));
     await page.locator('#refresh').click();
+    await expect(page.locator('#content')).toHaveAttribute('aria-busy','false');
     await expect(page.getByRole('heading',{ name:'Continue current program and physical gates', exact:true })).toBeVisible();
     await expect(page.getByText('Owner: Program coordinator / named physical gate owners',{ exact:true })).toBeVisible();
     await expect(page.getByText('Autonomous improvement implementation',{ exact:true })).toBeVisible();
