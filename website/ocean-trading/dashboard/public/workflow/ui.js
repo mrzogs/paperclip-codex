@@ -902,7 +902,14 @@ async function refresh(force = false) {
       for (const url of state.imageUrls) URL.revokeObjectURL(url); state.imageUrls = [];
       const html = current.view === 'onboarding-guide' ? onboardingHelpPage() : current.view === 'dashboard' ? overview(data) : current.view === 'artifacts' ? await renderArtifact(data,generation) : !current.key ? collectionPage(current.view,data) : ({ strategies:strategyPage, cases:casePage, runs:runPage, approvals:approvalPage })[current.view]?.(data);
       if (generation !== state.generation || html === undefined) return;
-      content.innerHTML = html; renderIcons(); state.fingerprint = fingerprint;
+      const availability = data.workflow_availability;
+      const readOnly = availability?.state === 'DEGRADED_READ_ONLY' && availability.read_only === true;
+      const availabilityBanner = readOnly ? `<section role='status' class='notice'><h2>Workflow is read only</h2><p>${esc(availability.physical_readiness?.blocker?.code)}. Physical readiness needs operator review. Starts, dispatch, adoption and workflow changes are blocked.</p></section>` : '';
+      content.innerHTML = availabilityBanner + html;
+      if (readOnly) content.querySelectorAll('[data-action]').forEach(element => {
+        if (!/^(?:download-|copy-)/.test(element.dataset.action || '')) { element.disabled = true; element.setAttribute('aria-disabled', 'true'); }
+      });
+      renderIcons(); state.fingerprint = fingerprint;
       if (location.hash) requestAnimationFrame(() => document.getElementById(decodeURIComponent(location.hash.slice(1)))?.scrollIntoView({ block:'start' }));
       if (focused && document.getElementById(focused)) { document.getElementById(focused).focus(); if (selection !== null) document.getElementById(focused).setSelectionRange?.(selection,selection); }
       document.title = `${content.querySelector('h1')?.textContent || 'Continuous Improvement'} | Ocean Trading`;

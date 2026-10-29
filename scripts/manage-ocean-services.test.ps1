@@ -83,7 +83,8 @@ $parseErrors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($managerPath, [ref]$tokens, [ref]$parseErrors)
 Assert-Test ($parseErrors.Count -eq 0) 'MANAGER_PARSE_FAILED'
 foreach ($name in @('Get-TaskSpec','Register-OceanTask','Get-WebsiteSupervisorCommandPattern',
-    'Get-MonitorOwnedProcessTree','Stop-WebsiteSupervisorProcesses','Stop-TaskComponent','Disable-TaskComponent')) {
+    'Get-MonitorOwnedProcessTree','Stop-WebsiteSupervisorProcesses','Stop-TaskComponent','Disable-TaskComponent',
+    'Test-OceanWorkflowReady','Test-OceanWebsiteAvailable')) {
   $declaration = @($ast.FindAll({ param($node)
     $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
   }, $true))
@@ -205,6 +206,54 @@ try {
     if (-not $resolved.StartsWith($expectedParent, [StringComparison]::OrdinalIgnoreCase)) { throw 'TEST_FIXTURE_CLEANUP_OUTSIDE_TEMP' }
     Remove-Item -LiteralPath $resolved -Recurse -Force
   }
+}
+
+# These predicates use only in-memory readiness/deployment fixtures. No HTTP,
+# scheduler or process APIs are invoked, and full operational health stays false.
+$script:RejectDeployment = $false
+$script:FakeDeployment = [pscustomobject]@{ReleaseId='ocean-reviewed-fixture';SourceCommit=('a'*40);ManifestSha256=('b'*64)}
+$script:FakeReadiness = $null
+function Get-OceanWorkflowReadiness { return $script:FakeReadiness }
+$degraded = [pscustomobject]@{state='DEGRADED_READ_ONLY';execution='READ_ONLY';workflow=[pscustomobject]@{
+  state='DEGRADED_READ_ONLY';schema_version=14;read_only=$true;mutations_enabled=$false;
+  deployment=[pscustomobject]@{release_id=$script:FakeDeployment.ReleaseId;source_commit=$script:FakeDeployment.SourceCommit;manifest_sha256=$script:FakeDeployment.ManifestSha256};
+  physical_readiness=[pscustomobject]@{state='BLOCKED';latched=$true;blocker=[pscustomobject]@{code='OPERATIONAL_TELEMETRY_MODULE_HASH_CONFLICT'}}}}
+$script:FakeReadiness = $degraded
+Assert-Test (Test-OceanWebsiteAvailable) 'REVIEWED_READ_ONLY_WEBSITE_IS_NOT_AVAILABLE'
+Assert-Test (-not (Test-OceanWorkflowReady)) 'READ_ONLY_WEBSITE_IS_MISREPORTED_OPERATIONALLY_READY'
+foreach ($mutate in @(
+    {param($v) $v.state='READY'}, {param($v) $v.execution='NORMAL'},
+    {param($v) $v.workflow.state='READY'}, {param($v) $v.workflow.schema_version=13},
+    {param($v) $v.workflow.read_only=$false}, {param($v) $v.workflow.mutations_enabled=$true},
+    {param($v) $v.workflow.physical_readiness.state='READY'}, {param($v) $v.workflow.physical_readiness.latched=$false},
+    {param($v) $v.workflow.physical_readiness.blocker.code='OTHER_FAILURE'},
+    {param($v) $v.workflow.deployment.release_id='other'}, {param($v) $v.workflow.deployment.source_commit=('c'*40)},
+    {param($v) $v.workflow.deployment.manifest_sha256=('d'*64)}
+  )) {
+  $script:FakeReadiness = $degraded | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+  & $mutate $script:FakeReadiness
+  Assert-Test (-not (Test-OceanWebsiteAvailable)) 'UNBOUND_OR_MUTABLE_DEGRADED_WEBSITE_ACCEPTED'
+}
+$script:FakeReadiness = $null
+Assert-Test (-not (Test-OceanWebsiteAvailable)) 'MISSING_WEBSITE_READINESS_ACCEPTED'
+$script:FakeReadiness = [pscustomobject]@{}
+& { Set-StrictMode -Version Latest; Assert-Test (-not (Test-OceanWebsiteAvailable)) 'STRICT_MODE_MALFORMED_READINESS_ACCEPTED' }
+$ready = [pscustomobject]@{execution='TEST_ONLY';workflow=[pscustomobject]@{state='READY';schema_version=14;
+  deployment=$degraded.workflow.deployment;
+  operational_learning=[pscustomobject]@{enabled=$true;state='READY';last_error=$null};
+  candidate_evaluator=[pscustomobject]@{version='ocean-operational-candidate-evaluator/v2';state='READY';last_error=$null}}}
+$script:FakeReadiness = $ready
+Assert-Test (Test-OceanWorkflowReady) 'GENUINE_OPERATIONAL_READY_PATH_CHANGED'
+Assert-Test (Test-OceanWebsiteAvailable) 'GENUINE_READY_WEBSITE_UNAVAILABLE'
+foreach ($patch in @(@{state='DEGRADED_READ_ONLY'},@{state='ERROR'},@{execution='READ_ONLY'},
+    @{workflow_read_only=$true},@{workflow_mutations_enabled=$false},
+    @{workflow_physical_readiness=[pscustomobject]@{state='BLOCKED';latched=$true}})) {
+  $script:FakeReadiness = $ready | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+  foreach ($key in $patch.Keys) {
+    if ($key.StartsWith('workflow_')) { $script:FakeReadiness.workflow | Add-Member -Force -NotePropertyName $key.Substring(9) -NotePropertyValue $patch[$key] }
+    else { $script:FakeReadiness | Add-Member -Force -NotePropertyName $key -NotePropertyValue $patch[$key] }
+  }
+  Assert-Test (-not (Test-OceanWorkflowReady)) 'CONTRADICTORY_READ_ONLY_RESPONSE_REPORTED_OPERATIONALLY_READY'
 }
 
 Write-Output 'managed Ocean website launcher contract: PASS'
