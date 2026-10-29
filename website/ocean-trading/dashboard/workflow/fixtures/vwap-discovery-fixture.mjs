@@ -31,6 +31,10 @@ export async function discoveryFixture(t, rows, {mutateReport,mutateClaims,unsig
     verifyPublication:unsignedPublication?undefined:({sha256})=>({...scope,verified:true,purpose:'improvement.report_publication',subject_sha256:sha256,expires_at_utc:'2026-10-29T12:10:00Z'})});
   const verifyAdmission=({report_sha256,manifest_sha256,learning_rows_sha256})=>{
     const claims={...scope,verified:true,report_sha256,manifest_sha256,learning_rows_sha256,run_id:runId,verified_custody:report.required_custody_purposes.map(purpose=>({...scope,purpose,verified:true,run_id:runId,subject_sha256:manifestSha256,issuer:purpose==='discovery.market_universe'?'independent-synthetic-market-custodian':'synthetic-test-verifier',verification_key_sha256:purpose==='discovery.market_universe'?'F'.repeat(64):'E'.repeat(64),issued_at_utc:'2026-10-29T11:58:00Z',expires_at_utc:'2026-10-29T12:10:00Z'}))};
+    // Trusted verifier mock only; the real implementation reads Python's exact
+    // immutable semantic outputs before emitting these claims.
+    claims.semantic_admission={status:'QUALIFIED_DISCOVERY',report_sha256:'1'.repeat(64),
+      intake_package_sha256:'2'.repeat(64),learning_rows_sha256};
     mutateClaims?.(claims); return claims;
   };
   const options={report:loaded.reports.discovery_admission,learningRowsReport:loaded.reports.learning_rows,discoverySchema:report.schema_version,requiredCustodyPurposes:VWAP_DISCOVERY_CUSTODY_PURPOSES,baselineSha256,configSha256,verifyAdmission,now};

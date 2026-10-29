@@ -40,6 +40,11 @@ export async function validateVwapDiscoveryAdmission({ report, learningRowsRepor
     // and return derived bindings. A publisher signature cannot replace it.
     const claims = await verifyAdmission({document,report_sha256:report.sha256,manifest_sha256:document.signed_subject_sha256,learning_rows_sha256:rowSetHash});
     requireValue(claims?.verified === true && claims.report_sha256?.toUpperCase() === report.sha256 && claims.manifest_sha256?.toUpperCase() === document.signed_subject_sha256?.toUpperCase() && HASH.test(document.signed_subject_sha256 || '') && document.signed_subject_sha256.toUpperCase() === document.manifest_sha256?.toUpperCase() && claims.strategy_id === context.project && claims.domain === context.domain && claims.project_root === context.projectRoot && claims.run_id === document.run_id && claims.learning_rows_sha256?.toUpperCase() === rowSetHash, 'DISCOVERY_RECEIPT_BINDING_MISMATCH');
+    requireValue(claims.semantic_admission?.status === 'QUALIFIED_DISCOVERY'
+      && HASH.test(claims.semantic_admission.report_sha256 || '')
+      && HASH.test(claims.semantic_admission.intake_package_sha256 || '')
+      && claims.semantic_admission.learning_rows_sha256?.toUpperCase() === rowSetHash,
+    'DISCOVERY_AUTHORITATIVE_SEMANTICS_REQUIRED');
     const expectedPurposes = canonicalVwapJson([...VWAP_DISCOVERY_CUSTODY_PURPOSES].sort());
     requireValue((requiredCustodyPurposes === undefined || Array.isArray(requiredCustodyPurposes) && canonicalVwapJson([...requiredCustodyPurposes].sort()) === expectedPurposes) && Array.isArray(document.required_custody_purposes) && canonicalVwapJson([...document.required_custody_purposes].sort()) === expectedPurposes && Array.isArray(claims.verified_custody) && claims.verified_custody.length === VWAP_DISCOVERY_CUSTODY_PURPOSES.length, 'DISCOVERY_CUSTODY_PURPOSES_REQUIRED');
     let expiresAt = Infinity;
@@ -55,7 +60,8 @@ export async function validateVwapDiscoveryAdmission({ report, learningRowsRepor
     const universe = claims.verified_custody.find(item=>item.purpose === 'discovery.market_universe');
     const source = claims.verified_custody.find(item=>item.purpose === 'discovery.source_binding');
     requireValue(!universe || typeof universe.issuer === 'string' && universe.issuer.length > 0 && universe.issuer !== source?.issuer && HASH.test(universe.verification_key_sha256 || '') && HASH.test(source?.verification_key_sha256 || '') && universe.verification_key_sha256.toUpperCase() !== source.verification_key_sha256.toUpperCase(), 'DISCOVERY_MARKET_UNIVERSE_INDEPENDENCE_REQUIRED');
-    const admission = Object.freeze({ admitted:true, report_sha256:report.sha256, publication_sha256:context.publicationHash, run_id:document.run_id, learning_rows_sha256:rowSetHash });
+    const admission = Object.freeze({ admitted:true, report_sha256:report.sha256, publication_sha256:context.publicationHash, run_id:document.run_id, learning_rows_sha256:rowSetHash,
+      semantic_admission:Object.freeze({...claims.semantic_admission}) });
     admissions.set(admission,{report,learningRowsReport,context,rowSetHash,contentSetHash:rowContentSetHash(learningRows),expiresAt,rows:learningRows});
     return { admitted:true, admission, blockers:[] };
   } catch (error) {

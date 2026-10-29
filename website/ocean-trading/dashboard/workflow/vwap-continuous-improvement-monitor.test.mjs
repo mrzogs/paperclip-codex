@@ -8,6 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { dispatchVwapImprovementEvent, loadVwapContinuousImprovementConfig, readVwapLearningRows,
   scanVwapContinuousImprovement as scanCore } from './vwap-continuous-improvement-monitor.mjs';
 import { discoveryFixture, FIXTURE_NOW } from './fixtures/vwap-discovery-fixture.mjs';
+import { validateVwapDiscoveryAdmission } from './vwap-discovery-admission.mjs';
 
 const cleanups=[];
 after(()=>{for(const cleanup of cleanups.reverse())cleanup();});
@@ -207,6 +208,23 @@ test('admission expiry or tamper with unchanged SQLite revokes eligibility and n
     assert.ok(kinds.slice(before).every(kind=>kind==='EVIDENCE_BLOCKED'));
     assert.notEqual(revoked.discovery_admission_signature,baseline.discovery_admission_signature);
   }
+});
+
+test('changed authoritative intake package rechecks the same publication without duplicating an investigation',async t=>{
+  const f=fixture();insertRows(f.dbFile,1,60,{role:'DISCOVERY'});
+  const evidence=await discoveryFixture(t,softwareRows(f.config));let active=evidence.result,calls=0;
+  const scan=()=>scanCore({config:f.config,stateFile:f.stateFile,clock:()=>FIXTURE_NOW,
+    readAdmission:async()=>({...active,rows:evidence.loaded.reports.learning_rows.document.records,
+      publication_sha256:evidence.loaded.publication_sha256}),dispatch:async()=>{calls++;return {triggered:true,dispatch_committed:true};}});
+  const first=await scan();assert.equal(first.eligible_trade_count,60);
+  active=await validateVwapDiscoveryAdmission({...evidence.options,verifyAdmission:request=>{
+    const claims=evidence.options.verifyAdmission(request);claims.semantic_admission.intake_package_sha256='3'.repeat(64);return claims;
+  }});
+  assert.equal(active.admitted,true);
+  const second=await scan();assert.equal(second.skipped_unchanged,false);
+  assert.notEqual(second.discovery_admission_signature,first.discovery_admission_signature);
+  assert.equal(second.discovery_admission.semantic_admission.intake_package_sha256,'3'.repeat(64));
+  await scan();const unchanged=await scan();assert.equal(unchanged.skipped_unchanged,true);assert.equal(calls,1);
 });
 
 test('null P&L and excursions remain unknown and cannot enter authenticated rows as zero',async t=>{

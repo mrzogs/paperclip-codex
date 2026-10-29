@@ -4,6 +4,18 @@ import { validateVwapDiscoveryAdmission, verifiedVwapDiscoveryRows } from './vwa
 import { discoveryFixture, FIXTURE_NOW } from './fixtures/vwap-discovery-fixture.mjs';
 
 const rows=()=>[{trade_id:'trade-1',strategy_id:'cicd-vwap-pull-back-strategy',run_id:'fixture-run',dataset_role:'DISCOVERY',environment:'REPLAY',session_id:'session-1',net_pnl:'-1.04'}];
+
+test('authenticated custody and report flags cannot replace the authoritative semantic result',async t=>{
+  for(const mutateClaims of [claims=>{delete claims.semantic_admission;},
+    claims=>{claims.semantic_admission.status='SOFTWARE_FIXTURE_VALIDATED';},
+    claims=>{claims.semantic_admission.learning_rows_sha256='A'.repeat(64);},
+    claims=>{delete claims.semantic_admission.intake_package_sha256;}]){
+    const f=await discoveryFixture(t,rows(),{mutateReport:report=>{
+      report.semantic_verified=true;report.semantic_admission={status:'QUALIFIED_DISCOVERY'};
+    },mutateClaims});
+    assert.equal(f.result.admitted,false);assert.equal(f.result.blockers[0].code,'DISCOVERY_AUTHORITATIVE_SEMANTICS_REQUIRED');
+  }
+});
 test('private admission requires original-manifest custody and exact row bridge',async t=>{
   const f=await discoveryFixture(t,rows(),{unsignedPublication:true});
   assert.equal(f.loaded.ingestion.status,'INTEGRITY_VERIFIED_DIAGNOSTIC_ONLY');

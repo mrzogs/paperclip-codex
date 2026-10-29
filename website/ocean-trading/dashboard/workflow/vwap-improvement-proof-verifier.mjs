@@ -102,7 +102,7 @@ const sortBindings = refs => refs.map(refBinding).sort((a,b) => compareUnicode(a
 /** Owner configuration supplies policyPath and its independently obtained hash.
  * No key, policy, credential, remote call or authority is provisioned here. */
 export function createVwapProofVerifier({ policyPath, expectedPolicySha256, evidenceRoot, now = () => Date.now(),
-  maxArtifactBytes = MAX_BYTES, maxTotalArtifactBytes = 64 * 1024 * 1024 } = {}) {
+  maxArtifactBytes = MAX_BYTES, maxTotalArtifactBytes = 64 * 1024 * 1024, verifyDiscoverySemantics } = {}) {
   hash(expectedPolicySha256);
   requireValue(typeof evidenceRoot === 'string' && path.isAbsolute(evidenceRoot) && fs.statSync(evidenceRoot).isDirectory(), 'Absolute existing evidence root required');
   const root = path.resolve(evidenceRoot);
@@ -225,9 +225,39 @@ export function createVwapProofVerifier({ policyPath, expectedPolicySha256, evid
     const rowHash = digest(canonicalBytes(projected.records));
     requireValue(sameHash(rowHash, learning_rows_sha256) && sameHash(rowHash, document.learning_rows_sha256), 'Discovery learning rowset hash mismatch');
     requireValue(policy.evidence_class === 'AUTHENTICATED_SYSTEM' && manifest.evidence_class === 'OBSERVED', 'Synthetic evidence cannot qualify market research');
+    // Custody authenticates originals; it cannot replace the authoritative W3
+    // HMM/prefix/native-order/fill/cost computations. Only source-owned wiring
+    // can provide this async, pinned Python bridge. Report flags cannot enable it.
+    requireValue(typeof verifyDiscoverySemantics === 'function', 'DISCOVERY_AUTHORITATIVE_SEMANTIC_VERIFIER_REQUIRED');
+    const packOriginal = verifyOriginal(document.pack_artifact);
+    requireValue(packOriginal.document.schema_version === 'cicd-vwap-discovery-pack/v1'
+      && sameHash(packOriginal.document.manifest?.sha256, manifestOriginal.sha256), 'Discovery semantic pack binding mismatch');
+    const semantic = await verifyDiscoverySemantics({pack_ref:structuredClone(document.pack_artifact),expected:{
+      manifest_sha256:manifestOriginal.sha256,run_id:manifest.run_id,
+      source_sha256:manifest.source_binding.source_sha256,config_sha256:manifest.source_binding.config_sha256,
+      learning_rows_sha256:rowHash}});
+    requireValue(semantic?.verified === true && semantic.qualified === true && semantic.status === 'QUALIFIED_DISCOVERY'
+      && sameHash(semantic.manifest_sha256,manifestOriginal.sha256) && sameHash(semantic.pack_sha256,packOriginal.sha256)
+      && sameHash(semantic.learning_rows_sha256,rowHash), 'DISCOVERY_AUTHORITATIVE_SEMANTICS_UNPROVED');
+    hash(semantic.intake_package_sha256);
+    const semanticReport = verifyOriginal(semantic.report_ref), semanticLearning = verifyOriginal(semantic.learning_rows_ref);
+    const derived = semanticReport.document;
+    requireValue(derived.schema_version === document.schema_version && derived.strategy_id === VWAP_PROOF_PROJECT
+      && derived.domain === VWAP_PROOF_DOMAIN && derived.project_root === policy.project_root
+      && derived.status === 'QUALIFIED_DISCOVERY' && derived.eligible_for_candidate_selection === true
+      && derived.evidence_class === 'OBSERVED' && derived.dataset_role === 'DISCOVERY' && derived.run_id === manifest.run_id
+      && Array.isArray(derived.errors) && derived.errors.length === 0
+      && sameHash(derived.manifest_sha256,manifestOriginal.sha256) && sameHash(derived.pack_artifact?.sha256,packOriginal.sha256)
+      && sameValue(derived.source_binding,manifest.source_binding) && sameValue(derived.verified_originals,sortBindings(refs))
+      && sameHash(derived.row_set_sha256,document.row_set_sha256)
+      && sameHash(derived.learning_rows_artifact?.sha256,semanticLearning.sha256)
+      && sameValue(derived.learning_rows,projected) && sameValue(semanticLearning.document,projected)
+      && sameHash(derived.learning_rows_sha256,rowHash), 'DISCOVERY_AUTHORITATIVE_SEMANTIC_READBACK_MISMATCH');
     return freeze({ verified:true, report_sha256:hash(report_sha256), manifest_sha256:manifestOriginal.sha256,
       run_id:manifest.run_id, strategy_id:VWAP_PROOF_PROJECT, domain:VWAP_PROOF_DOMAIN, project_root:policy.project_root,
-      verified_custody:verified, learning_rows_sha256:rowHash, trust_policy_sha256:policySha });
+      verified_custody:verified, learning_rows_sha256:rowHash, trust_policy_sha256:policySha,
+      semantic_admission:{status:'QUALIFIED_DISCOVERY',report_sha256:semanticReport.sha256,
+        learning_rows_sha256:rowHash,intake_package_sha256:hash(semantic.intake_package_sha256)} });
   };
   return Object.freeze(Object.assign(verifyReceipt, { verifyReceipt, verifyDiscoveryAdmission, verifyArtifact,
     evidenceClass:policy.evidence_class, policySha256:policySha, trust_policy_sha256:policySha }));

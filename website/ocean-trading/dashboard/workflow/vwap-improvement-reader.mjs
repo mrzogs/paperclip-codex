@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { loadVwapImprovementReports } from './vwap-improvement-reports.mjs';
 import { validateVwapDiscoveryAdmission } from './vwap-discovery-admission.mjs';
+import { createVwapDiscoverySemanticAdapter } from './vwap-discovery-semantic-adapter.mjs';
 import { createVwapProofVerifier, VWAP_PROOF_PROJECT, VWAP_PROOF_DOMAIN,
   VWAP_PROOF_PROJECT_ROOT } from './vwap-improvement-proof-verifier.mjs';
 
@@ -75,8 +76,11 @@ export async function loadConfiguredVwapImprovementReports({
 
 export async function loadConfiguredVwapDiscoveryAdmission({
   configFile = process.env.OCEAN_VWAP_IMPROVEMENT_REPORT_CONFIG,
+  semanticConfigFile = process.env.OCEAN_VWAP_DISCOVERY_SEMANTIC_CONFIG,
+  semanticConfigSha256 = process.env.OCEAN_VWAP_DISCOVERY_SEMANTIC_CONFIG_SHA256,
   now = Date.now(), loadReports = loadConfiguredVwapImprovementReports,
   createVerifier = createVwapProofVerifier, validateAdmission = validateVwapDiscoveryAdmission,
+  createSemanticAdapter = createVwapDiscoverySemanticAdapter,
 } = {}) {
   const loaded = await loadReports({configFile,now});
   const denied = blockers => ({admitted:false,admission:null,blockers,publication_sha256:loaded.publication_sha256 || null,
@@ -85,14 +89,22 @@ export async function loadConfiguredVwapDiscoveryAdmission({
     return denied([{code:'DISCOVERY_PUBLISHED_REPORTS_REQUIRED'},...(loaded.ingestion?.blockers || [])]);
   try {
     const config = loaded.config;
-    check(typeof config.trust_policy_file === 'string' && HASH.test(config.trust_policy_sha256 || ''), 'DISCOVERY_TRUST_POLICY_REQUIRED');
-    check(HASH.test(config.baseline_sha256 || '') && HASH.test(config.config_sha256 || ''), 'DISCOVERY_ACTIVE_BINDING_REQUIRED');
-    const verifier = createVerifier({policyPath:config.trust_policy_file,expectedPolicySha256:config.trust_policy_sha256,
-      evidenceRoot:config.evidence_root,now:() => now});
+    // Publisher configuration selects diagnostic bytes only. Admission authority
+    // comes from a separately pinned Website operator descriptor.
+    check(typeof semanticConfigFile === 'string' && path.isAbsolute(semanticConfigFile)
+      && HASH.test(semanticConfigSha256 || ''), 'DISCOVERY_SEMANTIC_CONFIG_REQUIRED');
+    const semantic = createSemanticAdapter({descriptorPath:semanticConfigFile,expectedDescriptorSha256:semanticConfigSha256});
+    const binding = semantic?.admissionBinding;
+    check(typeof semantic === 'function' && binding && path.resolve(binding.evidence_root) === path.resolve(config.evidence_root),
+      'DISCOVERY_SEMANTIC_EVIDENCE_ROOT_MISMATCH');
+    check(typeof binding.trust_policy_file === 'string' && HASH.test(binding.trust_policy_sha256 || ''), 'DISCOVERY_TRUST_POLICY_REQUIRED');
+    check(HASH.test(binding.baseline_sha256 || '') && HASH.test(binding.config_sha256 || ''), 'DISCOVERY_ACTIVE_BINDING_REQUIRED');
+    const verifier = createVerifier({policyPath:binding.trust_policy_file,expectedPolicySha256:binding.trust_policy_sha256,
+      evidenceRoot:config.evidence_root,now:() => now,verifyDiscoverySemantics:semantic});
     const admission = await validateAdmission({report:loaded.reports.discovery_admission,
       learningRowsReport:loaded.reports.learning_rows,verifyAdmission:verifier.verifyDiscoveryAdmission,
-      discoverySchema:config.report_schemas.discovery_admission,baselineSha256:config.baseline_sha256,
-      configSha256:config.config_sha256,now});
+      discoverySchema:config.report_schemas.discovery_admission,baselineSha256:binding.baseline_sha256,
+      configSha256:binding.config_sha256,now});
     return {...admission,rows:admission.admitted ? loaded.reports.learning_rows.document.records : [],
       publication_sha256:loaded.publication_sha256,ingestion:loaded.ingestion};
   } catch (error) { return denied([{code:error.code || error.message || 'DISCOVERY_AUTHENTICATION_FAILED'}]); }

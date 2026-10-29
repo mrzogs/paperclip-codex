@@ -20,7 +20,12 @@ async function admissionConfig(t){
     trust_policy_file:path.join(f.root,'missing-owner-policy.json'),trust_policy_sha256:'A'.repeat(64),
     baseline_sha256:f.options.baselineSha256,config_sha256:f.options.configSha256};
   const configFile=path.join(f.root,'reader.json'),write=()=>fs.writeFileSync(configFile,JSON.stringify(config));write();
-  return {...f,config,configFile,write};
+  const operatorBinding={evidence_root:f.root,trust_policy_file:config.trust_policy_file,trust_policy_sha256:config.trust_policy_sha256,
+    baseline_sha256:config.baseline_sha256,config_sha256:config.config_sha256};
+  const semanticOptions={semanticConfigFile:path.join(path.dirname(f.root),'website-owned-semantic.json'),semanticConfigSha256:'B'.repeat(64),
+    createSemanticAdapter:()=>Object.assign(async()=>{throw new Error('software verifier mock must not execute Python');},
+      {admissionBinding:operatorBinding})};
+  return {...f,config,configFile,write,semanticOptions};
 }
 
 test('missing operator configuration is NOT_CONFIGURED and cannot admit rows',async()=>{
@@ -48,27 +53,45 @@ test('configured unsigned diagnostics stay visible without authenticating an imp
   const f=makeVwapStatusSoftwareFixture(t),result=await loadConfiguredVwapImprovementReports({configFile:f.configFile,now:f.now});
   assert.equal(result.ingestion.status,'INTEGRITY_VERIFIED_DIAGNOSTIC_ONLY');assert.equal(result.reports.cohort.document.closed,46);
   assert.equal(result.config.publication_sha256,f.config.publication_sha256);
+  const admission=await loadConfiguredVwapDiscoveryAdmission({configFile:f.configFile,now:f.now,
+    createSemanticAdapter:()=>{throw new Error('diagnostics must never start Python');}});
+  assert.equal(admission.admitted,false);assert.equal(admission.blockers[0].code,'DISCOVERY_PUBLISHED_REPORTS_REQUIRED');
   f.config.publication_sha256='A'.repeat(64);fs.writeFileSync(f.configFile,JSON.stringify(f.config));
   const tampered=await loadConfiguredVwapImprovementReports({configFile:f.configFile,now:f.now});
   assert.equal(tampered.ingestion.status,'BLOCKED');assert.deepEqual(tampered.reports,{});
 });
 
-test('missing owner policy and unavailable external authentication fail closed despite caller verified flags',async t=>{
-  const f=await admissionConfig(t);delete f.config.trust_policy_file;f.config.verified=true;f.config.admitted=true;f.write();
+test('missing Website semantic descriptor and unavailable authentication fail closed despite publisher authority flags',async t=>{
+  const f=await admissionConfig(t);f.config.verified=true;f.config.admitted=true;f.write();
   let verifierCalls=0;
   const missing=await loadConfiguredVwapDiscoveryAdmission({configFile:f.configFile,now:FIXTURE_NOW,
+    semanticConfigFile:null,semanticConfigSha256:null,
     createVerifier:()=>{verifierCalls++;throw new Error('must not be called');}});
-  assert.equal(missing.admitted,false);assert.equal(missing.blockers[0].code,'DISCOVERY_TRUST_POLICY_REQUIRED');assert.equal(verifierCalls,0);
-  f.config.trust_policy_file=path.join(f.root,'missing-owner-policy.json');f.write();
-  const unavailable=await loadConfiguredVwapDiscoveryAdmission({configFile:f.configFile,now:FIXTURE_NOW});
+  assert.equal(missing.admitted,false);assert.equal(missing.blockers[0].code,'DISCOVERY_SEMANTIC_CONFIG_REQUIRED');assert.equal(verifierCalls,0);
+  const unavailable=await loadConfiguredVwapDiscoveryAdmission({configFile:f.configFile,now:FIXTURE_NOW,...f.semanticOptions});
   assert.equal(unavailable.admitted,false);assert.equal(unavailable.admission,null);
   const badVerifier=await loadConfiguredVwapDiscoveryAdmission({configFile:f.configFile,now:FIXTURE_NOW,
+    ...f.semanticOptions,
     createVerifier:()=>({verifyDiscoveryAdmission:()=>({verified:true})})});
   assert.equal(badVerifier.admitted,false);assert.equal(badVerifier.blockers[0].code,'DISCOVERY_RECEIPT_BINDING_MISMATCH');
 });
 
+test('publisher cannot replace Website-owned source, policy or semantic execution bindings',async t=>{
+  const f=await admissionConfig(t);let captured;
+  Object.assign(f.config,{trust_policy_file:'publisher-policy',trust_policy_sha256:'C'.repeat(64),baseline_sha256:'D'.repeat(64),config_sha256:'E'.repeat(64)});f.write();
+  const semantic=f.semanticOptions.createSemanticAdapter();
+  const result=await loadConfiguredVwapDiscoveryAdmission({configFile:f.configFile,now:FIXTURE_NOW,...f.semanticOptions,
+    createSemanticAdapter:()=>semantic,createVerifier:options=>{captured=options;return {verifyDiscoveryAdmission:f.options.verifyAdmission};}});
+  assert.equal(result.admitted,true);assert.equal(captured.verifyDiscoverySemantics,semantic);
+  assert.equal(captured.policyPath,semantic.admissionBinding.trust_policy_file);
+  assert.equal(captured.expectedPolicySha256,'A'.repeat(64));
+  const wrong=Object.assign(async()=>{}, {admissionBinding:{...semantic.admissionBinding,evidence_root:path.dirname(f.root)}});
+  const denied=await loadConfiguredVwapDiscoveryAdmission({configFile:f.configFile,now:FIXTURE_NOW,...f.semanticOptions,createSemanticAdapter:()=>wrong});
+  assert.equal(denied.admitted,false);assert.equal(denied.blockers[0].code,'DISCOVERY_SEMANTIC_EVIDENCE_ROOT_MISMATCH');
+});
+
 test('SOFTWARE custody bridge returns actual private-brand rows only after exact independently verified binding',async t=>{
-  const f=await admissionConfig(t),options={configFile:f.configFile,now:FIXTURE_NOW,
+  const f=await admissionConfig(t),options={configFile:f.configFile,now:FIXTURE_NOW,...f.semanticOptions,
     createVerifier:()=>({verifyDiscoveryAdmission:f.options.verifyAdmission})};
   const result=await loadConfiguredVwapDiscoveryAdmission(options);
   assert.equal(result.admitted,true);assert.equal(result.rows.length,1);assert.equal(result.rows[0].run_id,'reader-software-run');

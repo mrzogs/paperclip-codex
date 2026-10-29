@@ -13,6 +13,21 @@ a fixed evidence root, a publication path and SHA256, schema bindings, required
 report kinds, freshness and byte limits. Neither HTTP parameters nor report JSON
 can select another root or supply a verifier.
 
+For managed Website releases, the optional deployment-manifest field
+`vwap_improvement_report_config` owns that location. Pass
+`-VwapImprovementReportConfig` to the immutable release builder for its initial
+binding; subsequent releases retain the validated active location unless an
+operator supplies another. The resolver requires a canonical local, regular,
+nonempty JSON file of at most 64 KiB without reparse points or path aliases. It
+inspects metadata only; Node validates the contents and evidence scope.
+
+The Website supervisor copies this validated property into its own process/child
+environment. Missing bindings clear ambient values and remain unconfigured.
+The service manager registers only the Website task against the release's
+hash-bound supervisor script, preserving legacy and prior-release stop recovery.
+It neither changes user/machine environment settings nor overwrites the dirty
+canonical checkout or other components' tasks.
+
 The diagnostic publisher currently supplies four genuine kinds:
 `collector_health`, `cohort`, `exit_reconciliation`, `improvement_liveness`.
 Missing `discovery_admission` and `learning_rows` remain missing. Integrity-only
@@ -45,6 +60,31 @@ Synthetic evidence remains software-only. Private admission capabilities do not
 survive JSON serialization. Observed rows with incomplete or unknown pre-event
 mechanism evidence remain ledger observations, with research eligibility false.
 
+Admission also reruns the authoritative Python Discovery intake asynchronously.
+The separate Website-owned descriptor is selected by the paired manifest fields
+`vwap_discovery_semantic_config` and `vwap_discovery_semantic_config_sha256`, or
+the corresponding supervisor environment values
+`OCEAN_VWAP_DISCOVERY_SEMANTIC_CONFIG` and
+`OCEAN_VWAP_DISCOVERY_SEMANTIC_CONFIG_SHA256`. The immutable release builder
+accepts `-VwapDiscoverySemanticConfig` and
+`-VwapDiscoverySemanticConfigSha256` together; both-null clears them. Omission
+retains an existing validated pair. The publisher's reader configuration cannot
+select admission policy, active source/config identity, interpreter or code.
+
+The descriptor pins the approved interpreter, fixed bootstrap, local module
+closure, 21-contract index, W0 package, HMM decoder and independent public-key
+policy. A bounded child process invokes the existing intake and report publisher;
+Ocean independently rereads its exact output report and learning rows and checks
+them against the authenticated originals. Missing, changed, mismatched or
+ineligible outputs fail closed. Four diagnostic reports never construct this
+adapter or launch Python. A software contract descriptor remains explicitly
+unqualified and cannot admit market evidence. No production descriptor or
+authority is provisioned by this code change.
+
+The intake-package hash is retained in private admission and monitor state.
+Changing it invalidates the unchanged-database shortcut without treating a
+repeated semantic report timestamp as new market evidence.
+
 The signed pre-outcome freeze must satisfy
 `frozen_at <= authenticated issued_at < outcome_access`. Actor identities,
 market/source issuer independence, freshness and all original byte bindings are
@@ -70,6 +110,21 @@ enable this path. Source tests or an offline wire check do not establish
 production receiver compatibility or physical qualification.
 
 ## Local verification and release
+
+One recognized physical preflight failure,
+`OPERATIONAL_TELEMETRY_MODULE_HASH_CONFLICT`, now preserves authenticated
+monitoring as `DEGRADED_READ_ONLY`. It does not alter the Replay binding or accept
+the installed DLL as qualified. The exact blocker is latched for the process
+lifetime; workflow mutations and mutating background workers remain disabled.
+Only the explicitly allowed read projections, report downloads and session
+lifecycle remain available. Other startup errors retain their fatal behavior.
+
+Website start/wait checks accept this explicit read-only state only for the
+exact loaded release, source, manifest and schema. Full operational health
+continues to require `READY`. The supervisor can therefore preserve a usable
+monitor without reporting that physical execution is ready. An operator must
+resolve the original physical binding through its approved route and start a
+new process before that workflow can regain mutation authority.
 
 Run the relevant `workflow/vwap-*.test.mjs`, targeted evaluator/continuation tests,
 and disposable browser suites. `vwap-targeted-dispatch-integration.test.mjs`

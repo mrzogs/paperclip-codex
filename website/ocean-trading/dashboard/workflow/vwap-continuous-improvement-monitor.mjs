@@ -338,6 +338,7 @@ export async function scanVwapContinuousImprovement({config,stateFile,reason='pe
   const admissionValid=admissionState?.admitted===true && currentAdmission.blockers.length===0;
   const admissionSignature=digest({publication:admissionState?.publication_sha256||null,
     admitted:admissionValid,report:admissionState?.admission?.report_sha256||null,
+    intake_package_sha256:admissionState?.admission?.semantic_admission?.intake_package_sha256||null,
     blockers:[...(admissionState?.blockers||[]),...currentAdmission.blockers]});
   const signatures=config.sources.flatMap(source=>sqliteSignatures(source.database_path));
   const signature=digest({normalization_version:'frozen-replay-role-map-account-scope/v2',signatures,
@@ -369,6 +370,7 @@ export async function scanVwapContinuousImprovement({config,stateFile,reason='pe
     const eligibleIds=eligibleRows.map(row=>row.trade_id),priorEligible=new Set(previous.eligible_trade_ids||[]);
     const newlyEligibleIds=eligibleIds.filter(id=>!priorEligible.has(id));
     const eligibleFingerprint=digest({admission_report_sha256:admissionState?.admission?.report_sha256||null,
+      intake_package_sha256:admissionState?.admission?.semantic_admission?.intake_package_sha256||null,
       rows:eligibleRows.map(row=>({trade_id:row.trade_id,run_id:row.run_id,dataset_role:row.dataset_role,
       setup_id:row.setup_id,session_name:row.session_name,side:row.side,regime_label:row.regime_label,
       volatility_label:row.volatility_label,vwap_reclaim_state:row.vwap_reclaim_state,net_pnl:row.net_pnl,mfe:row.mfe,mae:row.mae,
@@ -429,6 +431,7 @@ export async function scanVwapContinuousImprovement({config,stateFile,reason='pe
       discovery_admission_signature:admissionSignature,
       discovery_admission:{admitted:verifiedRows.length>0,publication_sha256:admissionState?.publication_sha256||null,
         report_sha256:admissionState?.admission?.report_sha256||null,
+        semantic_admission:admissionValid?admissionState.admission.semantic_admission:null,
         blockers:[...(admissionState?.blockers||[]),...currentAdmission.blockers],
         authority:verifiedRows.length?'AUTHENTICATED_DISCOVERY_ORIGINALS':'UNPROVED'},
       run_contract_publication:publication,
