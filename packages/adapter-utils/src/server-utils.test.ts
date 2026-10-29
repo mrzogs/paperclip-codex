@@ -506,7 +506,7 @@ describe("runChildProcess", () => {
     expect(await waitForPidExit(descendantPid, 2_000)).toBe(true);
   });
 
-  it.skipIf(process.platform === "win32")("cleans up a still-running child after terminal output", async () => {
+  it("cleans up a still-running child after terminal output", async () => {
     const result = await runChildProcess(
       randomUUID(),
       process.execPath,
@@ -520,7 +520,7 @@ describe("runChildProcess", () => {
       {
         cwd: process.cwd(),
         env: {},
-        timeoutSec: 0,
+        timeoutSec: 5,
         graceSec: 1,
         onLog: async () => {},
         terminalResultCleanup: {
@@ -531,8 +531,40 @@ describe("runChildProcess", () => {
     );
 
     expect(result.timedOut).toBe(false);
-    expect(result.signal).toBe("SIGTERM");
+    expect(result.terminalResultCleanupTriggered).toBe(true);
     expect(result.stdout).toContain('"type":"result"');
+  });
+
+  it.skipIf(process.platform === "win32")("force-kills a child that ignores the terminal cleanup SIGTERM", async () => {
+    const startedAt = Date.now();
+    const result = await runChildProcess(
+      randomUUID(),
+      process.execPath,
+      [
+        "-e",
+        [
+          "process.on('SIGTERM', () => {});",
+          "process.stdout.write(`${JSON.stringify({ type: 'result', result: 'done' })}\\n`);",
+          "setInterval(() => {}, 1000);",
+        ].join(" "),
+      ],
+      {
+        cwd: process.cwd(),
+        env: {},
+        timeoutSec: 5,
+        graceSec: 1,
+        onLog: async () => {},
+        terminalResultCleanup: {
+          graceMs: 100,
+          hasTerminalResult: ({ stdout }) => stdout.includes('"type":"result"'),
+        },
+      },
+    );
+
+    expect(result.timedOut).toBe(false);
+    expect(result.terminalResultCleanupTriggered).toBe(true);
+    expect(result.signal).toBe("SIGKILL");
+    expect(Date.now() - startedAt).toBeLessThan(4_000);
   });
 
   it.skipIf(process.platform === "win32")("does not clean up noisy runs that have no terminal output", async () => {

@@ -455,6 +455,8 @@ Watchdog decisions are explicit operator/recovery-owner decisions:
 
 Operators should prefer `snooze` for known time-bounded quiet periods. `continue` is only a short acknowledgement of the current evidence; if the run remains silent after the re-arm window, the periodic watchdog scan can create or update review work again.
 
+For local Codex CLI execution, a top-level JSONL `turn.completed` or `turn.failed` is terminal adapter output. If the child remains alive for another 15 seconds, the adapter process runner may terminate that child and record `terminalResultCleanupTriggered` in the run result. A confirmed completed turn with no parsed error is finalized as success; a failed turn or a completed event accompanied by a parsed error remains a failure. Non-terminal output does not trigger this cleanup, and an operator cancellation retains the normal cancellation path. Preserve stdout, stderr, and the cleanup marker so a post-turn Codex session-persistence error is visible without holding the agent's execution slot until the general timeout. This targets the direct local child; Windows command wrappers that leave a grandchild holding output handles require separate process-tree validation. This does not approve, dispatch, or complete trading work on its own.
+
 The board can record watchdog decisions. The assigned owner of an issue-backed watchdog evaluation can also record them. Other agents cannot.
 
 ### Source-aware watchdog folding
