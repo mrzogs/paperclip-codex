@@ -103,13 +103,13 @@ function readWorkflowViewObserved(backend, actor, route) {
     return { strategy_id: value.id, strategy_name: registry.strategy_name, registry_revision: value.revision, activation_status: registry.activation_status, activation_decision_id: registry.activation_decision_id, baseline_version: registry.baseline_version, baseline_hash: value.baseline_hash, production_version: registry.production_version, profile: { profile_id: profile.profile_id, profile_version: profile.profile_version, profile_hash: profile.profile_hash, strategy_code_hash: profile.strategy_code_hash, strategy_config_hash: profile.strategy_config_hash }, cases: strategyCaseSummaries(db,value.id,registry.strategy_name), cases_total: db.prepare('SELECT COUNT(*) AS n FROM ow_cases WHERE strategy_id=?').get(value.id).n };
   };
   const onboarding = () => timedSync('workflow.onboarding',()=>{
-    const strategyId = readOnboardingStrategyId(backend.config.strategy_onboarding_root);
+    const strategyId = timedSync('workflow.onboarding.source.identity',()=>readOnboardingStrategyId(backend.config.strategy_onboarding_root));
     return loadStrategyOnboarding({
       root: backend.config.strategy_onboarding_root,
-      events: readStrategyOnboardingEvents(db, strategyId),
-      brainOutbox: readOnboardingBrainOutbox(db).filter(row => row.strategy_id === strategyId),
-      registration: readOnboardingRegistration(db, strategyId),
-      activationEvents: readOnboardingActivationEvents(db, strategyId),
+      events: timedSync('workflow.onboarding.db.events',()=>readStrategyOnboardingEvents(db, strategyId)),
+      brainOutbox: timedSync('workflow.onboarding.db.brain-outbox',()=>readOnboardingBrainOutbox(db).filter(row => row.strategy_id === strategyId)),
+      registration: timedSync('workflow.onboarding.db.registration',()=>readOnboardingRegistration(db, strategyId)),
+      activationEvents: timedSync('workflow.onboarding.db.activation',()=>readOnboardingActivationEvents(db, strategyId)),
       runtimeProbe: backend.config.strategy_onboarding_runtime_probe,
       improvementMonitorStatePath: backend.config.strategy_improvement_monitor_state,
       physicalComparatorPath: backend.config.strategy_physical_comparator_contract,

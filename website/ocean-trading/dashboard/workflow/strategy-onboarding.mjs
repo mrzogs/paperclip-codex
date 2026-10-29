@@ -9,6 +9,7 @@ import { readVwapContinuousImprovementState } from './vwap-continuous-improvemen
 import { DEFAULT_VWAP_PHYSICAL_COMPARATOR_CONTRACT, readVwapPhysicalComparatorContract } from './vwap-physical-comparator-contract.mjs';
 import { DEFAULT_VWAP_APPROVAL_DISPATCH_STATE, readVwapPhysicalComparatorApprovalDispatchState } from './vwap-physical-comparator-approval-dispatch.mjs';
 import { createRuntimeProbeCache } from './runtime-probe-cache.mjs';
+import { timedSync } from '../request-timing.mjs';
 
 export const ONBOARDING_STRATEGY_ID = 'cicd-vwap-pull-back-strategy';
 export const DEFAULT_ONBOARDING_ROOT = process.env.OCEAN_STRATEGY_ONBOARDING_ROOT
@@ -456,8 +457,8 @@ export const cachedReplayTwoRuntime = createRuntimeProbeCache({
 });
 
 export function loadStrategyOnboarding({ root = DEFAULT_ONBOARDING_ROOT, events = [], brainOutbox = [], registration = null, activationEvents = [], runtimeProbe = cachedReplayTwoRuntime, campaignStatePath = DEFAULT_REPLAY_CAMPAIGN_STATE, improvementMonitorStatePath = DEFAULT_VWAP_IMPROVEMENT_MONITOR_STATE, physicalComparatorPath = DEFAULT_VWAP_PHYSICAL_COMPARATOR_CONTRACT, approvalDispatchStatePath = DEFAULT_VWAP_APPROVAL_DISPATCH_STATE } = {}) {
-  const strategyId = readOnboardingStrategyId(root);
-  const sources = SOURCES.map(([key, filename]) => readSource(root, key, filename, strategyId));
+  const strategyId = timedSync('workflow.onboarding.source.identity',()=>readOnboardingStrategyId(root));
+  const sources = SOURCES.map(([key, filename]) => timedSync(`workflow.onboarding.source.${key}`,()=>readSource(root, key, filename, strategyId)));
   const records = Object.fromEntries(sources.map(source => [source.key, source.value]));
   const { registry, profile, instance, setup, unresolved, remediation } = records;
   const availableCount = sources.filter(source => source.state === 'AVAILABLE').length;
@@ -491,13 +492,13 @@ export function loadStrategyOnboarding({ root = DEFAULT_ONBOARDING_ROOT, events 
   const replayReady = latestReplayLifecycle?.action === 'ACTIVATE';
   const instanceSafety = instance?.safety_state || {};
   const setupSafety = setup?.safety || {};
-  const replayRuntime = runtimeProbe({
+  const replayRuntime = timedSync('workflow.onboarding.runtime-cache',()=>runtimeProbe({
     executable: instance?.executable || setup?.installation?.executable || null,
     installation_root: instance?.installation_root || setup?.installation?.root || null,
     chartbook_path: instance?.chartbook_path || setup?.chartbook?.path || null,
     chart_id: instance?.chart_id || setup?.chartbook?.chart_number || null,
     account_alias: instance?.account_alias || setup?.chartbook?.simulation_account || null,
-  });
+  }));
   const checks = [
     { id: 'strategy-detected', label: 'Strategy detected', state: baseReady ? 'COMPLETE' : 'PENDING' },
     { id: 'test-setup', label: 'Replay setup confirmed', state: setupConfirmed ? 'COMPLETE' : 'PENDING' },
@@ -536,12 +537,12 @@ export function loadStrategyOnboarding({ root = DEFAULT_ONBOARDING_ROOT, events 
     return { ...item, state, revision: latest?.revision || 0, last_event_id: latest?.id || null, last_changed_at_utc: latest?.created_at_utc || null, can_activate: registrationComplete && item.permitted && state !== 'ACTIVATED_NOT_STARTED', actual_source_started: false };
   });
   const latestActive = activationEnvironments.find(item => item.state === 'ACTIVATED_NOT_STARTED') || null;
-  const replayCampaign = readReplayCampaign(campaignStatePath, strategyId);
-  const priorityProgram = readPriorityProgram(root, strategyId);
-  const autonomousImprovement = readAutonomousImprovementProgram(root, strategyId);
-  const eventMonitor = readVwapContinuousImprovementState(improvementMonitorStatePath);
-  const physicalComparator = readVwapPhysicalComparatorContract(physicalComparatorPath, strategyId);
-  const approvalDispatch = readVwapPhysicalComparatorApprovalDispatchState(approvalDispatchStatePath, strategyId);
+  const replayCampaign = timedSync('workflow.onboarding.aux.campaign',()=>readReplayCampaign(campaignStatePath, strategyId));
+  const priorityProgram = timedSync('workflow.onboarding.aux.priority',()=>readPriorityProgram(root, strategyId));
+  const autonomousImprovement = timedSync('workflow.onboarding.aux.autonomous',()=>readAutonomousImprovementProgram(root, strategyId));
+  const eventMonitor = timedSync('workflow.onboarding.aux.monitor',()=>readVwapContinuousImprovementState(improvementMonitorStatePath));
+  const physicalComparator = timedSync('workflow.onboarding.aux.comparator',()=>readVwapPhysicalComparatorContract(physicalComparatorPath, strategyId));
+  const approvalDispatch = timedSync('workflow.onboarding.aux.dispatch',()=>readVwapPhysicalComparatorApprovalDispatchState(approvalDispatchStatePath, strategyId));
   physicalComparator.approval_dispatch = approvalDispatch;
 
   return {
