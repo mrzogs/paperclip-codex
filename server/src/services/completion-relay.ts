@@ -29,15 +29,17 @@ function requireRelay(ok: unknown, reason: string): asserts ok { if (!ok) throw 
 
 /** No stored bearer tokens or implicit Board impersonation. A persistent Board key
  * plus explicit writable memberships in BOTH companies is required, even for admins.
- * Lock these rows until delivery commits so revocation and delivery serialize. */
+ * FOR SHARE (not FOR UPDATE) until delivery commits: plain UPDATEs (revocation,
+ * membership/status changes) take FOR NO KEY UPDATE and still serialize with
+ * delivery, while FK inserts (FOR KEY SHARE) into either company keep flowing. */
 export async function verifyRelayAuthority(tx: Tx, ownerUserId: string, ownerKeyId: string, companyIds: string[]) {
-  const [key] = await tx.select().from(boardApiKeys).where(eq(boardApiKeys.id, ownerKeyId)).for("update");
+  const [key] = await tx.select().from(boardApiKeys).where(eq(boardApiKeys.id, ownerKeyId)).for("share");
   requireRelay(key && key.userId === ownerUserId && !key.revokedAt && (!key.expiresAt || key.expiresAt > new Date()), "Board key revoked, expired or mismatched; owner must create a new mapping");
   const memberships = await tx.select().from(companyMemberships).where(and(
     eq(companyMemberships.principalType, "user"), eq(companyMemberships.principalId, ownerUserId),
-    inArray(companyMemberships.companyId, companyIds))).orderBy(companyMemberships.companyId).for("update");
+    inArray(companyMemberships.companyId, companyIds))).orderBy(companyMemberships.companyId).for("share");
   requireRelay(companyIds.every(id => memberships.some(m => m.companyId === id && m.status === "active" && ["owner", "admin", "member", "operator"].includes(m.membershipRole ?? ""))), "Board no longer has explicit mutation memberships in both companies");
-  const scopes = await tx.select().from(companies).where(inArray(companies.id, companyIds)).for("update");
+  const scopes = await tx.select().from(companies).where(inArray(companies.id, companyIds)).for("share");
   requireRelay(scopes.length === 2 && scopes.every(c => c.status === "active"), "Source or destination company unavailable");
 }
 function boardIdentity(actor: BoardActor) {
@@ -56,7 +58,7 @@ async function audit(tx: Tx, m: Mapping, action: string, details: Record<string,
 export async function validateRelaySnapshot(tx: Tx, m: Mapping) {
   const b = completionRelayMappingSchema.parse(m.binding);
   requireRelay(relayBindingHash(b) === m.bindingHash, "Mapping binding changed");
-  const endpoints = await tx.select().from(issues).where(inArray(issues.id, [b.sourceIssueId, b.destinationIssueId])).orderBy(issues.id).for("update");
+  const endpoints = await tx.select().from(issues).where(inArray(issues.id, [b.sourceIssueId, b.destinationIssueId])).orderBy(issues.id).for("share");
   const source = endpoints.find(i => i.id === b.sourceIssueId);
   const destination = endpoints.find(i => i.id === b.destinationIssueId);
   requireRelay(source && destination && source.companyId === b.sourceCompanyId && destination.companyId === b.destinationCompanyId, "Endpoint/company mismatch");
@@ -64,9 +66,10 @@ export async function validateRelaySnapshot(tx: Tx, m: Mapping) {
   requireRelay(source.status === b.sourceStatus && source.updatedAt.toISOString() === b.sourceVersion
     && source.assigneeAgentId === b.sourceAssigneeAgentId && source.assigneeUserId === b.sourceAssigneeUserId, "Source reopened, version changed or reassigned");
   requireRelay(destination.status === "blocked", "Destination gate must remain blocked awaiting independent acceptance");
-  const [run] = await tx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, b.sourceRunId)).for("update");
-  requireRelay(run && run.companyId === b.sourceCompanyId && run.status === "succeeded" && run.finishedAt && run.finishedAt <= source.updatedAt, "Source run missing, stale or incomplete");
-  const decisions = await tx.select().from(issueExecutionDecisions).where(eq(issueExecutionDecisions.issueId, b.sourceIssueId)).orderBy(sql`${issueExecutionDecisions.createdAt} desc`, sql`${issueExecutionDecisions.id} desc`).for("update");
+  const [run] = await tx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, b.sourceRunId)).for("share");
+  requireRelay(run && run.companyId === b.sourceCompanyId && run.status === "succeeded" && run.finishedAt && run.finishedAt <= source.updatedAt
+    && (!b.sourceAssigneeAgentId || run.agentId === b.sourceAssigneeAgentId), "Source run missing, stale, incomplete or not by the bound assignee");
+  const decisions = await tx.select().from(issueExecutionDecisions).where(eq(issueExecutionDecisions.issueId, b.sourceIssueId)).orderBy(sql`${issueExecutionDecisions.createdAt} desc`, sql`${issueExecutionDecisions.id} desc`).for("share");
   const acceptance = decisions[0];
   requireRelay(acceptance && acceptance.id === b.acceptanceId && acceptance.companyId === b.sourceCompanyId
     && acceptance.outcome === "approved" && acceptance.actorAgentId === b.reviewerAgentId && acceptance.actorUserId === b.reviewerUserId
@@ -75,13 +78,13 @@ export async function validateRelaySnapshot(tx: Tx, m: Mapping) {
     && acceptance.updatedAt <= source.updatedAt && relayAcceptanceHash(acceptance) === b.acceptanceHash, "Independent acceptance missing, changed, stale or rejected");
   const evidence = [];
   for (const e of b.evidence) {
-    const [wp] = await tx.select().from(issueWorkProducts).where(eq(issueWorkProducts.id, e.workProductId)).for("update");
-    const [attachment] = await tx.select().from(issueAttachments).where(eq(issueAttachments.id, e.attachmentId)).for("update");
+    const [wp] = await tx.select().from(issueWorkProducts).where(eq(issueWorkProducts.id, e.workProductId)).for("share");
+    const [attachment] = await tx.select().from(issueAttachments).where(eq(issueAttachments.id, e.attachmentId)).for("share");
     requireRelay(wp && attachment && wp.companyId === b.sourceCompanyId && wp.issueId === b.sourceIssueId
       && wp.createdByRunId === b.sourceRunId && wp.metadata?.attachmentId === e.attachmentId
       && wp.reviewState === "approved" && wp.updatedAt <= acceptance.createdAt
       && attachment.companyId === b.sourceCompanyId && attachment.issueId === b.sourceIssueId, "Evidence missing or not accepted for bound source run");
-    const [asset] = await tx.select().from(assets).where(eq(assets.id, attachment.assetId)).for("update");
+    const [asset] = await tx.select().from(assets).where(eq(assets.id, attachment.assetId)).for("share");
     requireRelay(asset && asset.companyId === b.sourceCompanyId && asset.sha256 === e.sha256 && asset.byteSize <= 10 * 1024 * 1024, "Original artifact hash/size/company mismatch");
     evidence.push({ binding: e, asset });
   }
@@ -140,38 +143,66 @@ export function completionRelayService(db: Db, storage: StorageService) {
     for (const job of due) await deliver(job.mappingId);
     return { inspected: due.length };
   }
+  type Copy = { assetId: string; objectKey: string; copy: Awaited<ReturnType<StorageService["putFile"]>> };
+  // Storage I/O runs with no transaction open; only verified bytes reach the short
+  // commit transaction. A losing/failed attempt may orphan blobs, never DB receipts.
+  async function copyEvidence(m: Mapping, b: CompletionRelayBinding, evidence: Awaited<ReturnType<typeof validateRelaySnapshot>>["evidence"]) {
+    const copies: Copy[] = [];
+    for (const { asset, binding } of evidence) {
+      const original = await storage.getObject(b.sourceCompanyId, asset.objectKey);
+      const chunks: Buffer[] = [];
+      let length = 0;
+      for await (const chunk of original.stream) {
+        const bytes = Buffer.from(chunk); length += bytes.length;
+        requireRelay(length <= asset.byteSize, "Original artifact exceeds recorded size"); chunks.push(bytes);
+      }
+      const body = Buffer.concat(chunks);
+      requireRelay(length === asset.byteSize && relayHash(body) === binding.sha256, "Original download hash mismatch");
+      // Only explicit originals; no source title/body/URL/filename or other unselected metadata.
+      const copy = await storage.putFile({ companyId: b.destinationCompanyId, namespace: `completion-relay/${m.id}`,
+        originalFilename: "accepted-evidence.bin", contentType: "application/octet-stream", body });
+      requireRelay(copy.sha256 === binding.sha256 && copy.byteSize === length, "Destination copy hash mismatch");
+      // Verify independently downloadable bytes before making a DB-visible receipt.
+      const download = await storage.getObject(b.destinationCompanyId, copy.objectKey);
+      const hash = createHash("sha256"); let downloaded = 0;
+      for await (const chunk of download.stream) { downloaded += chunk.length; requireRelay(downloaded <= length, "Destination download size mismatch"); hash.update(chunk); }
+      requireRelay(downloaded === length && hash.digest("hex") === binding.sha256, "Destination download hash mismatch");
+      copies.push({ assetId: asset.id, objectKey: asset.objectKey, copy });
+    }
+    return copies;
+  }
   async function deliver(id: string) {
     try {
+      // 1. Short preflight; its share locks are released before any storage I/O.
+      const pre = await db.transaction(async tx => {
+        const [m] = await tx.select().from(completionRelayMappings).where(eq(completionRelayMappings.id, id));
+        if (!m) throw notFound("Relay mapping not found");
+        const [job] = await tx.select().from(completionRelayOutbox).where(eq(completionRelayOutbox.mappingId, id));
+        if (!job || job.state !== "pending" || job.nextAttemptAt > new Date()) return null;
+        const [duplicate] = await tx.select().from(completionRelayInbox).where(eq(completionRelayInbox.mappingId, id));
+        if (duplicate) return null;
+        requireRelay(m.enabled, "Mapping disabled; Board must inspect and create a fresh revision");
+        await verifyRelayAuthority(tx, m.ownerUserId, m.ownerKeyId, [m.sourceCompanyId, m.destinationCompanyId]);
+        return { m, ...(await validateRelaySnapshot(tx, m)) };
+      });
+      if (!pre) return;
+      // 2. Copy and verify outside any transaction.
+      const copies = await copyEvidence(pre.m, pre.binding, pre.evidence);
+      // 3. Short commit: re-lock, re-validate everything, bind to the copied originals.
       return await db.transaction(async tx => {
         const [m] = await tx.select().from(completionRelayMappings).where(eq(completionRelayMappings.id, id)).for("update");
         if (!m) throw notFound("Relay mapping not found");
         const [job] = await tx.select().from(completionRelayOutbox).where(eq(completionRelayOutbox.mappingId, id)).for("update");
         if (!job || job.state !== "pending" || job.nextAttemptAt > new Date()) return;
-        requireRelay(m.enabled, "Mapping disabled; Board must inspect and create a fresh revision");
-        await verifyRelayAuthority(tx, m.ownerUserId, m.ownerKeyId, [m.sourceCompanyId, m.destinationCompanyId]);
-        const { binding: b, evidence } = await validateRelaySnapshot(tx, m);
         const [duplicate] = await tx.select().from(completionRelayInbox).where(eq(completionRelayInbox.mappingId, id));
         if (duplicate) return duplicate;
+        requireRelay(m.enabled && m.bindingHash === pre.m.bindingHash, "Mapping disabled or changed during copy");
+        await verifyRelayAuthority(tx, m.ownerUserId, m.ownerKeyId, [m.sourceCompanyId, m.destinationCompanyId]);
+        const { binding: b, evidence } = await validateRelaySnapshot(tx, m);
+        requireRelay(evidence.length === copies.length && evidence.every((e, i) => e.asset.id === copies[i]!.assetId
+          && e.asset.objectKey === copies[i]!.objectKey), "Original artifact changed during copy");
         const attachmentIds: string[] = [];
-        for (const { asset, binding } of evidence) {
-          const original = await storage.getObject(b.sourceCompanyId, asset.objectKey);
-          const chunks: Buffer[] = [];
-          let length = 0;
-          for await (const chunk of original.stream) {
-            const bytes = Buffer.from(chunk); length += bytes.length;
-            requireRelay(length <= asset.byteSize, "Original artifact exceeds recorded size"); chunks.push(bytes);
-          }
-          const body = Buffer.concat(chunks);
-          requireRelay(length === asset.byteSize && relayHash(body) === binding.sha256, "Original download hash mismatch");
-          // Only explicit originals; no source title/body/URL/filename or other unselected metadata.
-          const copy = await storage.putFile({ companyId: b.destinationCompanyId, namespace: `completion-relay/${m.id}`,
-            originalFilename: "accepted-evidence.bin", contentType: "application/octet-stream", body });
-          requireRelay(copy.sha256 === binding.sha256 && copy.byteSize === length, "Destination copy hash mismatch");
-          // Verify independently downloadable bytes before making a DB-visible receipt.
-          const download = await storage.getObject(b.destinationCompanyId, copy.objectKey);
-          const hash = createHash("sha256"); let downloaded = 0;
-          for await (const chunk of download.stream) { downloaded += chunk.length; requireRelay(downloaded <= length, "Destination download size mismatch"); hash.update(chunk); }
-          requireRelay(downloaded === length && hash.digest("hex") === binding.sha256, "Destination download hash mismatch");
+        for (const { copy } of copies) {
           const [copiedAsset] = await tx.insert(assets).values({ companyId: b.destinationCompanyId, ...copy }).returning();
           const [copiedAttachment] = await tx.insert(issueAttachments).values({ companyId: b.destinationCompanyId, issueId: b.destinationIssueId, assetId: copiedAsset.id }).returning();
           attachmentIds.push(copiedAttachment.id);
@@ -208,12 +239,12 @@ export function completionRelayService(db: Db, storage: StorageService) {
     if (!actor.userId) return [];
     const mappings = await db.select().from(completionRelayMappings).where(and(eq(completionRelayMappings.ownerUserId, actor.userId),
       sql`(${completionRelayMappings.sourceCompanyId} = ${companyId} or ${completionRelayMappings.destinationCompanyId} = ${companyId})`));
+    // Read-only owner inspection remains possible after key revocation so the
+    // dead-letter is visible. Never use inspection as a delivery grant.
+    const memberships = await db.select().from(companyMemberships).where(and(eq(companyMemberships.principalType, "user"),
+      eq(companyMemberships.principalId, actor.userId), eq(companyMemberships.status, "active")));
     const result = [];
     for (const m of mappings) {
-      // Read-only owner inspection remains possible after key revocation so the
-      // dead-letter is visible. Never use inspection as a delivery grant.
-      const memberships = await db.select().from(companyMemberships).where(and(eq(companyMemberships.principalType, "user"),
-        eq(companyMemberships.principalId, actor.userId), eq(companyMemberships.status, "active")));
       if (![m.sourceCompanyId, m.destinationCompanyId].every(id => memberships.some(x => x.companyId === id))) continue;
       result.push({ ...m, outbox: await db.select().from(completionRelayOutbox).where(eq(completionRelayOutbox.mappingId, m.id)) });
     }

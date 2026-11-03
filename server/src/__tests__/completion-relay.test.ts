@@ -16,11 +16,11 @@ function fixture() {
   const attachmentId = randomUUID(), workProductId = randomUUID(), assetId = randomUUID();
   const binding = completionRelayMappingSchema.parse({ projectId, domain: "platform", strategy: "synthetic", sourceCompanyId,
     sourceIssueId, destinationCompanyId, destinationIssueId, destinationGate: "synthetic-proof", sourceStatus: "done",
-    sourceVersion: updatedAt.toISOString(), sourceAssigneeAgentId: reviewerAgentId, sourceAssigneeUserId: null, sourceRunId: runId,
+    sourceVersion: updatedAt.toISOString(), sourceAssigneeAgentId: agentId, sourceAssigneeUserId: null, sourceRunId: runId,
     acceptanceId: acceptance.id, acceptanceHash: relayAcceptanceHash(acceptance), reviewerAgentId, reviewerUserId: null,
     evidence: [{ workProductId, attachmentId, sha256: relayHash("evidence") }], authorizeOriginalCopies: true, mappingRevision: 1, idempotencyKey: randomUUID() });
   const source = { id: sourceIssueId, companyId: sourceCompanyId, projectId, status: "done", updatedAt,
-    assigneeAgentId: reviewerAgentId, assigneeUserId: null, hiddenAt: null };
+    assigneeAgentId: agentId, assigneeUserId: null, hiddenAt: null };
   const destination = { id: destinationIssueId, companyId: destinationCompanyId, status: "blocked", hiddenAt: null };
   const run = { id: runId, companyId: sourceCompanyId, agentId, status: "succeeded", finishedAt };
   const wp = { id: workProductId, companyId: sourceCompanyId, issueId: sourceIssueId, createdByRunId: runId,
@@ -52,6 +52,7 @@ describe("completion relay eligibility", () => {
     ["reassignment", f => { f.source.assigneeAgentId = randomUUID(); }],
     ["stale evidence run", f => { f.wp.createdByRunId = randomUUID(); }],
     ["failed run", f => { f.run.status = "failed"; }],
+    ["run by unbound agent", f => { f.run.agentId = randomUUID(); }],
     ["source company mismatch", f => { f.source.companyId = randomUUID(); }],
     ["destination company mismatch", f => { f.destination.companyId = randomUUID(); }],
     ["missing evidence", f => { f.tables.set(issueAttachments, []); }],

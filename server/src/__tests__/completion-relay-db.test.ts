@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import express from "express";
 import request from "supertest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -338,5 +338,42 @@ describeEmbeddedPostgres("completion relay durable DB/API flow", () => {
     await Promise.all([relay.deliver(mapping.id), relay.deliver(mapping.id), relay.deliver(mapping.id)]);
     expect((await rows(mapping.id)).inbox).toHaveLength(1);
     expect((await destinationArtifacts(s.destinationIssue.id)).attachments).toHaveLength(1);
+  });
+
+  it("does not block FK inserts in either company while delivery is stalled in storage I/O (OCE-957 R1)", async () => {
+    const s = await seed();
+    const { mapping } = await createAndEnable(s);
+    await db.insert(completionRelayOutbox).values({ mappingId: mapping.id });
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let stalled!: () => void;
+    const reachedStorage = new Promise<void>(resolve => { stalled = resolve; });
+    const slow: StorageService = { ...storage, getObject: async (companyId, objectKey) => {
+      stalled(); await gate; return storage.getObject(companyId, objectKey);
+    } };
+    const delivery = completionRelayService(db, slow).deliver(mapping.id);
+    await reachedStorage;
+    // Before the fix, companies/issues FOR UPDATE made these hit lock_timeout.
+    for (const [companyId, issueId] of [[s.source.id, s.sourceIssue.id], [s.destination.id, s.destinationIssue.id]] as const) {
+      await db.transaction(async tx => {
+        await tx.execute(sql`set local lock_timeout = '1500ms'`);
+        await tx.insert(activityLog).values({ companyId, actorType: "system", actorId: "oce-957-probe", action: "probe", entityType: "issue", entityId: issueId });
+        await tx.insert(issueComments).values({ companyId, issueId, authorType: "system", body: "concurrent probe" });
+      });
+    }
+    release();
+    await delivery;
+    const r = await rows(mapping.id);
+    expect(r.outbox[0]!.state).toBe("delivered");
+    expect(r.inbox).toHaveLength(1);
+  });
+
+  it("rejects a binding whose source run was not made by the bound assignee agent", async () => {
+    const s = await seed();
+    const [other] = await db.insert(agents).values({ companyId: s.source.id, name: "Synthetic other" }).returning();
+    await db.update(heartbeatRuns).set({ agentId: other!.id }).where(eq(heartbeatRuns.id, s.run.id));
+    const res = await request(await app(s.boardActor())).post("/api/completion-relays").send(s.binding());
+    expect(res.status).toBe(422);
+    expect(res.body.error).toMatch(/bound assignee/);
   });
 });
