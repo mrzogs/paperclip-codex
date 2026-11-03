@@ -16,6 +16,8 @@ import { teamsCatalogRoutes } from "./routes/teams-catalog.js";
 import { agentRoutes } from "./routes/agents.js";
 import { projectRoutes } from "./routes/projects.js";
 import { issueRoutes } from "./routes/issues.js";
+import { completionRelayRoutes } from "./routes/completion-relays.js";
+import { completionRelayService } from "./services/completion-relay.js";
 import { issueTreeControlRoutes } from "./routes/issue-tree-control.js";
 import { routineRoutes } from "./routes/routines.js";
 import { environmentRoutes } from "./routes/environments.js";
@@ -222,6 +224,7 @@ export async function createApp(
     pluginWorkerManager: workerManager,
   }));
   api.use(issueTreeControlRoutes(db));
+  api.use(completionRelayRoutes(db, opts.storageService));
   api.use(routineRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(environmentRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(executionWorkspaceRoutes(db));
@@ -479,10 +482,25 @@ export async function createApp(
   }).catch((err) => {
     logger.error({ err }, "Failed to load ready plugins on startup");
   });
+  // No routes are enabled by default. Scan committed bindings on startup as well
+  // as periodically: source completion cannot be lost between commit and enqueue.
+  const completionRelay = completionRelayService(db, opts.storageService);
+  let relayRunning = false;
+  const reconcileRelay = async () => {
+    if (relayRunning) return;
+    relayRunning = true;
+    try { await completionRelay.reconcile(); }
+    catch (err) { logger.error({ err }, "Completion relay reconciliation failed"); }
+    finally { relayRunning = false; }
+  };
+  const relayTimer = setInterval(() => { void reconcileRelay(); }, 30_000);
+  relayTimer.unref();
+  void reconcileRelay();
   let appServicesShutdown = false;
   const shutdownAppServices = () => {
     if (appServicesShutdown) return;
     appServicesShutdown = true;
+    clearInterval(relayTimer);
     disableFeedbackExportFlushes();
     devWatcher?.close();
     viteHtmlRenderer?.dispose();

@@ -1374,3 +1374,5 @@ export type {
   EnvironmentProviderCapability,
   EnvironmentSupportStatus,
 } from "./environment-support.js";
+export { completionRelayMappingSchema, type CompletionRelayBinding } from "./validators/completion-relay.js";
+export type { CompletionRelayStatus } from "./types/completion-relay.js";
