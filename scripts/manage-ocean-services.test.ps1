@@ -221,6 +221,10 @@ $degraded = [pscustomobject]@{state='DEGRADED_READ_ONLY';execution='READ_ONLY';w
 $script:FakeReadiness = $degraded
 Assert-Test (Test-OceanWebsiteAvailable) 'REVIEWED_READ_ONLY_WEBSITE_IS_NOT_AVAILABLE'
 Assert-Test (-not (Test-OceanWorkflowReady)) 'READ_ONLY_WEBSITE_IS_MISREPORTED_OPERATIONALLY_READY'
+$script:FakeReadiness = $degraded | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+$script:FakeReadiness.workflow.physical_readiness.blocker.code = 'OPERATIONAL_STRATEGY_MODULE_HASH_CONFLICT'
+Assert-Test (Test-OceanWebsiteAvailable) 'REVIEWED_STRATEGY_READ_ONLY_WEBSITE_IS_NOT_AVAILABLE'
+Assert-Test (-not (Test-OceanWorkflowReady)) 'STRATEGY_READ_ONLY_WEBSITE_IS_MISREPORTED_OPERATIONALLY_READY'
 foreach ($mutate in @(
     {param($v) $v.state='READY'}, {param($v) $v.execution='NORMAL'},
     {param($v) $v.workflow.state='READY'}, {param($v) $v.workflow.schema_version=13},

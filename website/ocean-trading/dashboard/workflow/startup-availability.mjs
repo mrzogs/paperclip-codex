@@ -1,7 +1,11 @@
 // A physical preflight failure cannot grant execution authority. This narrow
 // fallback keeps authenticated projections available until an operator fixes
 // the pin and starts a new process; there is no in-process upgrade to READY.
-export const OPTIONAL_PHYSICAL_READINESS_ERRORS = Object.freeze(['OPERATIONAL_TELEMETRY_MODULE_HASH_CONFLICT']);
+export const OPTIONAL_PHYSICAL_READINESS_ERRORS = Object.freeze([
+  'OPERATIONAL_STRATEGY_MODULE_HASH_CONFLICT', 'OPERATIONAL_TELEMETRY_MODULE_HASH_CONFLICT']);
+
+// Fatal startup errors reach an unauthenticated 503. Project only a code.
+export const publicStartupCode = error => (/^[A-Z][A-Z0-9_]{2,79}$/.test(error?.code ?? '') ? error.code : null);
 
 const isRead = route => /^(?:readiness|session|me|status|view\/dashboard)$/.test(route)
   || /^view\/strategies(?:\/page\/\d+|\/[A-Za-z0-9_.:-]+)?$/.test(route)

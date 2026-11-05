@@ -56,7 +56,7 @@ export async function request(path, options = {}) {
   const timer = setTimeout(() => controller.abort(), workflowReadTimeoutMs(path));
   try {
     const response = await fetch(`/api/workflow/${path}`, { credentials: 'same-origin', cache: 'no-store', ...options, signal: controller.signal });
-    if (!response.ok) { const payload = await response.json().catch(() => ({})); throw Object.assign(new Error(payload.error?.code || 'REQUEST_FAILED'), { code: payload.error?.code || 'REQUEST_FAILED', status: response.status }); }
+    if (!response.ok) { const payload = await response.json().catch(() => ({})); throw Object.assign(new Error(payload.error?.code || 'REQUEST_FAILED'), { code: payload.error?.code || 'REQUEST_FAILED', status: response.status, startupCode: payload.error?.startup_code }); }
     return options.binary ? response : await response.json();
   } catch (error) {
     if (error?.name === 'AbortError') throw Object.assign(new Error('WORKFLOW_REQUEST_TIMEOUT'), { code:'WORKFLOW_REQUEST_TIMEOUT', retryable:true });
@@ -80,7 +80,10 @@ function localAccessProblem(error = null) {
   document.querySelector('#approval-badge').hidden = true;
   content.setAttribute('aria-busy', 'false');
   const detail = error ? errorText(error) : 'Ocean could not establish its protected local browser session.';
-  content.innerHTML = `${heading('Ocean local access unavailable', detail)}<section class='local-access' id='local-access'><p>No sign-in is required. Restore the local operator binding, then refresh this page.</p><details class='access-help' open><summary>Recover local access</summary><p>Run the protected local operator command in your Windows PowerShell window:</p><code>&amp; 'D:\\Paperclip-codex\\scripts\\ocean-workflow-operator.ps1' -Action Initialize</code><p>Then restart only the website:</p><code>&amp; 'D:\\Paperclip-codex\\scripts\\start-ocean-trading-stack.ps1' -WebsiteOnly -RestartWebsite</code><p>This restores website access only. It does not approve a strategy or start trading.</p></details></section>`;
+  const startupCode = error?.code === 'WORKFLOW_CONFIG_BLOCKED' && error.startupCode !== 'PROTECTED_OPERATOR_STATE_UNAVAILABLE' ? error.startupCode : null;
+  content.innerHTML = startupCode
+    ? `${heading('Workflow startup is blocked', detail)}<section class='local-access' id='local-access'><p>${esc(startupCode)}. This is not a local access problem, so the operator recovery commands will not fix it. Resolve this startup check, then refresh this page.</p></section>`
+    : `${heading('Ocean local access unavailable', detail)}<section class='local-access' id='local-access'><p>No sign-in is required. Restore the local operator binding, then refresh this page.</p><details class='access-help' open><summary>Recover local access</summary><p>Run the protected local operator command in your Windows PowerShell window:</p><code>&amp; 'D:\\Paperclip-codex\\scripts\\ocean-workflow-operator.ps1' -Action Initialize</code><p>Then restart only the website:</p><code>&amp; 'D:\\Paperclip-codex\\scripts\\start-ocean-trading-stack.ps1' -WebsiteOnly -RestartWebsite</code><p>This restores website access only. It does not approve a strategy or start trading.</p></details></section>`;
   const status = document.createElement('p'); status.className='muted'; status.id='service-readiness';
   document.querySelector('.page-heading > div').append(status);
   request('readiness').then(value => {
@@ -909,7 +912,9 @@ async function refresh(force = false) {
       if (generation !== state.generation || html === undefined) return;
       const availability = data.workflow_availability;
       const readOnly = availability?.state === 'DEGRADED_READ_ONLY' && availability.read_only === true;
-      const availabilityBanner = readOnly ? `<section role='status' class='notice'><h2>Workflow is read only</h2><p>${esc(availability.physical_readiness?.blocker?.code)}. Physical readiness needs operator review. Starts, dispatch, adoption and workflow changes are blocked.</p></section>` : '';
+      const blockerCode = availability?.physical_readiness?.blocker?.code;
+      const blockerReason = blockerCode === 'OPERATIONAL_STRATEGY_MODULE_HASH_CONFLICT' ? ' The Replay strategy DLL does not match its pinned hash. A governed Replay run installs its own DLL and restores the pinned one when it ends.' : '';
+      const availabilityBanner = readOnly ? `<section role='status' class='notice'><h2>Workflow is read only</h2><p>${esc(blockerCode)}.${blockerReason} Physical readiness needs operator review. Starts, dispatch, adoption and workflow changes are blocked.</p></section>` : '';
       content.innerHTML = availabilityBanner + html;
       if (readOnly) content.querySelectorAll('[data-action]').forEach(element => {
         if (!/^(?:download-|copy-)/.test(element.dataset.action || '')) { element.disabled = true; element.setAttribute('aria-disabled', 'true'); }

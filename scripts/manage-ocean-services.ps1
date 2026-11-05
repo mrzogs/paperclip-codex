@@ -112,7 +112,7 @@ function Test-OceanWebsiteAvailable {
     $deployment = Get-ValidatedOceanDeployment
     $readiness = Get-OceanWorkflowReadiness
     # Availability is separate from operational readiness. Accept only the
-    # reviewed, latched Replay DLL mismatch in this exact deployed generation.
+    # reviewed, latched Replay DLL mismatches in this exact deployed generation.
     return [bool]($readiness -and
       $readiness.state -ceq 'DEGRADED_READ_ONLY' -and $readiness.execution -ceq 'READ_ONLY' -and
       $readiness.workflow.state -ceq 'DEGRADED_READ_ONLY' -and
@@ -123,7 +123,7 @@ function Test-OceanWebsiteAvailable {
       $readiness.workflow.read_only -eq $true -and $readiness.workflow.mutations_enabled -eq $false -and
       $readiness.workflow.physical_readiness.state -ceq 'BLOCKED' -and
       $readiness.workflow.physical_readiness.latched -eq $true -and
-      $readiness.workflow.physical_readiness.blocker.code -ceq 'OPERATIONAL_TELEMETRY_MODULE_HASH_CONFLICT')
+      $readiness.workflow.physical_readiness.blocker.code -cin @('OPERATIONAL_STRATEGY_MODULE_HASH_CONFLICT','OPERATIONAL_TELEMETRY_MODULE_HASH_CONFLICT'))
   } catch { return $false }
 }
 

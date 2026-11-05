@@ -111,13 +111,19 @@ production receiver compatibility or physical qualification.
 
 ## Local verification and release
 
-One recognized physical preflight failure,
-`OPERATIONAL_TELEMETRY_MODULE_HASH_CONFLICT`, now preserves authenticated
-monitoring as `DEGRADED_READ_ONLY`. It does not alter the Replay binding or accept
+Two recognized physical preflight failures,
+`OPERATIONAL_STRATEGY_MODULE_HASH_CONFLICT` and
+`OPERATIONAL_TELEMETRY_MODULE_HASH_CONFLICT`, now preserve authenticated
+monitoring as `DEGRADED_READ_ONLY`. A governed Replay run installs its own
+strategy DLL and restores the pinned one when it ends, so a Website restart during
+such a run hits the strategy conflict. This does not alter the Replay binding or accept
 the installed DLL as qualified. The exact blocker is latched for the process
 lifetime; workflow mutations and mutating background workers remain disabled.
 Only the explicitly allowed read projections, report downloads and session
-lifecycle remain available. Other startup errors retain their fatal behavior.
+lifecycle remain available. Other startup errors retain their fatal behavior; the
+public 503 then carries a validated `startup_code` (code only, no message or path)
+so the page names the real check and offers operator recovery commands only for
+operator-state failures.
 
 Website start/wait checks accept this explicit read-only state only for the
 exact loaded release, source, manifest and schema. Full operational health
