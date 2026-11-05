@@ -214,6 +214,11 @@ pnpm paperclipai configure --section storage
 
 ## Agent Artifact Uploads
 
+For the opt-in Ocean Trading VWAP release workflow, use the
+[scoped release handoff contract](RELEASE-HANDOFFS.md) after uploading immutable
+inputs. It creates ready cross-owner work with its inputs at creation, or routes
+parked work to an authorized activation owner without enabling global recovery.
+
 When an agent generates a file that a board user or reviewer should inspect,
 attach it to the issue before marking the task complete. Do not rely on a local
 workspace path as the only access path.
