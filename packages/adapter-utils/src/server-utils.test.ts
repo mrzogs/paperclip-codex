@@ -10,8 +10,10 @@ import {
   buildRuntimeMountedSkillSnapshot,
   buildInvocationEnvForLogs,
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
+  ensureCommandResolvable,
   materializePaperclipSkillCopy,
   refreshPaperclipWorkspaceEnvForExecution,
+  resolveCommandForLogs,
   renderPaperclipWakePrompt,
   runningProcesses,
   runChildProcess,
@@ -50,6 +52,8 @@ async function waitForTextMatch(read: () => string, pattern: RegExp, timeoutMs =
   return read().match(pattern);
 }
 
+const windowsOnly = process.platform === "win32" ? it : it.skip;
+
 describe("buildInvocationEnvForLogs", () => {
   it("redacts inline secrets from resolved command metadata", () => {
     const loggedEnv = buildInvocationEnvForLogs(
@@ -64,6 +68,104 @@ describe("buildInvocationEnvForLogs", () => {
     expect(loggedEnv.PAPERCLIP_RESOLVED_COMMAND).toBe(
       "env OPENAI_API_KEY=***REDACTED*** PAPERCLIP_API_KEY='***REDACTED***' custom-acp --paperclip-api-key=***REDACTED*** --token ***REDACTED***",
     );
+  });
+});
+
+describe("Codex command resolution", () => {
+  windowsOnly("falls forward from a stale version-pinned Codex bundle path", async () => {
+    const localAppData = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-localappdata-"));
+    try {
+      const binRoot = path.join(localAppData, "OpenAI", "Codex", "bin");
+      const newerDir = path.join(binRoot, "newer-build");
+      const newerExe = path.join(newerDir, "codex.exe");
+      const staleExe = path.join(binRoot, "stale-build", "codex.exe");
+      await fs.mkdir(newerDir, { recursive: true });
+      await fs.writeFile(newerExe, "codex", "utf8");
+      const newerTime = new Date("2026-07-20T09:00:00Z");
+      await fs.utimes(newerExe, newerTime, newerTime);
+
+      const env = { LOCALAPPDATA: localAppData, PATH: "" };
+      await expect(resolveCommandForLogs(staleExe, localAppData, env)).resolves.toBe(newerExe);
+      await expect(ensureCommandResolvable(staleExe, localAppData, env)).resolves.toBeUndefined();
+    } finally {
+      await fs.rm(localAppData, { recursive: true, force: true });
+    }
+  });
+
+  windowsOnly("finds the latest installed Codex bundle when codex is not on PATH", async () => {
+    const localAppData = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-localappdata-"));
+    try {
+      const binRoot = path.join(localAppData, "OpenAI", "Codex", "bin");
+      const olderDir = path.join(binRoot, "older-build");
+      const newerDir = path.join(binRoot, "newer-build");
+      const olderExe = path.join(olderDir, "codex.exe");
+      const newerExe = path.join(newerDir, "codex.exe");
+      await fs.mkdir(olderDir, { recursive: true });
+      await fs.mkdir(newerDir, { recursive: true });
+      await fs.writeFile(olderExe, "old", "utf8");
+      await fs.writeFile(newerExe, "new", "utf8");
+      const olderTime = new Date("2026-07-19T09:00:00Z");
+      const newerTime = new Date("2026-07-20T09:00:00Z");
+      await fs.utimes(olderExe, olderTime, olderTime);
+      await fs.utimes(newerExe, newerTime, newerTime);
+
+      const env = { LOCALAPPDATA: localAppData, PATH: "" };
+      await expect(resolveCommandForLogs("codex", localAppData, env)).resolves.toBe(newerExe);
+      await expect(ensureCommandResolvable("codex", localAppData, env)).resolves.toBeUndefined();
+    } finally {
+      await fs.rm(localAppData, { recursive: true, force: true });
+    }
+  });
+
+  windowsOnly("prefers the local Codex bundle over the WindowsApps alias", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-resolution-"));
+    try {
+      const localAppData = path.join(root, "LocalAppData");
+      const pathDir = path.join(root, "PathRoot");
+      const windowsAppsDir = path.join(pathDir, "WindowsApps", "OpenAI.Codex_fake", "app", "resources");
+      const localBinRoot = path.join(localAppData, "OpenAI", "Codex", "bin");
+      const localDir = path.join(localBinRoot, "newer-build");
+      const windowsAppsExe = path.join(windowsAppsDir, "codex.exe");
+      const localExe = path.join(localDir, "codex.exe");
+      await fs.mkdir(windowsAppsDir, { recursive: true });
+      await fs.mkdir(localDir, { recursive: true });
+      await fs.writeFile(windowsAppsExe, "alias", "utf8");
+      await fs.writeFile(localExe, "local", "utf8");
+      const localTime = new Date("2026-07-20T09:00:00Z");
+      await fs.utimes(localExe, localTime, localTime);
+
+      const env = { LOCALAPPDATA: localAppData, PATH: windowsAppsDir };
+      await expect(resolveCommandForLogs("codex", root, env)).resolves.toBe(localExe);
+      await expect(ensureCommandResolvable("codex", root, env)).resolves.toBeUndefined();
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  windowsOnly("does not replace an unrelated missing executable", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-unrelated-command-"));
+    try {
+      const localDir = path.join(root, "OpenAI", "Codex", "bin", "current");
+      await fs.mkdir(localDir, { recursive: true });
+      await fs.writeFile(path.join(localDir, "codex.exe"), "codex", "utf8");
+      const unrelated = path.join(root, "missing", "other.exe");
+      const env = { LOCALAPPDATA: root, PATH: "" };
+      await expect(resolveCommandForLogs(unrelated, root, env)).resolves.toBe(unrelated);
+      await expect(ensureCommandResolvable(unrelated, root, env)).rejects.toThrow("Command is not executable");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  windowsOnly("does not borrow the host Codex install when LOCALAPPDATA is absent", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-no-localappdata-"));
+    try {
+      const env = { PATH: "" };
+      await expect(resolveCommandForLogs("codex", root, env)).resolves.toBe("codex");
+      await expect(ensureCommandResolvable("codex", root, env)).rejects.toThrow("Command not found in PATH");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 });
 
