@@ -3432,7 +3432,7 @@ function renderLiveClosedTradeTable(trades) {
                 <td>${escapeHtml(trade.strategyName || "Manual Trade")}</td>
                 <td><span class="pill ${String(trade.side).toLowerCase()}">${escapeHtml(trade.side || "n/a")}</span></td>
                 <td>${escapeHtml(trade.quantity || "n/a")}</td>
-                <td>${escapeHtml(formatCurrency(trade.realizedPnlDollars))}</td>
+                <td>${escapeHtml(formatCurrency(trade.realizedPnlDollars))}${formatTradePointsDisplay(trade) ? `<small class="trade-points" title="Sierra points: points per contract × ${escapeHtml(trade.quantity)} contract(s), before commission">${escapeHtml(formatTradePointsDisplay(trade))}</small>` : ""}</td>
                 <td>${escapeHtml(formatTradeTimestamp(trade.entryAtUtc || trade.openedAtUtc || trade.tradeDateUtc))}</td>
                 <td>${escapeHtml(formatTradeTimestamp(trade.exitAtUtc || trade.closedAtUtc || trade.tradeDateUtc))}</td>
                 <td>${escapeHtml(formatDurationMinutes(trade.durationMinutes) !== "n/a" ? formatDurationMinutes(trade.durationMinutes) : durationBetween(trade.entryAtUtc || trade.openedAtUtc, trade.exitAtUtc || trade.closedAtUtc))}</td>

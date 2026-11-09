@@ -2644,7 +2644,7 @@ body[data-page="replay"] main.page > .panel {
   text-align: right;
 }
 
-.dashboard-trades-table .trade-points {
+.trade-points {
   display: block;
   color: #64748b;
   font-size: 0.78em;
