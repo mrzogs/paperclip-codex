@@ -26,6 +26,24 @@ function formatCurrency(value) {
   return Math.abs(number % 1) > 0.0001 ? currencyCentsFormatter.format(number) : currencyFormatter.format(number);
 }
 
+// Sierra's Trade Window shows P/L in points by default: points per contract times
+// quantity, before commission. Showing the same figure next to the dollar P/L lets a
+// reader match the website to Sierra without mistaking points for dollars.
+function tradeTotalPoints(trade) {
+  const raw = trade?.grossPoints ?? trade?.points;
+  if (raw === null || raw === undefined || raw === "") return null;
+  const perContract = Number(raw);
+  const quantity = Number(trade?.quantity);
+  if (!Number.isFinite(perContract) || !Number.isFinite(quantity) || quantity <= 0) return null;
+  return perContract * quantity;
+}
+
+function formatTradePointsDisplay(trade) {
+  const total = tradeTotalPoints(trade);
+  if (total === null) return "";
+  return `${total.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} pts`;
+}
+
 function formatPercent(value) {
   if (value === null || value === undefined || value === "") return formatMaybeNull(value);
   const number = Number(value);
@@ -2047,6 +2065,7 @@ function dashboardTradeSearchText(trade, mode) {
     trade?.side,
     trade?.status,
     formatCurrency(trade?.realizedPnlDollars),
+    formatTradePointsDisplay(trade),
     formatTradeTimestamp(dashboardTradeTimestamp(trade)),
   ].filter(Boolean).join(" ").toLowerCase();
 }
@@ -2094,6 +2113,7 @@ function renderDashboardTradesTable(stats, mode) {
         <tbody>
           ${visible.map((trade) => {
             const pnl = Number(trade.realizedPnlDollars) || 0;
+            const pointsText = formatTradePointsDisplay(trade);
             const sideClass = String(trade.side || "").toLowerCase() === "short" ? "short" : "long";
             return `
               <tr>
@@ -2105,7 +2125,7 @@ function renderDashboardTradesTable(stats, mode) {
                 <td>${escapeHtml(trade.strategyName || (trade.tradeSource === "manual" ? "Manual Trade" : "Strategy"))}</td>
                 <td class="${sideClass}">${escapeHtml(humanizeStatus(trade.side || "n/a"))}</td>
                 <td>${escapeHtml(formatTradeStatusDisplay(trade))}</td>
-                <td class="pnl ${pnl < 0 ? "loss" : pnl > 0 ? "gain" : ""}">${escapeHtml(formatCurrency(pnl))}</td>
+                <td class="pnl ${pnl < 0 ? "loss" : pnl > 0 ? "gain" : ""}">${escapeHtml(formatCurrency(pnl))}${pointsText ? `<small class="trade-points" title="Sierra points: points per contract × ${escapeHtml(trade.quantity)} contract(s), before commission">${escapeHtml(pointsText)}</small>` : ""}</td>
               </tr>
             `;
           }).join("")}
