@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { WorkflowBackend, workflowFromEnvironment } from './backend.mjs';
 import { issueOceanIdentity, issueTestBrowserSecret } from './auth.mjs';
 import { digest, sealedHash, WorkflowError } from './common.mjs';
-import { initializeAvailableWorkflow, OPTIONAL_PHYSICAL_READINESS_ERRORS } from './startup-availability.mjs';
+import { initializeAvailableWorkflow, OPTIONAL_PHYSICAL_READINESS_ERRORS, publicStartupCode } from './startup-availability.mjs';
 import { reconcileOperationalReplayRunSettings } from './operational-run-readiness.mjs';
 import { chromium, expect } from '@playwright/test';
 import { makeVwapStatusSoftwareFixture } from './vwap-improvement-status.fixtures.mjs';
@@ -17,10 +17,11 @@ import { loadStrategyOnboarding, readOnboardingStrategyId } from './strategy-onb
 import {createSyncMarkers,installSyncMarkers,stallViews,CONTROL,readStallSnapshot} from '../sync-stall-markers.mjs';
 
 const code = 'OPERATIONAL_TELEMETRY_MODULE_HASH_CONFLICT';
+const strategyCode = 'OPERATIONAL_STRATEGY_MODULE_HASH_CONFLICT';
 const examples = JSON.parse(fs.readFileSync(new URL('./contracts/2.1.0/shared-contracts/examples/positive-examples.json', import.meta.url)));
 const python = process.env.OCEAN_TEST_PYTHON || 'C:\\Users\\wayne\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\python\\python.exe';
 
-async function fixture(t, { degraded = true } = {}) {
+async function fixture(t, { degraded = true, blocker = code } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ocean-startup-availability-'));
   const reports = makeVwapStatusSoftwareFixture(t), now = Date.now();
   for (const document of Object.values(reports.documents)) document.generated_at_utc = new Date(now - 60000).toISOString();
@@ -61,7 +62,7 @@ async function fixture(t, { degraded = true } = {}) {
       assert.equal(candidate.operationalLearning.enabled, false);
       assert.equal(candidate.onboardingBrain.enabled, false);
       assert.equal(candidate.operationalCandidateEvaluator.timer, null);
-      if (degraded) throw new WorkflowError(503, code, 'private exception path must not be projected');
+      if (degraded) throw new WorkflowError(503, blocker, 'private exception path must not be projected');
       return { status: 'READY' };
     } });
   backend.config.strategy_onboarding_runtime_probe = () => ({ state: 'UNKNOWN', reason: 'SOFTWARE_FIXTURE_ONLY',
@@ -86,9 +87,9 @@ async function fixture(t, { degraded = true } = {}) {
   return { root, backend, request, environment, config, session, base, reports };
 }
 
-test('only the exact optional physical error is eligible; construction and unrelated reconciliation failures remain fatal', () => {
-  assert.deepEqual(OPTIONAL_PHYSICAL_READINESS_ERRORS, [code]);
-  for (const error of [new WorkflowError(503, 'WORKFLOW_DATABASE_BINDING_CONFLICT'), new WorkflowError(503, 'OPERATIONAL_STRATEGY_MODULE_HASH_CONFLICT'), new Error('unknown')]) {
+test('only the exact optional physical errors are eligible; construction and unrelated reconciliation failures remain fatal', () => {
+  assert.deepEqual(OPTIONAL_PHYSICAL_READINESS_ERRORS, [strategyCode, code]);
+  for (const error of [new WorkflowError(503, 'WORKFLOW_DATABASE_BINDING_CONFLICT'), new WorkflowError(503, 'OPERATIONAL_STRATEGY_MODULE_REQUIRED'), new WorkflowError(503, 'OPERATIONAL_CHARTBOOK_REQUIRED'), new Error('unknown')]) {
     let closed = 0;
     assert.throws(() => initializeAvailableWorkflow({ environment: { OCEAN_OPERATIONAL_LEARNING_PHYSICAL_BINDING_FILE: 'fixture' },
       createBackend: () => ({ close() { closed++; } }), reconcile() { throw error; } }), actual => actual === error);
@@ -97,6 +98,11 @@ test('only the exact optional physical error is eligible; construction and unrel
   const fatal = new Error('fatal construction');
   assert.throws(() => initializeAvailableWorkflow({ environment: {}, createBackend() { throw fatal; } }), actual => actual === fatal);
   assert.equal(initializeAvailableWorkflow({ environment: {}, createBackend: () => null }), null);
+});
+
+test('fatal startup errors project only a well-formed code, never a message or path', () => {
+  assert.equal(publicStartupCode(new WorkflowError(503, 'WORKFLOW_DATABASE_BINDING_CONFLICT', 'D:\\private\\path')), 'WORKFLOW_DATABASE_BINDING_CONFLICT');
+  for (const error of [new Error('D:\\private\\path'), { code: 'D:\\private\\path' }, { code: 'ENOENT: open D:\\private' }, { code: 7 }, null, undefined]) assert.equal(publicStartupCode(error), null);
 });
 
 test('requested background workers start only after successful synchronous physical reconciliation', () => {
@@ -137,6 +143,69 @@ test('real file hash preflight mismatch stays blocked without registering execut
     createBackend: () => backend, reconcile: reconcileOperationalReplayRunSettings }), backend);
   assert.equal(backend.workflowAvailability.physical_readiness.blocker.code, code);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM ow_run_settings').get().n, 0);
+});
+
+test('real strategy file hash mismatch latches read only before telemetry checks or settings registration', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ocean-strategy-pin-fixture-'));
+  const db = new DatabaseSync(path.join(root, 'fixture.sqlite'));
+  t.after(() => { db.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  const config = JSON.parse(fs.readFileSync(new URL('../config/replay-run-bridge.json', import.meta.url)));
+  for (const key of ['workflow_db', 'telemetry_db', 'handoff_path', 'expected_sierra_exe', 'state_file', 'expected_chartbook_path',
+    'expected_strategy_module_path', 'expected_telemetry_module_path', 'source_preflight_status_path']) config[key] = path.join(root, `${key}.fixture`);
+  for (const key of ['expected_chartbook_path', 'expected_strategy_module_path', 'expected_telemetry_module_path']) fs.writeFileSync(config[key], `software fixture ${key}`);
+  config.expected_chartbook_sha256 = digest(fs.readFileSync(config.expected_chartbook_path));
+  config.expected_strategy_module_sha256 = digest('pinned strategy bytes replaced by a governed run');
+  config.expected_telemetry_module_sha256 = digest(fs.readFileSync(config.expected_telemetry_module_path));
+  const instance = { execution_instance_id: config.instance_id };
+  db.exec('CREATE TABLE ow_instances(id TEXT PRIMARY KEY,payload_json TEXT); CREATE TABLE ow_run_settings(id TEXT PRIMARY KEY,payload_json TEXT);');
+  db.prepare('INSERT INTO ow_instances VALUES(?,?)').run(config.instance_id, JSON.stringify(instance));
+  const configFile = path.join(root, 'bridge.json'); fs.writeFileSync(configFile, JSON.stringify(config));
+  const backend = { environment: {}, db, config: { db_file: config.workflow_db, operational_factual_bindings: [{
+    binding_hash: config.factual_binding_hash, strategy_id: config.strategy_id, instance }] },
+    runs: { perform() { assert.fail('must not register settings after a strategy pin mismatch'); } },
+    handle() {}, close() { assert.fail('recognized mismatch must preserve read availability'); } };
+  assert.equal(initializeAvailableWorkflow({ environment: { OCEAN_OPERATIONAL_LEARNING_PHYSICAL_BINDING_FILE: configFile },
+    createBackend: () => backend, reconcile: reconcileOperationalReplayRunSettings }), backend);
+  assert.equal(backend.workflowAvailability.physical_readiness.blocker.code, strategyCode);
+  assert.equal(backend.workflowAvailability.mutations_enabled, false);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM ow_run_settings').get().n, 0);
+});
+
+test('strategy hash conflict blocks mutations and keeps reads available on the real backend', async t => {
+  const f = await fixture(t, { blocker: strategyCode });
+  const readiness = await f.request('readiness'); assert.equal(readiness.status, 200);
+  assert.equal(readiness.value.workflow.state, 'DEGRADED_READ_ONLY');
+  assert.equal(readiness.value.workflow.physical_readiness.blocker.code, strategyCode);
+  assert.equal((await f.request('view/strategies/page/0')).status, 200);
+  for (const route of ['run-manager/prepare', 'operational/v1/run/start', 'operational/v1/candidate/dispatch']) {
+    const response = await f.request(route, { method: 'POST', data: {} });
+    assert.equal(response.status, 503, route); assert.equal(response.value.error.code, strategyCode);
+  }
+});
+
+test('disposable browser explains read-only strategy conflicts and fatal startup blocks without recovery commands', { timeout: 30000 }, async t => {
+  const f = await fixture(t, { blocker: strategyCode }), browser = await chromium.launch({ ...(process.env.OCEAN_BROWSER_TEST_EXECUTABLE
+    ? { executablePath: process.env.OCEAN_BROWSER_TEST_EXECUTABLE } : { channel: 'chrome' }), headless: true });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.goto(`${f.base}/improvement/strategies/cicd-vwap-pull-back-strategy`);
+  await expect(page.getByRole('status').filter({ hasText: strategyCode })).toContainText('does not match its pinned hash');
+  const blocked = async startup_code => {
+    const fatal = await browser.newPage();
+    await fatal.route('**/api/workflow/**', route => route.fulfill({ status: 503, contentType: 'application/json',
+      body: JSON.stringify({ error: { code: 'WORKFLOW_CONFIG_BLOCKED', ...(startup_code ? { startup_code } : {}) } }) }));
+    await fatal.goto(`${f.base}/improvement/dashboard`);
+    return fatal;
+  };
+  const fatal = await blocked('WORKFLOW_DATABASE_BINDING_CONFLICT');
+  await expect(fatal.getByRole('heading', { name: 'Workflow startup is blocked', exact: true })).toBeVisible();
+  await expect(fatal.locator('#local-access')).toContainText('WORKFLOW_DATABASE_BINDING_CONFLICT');
+  assert.equal(await fatal.locator('#local-access code').count(), 0);
+  for (const startup of ['PROTECTED_OPERATOR_STATE_UNAVAILABLE', null]) {
+    const recovery = await blocked(startup);
+    await expect(recovery.getByRole('heading', { name: 'Ocean local access unavailable', exact: true })).toBeVisible();
+    await expect(recovery.locator('#local-access')).toContainText('ocean-workflow-operator.ps1');
+  }
 });
 
 test('real authenticated backend stays readable and reports the latched exact physical blocker without private details', async t => {

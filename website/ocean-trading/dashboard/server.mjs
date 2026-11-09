@@ -13,7 +13,7 @@ import { shouldWebsiteScheduleManifestRebuild } from "./manifest-refresh-policy.
 import { workflowFromEnvironment } from "./workflow/backend.mjs";
 import { installWebsiteControl } from "./workflow/process-control.mjs";
 import { reconcileOperationalReplayRunSettings } from "./workflow/operational-run-readiness.mjs";
-import { initializeAvailableWorkflow } from "./workflow/startup-availability.mjs";
+import { initializeAvailableWorkflow, publicStartupCode } from "./workflow/startup-availability.mjs";
 import { readVwapContinuousImprovementState } from "./workflow/vwap-continuous-improvement-monitor.mjs";
 import { handleVwapImprovementRequest } from "./workflow/vwap-improvement-status.mjs";
 import { handleQuantTerminalRequest, initializeQuantTerminal, stopQuantTerminal, setQuantSyncObserver } from "./quant-terminal/server.js";
@@ -96,6 +96,7 @@ const PORT = Number(process.env.DASHBOARD_PORT || 3102);
 let workflowBackend = null;
 let workflowStartupFailed = false;
 let workflowEnrollmentRequired = false;
+let workflowStartupCode = null;
 let workflowRetryTimer = null;
 let workflowRetryAttempt = 0;
 
@@ -122,6 +123,7 @@ function initializeWorkflowBackend() {
     workflowBackend = candidate;
     workflowStartupFailed = false;
     workflowEnrollmentRequired = false;
+    workflowStartupCode = null;
     workflowRetryAttempt = 0;
     if (workflowBackend) console.log(workflowBackend.workflowAvailability
       ? `Ocean workflow backend DEGRADED_READ_ONLY: ${workflowBackend.workflowAvailability.physical_readiness.blocker.code}`
@@ -129,6 +131,7 @@ function initializeWorkflowBackend() {
   } catch (error) {
     workflowStartupFailed = true;
     workflowEnrollmentRequired = error.code === "WAYNE_LOCAL_ENROLLMENT_REQUIRED";
+    workflowStartupCode = publicStartupCode(error);
     const detail=error.message&&error.message!==error.code?` · ${String(error.message).slice(0,320)}`:'';
     console.warn(`Ocean workflow backend startup unavailable: ${error.code || error.name || "UNKNOWN_ERROR"}${detail}`);
     if (error.code === "PROTECTED_OPERATOR_STATE_UNAVAILABLE") scheduleWorkflowStartupRetry();
@@ -3554,7 +3557,7 @@ const server = http.createServer((req, res) => websiteTiming.request(req,res,()=
       void workflowBackend.handle(req, res, requestUrl);
     } else {
       res.writeHead(503, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
-      res.end(JSON.stringify({ error: { code: workflowEnrollmentRequired ? 'WAYNE_LOCAL_ENROLLMENT_REQUIRED' : workflowStartupFailed ? "WORKFLOW_CONFIG_BLOCKED" : "WORKFLOW_DISABLED", message: "TEST workflow backend is unavailable; existing ledger remains independent." } }));
+      res.end(JSON.stringify({ error: { code: workflowEnrollmentRequired ? 'WAYNE_LOCAL_ENROLLMENT_REQUIRED' : workflowStartupFailed ? "WORKFLOW_CONFIG_BLOCKED" : "WORKFLOW_DISABLED", message: "TEST workflow backend is unavailable; existing ledger remains independent.", ...(workflowStartupFailed && workflowStartupCode ? { startup_code: workflowStartupCode } : {}) } }));
     }
     return;
   }

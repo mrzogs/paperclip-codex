@@ -2644,6 +2644,13 @@ body[data-page="replay"] main.page > .panel {
   text-align: right;
 }
 
+.trade-points {
+  display: block;
+  color: #64748b;
+  font-size: 0.78em;
+  font-weight: 600;
+}
+
 .replay-dashboard-trades .long,
 .replay-dashboard-trades .gain {
   color: #16a34a;
