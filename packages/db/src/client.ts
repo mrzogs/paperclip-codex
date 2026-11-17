@@ -10,8 +10,20 @@ const MIGRATIONS_FOLDER = fileURLToPath(new URL("./migrations", import.meta.url)
 const DRIZZLE_MIGRATIONS_TABLE = "__drizzle_migrations";
 const MIGRATIONS_JOURNAL_JSON = fileURLToPath(new URL("./migrations/meta/_journal.json", import.meta.url));
 
+export function normalizeLoopbackPostgresUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") return url;
+    if (parsed.hostname !== "127.0.0.1") return url;
+    parsed.hostname = "localhost";
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
 function createUtilitySql(url: string) {
-  return postgres(url, { max: 1, onnotice: () => {} });
+  return postgres(normalizeLoopbackPostgresUrl(url), { max: 1, onnotice: () => {} });
 }
 
 function isSafeIdentifier(value: string): boolean {
@@ -46,7 +58,7 @@ export type MigrationState =
     };
 
 export function createDb(url: string) {
-  const sql = postgres(url);
+  const sql = postgres(normalizeLoopbackPostgresUrl(url));
   return drizzlePg(sql, { schema });
 }
 

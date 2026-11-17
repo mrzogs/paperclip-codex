@@ -1,9 +1,17 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import zlib from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import postgres from "postgres";
-import { createBufferedTextFileWriter, runDatabaseBackup, runDatabaseRestore } from "./backup-lib.js";
+import {
+  createBufferedTextFileWriter,
+  iterateWithIdleTimeout,
+  parseRestoreSteps,
+  runDatabaseBackup,
+  runDatabaseRestore,
+  type RestoreStep,
+} from "./backup-lib.js";
 import { ensurePostgresDatabase } from "./client.js";
 import {
   getEmbeddedPostgresTestSupport,
@@ -50,6 +58,44 @@ if (!embeddedPostgresSupport.supported) {
   );
 }
 
+describe("iterateWithIdleTimeout", () => {
+  it("passes through every chunk of a source that completes", async () => {
+    async function* source() {
+      yield "a";
+      yield "b";
+    }
+    const seen: string[] = [];
+    for await (const chunk of iterateWithIdleTimeout(source(), 1_000, "test")) seen.push(chunk);
+    expect(seen).toEqual(["a", "b"]);
+  });
+
+  it("rejects and calls onTimeout when the source stalls after partial data", async () => {
+    let timedOut = false;
+    const stalled: AsyncIterable<string> = {
+      [Symbol.asyncIterator]() {
+        let sent = false;
+        return {
+          next: () => {
+            if (!sent) {
+              sent = true;
+              return Promise.resolve({ done: false, value: "partial" });
+            }
+            return new Promise<IteratorResult<string>>(() => {});
+          },
+        };
+      },
+    };
+    const seen: string[] = [];
+    await expect(async () => {
+      for await (const chunk of iterateWithIdleTimeout(stalled, 50, "COPY t TO STDOUT", () => {
+        timedOut = true;
+      })) seen.push(chunk);
+    }).rejects.toThrow(/COPY t TO STDOUT produced no data for 50ms/);
+    expect(seen).toEqual(["partial"]);
+    expect(timedOut).toBe(true);
+  });
+});
+
 describe("createBufferedTextFileWriter", () => {
   it("preserves line boundaries across buffered flushes", async () => {
     const tempDir = createTempDir("paperclip-buffered-writer-");
@@ -70,6 +116,77 @@ describe("createBufferedTextFileWriter", () => {
     await writer.close();
 
     expect(fs.readFileSync(outputPath, "utf8")).toBe(lines.join("\n"));
+  });
+});
+
+describe("parseRestoreSteps", () => {
+  const BREAKPOINT = "-- paperclip statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900";
+
+  async function collect(lines: string[]): Promise<RestoreStep[]> {
+    async function* source() {
+      yield* lines;
+    }
+    const steps: RestoreStep[] = [];
+    for await (const step of parseRestoreSteps(source())) steps.push(step);
+    return steps;
+  }
+
+  it("streams a COPY block as copy steps between plain statements", async () => {
+    const steps = await collect([
+      'CREATE TABLE "public"."t" ("id" integer, "body" text);',
+      BREAKPOINT,
+      "-- Data for: public.t (2 rows)",
+      'COPY "public"."t" ("id", "body") FROM stdin;',
+      "1\tfirst",
+      "2\t\\N",
+      "\\.",
+      BREAKPOINT,
+      "",
+      'SELECT setval(\'"public"."t_id_seq"\', 2, true);',
+      BREAKPOINT,
+    ]);
+    expect(steps).toEqual([
+      { type: "statement", sql: 'CREATE TABLE "public"."t" ("id" integer, "body" text);' },
+      { type: "copy-start", sql: 'COPY "public"."t" ("id", "body") FROM stdin' },
+      { type: "copy-data", line: "1\tfirst" },
+      { type: "copy-data", line: "2\t\\N" },
+      { type: "copy-end" },
+      { type: "statement", sql: 'SELECT setval(\'"public"."t_id_seq"\', 2, true);' },
+    ]);
+  });
+
+  it("keeps U+2028 and U+2029 inside COPY rows and statements intact", async () => {
+    const steps = await collect([
+      "INSERT INTO \"public\".\"t\" VALUES (1, 'a b c');",
+      BREAKPOINT,
+      'COPY "public"."t" ("id", "body") FROM stdin;',
+      '2\t{"message":"x y z"}',
+      "\\.",
+      BREAKPOINT,
+    ]);
+    expect(steps).toEqual([
+      { type: "statement", sql: "INSERT INTO \"public\".\"t\" VALUES (1, 'a b c');" },
+      { type: "copy-start", sql: 'COPY "public"."t" ("id", "body") FROM stdin' },
+      { type: "copy-data", line: '2\t{"message":"x y z"}' },
+      { type: "copy-end" },
+    ]);
+  });
+
+  it("does not treat a COPY line inside a statement body as a data block", async () => {
+    const body = [
+      "CREATE FUNCTION f() RETURNS void AS $$",
+      "BEGIN",
+      'COPY "public"."t" ("id") FROM stdin;',
+      "END $$ LANGUAGE plpgsql;",
+    ];
+    const steps = await collect([...body, BREAKPOINT]);
+    expect(steps).toEqual([{ type: "statement", sql: body.join("\n") }]);
+  });
+
+  it("rejects a backup that ends inside a COPY block", async () => {
+    await expect(collect(['COPY "public"."t" ("id") FROM stdin;', "1"])).rejects.toThrow(
+      /ended inside a COPY/,
+    );
   });
 });
 
@@ -174,6 +291,135 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
           },
         ]);
       } finally {
+        await sourceSql.end();
+        await restoreSql.end();
+      }
+    },
+    60_000,
+  );
+
+  it(
+    "restores text and json values containing U+2028, U+2029 and carriage returns byte-for-byte",
+    async () => {
+      const sourceConnectionString = await createTempDatabase();
+      const restoreConnectionString = await createSiblingDatabase(
+        sourceConnectionString,
+        "paperclip_restore_line_separators",
+      );
+      const backupDir = createTempDir("paperclip-db-backup-line-separators-");
+      const sourceSql = postgres(sourceConnectionString, { max: 1, onnotice: () => {} });
+      const restoreSql = postgres(restoreConnectionString, { max: 1, onnotice: () => {} });
+
+      try {
+        await sourceSql.unsafe(`
+          CREATE TABLE "public"."backup_line_separator_records" (
+            "id" integer PRIMARY KEY,
+            "body" text NOT NULL,
+            "doc" json NOT NULL,
+            "docb" jsonb NOT NULL
+          );
+        `);
+
+        const body = "line sep para\r\ncrlf\rcr\nlf";
+        const doc = { message: "a b c", nested: [" ", "x y"] };
+        // JSON.stringify leaves U+2028/U+2029 unescaped, so they land raw inside the json string.
+        const docText = JSON.stringify(doc);
+        expect(docText).toContain(" ");
+        await sourceSql.unsafe(
+          `INSERT INTO "public"."backup_line_separator_records" ("id", "body", "doc", "docb")
+           VALUES (1, $1::text, $2::text::json, $2::text::jsonb)`,
+          [body, docText],
+        );
+
+        const result = await runDatabaseBackup({
+          connectionString: sourceConnectionString,
+          backupDir,
+          retention: { dailyDays: 7, weeklyWeeks: 4, monthlyMonths: 1 },
+          filenamePrefix: "paperclip-line-separators",
+          backupEngine: "javascript",
+        });
+
+        await runDatabaseRestore({
+          connectionString: restoreConnectionString,
+          backupFile: result.backupFile,
+        });
+
+        const rows = await restoreSql.unsafe<{ body: string; doc: string; docb: string }[]>(`
+          SELECT "body", "doc"::text AS "doc", "docb"::text AS "docb"
+          FROM "public"."backup_line_separator_records"
+          WHERE "id" = 1
+        `);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]?.body).toBe(body);
+        expect(rows[0]?.doc).toBe(docText);
+        expect(JSON.parse(rows[0]!.doc)).toEqual(doc);
+        expect(JSON.parse(rows[0]!.docb)).toEqual(doc);
+      } finally {
+        await sourceSql.end();
+        await restoreSql.end();
+      }
+    },
+    60_000,
+  );
+
+  it(
+    "restores COPY-format backups through the client fallback when psql is unavailable",
+    async () => {
+      const sourceConnectionString = await createTempDatabase();
+      const restoreConnectionString = await createSiblingDatabase(
+        sourceConnectionString,
+        "paperclip_restore_copy_format",
+      );
+      const backupDir = createTempDir("paperclip-db-backup-copy-format-");
+      const sourceSql = postgres(sourceConnectionString, { max: 1, onnotice: () => {} });
+      const restoreSql = postgres(restoreConnectionString, { max: 1, onnotice: () => {} });
+      const previousPsqlPath = process.env.PAPERCLIP_PSQL_PATH;
+
+      try {
+        await sourceSql.unsafe(`
+          CREATE TABLE "public"."backup_copy_records" (
+            "id" integer PRIMARY KEY,
+            "body" text,
+            "doc" jsonb NOT NULL
+          );
+        `);
+        const doc = { message: "a b c", tab: "x\ty", backslash: "\\." };
+        await sourceSql.unsafe(
+          `INSERT INTO "public"."backup_copy_records" ("id", "body", "doc")
+           SELECT g, CASE WHEN g % 2 = 0 THEN NULL ELSE 'row ' || g || E'\\n\\\\.\\r' || chr(8232) END, $1::text::jsonb
+           FROM generate_series(1, 2500) AS g`,
+          [JSON.stringify(doc)],
+        );
+
+        // excludeTables disables pg_dump, so the backup uses the COPY engine.
+        const result = await runDatabaseBackup({
+          connectionString: sourceConnectionString,
+          backupDir,
+          retention: { dailyDays: 7, weeklyWeeks: 4, monthlyMonths: 1 },
+          filenamePrefix: "paperclip-copy-format",
+          excludeTables: ["public.not_a_real_table"],
+        });
+        expect(zlib.gunzipSync(fs.readFileSync(result.backupFile)).toString("utf8")).toContain(
+          'COPY "public"."backup_copy_records" ("id", "body", "doc") FROM stdin;',
+        );
+
+        process.env.PAPERCLIP_PSQL_PATH = path.join(backupDir, "missing-psql");
+        await runDatabaseRestore({
+          connectionString: restoreConnectionString,
+          backupFile: result.backupFile,
+        });
+
+        const source = await sourceSql.unsafe<{ id: number; body: string | null; doc: string }[]>(
+          `SELECT "id", "body", "doc"::text AS "doc" FROM "public"."backup_copy_records" ORDER BY "id"`,
+        );
+        const restored = await restoreSql.unsafe<{ id: number; body: string | null; doc: string }[]>(
+          `SELECT "id", "body", "doc"::text AS "doc" FROM "public"."backup_copy_records" ORDER BY "id"`,
+        );
+        expect(restored).toHaveLength(2500);
+        expect(restored).toEqual(source);
+      } finally {
+        if (previousPsqlPath === undefined) delete process.env.PAPERCLIP_PSQL_PATH;
+        else process.env.PAPERCLIP_PSQL_PATH = previousPsqlPath;
         await sourceSql.end();
         await restoreSql.end();
       }
