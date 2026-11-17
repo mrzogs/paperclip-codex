@@ -2,7 +2,11 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { applyPendingMigrations, ensurePostgresDatabase } from "./client.js";
+import {
+  applyPendingMigrations,
+  ensurePostgresDatabase,
+  normalizeLoopbackPostgresUrl,
+} from "./client.js";
 import { prepareEmbeddedPostgresNativeRuntime } from "./embedded-postgres-native.js";
 
 type EmbeddedPostgresInstance = {
@@ -157,9 +161,13 @@ export async function startEmbeddedPostgresTestDatabase(
     await instance.initialise();
     await instance.start();
 
-    const adminConnectionString = `postgres://paperclip:paperclip@127.0.0.1:${port}/postgres`;
+    const adminConnectionString = normalizeLoopbackPostgresUrl(
+      `postgres://paperclip:paperclip@127.0.0.1:${port}/postgres`,
+    );
     await ensurePostgresDatabase(adminConnectionString, "paperclip");
-    const connectionString = `postgres://paperclip:paperclip@127.0.0.1:${port}/paperclip`;
+    const connectionString = normalizeLoopbackPostgresUrl(
+      `postgres://paperclip:paperclip@127.0.0.1:${port}/paperclip`,
+    );
     await applyPendingMigrations(connectionString);
 
     return {

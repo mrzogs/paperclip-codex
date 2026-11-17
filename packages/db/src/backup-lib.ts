@@ -1,11 +1,13 @@
 import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { basename, resolve } from "node:path";
-import { createInterface } from "node:readline";
+import { StringDecoder } from "node:string_decoder";
 import { spawn } from "node:child_process";
 import { open as openFile } from "node:fs/promises";
+import type { Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createGunzip, createGzip } from "node:zlib";
 import postgres from "postgres";
+import { normalizeLoopbackPostgresUrl } from "./client.js";
 
 export type BackupRetentionPolicy = {
   dailyDays: number;
@@ -28,7 +30,55 @@ export type RunDatabaseBackupOptions = {
   excludeTables?: string[];
   nullifyColumns?: Record<string, string[]>;
   backupEngine?: "auto" | "pg_dump" | "javascript";
+  /**
+   * Fail the backup when a COPY ... TO STDOUT stream delivers no data for this
+   * long. Guards against the client stream stalling after the server finished
+   * (seen 2026-10-29: a stalled COPY left the scheduled backup hung for days).
+   */
+  copyIdleTimeoutMs?: number;
 };
+
+const DEFAULT_COPY_IDLE_TIMEOUT_MS = 120_000;
+const CLIENT_END_TIMEOUT_SECONDS = 5;
+
+export async function* iterateWithIdleTimeout<T>(
+  source: AsyncIterable<T>,
+  idleTimeoutMs: number,
+  label: string,
+  onTimeout?: () => void,
+): AsyncGenerator<T> {
+  const iterator = source[Symbol.asyncIterator]();
+  let completed = false;
+  try {
+    while (true) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`${label} produced no data for ${idleTimeoutMs}ms; aborting`));
+        }, idleTimeoutMs);
+      });
+      let result: IteratorResult<T>;
+      try {
+        result = await Promise.race([iterator.next(), timeout]);
+      } catch (error) {
+        onTimeout?.();
+        throw error;
+      } finally {
+        clearTimeout(timer);
+      }
+      if (result.done) {
+        completed = true;
+        return;
+      }
+      yield result.value;
+    }
+  } finally {
+    if (!completed) {
+      // Do not await: a stalled iterator may never settle its return().
+      void Promise.resolve(iterator.return?.()).catch(() => {});
+    }
+  }
+}
 
 export type RunDatabaseBackupResult = {
   backupFile: string;
@@ -397,15 +447,56 @@ async function hasStatementBreakpoints(backupFile: string): Promise<boolean> {
   }
 }
 
-async function* readRestoreStatements(backupFile: string): AsyncGenerator<string> {
-  const raw = createReadStream(backupFile);
-  const stream = backupFile.endsWith(".gz") ? raw.pipe(createGunzip()) : raw;
-  stream.setEncoding("utf8");
-  const reader = createInterface({
-    input: stream,
-    crlfDelay: Infinity,
-  });
+// Split on "\n" only. node:readline also breaks on "\r", U+2028 and U+2029, which
+// corrupts dollar-quoted values (e.g. JSON strings containing U+2028) on restore.
+async function* readBackupLines(stream: NodeJS.ReadableStream): AsyncGenerator<string> {
+  const decoder = new StringDecoder("utf8");
+  let pending = "";
+  for await (const chunk of stream) {
+    pending += typeof chunk === "string" ? chunk : decoder.write(chunk as Buffer);
+    let lineStart = 0;
+    let newlineIndex = pending.indexOf("\n", lineStart);
+    while (newlineIndex !== -1) {
+      yield pending.slice(lineStart, newlineIndex);
+      lineStart = newlineIndex + 1;
+      newlineIndex = pending.indexOf("\n", lineStart);
+    }
+    pending = pending.slice(lineStart);
+  }
+  pending += decoder.end();
+  if (pending.length > 0) yield pending;
+}
+
+function isStatementBreakpointLine(line: string): boolean {
+  return line === STATEMENT_BREAKPOINT || line === `${STATEMENT_BREAKPOINT}\r`;
+}
+
+export type RestoreStep =
+  | { type: "statement"; sql: string }
+  | { type: "copy-start"; sql: string }
+  | { type: "copy-data"; line: string }
+  | { type: "copy-end" };
+
+const COPY_FROM_STDIN_PATTERN = /^COPY\s.+\sFROM\s+stdin;$/i;
+const COPY_END_MARKER = "\\.";
+
+function stripTrailingCarriageReturn(line: string): string {
+  return line.endsWith("\r") ? line.slice(0, -1) : line;
+}
+
+function isCommentOrBlankLine(line: string): boolean {
+  const trimmed = line.trim();
+  return trimmed.length === 0 || trimmed.startsWith("--");
+}
+
+// Turns backup lines into executable steps. COPY ... FROM stdin blocks (written by
+// the backup's COPY engine) cannot go through a simple query, so they are surfaced
+// as copy-start / copy-data / copy-end steps for the copy protocol. A COPY header is
+// only recognised at a statement boundary, so a "COPY" line inside a function body
+// is never mistaken for a data block.
+export async function* parseRestoreSteps(lines: AsyncIterable<string>): AsyncGenerator<RestoreStep> {
   let statementLines: string[] = [];
+  let inCopy = false;
 
   const flushStatement = () => {
     const statement = statementLines.join("\n").trim();
@@ -413,26 +504,104 @@ async function* readRestoreStatements(backupFile: string): AsyncGenerator<string
     return statement;
   };
 
-  try {
-    for await (const line of reader) {
-      if (line === STATEMENT_BREAKPOINT) {
-        const statement = flushStatement();
-        if (statement.length > 0) {
-          yield statement;
-        }
+  for await (const rawLine of lines) {
+    if (inCopy) {
+      if (stripTrailingCarriageReturn(rawLine) === COPY_END_MARKER) {
+        inCopy = false;
+        yield { type: "copy-end" };
         continue;
       }
-      statementLines.push(line);
+      yield { type: "copy-data", line: rawLine };
+      continue;
     }
+    if (isStatementBreakpointLine(rawLine)) {
+      const statement = flushStatement();
+      if (statement.length > 0) {
+        yield { type: "statement", sql: statement };
+      }
+      continue;
+    }
+    const header = stripTrailingCarriageReturn(rawLine);
+    if (COPY_FROM_STDIN_PATTERN.test(header) && statementLines.every(isCommentOrBlankLine)) {
+      statementLines = [];
+      inCopy = true;
+      yield { type: "copy-start", sql: header.slice(0, -1) };
+      continue;
+    }
+    statementLines.push(rawLine);
+  }
 
-    const trailingStatement = flushStatement();
-    if (trailingStatement.length > 0) {
-      yield trailingStatement;
-    }
+  if (inCopy) {
+    throw new Error("Backup ended inside a COPY ... FROM stdin block (missing \\. terminator)");
+  }
+  const trailingStatement = flushStatement();
+  if (trailingStatement.length > 0) {
+    yield { type: "statement", sql: trailingStatement };
+  }
+}
+
+async function* readRestoreSteps(backupFile: string): AsyncGenerator<RestoreStep> {
+  const raw = createReadStream(backupFile);
+  const stream = backupFile.endsWith(".gz") ? raw.pipe(createGunzip()) : raw;
+  try {
+    yield* parseRestoreSteps(readBackupLines(stream));
   } finally {
-    reader.close();
     stream.destroy();
     raw.destroy();
+  }
+}
+
+const RESTORE_COPY_WRITE_BYTES = 256 * 1024;
+
+async function writeCopyChunk(target: Writable, chunk: string): Promise<void> {
+  await new Promise<void>((resolveWrite, rejectWrite) => {
+    target.write(chunk, (error) => (error ? rejectWrite(error) : resolveWrite()));
+  });
+}
+
+async function finishCopy(target: Writable): Promise<void> {
+  await new Promise<void>((resolveFinish, rejectFinish) => {
+    target.once("error", rejectFinish);
+    target.end(() => resolveFinish());
+  });
+}
+
+async function restoreWithClient(sql: postgres.Sql, backupFile: string): Promise<void> {
+  let copyTarget: Writable | null = null;
+  let copySql = "";
+  let pending = "";
+  try {
+    for await (const step of readRestoreSteps(backupFile)) {
+      switch (step.type) {
+        case "statement":
+          await sql.unsafe(step.sql).execute();
+          break;
+        case "copy-start":
+          copySql = step.sql;
+          copyTarget = await sql.unsafe(step.sql).writable();
+          break;
+        case "copy-data":
+          pending += `${step.line}\n`;
+          if (pending.length >= RESTORE_COPY_WRITE_BYTES) {
+            await writeCopyChunk(copyTarget!, pending);
+            pending = "";
+          }
+          break;
+        case "copy-end":
+          if (pending.length > 0) await writeCopyChunk(copyTarget!, pending);
+          pending = "";
+          await finishCopy(copyTarget!);
+          copyTarget = null;
+          copySql = "";
+          break;
+      }
+    }
+  } catch (error) {
+    if (copySql && error && typeof error === "object" && !("query" in error)) {
+      (error as Record<string, unknown>).query = copySql;
+    }
+    copyTarget?.destroy();
+    throw error;
   }
 }
 
@@ -526,13 +695,14 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
   const canUsePgDump = !hasBackupTransforms(opts);
   const excludedTableNames = normalizeTableNameSet(opts.excludeTables);
   const nullifiedColumnsByTable = normalizeNullifyColumnMap(opts.nullifyColumns);
-  let sql = postgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout });
+  let sql = postgres(normalizeLoopbackPostgresUrl(opts.connectionString), { max: 1, connect_timeout: connectTimeout });
   let sqlClosed = false;
   const closeSql = async () => {
     if (sqlClosed) return;
     sqlClosed = true;
-    await sql.end();
+    await sql.end({ timeout: CLIENT_END_TIMEOUT_SECONDS });
   };
+  const copyIdleTimeoutMs = Math.max(1, Math.trunc(opts.copyIdleTimeoutMs ?? DEFAULT_COPY_IDLE_TIMEOUT_MS));
   mkdirSync(opts.backupDir, { recursive: true });
   const sqlFile = resolve(opts.backupDir, `${filenamePrefix}-${timestamp()}.sql`);
   const backupFile = `${sqlFile}.gz`;
@@ -563,7 +733,7 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
         if (backupEngine === "pg_dump") {
           throw error;
         }
-        sql = postgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout });
+        sql = postgres(normalizeLoopbackPostgresUrl(opts.connectionString), { max: 1, connect_timeout: connectTimeout });
         sqlClosed = false;
       }
     }
@@ -899,16 +1069,22 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
       if (backupEngine !== "javascript" && nullifiedColumns.size === 0) {
         emit(`COPY ${qualifiedTableName} (${colNames}) FROM stdin;`);
         await writer.writeRaw("\n");
-        const copySql = postgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout });
+        const copySql = postgres(normalizeLoopbackPostgresUrl(opts.connectionString), { max: 1, connect_timeout: connectTimeout });
         try {
           const copyStream = await copySql
             .unsafe(`COPY ${qualifiedTableName} (${colNames}) TO STDOUT`)
             .readable();
-          for await (const chunk of copyStream) {
+          const chunks = iterateWithIdleTimeout(
+            copyStream as AsyncIterable<unknown>,
+            copyIdleTimeoutMs,
+            `COPY ${qualifiedTableName} TO STDOUT`,
+            () => copyStream.destroy(),
+          );
+          for await (const chunk of chunks) {
             await writer.writeRaw(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
           }
         } finally {
-          await copySql.end();
+          await copySql.end({ timeout: CLIENT_END_TIMEOUT_SECONDS });
         }
         await writer.writeRaw("\\.\n");
         emitStatementBoundary();
@@ -996,13 +1172,11 @@ export async function runDatabaseRestore(opts: RunDatabaseRestoreOptions): Promi
     }
   }
 
-  const sql = postgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout });
+  const sql = postgres(normalizeLoopbackPostgresUrl(opts.connectionString), { max: 1, connect_timeout: connectTimeout });
 
   try {
     await sql`SELECT 1`;
-    for await (const statement of readRestoreStatements(opts.backupFile)) {
-      await sql.unsafe(statement).execute();
-    }
+    await restoreWithClient(sql, opts.backupFile);
   } catch (error) {
     const statementPreview = typeof error === "object" && error !== null && typeof (error as Record<string, unknown>).query === "string"
       ? String((error as Record<string, unknown>).query)
