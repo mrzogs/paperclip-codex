@@ -40,6 +40,9 @@ export type RunDatabaseBackupOptions = {
 
 const DEFAULT_COPY_IDLE_TIMEOUT_MS = 120_000;
 const CLIENT_END_TIMEOUT_SECONDS = 5;
+// Scheduled backups open fresh connections; under heavy disk I/O a 5s connect window
+// was missed ~2% of the time (OCE-961), skipping that hour's backup.
+export const DEFAULT_CONNECT_TIMEOUT_SECONDS = 30;
 
 export async function* iterateWithIdleTimeout<T>(
   source: AsyncIterable<T>,
@@ -690,7 +693,7 @@ export function createBufferedTextFileWriter(filePath: string, maxBufferedBytes 
 export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise<RunDatabaseBackupResult> {
   const filenamePrefix = opts.filenamePrefix ?? "paperclip";
   const retention = opts.retention;
-  const connectTimeout = Math.max(1, Math.trunc(opts.connectTimeoutSeconds ?? 5));
+  const connectTimeout = Math.max(1, Math.trunc(opts.connectTimeoutSeconds ?? DEFAULT_CONNECT_TIMEOUT_SECONDS));
   const backupEngine = opts.backupEngine ?? "auto";
   const canUsePgDump = !hasBackupTransforms(opts);
   const excludedTableNames = normalizeTableNameSet(opts.excludeTables);
@@ -1160,7 +1163,7 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
 }
 
 export async function runDatabaseRestore(opts: RunDatabaseRestoreOptions): Promise<void> {
-  const connectTimeout = Math.max(1, Math.trunc(opts.connectTimeoutSeconds ?? 5));
+  const connectTimeout = Math.max(1, Math.trunc(opts.connectTimeoutSeconds ?? DEFAULT_CONNECT_TIMEOUT_SECONDS));
   try {
     await restoreWithPsql(opts, connectTimeout);
     return;
